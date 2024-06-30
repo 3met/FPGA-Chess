@@ -1,0 +1,10 @@
+
+/db
+/output_files
+/simulation
+/incremental_db
+c5_pin_model_dump.txt
+main.qsf
+*.qpf
+/build
+*.bak
