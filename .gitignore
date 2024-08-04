@@ -8,3 +8,16 @@ main.qsf
 *.qpf
 /build
 *.bak
+*.mti
+*.mpf
+/work
+transcript
+*.bsf
+*.cmp
+*.ppf
+*.sip
+*.spd
+*.f
+*.vo
+*.vstf
+*.wlf
