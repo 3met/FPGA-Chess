@@ -23,14 +23,14 @@ module uart_receiver
 	localparam int CLKS_PER_BIT = (CLOCK_FREQ + (BAUD_RATE/2)) / BAUD_RATE;
 
 	// FSM States
-	typedef enum logic [2:0] {
+	typedef enum {
 		UART_IDLE,
 		UART_START,
 		UART_DATA,
 		UART_STOP
-	} UartStageType;
+	} UartRxStageType;
 	
-	UartStageType uart_stage;
+	UartRxStageType uart_stage;
 	reg [$clog2(CLKS_PER_BIT+1)-1:0] rx_timer;
 	reg [2:0] rx_data_pos;
 
@@ -83,22 +83,6 @@ module uart_receiver
 				uart_stage <= UART_START;
 				rx_timer <= rx_timer + 'd1;
 			end
-
-		// end else if (uart_stage == UART_START) begin
-		// 	rx_stream <= 8'dx;
-		// 	rx_stream_valid <= 1'd0;
-			
-		// 	// Wait for half a bit duration to sample mid-bit
-		// 	// Next stage after half-bit duration
-		// 	if (rx_timer == CLKS_PER_BIT) begin
-		// 		uart_stage <= UART_DATA;
-		// 		rx_data_pos <= 3'd0;
-		// 		rx_timer <= 0;
-		// 	end else begin
-		// 		uart_stage <= UART_START;
-		// 		rx_data_pos <= 3'dx;
-		// 		rx_timer <= rx_timer + 'd1;
-		// 	end
 
 		// Read data bits if we are in the middle of a transmission
 		end else if (uart_stage == UART_DATA) begin

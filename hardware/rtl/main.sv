@@ -54,43 +54,17 @@ module main(input CLOCK_50,
 	end
 
 	
-	
-	/*
-	reg [4:0] UART_bits_to_write;
 
-	reg [$clog2(CLKS_PER_BIT)-1:0] UART_TX_timer;
-	assign LEDR[$bits(UART_TX_timer)-1:0] = UART_TX_timer;
-	
-	
-	always_ff @(posedge clk) begin
-		// Reset variable
-		if (~rst_n) begin
-			UART_TX_timer <= 'd0;
-			UART_bits_to_write <= 'd0;
-			UART_TXD <= 1'b1;
+	// --- UART Output Encoding ---
+	uart_transmitter #(.BAUD_RATE(BAUD_RATE), .CLOCK_FREQ(CLOCK_FREQ)) engine_uart_transmitter (
+		.clk(clk),
+		.rst_n(rst_n),
+		.tx_stream(rx_stream),
+		.tx_stream_valid(rx_stream_valid),
+		.ready(),
+		.uart_tx(GPIO_0[7])
+	);
 
-		// Still has content to write
-		end else if (UART_bits_to_write != 'd0) begin
-			// Time to write content
-			if (UART_TX_timer == CLKS_PER_BIT) begin
-				UART_TX_timer <= 'd0;
-				UART_TXD <= SW[UART_bits_to_write-'d1];
-				UART_bits_to_write <= UART_bits_to_write - 'd1;
-
-			// Waiting to write content
-			end else begin
-				UART_TX_timer <= UART_TX_timer + 'd1;
-			end
-
-		// Nothing to write
-		end else begin
-			if (~KEY[0]) UART_bits_to_write <= 'd8;
-			UART_TXD <= 1'd1;
-		end
-	end
-
-	*/
-	
 
 
 endmodule : main

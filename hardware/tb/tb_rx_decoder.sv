@@ -5,8 +5,8 @@
 module tb_uart_receiver();
 
 	localparam CLOCK_FREQ = 100_000_000;
-	// localparam BAUD_RATE = 5_000_000;
-	localparam BAUD_RATE = CLOCK_FREQ/6;
+	localparam BAUD_RATE = 12_000_000;
+	// localparam BAUD_RATE = CLOCK_FREQ/6;
 
 	logic clk = 1'b0;
 	logic rst_n = 1'b1;
