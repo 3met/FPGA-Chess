@@ -2,42 +2,12 @@
 # Altera DE1-SoC board settings
 #============================================================
 
-
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEMA5F31C6
 set_global_assignment -name TOP_LEVEL_ENTITY "DE1_SoC"
 set_global_assignment -name DEVICE_FILTER_PACKAGE FBGA
 set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name SDC_FILE DE1_SoC.sdc
-
-
-#============================================================
-# ADC
-#============================================================
-set_location_assignment PIN_AJ4 -to ADC_CS_N
-set_location_assignment PIN_AK4 -to ADC_DIN
-set_location_assignment PIN_AK3 -to ADC_DOUT
-set_location_assignment PIN_AK2 -to ADC_SCLK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to ADC_CS_N
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to ADC_DIN
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to ADC_DOUT
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to ADC_SCLK
-
-#============================================================
-# AUD
-#============================================================
-set_location_assignment PIN_K7 -to AUD_ADCDAT
-set_location_assignment PIN_K8 -to AUD_ADCLRCK
-set_location_assignment PIN_H7 -to AUD_BCLK
-set_location_assignment PIN_J7 -to AUD_DACDAT
-set_location_assignment PIN_H8 -to AUD_DACLRCK
-set_location_assignment PIN_G7 -to AUD_XCK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to AUD_ADCDAT
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to AUD_ADCLRCK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to AUD_BCLK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to AUD_DACDAT
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to AUD_DACLRCK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to AUD_XCK
 
 #============================================================
 # CLOCK
@@ -461,19 +431,6 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to LEDR[8]
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to LEDR[9]
 
 #============================================================
-# PS2
-#============================================================
-set_location_assignment PIN_AD7 -to PS2_CLK
-set_location_assignment PIN_AE7 -to PS2_DAT
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to PS2_CLK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to PS2_DAT
-
-set_location_assignment PIN_AD9 -to PS2_CLK2
-set_location_assignment PIN_AE9 -to PS2_DAT2
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to PS2_CLK2
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to PS2_DAT2
-
-#============================================================
 # SW
 #============================================================
 set_location_assignment PIN_AB12 -to SW[0]
@@ -563,67 +520,6 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB_SCL
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB_SDA
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to USB_WR_N
 
-#============================================================
-# VGA
-#============================================================
-set_location_assignment PIN_B13 -to VGA_B[0]
-set_location_assignment PIN_G13 -to VGA_B[1]
-set_location_assignment PIN_H13 -to VGA_B[2]
-set_location_assignment PIN_F14 -to VGA_B[3]
-set_location_assignment PIN_H14 -to VGA_B[4]
-set_location_assignment PIN_F15 -to VGA_B[5]
-set_location_assignment PIN_G15 -to VGA_B[6]
-set_location_assignment PIN_J14 -to VGA_B[7]
-set_location_assignment PIN_F10 -to VGA_BLANK_N
-set_location_assignment PIN_A11 -to VGA_CLK
-set_location_assignment PIN_J9 -to VGA_G[0]
-set_location_assignment PIN_J10 -to VGA_G[1]
-set_location_assignment PIN_H12 -to VGA_G[2]
-set_location_assignment PIN_G10 -to VGA_G[3]
-set_location_assignment PIN_G11 -to VGA_G[4]
-set_location_assignment PIN_G12 -to VGA_G[5]
-set_location_assignment PIN_F11 -to VGA_G[6]
-set_location_assignment PIN_E11 -to VGA_G[7]
-set_location_assignment PIN_B11 -to VGA_HS
-set_location_assignment PIN_A13 -to VGA_R[0]
-set_location_assignment PIN_C13 -to VGA_R[1]
-set_location_assignment PIN_E13 -to VGA_R[2]
-set_location_assignment PIN_B12 -to VGA_R[3]
-set_location_assignment PIN_C12 -to VGA_R[4]
-set_location_assignment PIN_D12 -to VGA_R[5]
-set_location_assignment PIN_E12 -to VGA_R[6]
-set_location_assignment PIN_F13 -to VGA_R[7]
-set_location_assignment PIN_C10 -to VGA_SYNC_N
-set_location_assignment PIN_D11 -to VGA_VS
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[0]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[1]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[2]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[3]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[4]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[5]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[6]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_B[7]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_BLANK_N
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_CLK
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[0]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[1]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[2]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[3]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[4]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[5]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[6]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_G[7]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_HS
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[0]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[1]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[2]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[3]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[4]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[5]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[6]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_R[7]
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_SYNC_N
-set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to VGA_VS
 
 #============================================================
 # HPS
