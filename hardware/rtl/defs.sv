@@ -4,7 +4,9 @@
 `ifndef ENGINE_INCLUDE_SV
 `define ENGINE_INCLUDE_SV
 
+// A Package for general chess/engine definitions
 package engine_defs;
+
 	// -- Data Type for Colors --
 	typedef enum logic {
 		WHITE, BLACK
@@ -26,6 +28,19 @@ package engine_defs;
 	} PieceType;
 
 	localparam PieceType UNKNOWN_PIECE = PieceType'(3'dx);
+
+	// Value of each type of piece in units of pawns
+	// Indexed by PieceType
+	localparam logic[3:0] PIECE_VALS_1[8] = '{
+		4'd0, 4'd1, 4'd3, 4'd3, 4'd5, 4'd9, 4'd12, 4'dx
+	};
+
+	// Value of each type of piece in units of 64th of a pawn
+	// Indexed by PieceType
+	// https://web.archive.org/web/20160314214435/http://www.danheisman.com/Articles/evaluation_of_material_imbalance.htm
+	localparam logic[9:0] PIECE_VALS_64[8] = '{
+		10'd0, 10'd64, 10'd208, 10'd208, 10'd320, 10'd576, 10'd1000, 10'dx
+	};
 
 
 	// -- Data Type for Pawn Promotion Types --
@@ -99,6 +114,8 @@ package engine_defs;
 	// Data type to store search depth
 	typedef logic [$clog2(MAX_DEPTH)-1:0] DepthType;
 
+	// -- Direction Related Definitions --
+
 	// Defines board direction
 	typedef enum logic[2:0] {
 		NORTH, NORTH_EAST, EAST, SOUTH_EAST, SOUTH, SOUTH_WEST, WEST, NORTH_WEST
@@ -110,6 +127,20 @@ package engine_defs;
 	localparam Direction OPPOSITE_DIR[8] = '{
 		SOUTH, SOUTH_WEST, WEST, NORTH_WEST, NORTH, NORTH_EAST, EAST, SOUTH_EAST
 	};
+
+	// List of Cardinal and diagonal directions for looping through
+	localparam Direction CARDINAL_DIR[4] = '{NORTH, SOUTH, EAST, WEST};
+	localparam Direction DIAG_DIR[4] = '{NORTH_EAST, SOUTH_EAST, SOUTH_WEST, NORTH_WEST};
+
+	// Function returns true if direction is cardinal
+	function logic isDirCardinal(Direction dir);
+		return (dir==NORTH || dir==SOUTH || dir==EAST || dir==WEST);
+	endfunction : isDirCardinal
+
+	// Function returns true if direction is diagonal
+	function logic isDirDiag(Direction dir);
+		return (dir==NORTH_EAST || dir==SOUTH_EAST || dir==NORTH_WEST || dir==SOUTH_WEST);
+	endfunction : isDirDiag
 
 	// Position shift of one tile given a direction
 	localparam logic[5:0] POS_SHIFT[8] = '{
@@ -199,48 +230,6 @@ package engine_defs;
 		0,	1,	2,	3,	4,	5,	6,	7
 	};
 
-
-	// -- Tile Connection Structs and Types --
-
-	// Tile data format for inter-tile communication
-	typedef struct packed {
-		Tile tile;
-		logic [2:0] distance;
-	} AdjTileData;
-
-	// Move priority format for inter-tile communication
-	typedef struct packed {
-		MovePriority move_priority;
-
-	} MoveData;
-
-	// Scoring format for inter-tile communication
-	/*
-	// Union of both data formats that can be passed over the bus
-	typedef union {
-		AdjTileData adj_tile_data;
-		MoveData move_data;
-	} AdjTileBus;
-	*/
-
-
-	// -- Bus to Connect to 8 Knight-Connected Tiles --
-	typedef struct packed {
-		Color piece_color;
-		logic hasKnight;
-		logic hasKing;
-	} KnightBus;
-
-
-	// -- Define State System for Tiles --
-	typedef enum logic[1:0] {
-		IDLE_TILE,
-		RESET_CURR_DEPTH,
-		DISABLE_MOVE
-	} BoardState;
-
-
-endpackage
-
+endpackage : engine_defs
 
 `endif
