@@ -30,8 +30,7 @@ module tb_adder_maximizer();
 		.key_in(key_in),
 		.data_in(data_in),
 		.key_out(key_out),
-		.data_out(data_out),
-		.overflow()
+		.data_out(data_out)
 	);
 
 

@@ -25,8 +25,7 @@ module adder_maximizer #(INPUT_KEY_WIDTH=8, OUTPUT_KEY_WIDTH=8, DATA_WIDTH=8)
 		input  logic signed [INPUT_KEY_WIDTH-1:0] key_in[64],
 		input  logic [DATA_WIDTH-1:0] data_in[64],
 		output logic signed [OUTPUT_KEY_WIDTH-1:0] key_out,
-		output logic [DATA_WIDTH-1:0] data_out,
-		output logic overflow
+		output logic [DATA_WIDTH-1:0] data_out
 	);
 
 	// Returns min of two values
@@ -151,34 +150,5 @@ module adder_maximizer #(INPUT_KEY_WIDTH=8, OUTPUT_KEY_WIDTH=8, DATA_WIDTH=8)
 		assign key_out = (operation==GET_AM_SUM) ? key5_out : (overflow5) ? key5_in[1][INPUT_KEY_WIDTH-1:0] : key5_in[0][INPUT_KEY_WIDTH-1:0];
 
 	endgenerate
-
-
-	// --- Compute Overflow ---
-	always_comb begin
-		overflow = 1'b0;
-
-		for (int i=0; i<32; i+=1) begin
-			overflow |= overflow0[i];
-		end
-
-		for (int i=0; i<16; i+=1) begin
-			overflow |= overflow1[i];
-		end
-
-		for (int i=0; i<8; i+=1) begin
-			overflow |= overflow2[i];
-		end
-
-		for (int i=0; i<4; i+=1) begin
-			overflow |= overflow3[i];
-		end
-
-		for (int i=0; i<2; i+=1) begin
-			overflow |= overflow4[i];
-		end
-
-		overflow |= overflow5;
-	end
-
 
 endmodule : adder_maximizer
