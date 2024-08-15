@@ -56,28 +56,28 @@ module add_sub #(parameter DATA_WIDTH) (
 	wire  overflow = sub_wire0;
 	wire [DATA_WIDTH-1:0] result = sub_wire1[DATA_WIDTH-1:0];
 
-	lpm_add_sub	LPM_ADD_SUB_component (
-				.add_sub (add_sub),
-				.dataa (dataa),
-				.datab (datab),
-				.overflow (sub_wire0),
-				.result (sub_wire1)
-				// synopsys translate_off
-				,
-				.aclr (),
-				.cin (),
-				.clken (),
-				.clock (),
-				.cout ()
-				// synopsys translate_on
-				);
-	defparam
-		LPM_ADD_SUB_component.lpm_direction = "UNUSED",
-		LPM_ADD_SUB_component.lpm_hint = "ONE_INPUT_IS_CONSTANT=NO,CIN_USED=NO",
-		LPM_ADD_SUB_component.lpm_representation = "SIGNED",
-		LPM_ADD_SUB_component.lpm_type = "LPM_ADD_SUB",
-		LPM_ADD_SUB_component.lpm_width = DATA_WIDTH;
-
+	lpm_add_sub	
+	#(
+		.lpm_direction("UNUSED"),
+		.lpm_hint("ONE_INPUT_IS_CONSTANT=NO,CIN_USED=NO"),
+		.lpm_representation("UNSIGNED"),
+		.lpm_type("LPM_ADD_SUB"),
+		.lpm_width(DATA_WIDTH)
+	) LPM_ADD_SUB_component (
+		.add_sub (add_sub),
+		.dataa (dataa),
+		.datab (datab),
+		.overflow (sub_wire0),
+		.result (sub_wire1)
+		// synopsys translate_off
+		,
+		.aclr (),
+		.cin (),
+		.clken (),
+		.clock (),
+		.cout ()
+		// synopsys translate_on
+	);
 
 endmodule
 
