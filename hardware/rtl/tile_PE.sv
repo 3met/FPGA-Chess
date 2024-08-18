@@ -59,7 +59,7 @@ module tile
 		input  TileOp		operation,
 		input  DepthType	search_depth,
 		input  Tile			tile_wr_data,
-		input  logic		turn,
+		input  Color		turn,
 		input  CastlePerms	castle_perms,  // Only used by some tiles
 		input  logic		has_ep,        // Only used by some tiles
 		input  BoardFile	ep_file,       // Only used by some tiles
@@ -234,7 +234,7 @@ module tile
 						weakest_attacker = adj_bus_in[dir].tile.piece_type;
 					end
 
-					if (adj_mask[dir][search_depth]) begin
+					if (adj_mask[search_depth][dir]) begin
 						has_attacker[adj_bus_in[dir].tile.piece_type] = 1'b1;
 						attacker_dir[adj_bus_in[dir].tile.piece_type] = Direction'(dir);
 					end
@@ -252,16 +252,32 @@ module tile
 
 
 		// - Pawn Influences -
+		// White pawn normal moves
+		if (turn == WHITE && adj_bus_in[SOUTH].tile == Tile'({WHITE, PAWN}) && adj_mask[search_depth][SOUTH]) begin
+			if (adj_bus_in[SOUTH].distance == 3'd1 || adj_bus_in[SOUTH].distance == 3'd2) begin
+				has_attacker[PAWN] = 1'd1;
+				attacker_dir[PAWN] = SOUTH;
+			end
+		end
+		// Black pawn normal moves
+		if (turn == BLACK && adj_bus_in[NORTH].tile == Tile'({BLACK, PAWN}) && adj_mask[search_depth][NORTH]) begin
+			if (adj_bus_in[NORTH].distance == 3'd1 || adj_bus_in[NORTH].distance == 3'd2) begin
+				has_attacker[PAWN] = 1'd1;
+				attacker_dir[PAWN] = NORTH;
+			end
+		end
 		for (int i=0; i<=1; i+=1) begin
-			// Black pawn influences
-			if (FILE<6 && adj_bus_in[b_pawn_dir[i]].tile == Tile'({BLACK, PAWN})) begin
-				if (turn==BLACK) begin
+			// White pawn diag attacks
+			if (RANK>1 && adj_bus_in[w_pawn_dir[i]].tile == Tile'({WHITE, PAWN})
+			    && adj_bus_in[w_pawn_dir[i]].distance == 3'd1) begin
+
+				if (turn==WHITE) begin
 					attacker_count += 'd1;
 					weakest_attacker = PAWN;
 
-					if (adj_mask[b_pawn_dir[i]][search_depth]) begin
+					if (adj_mask[search_depth][w_pawn_dir[i]] && tile.occupant!=NULL_PIECE) begin
 						has_attacker[PAWN] = 1'b1;
-						attacker_dir[PAWN] = Direction'(b_pawn_dir[i]);
+						attacker_dir[PAWN] = Direction'(w_pawn_dir[i]);
 					end
 				end else begin
 					defender_count += 'd1;
@@ -269,15 +285,17 @@ module tile
 				end
 			end
 
-			// White pawn influences
-			if (FILE>1 && adj_bus_in[w_pawn_dir[i]].tile == Tile'({WHITE, PAWN})) begin
-				if (turn==WHITE) begin
+			// Black pawn diag attacks
+			if (RANK<6 && adj_bus_in[b_pawn_dir[i]].tile == Tile'({BLACK, PAWN})
+			    && adj_bus_in[b_pawn_dir[i]].distance == 3'd1) begin
+
+				if (turn==BLACK) begin
 					attacker_count += 'd1;
 					weakest_attacker = PAWN;
 
-					if (adj_mask[w_pawn_dir[i]][search_depth]) begin
+					if (adj_mask[search_depth][b_pawn_dir[i]] && tile.occupant!=NULL_PIECE) begin
 						has_attacker[PAWN] = 1'b1;
-						attacker_dir[PAWN] = Direction'(w_pawn_dir[i]);
+						attacker_dir[PAWN] = Direction'(b_pawn_dir[i]);
 					end
 				end else begin
 					defender_count += 'd1;
@@ -294,7 +312,7 @@ module tile
 					weakest_attacker = (weakest_attacker > KNIGHT) ? KNIGHT : weakest_attacker;
 					attacker_count += 'd1;
 
-					if (knight_mask[dir][search_depth]) begin
+					if (knight_mask[search_depth][dir]) begin
 						has_attacker[KNIGHT] = 1'b1;
 						attacker_dir[KNIGHT] = Direction'(dir);
 					end
@@ -316,8 +334,9 @@ module tile
 			move_dir = Direction'('dx);
 			move_dist = 3'dx;
 
-		// NULL score for no attackers
-		end else if (attacker_count == 0) begin
+		// NULL score for no attackers and pawn moves
+		end else if (   ~has_attacker[PAWN] && ~has_attacker[KNIGHT] && ~has_attacker[BISHOP]
+		             && ~has_attacker[ROOK] && ~has_attacker[QUEEN] && ~has_attacker[KING]) begin
 			move_score = NULL_MOVE_SCORE;
 			move_dir = Direction'('dx);
 			move_dist = 3'dx;
@@ -418,7 +437,12 @@ module tile
 
 			// If there are defenders, use weakest attacker
 			end else begin
-				move_dir = attacker_dir[weakest_attacker];
+				// Special case to deal with pawn forward moves
+				if (has_attacker[PAWN]) begin
+					move_dir = attacker_dir[PAWN];
+				end else begin
+					move_dir = attacker_dir[weakest_attacker];
+				end
 
 				if (weakest_attacker == KNIGHT) begin
 					move_dist = 3'd0; // Distance is zero for knights

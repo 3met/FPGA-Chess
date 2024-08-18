@@ -81,6 +81,7 @@ module board (
 	// ---- Internal Board Registers ----
 	logic [3:0] data_in_buffer;
 	Move		move_buffer;
+	reg         in_search_buffer;
 	BoardState	state;
 	Color		turn;
 	CastlePerms	castle_perms;
@@ -194,11 +195,12 @@ module board (
 	);
 
 
-	// --- Connect data_in_buffer, and move_buffer ---
+	// --- Connect data_in_buffer, move_buffer, and in_search_buffer ---
 	always_ff @(posedge clk) begin
 		if (ready) begin
 			data_in_buffer <= data_in;
 			move_buffer <= move_in;
+			in_search_buffer <= in_search;
 		end
 	end
 
@@ -566,11 +568,13 @@ module board (
 
 
 		// - Increment/Decrement search depth -
-		if (in_search && ready) begin
+		if (~rst_n) begin
+			search_depth <= DepthType'('d0);
+		end else if (in_search_buffer && ready) begin
 			if (state==MAKE_MOVE_STATE0 || state==MAKE_MOVE_STATE1 || state==MAKE_MOVE_STATE2) begin
-				search_depth += DepthType'('d1);
+				search_depth <= search_depth + DepthType'('d1);
 			end else if (state==REVERSE_MOVE_STATE0 || state==REVERSE_MOVE_STATE1 || state==REVERSE_MOVE_STATE2) begin
-				search_depth -= DepthType'('d1);
+				search_depth <= search_depth - DepthType'('d1);
 			end
 		end
 	end
@@ -639,30 +643,30 @@ module board (
 	// --- Compute best_move and board_score ---
 	always_comb begin
 		// - Send board score in eval mode -
-		board_score <= add_max_key_out[$bits(board_score)-1:0];
+		board_score = add_max_key_out[$bits(board_score)-1:0];
 
 		// - Send best move in best move mode -
 		if (add_max_key_out[$bits(board_score)-1:0] == NULL_PIECE) begin
-			best_move <= NULL_MOVE;
+			best_move = NULL_MOVE;
 		end else begin
 			// add-max data out is destination tile
-			best_move.end_pos <= add_max_data_out;
+			best_move.end_pos = add_max_data_out;
 
 			// Calculate start position from end position and shift
 			// Distance of 0 represents a knight move
-			if (tile_move_dist[move_buffer.end_pos] == 3'd0) begin
-				best_move.start_pos <= move_buffer.end_pos + KNIGHT_SHIFT[tile_move_dir[move_buffer.end_pos]];
+			if (tile_move_dist[best_move.end_pos] == 3'd0) begin
+				best_move.start_pos = best_move.end_pos + KNIGHT_SHIFT[tile_move_dir[best_move.end_pos]];
 			end else begin
-				best_move.start_pos <= move_buffer.end_pos + DIST_SHIFT[tile_move_dir[move_buffer.end_pos]][tile_move_dist[move_buffer.end_pos]];
+				best_move.start_pos = best_move.end_pos + DIST_SHIFT[tile_move_dir[best_move.end_pos]][tile_move_dist[best_move.end_pos]];
 			end
 
 			// Only care about promotion outputs from first and last rank
 			if (   getRank(best_move.end_pos) == BoardRank'(0)
 			    || getRank(best_move.end_pos) == BoardRank'(7)) begin
 
-				best_move.promo_piece <= tile_promo_type[best_move.end_pos];
+				best_move.promo_piece = tile_promo_type[best_move.end_pos];
 			end else begin
-				best_move.promo_piece <= PromoType'('dx);
+				best_move.promo_piece = PromoType'('dx);
 			end
 		end
 	end

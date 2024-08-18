@@ -739,6 +739,59 @@ module tb_board();
 		end
 
 
+		// --- Test basic move generation ---
+		$display("=== Test Basic Move Generation ===");
+		clock(10);
+		board_operation = MAKE_MOVE_OP;
+		move_in = Move'({6'd8, 6'd24, PROMO_UNKNOWN});
+		clock();
+
+		in_search = 1'b1;
+		move_counter = 0;
+		// move_output = Move'({6'd0, 6'd1, PROMO_UNKNOWN});	// Random, non-null move
+
+		// There should be 20 possible moves
+		for (int i=0; i<20; i+=1) begin
+			board_operation = GET_BEST_MOVE_OP;
+			clock();
+			move_output = best_move;
+			$display("%0d->%0d (%1b)", move_output.start_pos, move_output.end_pos, move_output.promo_piece);
+			board_operation = MAKE_MOVE_OP;
+			move_in = best_move;
+			clock();
+			board_operation = REVERSE_MOVE_OP;
+			clock();
+		end
+
+		// Check 20th move is a non-NULL move
+		assert (~isNullMove(move_output)) begin
+			passCount += 1;
+		end else begin
+			failCount += 1;
+			$error("Fails to generate 20 moves");
+		end
+
+		board_operation = GET_BEST_MOVE_OP;
+		clock();
+		move_output = best_move;
+		$display("%0d->%0d (%1b)", move_output.start_pos, move_output.end_pos, move_output.promo_piece);
+
+		// Check 21th move is a NULL move
+		assert (isNullMove(move_output)) begin
+			passCount += 1;
+		end else begin
+			failCount += 1;
+			$error("Fails to generate 20 moves");
+		end
+		
+
+		board_operation = IDLE_BOARD_OP;
+		move_in = Move'($urandom_range(0, $bits(Move)-1));
+		clock(2);
+		print_board();
+
+
+
 		// Display Results
 		$display("Pass Count: %0d", passCount);
 		$display("Fail Count: %0d", failCount);
