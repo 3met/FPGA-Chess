@@ -98,8 +98,8 @@ module tile
 	generate
 		Tile occupant;
 
-		reg adj_mask[MAX_DEPTH][8];
-		reg knight_mask[MAX_DEPTH][8];
+		reg adj_mask[MAX_PLY_COUNT][8];
+		reg knight_mask[MAX_PLY_COUNT][8];
 	endgenerate
 
 
@@ -475,7 +475,7 @@ module tile
 	always_ff @(posedge clk) begin
 		// Set masks to high on reset
 		if (~rst_n) begin
-			for (int d=0; d<MAX_DEPTH; d+=1) begin
+			for (int d=0; d<MAX_PLY_COUNT; d+=1) begin
 				for (int dir=0; dir<8; dir+=1) begin
 					adj_mask[d][dir] <= 1'b1;
 					knight_mask[d][dir] <= 1'b1;

@@ -113,10 +113,10 @@ package engine_defs;
 
 	// Maximum search depth
 	// Ideally a power of two
-	localparam MAX_DEPTH = 8;
+	localparam MAX_PLY_COUNT = 8;
 
 	// Data type to store search depth
-	typedef logic [$clog2(MAX_DEPTH)-1:0] DepthType;
+	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] DepthType;
 
 	// -- Direction Related Definitions --
 
