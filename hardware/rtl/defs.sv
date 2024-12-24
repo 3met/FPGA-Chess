@@ -1,6 +1,9 @@
 
 // By Emet Behrendt
 
+// This file contains the engine_defs package which holds
+// definitions of various basic datatypes, constants, and functions.
+
 `ifndef ENGINE_INCLUDE_SV
 `define ENGINE_INCLUDE_SV
 
@@ -109,6 +112,7 @@ package engine_defs;
 	} Tile;
 
 	// Maximum search depth
+	// Ideally a power of two
 	localparam MAX_DEPTH = 8;
 
 	// Data type to store search depth

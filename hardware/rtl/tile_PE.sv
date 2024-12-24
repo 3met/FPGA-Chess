@@ -74,7 +74,7 @@ module tile
 		output Direction     move_dir,
 		output logic [2:0]   move_dist,
 		output PromoType     promo_type,	// Only used by some tiles
-		output TileEvalScore eval_score,
+		output TileEvalScore eval_score,	// represents the POV advantage for active player
 		output Tile          tile_rd_data,
 
 		// Inter-tile connections

@@ -2,6 +2,10 @@
 // FPGA-Chess
 // By Emet Behrendt
 
+// This file maps the ports DE1-SoC to the engine module.
+// The file also controls the LEDs and HEX displays on the DE1.
+// Lastly, this file contains configuration information for the engine.
+
 module main(input CLOCK_50,
             input [3:0] KEY, input [9:0] SW,
             input GPIO_0[36],

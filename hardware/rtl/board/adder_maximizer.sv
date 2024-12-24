@@ -1,6 +1,12 @@
 
 // By Emet Behrendt
 
+// This file contains the adder_maximizer module.
+// This module has two operations: add, and get_max.
+// For add, the module returns the sum of all 64 inputs.
+// For max, the modules returns the maximum of the 64 inputs
+// and the data associated with it. More details found below.
+
 
 // --- Define operation codes ---
 package adder_maximizer_defs;
