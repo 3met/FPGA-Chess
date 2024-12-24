@@ -23,7 +23,7 @@ module tb_board();
 	logic illegal_board;
 	Move best_move;
 	BoardEvalScore board_score;
-	Tile tile_data_out;
+	Tile data_out;
 
 	// Setup DUT
 	board dut (
@@ -37,7 +37,7 @@ module tb_board();
 		.illegal_board(illegal_board),
 		.best_move(best_move),
 		.board_score(board_score),
-		.tile_data_out(tile_data_out)
+		.data_out(data_out)
 	);
 
 	// Setup DUT tile indexing
@@ -111,6 +111,15 @@ module tb_board();
 	endtask : clear_board
 
 
+	// -- Task to place a piece on the board --
+	task place_piece(Tile tile, Position pos);
+		board_operation = PLACE_PIECE_OP;
+		data_in = tile;
+		move_in.end_pos = pos;
+		clock();
+	endtask
+
+
 	// -- Ensure select_1 is never the same as select_2 --
 	always_ff @(posedge clk or negedge rst_n) begin
 	    if (~rst_n) begin
@@ -133,6 +142,17 @@ module tb_board();
 	int failCount = 0;
 
 
+	// -- Function to Assert Equality with Error MSG --
+	function void assert_true(x, string msg);
+		assert (x) begin
+			passCount += 1;
+		end else begin
+			failCount += 1;
+			$error(msg);
+		end
+	endfunction
+
+
 	initial begin
 		
 		// Reset the board
@@ -150,103 +170,33 @@ module tb_board();
 		// $monitor("[%10t] dut.data_in=%4b, tile_arr[0]=%4b", $time, dut.data_in, tile_arr[0]);
 
 		// --- Set Starting Board --
-		board_operation = PLACE_PIECE_OP;
-		data_in = Tile'({WHITE, ROOK});
-		move_in.end_pos = Position'(0);
-		clock();
-		data_in = Tile'({WHITE, KNIGHT});
-		move_in.end_pos = Position'(1);
-		clock();
-		data_in = Tile'({WHITE, BISHOP});
-		move_in.end_pos = Position'(2);
-		clock();
-		data_in = Tile'({WHITE, QUEEN});
-		move_in.end_pos = Position'(3);
-		clock();
-		data_in = Tile'({WHITE, KING});
-		move_in.end_pos = Position'(4);
-		clock();
-		data_in = Tile'({WHITE, BISHOP});
-		move_in.end_pos = Position'(5);
-		clock();
-		data_in = Tile'({WHITE, KNIGHT});
-		move_in.end_pos = Position'(6);
-		clock();
-		data_in = Tile'({WHITE, ROOK});
-		move_in.end_pos = Position'(7);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(8);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(9);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(10);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(11);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(12);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(13);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(14);
-		clock();
-		data_in = Tile'({WHITE, PAWN});
-		move_in.end_pos = Position'(15);
-		clock();
-		data_in = Tile'({BLACK, ROOK});
-		move_in.end_pos = Position'(63);
-		clock();
-		data_in = Tile'({BLACK, KNIGHT});
-		move_in.end_pos = Position'(62);
-		clock();
-		data_in = Tile'({BLACK, BISHOP});
-		move_in.end_pos = Position'(61);
-		clock();
-		data_in = Tile'({BLACK, KING});
-		move_in.end_pos = Position'(60);
-		clock();
-		data_in = Tile'({BLACK, QUEEN});
-		move_in.end_pos = Position'(59);
-		clock();
-		data_in = Tile'({BLACK, BISHOP});
-		move_in.end_pos = Position'(58);
-		clock();
-		data_in = Tile'({BLACK, KNIGHT});
-		move_in.end_pos = Position'(57);
-		clock();
-		data_in = Tile'({BLACK, ROOK});
-		move_in.end_pos = Position'(56);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(55);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(54);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(53);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(52);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(51);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(50);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(49);
-		clock();
-		data_in = Tile'({BLACK, PAWN});
-		move_in.end_pos = Position'(48);
-		clock(2);
+		place_piece({WHITE, ROOK}, 0);
+		place_piece({WHITE, KNIGHT}, 1);
+		place_piece({WHITE, BISHOP}, 2);
+		place_piece({WHITE, QUEEN}, 3);
+		place_piece({WHITE, KING}, 4);
+		place_piece({WHITE, BISHOP}, 5);
+		place_piece({WHITE, KNIGHT}, 6);
+		place_piece({WHITE, ROOK}, 7);
+
+		for (int pos=8; pos<16; pos+=1) begin
+			place_piece({WHITE, PAWN}, pos);
+		end
+
+		place_piece({BLACK, ROOK}, 63);
+		place_piece({BLACK, KNIGHT}, 62);
+		place_piece({BLACK, BISHOP}, 61);
+		place_piece({BLACK, KING}, 60);
+		place_piece({BLACK, QUEEN}, 59);
+		place_piece({BLACK, BISHOP}, 58);
+		place_piece({BLACK, KNIGHT}, 57);
+		place_piece({BLACK, ROOK}, 56);
+
+		for (int pos=55; pos>=48; pos-=1) begin
+			place_piece({BLACK, PAWN}, pos);
+		end
+
+		clock(1);
 
 		for (int i=0; i<64; i+=1) begin
 			starting_tiles[i] <= tile_arr[i];
@@ -272,36 +222,16 @@ module tb_board();
 		clock(20);
 
 		// Check correct turn
-		assert (dut.turn === WHITE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Turn not correctly set to WHITE");
-		end
+		assert_true(dut.turn === WHITE, "Turn not correctly set to WHITE");
 
 		// Check castle permissions
-		assert (dut.castle_perms === 4'b1111) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Castle permissions not correctly set");
-		end
+		assert_true(dut.castle_perms === 4'b1111, "Castle permissions not correctly set");
 
 		// Check correct en passant value
-		assert (dut.has_ep === 1'b0) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Incorrectly starts with en passant");
-		end
+		assert_true(dut.has_ep === 1'b0, "Incorrectly starts with en passant");
 
 		// Check reseting halfmove clock
-		assert (dut.halfmove_clock === 7'd0) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to reset halfmove clock");
-		end
+		assert_true(dut.halfmove_clock === 7'd0, "Fails to reset halfmove clock");
 
 		print_board();
 
@@ -316,59 +246,23 @@ module tb_board();
 		clock();
 		print_board();
 
-		// Check correct turn
-		assert (dut.turn === BLACK) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Turn not correctly updated to BLACK");
-		end
+		assert_true(dut.turn === BLACK, "Turn not correctly updated to BLACK");
 
 		// Check pawn moved to new square
-		assert (tile_arr[28] === Tile'({WHITE, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Pawn not moved successfully");
-		end
-		assert (tile_arr[12].piece_type === NULL_PIECE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Pawn not moved successfully");
-		end
+		assert_true(tile_arr[28] === Tile'({WHITE, PAWN}), "Pawn not moved successfully");
+		assert_true(tile_arr[12].piece_type === NULL_PIECE, "Pawn not moved successfully");
 
 		// Check castle permissions
-		assert (dut.castle_perms === 4'b1111) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Castle permissions not correctly set");
-		end
+		assert_true(dut.castle_perms === 4'b1111, "Castle permissions not correctly set");
 
 		// Check updating en passant status
-		assert (dut.has_ep === 1'b1) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to recognize en passant");
-		end
-
+		assert_true(dut.has_ep === 1'b1, "Fails to recognize en passant");
+		
 		// Check correct en passant file
-		assert (dut.ep_file === BoardFile'(3'd4)) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Incorrect en passant file");
-		end
+		assert_true(dut.ep_file === BoardFile'(3'd4), "Incorrect en passant file");
 
 		// Check reseting halfmove clock
-		assert (dut.halfmove_clock === 7'd0) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to reset halfmove clock");
-		end
+		assert_true(dut.halfmove_clock === 7'd0, "Fails to reset halfmove clock");
 
 		// Move 2: f7f5
 		board_operation = MAKE_MOVE_OP;
@@ -379,26 +273,12 @@ module tb_board();
 		print_board();
 
 		// Check correct turn
-		assert (dut.turn === WHITE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Turn not correctly updated to BLACK");
-		end
+		assert_true(dut.turn === WHITE, "Turn not correctly updated to WHITE");
+
 
 		// Check pawn moved to new square
-		assert (tile_arr[37] === Tile'({BLACK, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Pawn not moved successfully");
-		end
-		assert (tile_arr[53].piece_type === NULL_PIECE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Pawn not moved successfully");
-		end
+		assert_true(tile_arr[37] === Tile'({BLACK, PAWN}), "Pawn not moved successfully");
+		assert_true(tile_arr[53].piece_type === NULL_PIECE, "Pawn not moved successfully");
 
 		// Move 3: e4f5
 		board_operation = MAKE_MOVE_OP;
@@ -409,18 +289,8 @@ module tb_board();
 		print_board();
 
 		// Check pawn moved to new square
-		assert (tile_arr[37] === Tile'({WHITE, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Pawn not moved successfully");
-		end
-		assert (tile_arr[28].piece_type === NULL_PIECE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Pawn not moved successfully");
-		end
+		assert_true(tile_arr[37] === Tile'({WHITE, PAWN}), "Pawn not moved successfully");
+		assert_true(tile_arr[28].piece_type === NULL_PIECE, "Pawn not moved successfully");
 
 		// Moves 4-5: e7e5, f5e6
 		board_operation = MAKE_MOVE_OP;
@@ -434,19 +304,11 @@ module tb_board();
 		print_board();
 
 		// Check correct turn
-		assert (dut.turn === BLACK) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Turn not correctly updated to BLACK");
-		end
+		assert_true(dut.turn === BLACK, "Turn not correctly updated to BLACK");
+
 		// Check en passant kill
-		assert (tile_arr[44] === Tile'({WHITE, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("En Passant kill was not successfully");
-		end
+		assert_true(tile_arr[44] === Tile'({WHITE, PAWN}), "En Passant kill was not successfully");
+
 		assert (tile_arr[36].piece_type === NULL_PIECE) begin
 			passCount += 1;
 		end else begin
@@ -459,13 +321,9 @@ module tb_board();
 			failCount += 1;
 			$error("En Passant kill was not successfully, expected=%3b, received=%3b", NULL_PIECE, tile_arr[37].piece_type);
 		end
+
 		// Check reseting halfmove clock
-		assert (dut.halfmove_clock === 7'd0) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to reset halfmove clock");
-		end
+		assert_true(dut.halfmove_clock === 7'd0, "Fails to reset halfmove clock");
 
 		// Move 6-8: g8f6, e6d7, f8c5
 		board_operation = MAKE_MOVE_OP;
@@ -484,12 +342,7 @@ module tb_board();
 		clock();
 		print_board();
 
-		assert (tile_arr[58].piece_type === QUEEN) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Promotion not successful");
-		end
+		assert_true(tile_arr[58].piece_type === QUEEN, "Promotion not successful");
 
 		// Move 9: e8g8 (Black king castle)
 		board_operation = MAKE_MOVE_OP;
@@ -500,24 +353,15 @@ module tb_board();
 
 		print_board();
 
-		assert (   tile_arr[60].piece_type === NULL_PIECE
-			    && tile_arr[61] === Tile'({BLACK, ROOK})
-			    && tile_arr[62] === Tile'({BLACK, KING})
-		        && tile_arr[63].piece_type === NULL_PIECE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Castling move not successful");
-		end
-		assert (   dut.castle_perms.whiteKingside
-			    && dut.castle_perms.whiteQueenside
-			    && ~dut.castle_perms.blackKingside
-			    && ~dut.castle_perms.blackQueenside) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Castling perm updates not successful");
-		end
+		assert_true(tile_arr[60].piece_type === NULL_PIECE, "Castling move not successful");
+		assert_true(tile_arr[61] === Tile'({BLACK, ROOK}), "Castling move not successful");
+		assert_true(tile_arr[62] === Tile'({BLACK, KING}), "Castling move not successful");
+		assert_true(tile_arr[63].piece_type === NULL_PIECE, "Castling move not successful");
+
+		assert_true(dut.castle_perms.whiteKingside, "Castling perm updates not successful");
+		assert_true(dut.castle_perms.whiteQueenside, "Castling perm updates not successful");
+		assert_true(~dut.castle_perms.blackKingside, "Castling perm updates not successful");
+		assert_true(~dut.castle_perms.blackQueenside, "Castling perm updates not successful");
 
 		// Make and undo normal move: b2b4
 		$display("=== Test Revese Move ===");
@@ -531,19 +375,9 @@ module tb_board();
 		clock();
 		print_board();
 
-		assert (   tile_arr[25].piece_type === NULL_PIECE
-			    && tile_arr[9] === Tile'({WHITE, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Reverse move was not successful");
-		end
-		assert (dut.turn == WHITE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Reverse move was not successful");
-		end
+		assert_true(tile_arr[25].piece_type === NULL_PIECE, "Reverse move was not successful");
+		assert_true(tile_arr[9] === Tile'({WHITE, PAWN}), "Reverse move was not successful");
+		assert_true(dut.turn == WHITE, "Reverse move was not successful");
 
 		// Make and undo kill move: b2b4, c5b4
 		$display("=== Test Revese Kill Move ===");
@@ -563,14 +397,9 @@ module tb_board();
 		clock(2);
 		print_board();
 
-		assert (   tile_arr[25].piece_type === NULL_PIECE
-			    && tile_arr[9] === Tile'({WHITE, PAWN})
-			    && tile_arr[34] === Tile'({BLACK, BISHOP})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Reverse kill move was not successful");
-		end
+		assert_true(tile_arr[25].piece_type === NULL_PIECE, "Reverse kill move was not successful");
+		assert_true(tile_arr[9] === Tile'({WHITE, PAWN}), "Reverse kill move was not successful");
+		assert_true(tile_arr[34] === Tile'({BLACK, BISHOP}), "Reverse kill move was not successful");
 
 
 		// Make and several moves: a2a3, a7a6, a3a4, a6a5
@@ -601,16 +430,10 @@ module tb_board();
 		clock(2);
 		print_board();
 
-		assert (   tile_arr[8] === Tile'({WHITE, PAWN})
-			    && tile_arr[9] === Tile'({WHITE, PAWN})
-			    && tile_arr[48] === Tile'({BLACK, PAWN})
-			    && tile_arr[49] === Tile'({BLACK, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Undo many moves was not successful");
-		end
-
+		assert_true(tile_arr[8] === Tile'({WHITE, PAWN}), "Undo many moves was not successful");
+		assert_true(tile_arr[9] === Tile'({WHITE, PAWN}), "Undo many moves was not successful");
+		assert_true(tile_arr[48] === Tile'({BLACK, PAWN}), "Undo many moves was not successful");
+		assert_true(tile_arr[49] === Tile'({BLACK, PAWN}), "Undo many moves was not successful");
 
 		// --- Undo a castle move ---
 		$display("=== Test Undo Castle Move ===");
@@ -623,15 +446,10 @@ module tb_board();
 		clock(2);
 		print_board();
 
-		assert (   tile_arr[60] === Tile'({BLACK, KING})
-			    && tile_arr[61].piece_type === NULL_PIECE
-			    && tile_arr[62].piece_type === NULL_PIECE
-			    && tile_arr[63] === Tile'({BLACK, ROOK})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Undo Castle Move was not successful");
-		end
+		assert_true(tile_arr[60] === Tile'({BLACK, KING}), "Undo Castle Move was not successful");
+		assert_true(tile_arr[61].piece_type === NULL_PIECE, "Undo Castle Move was not successful");
+		assert_true(tile_arr[62].piece_type === NULL_PIECE, "Undo Castle Move was not successful");
+		assert_true(tile_arr[63] === Tile'({BLACK, ROOK}), "Undo Castle Move was not successful");
 
 
 		// --- Undo a promotion ---
@@ -645,13 +463,8 @@ module tb_board();
 		clock(2);
 		print_board();
 
-		assert (   tile_arr[58] === Tile'({BLACK, BISHOP})
-			    && tile_arr[51] === Tile'({WHITE, PAWN})) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Undo Promotion Move was not successful");
-		end
+		assert_true(tile_arr[58] === Tile'({BLACK, BISHOP}), "Undo Promotion Move was not successful");
+		assert_true(tile_arr[51] === Tile'({WHITE, PAWN}), "Undo Promotion Move was not successful");
 
 
 		// --- Undo En Passant Move ---
@@ -665,14 +478,9 @@ module tb_board();
 		clock(2);
 		print_board();
 
-		assert (   tile_arr[36] === Tile'({BLACK, PAWN})
-			    && tile_arr[37] === Tile'({WHITE, PAWN})
-			    && tile_arr[44].piece_type === NULL_PIECE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Undo En Passant was not successful");
-		end
+		assert_true(tile_arr[36] === Tile'({BLACK, PAWN}), "Undo En Passant was not successful");
+		assert_true(tile_arr[37] === Tile'({WHITE, PAWN}), "Undo En Passant was not successful");
+		assert_true(tile_arr[44].piece_type === NULL_PIECE, "Undo En Passant was not successful");
 
 
 		// --- Undo Remaining Moves ---
@@ -689,54 +497,25 @@ module tb_board();
 		// Check that pieces are reset
 		for (int pos=0; pos<64; pos+=1) begin
 			if (pos < 16 || pos > 40) begin
-				assert (tile_arr[pos] === starting_tiles[pos]) begin
-					passCount += 1;
-				end else begin
-					failCount += 1;
-					$error("Board failed to reset somewhere");
-				end
+				assert_true(tile_arr[pos] === starting_tiles[pos], "Board failed to reset somewhere");
 			end else begin
-				assert (tile_arr[pos].piece_type === NULL_PIECE) begin
-					passCount += 1;
-				end else begin
-					failCount += 1;
-					$error("Board failed to reset somewhere");
-				end
+				assert_true(tile_arr[pos].piece_type === NULL_PIECE, "Board failed to reset somewhere");
 			end
 		end
 
 		// -- Check board setting are reset --
 		// Check correct turn
-		assert (dut.turn === WHITE) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Turn not correctly set to WHITE");
-		end
+		assert_true(dut.turn === WHITE, "Turn not correctly set to WHITE");
+
 
 		// Check castle permissions
-		assert (dut.castle_perms === 4'b1111) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Castle permissions not correctly set");
-		end
+		assert_true(dut.castle_perms === 4'b1111, "Castle permissions not correctly set");
 
 		// Check correct en passant value
-		assert (dut.has_ep === 1'b0) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Incorrectly starts with en passant");
-		end
+		assert_true(dut.has_ep === 1'b0, "Incorrectly starts with en passant");
 
 		// Check reseting halfmove clock
-		assert (dut.halfmove_clock === 7'd0) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to reset halfmove clock");
-		end
+		assert_true(dut.halfmove_clock === 7'd0, "Fails to reset halfmove clock");
 
 
 		// --- Test basic move generation ---
@@ -764,12 +543,7 @@ module tb_board();
 		end
 
 		// Check 20th move is a non-NULL move
-		assert (~isNullMove(move_output)) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to generate 20 moves");
-		end
+		assert_true(~isNullMove(move_output), "Fails to generate 20 moves");
 
 		board_operation = GET_BEST_MOVE_OP;
 		clock();
@@ -777,19 +551,48 @@ module tb_board();
 		$display("%0d->%0d (%1b)", move_output.start_pos, move_output.end_pos, move_output.promo_piece);
 
 		// Check 21th move is a NULL move
-		assert (isNullMove(move_output)) begin
-			passCount += 1;
-		end else begin
-			failCount += 1;
-			$error("Fails to generate 20 moves");
-		end
-		
+		assert_true(isNullMove(move_output), "Fails to generate 20 moves");
+
 
 		board_operation = IDLE_BOARD_OP;
 		move_in = Move'($urandom_range(0, $bits(Move)-1));
 		clock(2);
 		print_board();
 
+
+		// --- Test Reading from Board ---
+		board_operation = GET_TILE_OCCUPANCY_OP;
+		move_in.end_pos = 6'd0;
+		clock(1);
+		assert_true(data_out === {WHITE, ROOK}, "Failed to read tile (rook)");
+
+		move_in.end_pos = 6'd8;
+		clock(1);
+		assert_true(data_out.piece_type === NULL_PIECE, "Failed to read tile (empty)");
+
+		move_in.end_pos = 6'd24;
+		clock(1);
+		assert_true(data_out === {WHITE, PAWN}, "Failed to read tile (pawn)");
+
+		board_operation = READ_TURN_OP;
+		clock(1);
+		assert_true(data_out[0] === BLACK, "Failed to read turn");
+
+		board_operation = READ_CASTLE_OP;
+		clock(1);
+		assert_true(data_out === 4'b1111, "Failed to read castle perms");
+
+		board_operation = READ_EN_PASSANT_OP;
+		clock(1);
+		assert_true(data_out === {1'b1, 3'd0}, "Failed to read en passent");
+
+		board_operation = READ_LSB_HM_CLOCK_OP;
+		clock(1);
+		assert_true(data_out === 4'd0, "Failed to read LSB on halfmove clock");
+
+		board_operation = READ_MSB_HM_CLOCK_OP;
+		clock(1);
+		assert_true(data_out[2:0] === 3'd0, "Failed to read MSB on halfmove clock");
 
 
 		// Display Results

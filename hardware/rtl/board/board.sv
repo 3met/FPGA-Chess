@@ -15,7 +15,6 @@ package board_defs;
 	// -- Define Board Operations -- 
 	typedef enum {
 		IDLE_BOARD_OP,
-		// CLEAR_BOARD_OP,
 		PLACE_PIECE_OP,
 		MAKE_MOVE_OP,
 		REVERSE_MOVE_OP,
@@ -26,7 +25,12 @@ package board_defs;
 		WRITE_CASTLE_OP,
 		WRITE_EN_PASSANT_OP,
 		WRITE_LSB_HM_CLOCK_OP,
-		WRITE_MSB_HM_CLOCK_OP
+		WRITE_MSB_HM_CLOCK_OP,
+		READ_TURN_OP,
+		READ_CASTLE_OP,
+		READ_EN_PASSANT_OP,
+		READ_LSB_HM_CLOCK_OP,
+		READ_MSB_HM_CLOCK_OP
 	} BoardOp;
 
 	// Datatype 
@@ -49,7 +53,7 @@ module board (
 		output logic illegal_board,
 		output Move best_move,
 		output BoardEvalScore board_score,
-		output Tile tile_data_out
+		output logic[3:0] data_out
 	);
 
 
@@ -63,7 +67,6 @@ module board (
 	// --- Enum for Internal Board States ---
 	typedef enum {
 		IDLE_BOARD_STATE,
-		// CLEAR_BOARD_STATE[32],
 		PLACE_PIECE_STATE,
 		MAKE_MOVE_STATE[3],
 		REVERSE_MOVE_STATE[3],
@@ -74,7 +77,12 @@ module board (
 		WRITE_CASTLE_STATE,
 		WRITE_EN_PASSANT_STATE,
 		WRITE_LSB_HM_CLOCK_STATE,
-		WRITE_MSB_HM_CLOCK_STATE
+		WRITE_MSB_HM_CLOCK_STATE,
+		READ_TURN_STATE,
+		READ_CASTLE_STATE,
+		READ_EN_PASSANT_STATE,
+		READ_LSB_HM_CLOCK_STATE,
+		READ_MSB_HM_CLOCK_STATE
 	} BoardState;
 
 
@@ -278,7 +286,6 @@ module board (
 		end else if (ready) begin
 			case (board_operation)
 				IDLE_BOARD_OP:         state <= IDLE_BOARD_STATE;
-				// CLEAR_BOARD_OP:        state <= CLEAR_BOARD_STATE0;
 				PLACE_PIECE_OP:        state <= PLACE_PIECE_STATE;
 				MAKE_MOVE_OP:          state <= MAKE_MOVE_STATE0;
 				REVERSE_MOVE_OP:       state <= REVERSE_MOVE_STATE0;
@@ -290,6 +297,11 @@ module board (
 				WRITE_EN_PASSANT_OP:   state <= WRITE_EN_PASSANT_STATE;
 				WRITE_LSB_HM_CLOCK_OP: state <= WRITE_LSB_HM_CLOCK_STATE;
 				WRITE_MSB_HM_CLOCK_OP: state <= WRITE_MSB_HM_CLOCK_STATE;
+				READ_TURN_OP:          state <= READ_TURN_STATE;
+				READ_CASTLE_OP:        state <= READ_CASTLE_STATE;
+				READ_EN_PASSANT_OP:    state <= READ_EN_PASSANT_STATE;
+				READ_LSB_HM_CLOCK_OP:  state <= READ_LSB_HM_CLOCK_STATE;
+				READ_MSB_HM_CLOCK_OP:  state <= READ_MSB_HM_CLOCK_STATE;
 				default:               state <= BoardState'('dx);
 			endcase
 
@@ -333,7 +345,12 @@ module board (
 			WRITE_CASTLE_STATE,
 			WRITE_EN_PASSANT_STATE,
 			WRITE_LSB_HM_CLOCK_STATE,
-			WRITE_MSB_HM_CLOCK_STATE:
+			WRITE_MSB_HM_CLOCK_STATE,
+			READ_TURN_STATE,
+			READ_CASTLE_STATE,
+			READ_EN_PASSANT_STATE,
+			READ_LSB_HM_CLOCK_STATE,
+			READ_MSB_HM_CLOCK_STATE:
 
 			ready = 1'b1;
 		endcase
@@ -769,13 +786,18 @@ module board (
 	end
 
 
-	// --- Compute tile_data_out ---
+	// --- Compute data_out ---
 	always_comb begin
-		if (state == GET_TILE_OCCUPANCY_STATE) begin
-			tile_data_out <= tile_rd_data[move_buffer.end_pos];
-		end else begin
-			tile_data_out <= Tile'('dx);
-		end
+		case (state)
+			GET_TILE_OCCUPANCY_STATE: data_out <= tile_rd_data[move_buffer.end_pos];
+			READ_TURN_STATE: data_out <= {3'bx, turn};
+			READ_CASTLE_STATE: data_out <= castle_perms;
+			READ_EN_PASSANT_STATE: data_out <= {has_ep, ep_file};
+			READ_LSB_HM_CLOCK_STATE: data_out <= halfmove_clock[3:0];
+			READ_MSB_HM_CLOCK_STATE: data_out <= {1'bx, halfmove_clock[6:4]};
+
+			default: data_out <= Tile'('dx);
+		endcase
 	end
 
 
