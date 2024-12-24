@@ -7,6 +7,9 @@ import adder_maximizer_defs::*;
 // vsim -L altera_mf -L lpm -L 220model work.tb_adder_maximizer
 // restart -f; run -all
 
+// For vsim-13 error, see:
+// https://community.intel.com/t5/Intel-Quartus-Prime-Software/MODELSIM-Error-vsim-13-Recompile-work/m-p/718423
+
 module tb_adder_maximizer();
 
 	localparam int INPUT_KEY_WIDTH = 8;
