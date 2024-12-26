@@ -120,6 +120,15 @@ module tb_board();
 	endtask
 
 
+	// -- Task to make a move on the board --
+	task make_move(Move m);
+		board_operation = BOARD_MAKE_MOVE_OP;
+		move_in = m;
+		clock();
+		board_operation = BOARD_IDLE_OP;
+	endtask
+
+
 	// -- Ensure select_1 is never the same as select_2 --
 	always_ff @(posedge clk or negedge rst_n) begin
 	    if (~rst_n) begin
@@ -239,10 +248,7 @@ module tb_board();
 		$display("=== Testing Moves ===");
 
 		// Move 1, e2e4
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd12, 6'd28, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_IDLE_OP;
+		make_move(Move'({6'd12, 6'd28, PROMO_UNKNOWN}));
 		clock();
 		print_board();
 
@@ -265,10 +271,7 @@ module tb_board();
 		assert_true(dut.halfmove_clock === 7'd0, "Fails to reset halfmove clock");
 
 		// Move 2: f7f5
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd53, 6'd37, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_IDLE_OP;
+		make_move(Move'({6'd53, 6'd37, PROMO_UNKNOWN}));
 		clock();
 		print_board();
 
@@ -281,10 +284,7 @@ module tb_board();
 		assert_true(tile_arr[53].piece_type === NULL_PIECE, "Pawn not moved successfully");
 
 		// Move 3: e4f5
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd28, 6'd37, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_IDLE_OP;
+		make_move(Move'({6'd28, 6'd37, PROMO_UNKNOWN}));
 		clock();
 		print_board();
 
@@ -293,13 +293,8 @@ module tb_board();
 		assert_true(tile_arr[28].piece_type === NULL_PIECE, "Pawn not moved successfully");
 
 		// Moves 4-5: e7e5, f5e6
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd52, 6'd36, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd37, 6'd44, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_IDLE_OP;
+		make_move(Move'({6'd52, 6'd36, PROMO_UNKNOWN}));
+		make_move(Move'({6'd37, 6'd44, PROMO_UNKNOWN}));
 		clock(2);
 		print_board();
 
@@ -326,29 +321,17 @@ module tb_board();
 		assert_true(dut.halfmove_clock === 7'd0, "Fails to reset halfmove clock");
 
 		// Move 6-8: g8f6, e6d7, f8c5
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd62, 6'd45, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd44, 6'd51, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd61, 6'd34, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd51, 6'd58, PROMO_QUEEN});
-		clock();
-		board_operation = BOARD_IDLE_OP;
+		make_move(Move'({6'd62, 6'd45, PROMO_UNKNOWN}));
+		make_move(Move'({6'd44, 6'd51, PROMO_UNKNOWN}));
+		make_move(Move'({6'd61, 6'd34, PROMO_UNKNOWN}));
+		make_move(Move'({6'd51, 6'd58, PROMO_QUEEN}));
 		clock();
 		print_board();
 
 		assert_true(tile_arr[58].piece_type === QUEEN, "Promotion not successful");
 
 		// Move 9: e8g8 (Black king castle)
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd60, 6'd62, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_IDLE_OP;
+		make_move(Move'({6'd60, 6'd62, PROMO_UNKNOWN}));
 		clock(2);
 
 		print_board();
@@ -365,9 +348,7 @@ module tb_board();
 
 		// Make and undo normal move: b2b4
 		$display("=== Test Revese Move ===");
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd9, 6'd25, PROMO_UNKNOWN});
-		clock();
+		make_move(Move'({6'd9, 6'd25, PROMO_UNKNOWN}));
 		board_operation = BOARD_REVERSE_MOVE_OP;
 		move_in = Move'($urandom_range(0, $bits(Move)-1));
 		clock();
@@ -381,12 +362,8 @@ module tb_board();
 
 		// Make and undo kill move: b2b4, c5b4
 		$display("=== Test Revese Kill Move ===");
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd9, 6'd25, PROMO_UNKNOWN});
-		clock();
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd34, 6'd25, PROMO_UNKNOWN});
-		clock();
+		make_move(Move'({6'd9, 6'd25, PROMO_UNKNOWN}));
+		make_move(Move'({6'd34, 6'd25, PROMO_UNKNOWN}));
 		board_operation = BOARD_REVERSE_MOVE_OP;
 		move_in = Move'($urandom_range(0, $bits(Move)-1));
 		clock(2);
@@ -405,15 +382,10 @@ module tb_board();
 		// Make and several moves: a2a3, a7a6, a3a4, a6a5
 		$display("=== Test Undo Many Moves ===");
 		clock(10);
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd8, 6'd16, PROMO_UNKNOWN});
-		clock();
-		move_in = Move'({6'd48, 6'd40, PROMO_UNKNOWN});
-		clock();
-		move_in = Move'({6'd16, 6'd24, PROMO_UNKNOWN});
-		clock();
-		move_in = Move'({6'd40, 6'd32, PROMO_UNKNOWN});
-		clock();
+		make_move(Move'({6'd8, 6'd16, PROMO_UNKNOWN}));
+		make_move(Move'({6'd48, 6'd40, PROMO_UNKNOWN}));
+		make_move(Move'({6'd16, 6'd24, PROMO_UNKNOWN}));
+		make_move(Move'({6'd40, 6'd32, PROMO_UNKNOWN}));
 		board_operation = BOARD_REVERSE_MOVE_OP;
 		move_in = Move'($urandom_range(0, $bits(Move)-1));
 		clock(2);
@@ -521,9 +493,8 @@ module tb_board();
 		// --- Test basic move generation ---
 		$display("=== Test Basic Move Generation ===");
 		clock(10);
-		board_operation = BOARD_MAKE_MOVE_OP;
-		move_in = Move'({6'd8, 6'd24, PROMO_UNKNOWN});
-		clock();
+
+		make_move(Move'({6'd8, 6'd24, PROMO_UNKNOWN}));
 
 		in_search = 1'b1;
 		move_counter = 0;
@@ -535,9 +506,7 @@ module tb_board();
 			clock();
 			move_output = best_move;
 			$display("%0d->%0d (%1b)", move_output.start_pos, move_output.end_pos, move_output.promo_piece);
-			board_operation = BOARD_MAKE_MOVE_OP;
-			move_in = best_move;
-			clock();
+			make_move(best_move);
 			board_operation = BOARD_REVERSE_MOVE_OP;
 			clock();
 		end
