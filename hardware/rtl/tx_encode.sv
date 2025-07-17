@@ -1,7 +1,7 @@
 
 // By Emet Behrendt
 
-import engine_defs::*;
+import general_chess_defs::*;
 
 // Takes data byte in and transmits out with UART
 // Indicates readiness for new input with `ready` signal

@@ -11,7 +11,7 @@
 
 package board_hist_defs;
 
-	import engine_defs::*;
+	import general_chess_defs::*;
 
 	typedef enum {
 		NORM_MOVE,   // Move is a normal move

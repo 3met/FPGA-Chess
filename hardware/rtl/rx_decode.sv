@@ -1,7 +1,7 @@
 
 // By Emet Behrendt
 
-import engine_defs::*;
+import general_chess_defs::*;
 
 // Receives UART RX one bit at a time
 // Outputs data bytes one byte at a time

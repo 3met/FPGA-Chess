@@ -4,7 +4,7 @@
 // This file has the implementation of the board abstraction.
 // The board uses 64 tile modules.
 
-import engine_defs::*;
+import general_chess_defs::*;
 import tile_defs::*;
 import adder_maximizer_defs::*;
 import board_hist_defs::*;

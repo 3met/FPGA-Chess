@@ -1,12 +1,12 @@
 
 // By Emet Behrendt
 
-import engine_defs::*;
+import general_chess_defs::*;
 
 // Package for definitions relating to the Tile PE
 package tile_defs;
 	
-	import engine_defs::*;
+	import general_chess_defs::*;
 
 	// -- Tile Connection Structs and Types --
 

@@ -8,7 +8,7 @@
 `define ENGINE_INCLUDE_SV
 
 // A Package for general chess/engine definitions
-package engine_defs;
+package general_chess_defs;
 
 	// -- Data Type for Colors --
 	typedef enum logic {
@@ -234,6 +234,6 @@ package engine_defs;
 		0,	1,	2,	3,	4,	5,	6,	7
 	};
 
-endpackage : engine_defs
+endpackage : general_chess_defs
 
 `endif

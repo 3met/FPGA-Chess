@@ -3,7 +3,7 @@
 
 `timescale 1ns / 1ps
 
-import engine_defs::*;
+import general_chess_defs::*;
 import board_defs::*;
 
 // Run in modelsim with:
