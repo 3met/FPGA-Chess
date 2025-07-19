@@ -39,8 +39,8 @@ module static_evaluator (
 	EvalScore eval_pipeline_change[7]; // Indexed like [layer]
 
 	Tile board_pipeline[7][64];        // Indexed like [layer][position]
-	Tile cardinal_piece[7][64][8];     // Indexed like [layer][direction][position]
-	reg [2:0] cardinal_dist[76][64][8]; // Indexed like [layer][direction][position]
+	Tile cardinal_piece[7][64][8];     // Indexed like [layer][position][direction]
+	reg [2:0] cardinal_dist[76][64][8]; // Indexed like [layer][position][direction]
 
 	always_ff @(posedge clk) begin
 
