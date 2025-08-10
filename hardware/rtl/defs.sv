@@ -164,6 +164,36 @@ package general_chess_defs;
 		'{6'd0,	6'd7,	6'd14,	6'd21,	6'd28,	6'd35,	6'd42,	6'd49}
 	};
 
+	// Shift a position in some direction for some distance
+	function Position shiftPos(Position pos, Direction dir, logic [2:0] distance);
+		return Position'(pos + DIST_SHIFT[dir][distance]);
+	endfunction : shiftPos
+
+	// Takes a position, direaction, and distance as input
+	// Outputs if shifting starting from pos in the given dir for the given distance
+	// will still be on the board
+	function bit isShiftOnBoard(Position pos, Direction dir, logic [2:0] distance);
+		automatic Position new_pos = shiftPos(pos, dir, distance);
+		automatic BoardRank old_rank = getRank(pos);
+		automatic BoardFile old_file = getFile(pos);
+		automatic BoardRank new_rank = getRank(new_pos);
+		automatic BoardFile new_file = getFile(new_pos);
+
+		if (distance == 0) return 1'b1;
+
+		case (dir)
+			NORTH, NORTH_EAST, NORTH_WEST: if (new_rank <= old_rank) return 1'b0;
+			SOUTH, SOUTH_EAST, SOUTH_WEST: if (new_rank >= old_rank) return 1'b0;
+		endcase
+
+		case (dir)
+			WEST, SOUTH_WEST, NORTH_WEST:  if (new_file >= old_file) return 1'b0;
+			EAST, SOUTH_EAST, NORTH_EAST:  if (new_file <= old_file) return 1'b0;
+		endcase
+
+		return 1'b1;
+	endfunction : isShiftOnBoard
+
 	// Defines board direction
 	typedef enum logic[2:0] {
 		NNE, NEE, SEE, SSE, SSW, SWW, NWW, NNW
