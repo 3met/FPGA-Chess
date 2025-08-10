@@ -12,6 +12,8 @@ package static_evaluator_defs;
 
 	localparam TileMoveScore NULL_MOVE_SCORE = TileMoveScore'('d0);
 
+	localparam delay; // Cycles until the evaluation is complete (pipeline stages)
+
 	// -- Define operation System for Individual Tiles --
 	// typedef enum {
 	// 	IDLE_TILE,
@@ -30,9 +32,8 @@ import static_evaluator_defs::*;
 
 module static_evaluator (
 	input clk,
-	input Tile pieces[64],
+	input Tile board_tiles[64],
 	output EvalScore static_eval, // evaluation relative to WHITE player
-	output delay // outputs the number of clock before evaluation can be read (constant)
 );
 	// The score after a given layer and the change in score for a given layer
 	EvalScore eval_pipeline[7];        // Indexed like [layer]
@@ -52,7 +53,7 @@ module static_evaluator (
 
 			for (int layer=0; layer < 7; layer++) begin
 				// Copy the board down pipeline
-				board_pipeline[layer] <= (layer==0 ? pieces : board_pipeline[layer-1];
+				board_pipeline[layer] <= (layer==0 ? board_tiles : board_pipeline[layer-1];
 
 				for (int dir=0; dir < 8; dir++) begin
 					// Xs by default for first layer, copy previous value for later layers
@@ -92,6 +93,9 @@ module static_evaluator (
 		for (int layer=1; layer < 7; layer++) begin
 			eval_pipeline[layer] <= eval_pipeline[layer-1] + eval_pipeline_change[layer];
 		end
+
+		// Set output
+		static_eval <= eval_pipeline[6]
 	end
 
 
