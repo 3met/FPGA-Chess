@@ -14,16 +14,6 @@ package static_evaluator_defs;
 
 	localparam delay; // Cycles until the evaluation is complete (pipeline stages)
 
-	// -- Define operation System for Individual Tiles --
-	// typedef enum {
-	// 	IDLE_TILE,
-	// 	PLACE_TILE,
-	// 	PLACE_MASK_AND_CLEAR_TILE,
-	// 	PLACE_AND_CLEAR_TILE,
-	// 	PLACE_RESET_MASK_AND_CLEAR_TILE,
-	// 	OUTPUT_SCORE_TILE,
-	// 	OUTPUT_BEST_MOVE_TILE
-	// } StaticEvalOp;
 endpackage : static_evaluator_defs
 
 
