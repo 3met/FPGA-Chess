@@ -66,8 +66,8 @@ module static_evaluator (
 					end else if (layer > 0 && isShiftOnBoard(pos, dir, 2+layer-1) && !isShiftOnBoard(pos, dir, 2+layer)) begin
 						// If no piece exists, relay previous signal
 						if (board_pipeline[layer][shiftPos(pos, dir, 1)].piece_type == NULL_PIECE) begin
-							cardinal_piece[layer][pos][dir] = cardinal_piece[layer][shiftPos(pos, dir, 1)][dir];
-							cardinal_dist[layer][pos][dir] = cardinal_dist[layer][shiftPos(pos, dir, 1)][dir] + 3'd1;
+							cardinal_piece[layer][pos][dir] = cardinal_piece[layer-1][shiftPos(pos, dir, 1)][dir];
+							cardinal_dist[layer][pos][dir] = cardinal_dist[layer-1][shiftPos(pos, dir, 1)][dir] + 3'd1;
 						// else piece exists, so relay that piece
 						end else begin
 							cardinal_piece[layer][pos][dir] = board_pipeline[layer][shiftPos(pos, dir, 1)];
