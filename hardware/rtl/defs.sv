@@ -101,10 +101,6 @@ package general_chess_defs;
 	endfunction
 
 
-	// Defines a priority type for moves
-	typedef logic [3:0] MovePriority;
-	localparam MovePriority NULL_MOVE_PRIORITY = MovePriority'('d0);
-
 	// Defines a board tile
 	typedef struct packed {
 		Color piece_color;
