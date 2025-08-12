@@ -23,26 +23,26 @@ import move_generator_defs::*;
 
 
 module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
-    input clk,
-    input rst_n,
+    input logic clk,
+    input logic rst_n,
 
     // Move Generation Config
     input MoveGenOp move_gen_op,
     input ThreadID thread_id,
     input DepthType ply,
-    input Move target_move,
+    input wire Move target_move,
 
     // Board Data
-    input Tile        board_tiles,
-    input Color       turn,
-    input CastlePerms castle_perms,
-    input reg         has_ep,
-    input BoardFile   ep_file,
+    input wire Tile        board_tiles[64],
+    input Color            turn,
+    input wire CastlePerms castle_perms,
+    input logic            has_ep,
+    input BoardFile        ep_file,
     // input reg [6:0]   halfmove_clock, // Unused?
 
     // Generated Output
-    output Move best_move,
-    output reg move_is_legal
+    output var Move best_move,
+    output logic move_is_legal
 );
 
     // Move Config Pipeline
@@ -56,7 +56,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     // Piece Propagation Pipeline Registers
     Tile board_pipe[7][64];        // Indexed like [layer][position]
     Tile adj_piece_in[7][64][8];     // Indexed like [layer][position][direction]
-    reg  adj_dist_in[7][64][8]; // Indexed like [layer][position][direction]
+    reg [2:0] adj_dist_in[7][64][8]; // Indexed like [layer][position][direction]
 
     // Board State Pipeline
     Color       turn_pipe[8];
@@ -133,24 +133,57 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     //     .q()
     // );
 
-    wire [378-1:0] combined_mask[4];
+    wire [378-1:0] combined_mask[4]; // Indexed like [layer]
+    logic adj_mask[64][8]; // Indexed like [pos][dir]
+    logic knight_mask[64][8]; // Indexed like [pos][dir]
 
     genvar i;
     generate
         for (i=0; i<4; i=i+1) begin : gen_combined_masks
             assign combined_mask[i] = {
-            NS_cardinal_mask[i],
-            EW_cardinal_mask[i],
-            pos_diag_mask[i],
-            neg_diag_mask[i],
-            NNE_SSW_knight_mask[i],
-            NEE_SWW_knight_mask[i],
-            SEE_NWW_knight_mask[i],
-            SSE_NNW_knight_mask[i]
+            {<<{NS_cardinal_mask[i]}},
+            {<<{EW_cardinal_mask[i]}},
+            {<<{pos_diag_mask[i]}},
+            {<<{neg_diag_mask[i]}},
+            {<<{NNE_SSW_knight_mask[i]}},
+            {<<{NEE_SWW_knight_mask[i]}},
+            {<<{SEE_NWW_knight_mask[i]}},
+            {<<{SSE_NNW_knight_mask[i]}}
             };
         end
     endgenerate
     
+    // ========== Assign Adj Mask from Mask Data ==========
+    always_comb begin
+        for (int pos=0; pos<64; pos++) begin
+            automatic BoardRank RANK = getRank(pos);
+            automatic BoardRank FILE = getFile(pos);
+
+            adj_mask[pos] = '{default:1'd0};
+
+            if (RANK < 7) adj_mask[pos][NORTH] = NS_cardinal_mask[0][FILE][RANK];
+            if (RANK > 0) adj_mask[pos][SOUTH] = NS_cardinal_mask[0][FILE][RANK-1];
+            if (FILE < 7) adj_mask[pos][EAST] = EW_cardinal_mask[0][FILE][RANK];
+            if (FILE > 0) adj_mask[pos][WEST] = EW_cardinal_mask[0][FILE-1][RANK];
+            if (RANK < 7 && FILE < 7) adj_mask[pos][NORTH_EAST] = pos_diag_mask[0][FILE][RANK];
+            if (RANK > 0 && FILE > 0) adj_mask[pos][SOUTH_WEST] = pos_diag_mask[0][FILE-1][RANK-1];
+            if (RANK < 7 && FILE > 0) adj_mask[pos][NORTH_WEST] = neg_diag_mask[0][FILE-1][RANK];
+            if (RANK > 0 && FILE < 7) adj_mask[pos][SOUTH_EAST] = neg_diag_mask[0][FILE][RANK-1];
+
+            knight_mask[pos] = '{default:1'd0};
+
+            if (RANK < 6 && FILE < 7) knight_mask[pos][NNE] = NNE_SSW_knight_mask[0][FILE][RANK];
+            if (RANK > 1 && FILE > 0) knight_mask[pos][SSW] = NNE_SSW_knight_mask[0][FILE-1][RANK-2];
+            if (RANK < 7 && FILE < 6) knight_mask[pos][NEE] = NEE_SWW_knight_mask[0][FILE][RANK];
+            if (RANK > 0 && FILE > 1) knight_mask[pos][SWW] = NEE_SWW_knight_mask[0][FILE-2][RANK-1];
+            if (RANK > 0 && FILE < 6) knight_mask[pos][SEE] = SEE_NWW_knight_mask[0][FILE][RANK-1];
+            if (RANK < 7 && FILE > 1) knight_mask[pos][NWW] = SEE_NWW_knight_mask[0][FILE-2][RANK];
+            if (RANK > 1 && FILE < 7) knight_mask[pos][SSE] = SSE_NNW_knight_mask[0][FILE][RANK-2];
+            if (RANK < 6 && FILE > 0) knight_mask[pos][NNW] = SSE_NNW_knight_mask[0][FILE-1][RANK];
+        end
+    end
+
+
 
     simple_dual_port_ram #(.NUM_WORDS(THREAD_COUNT * MAX_PLY_COUNT), .WORD_SIZE(378)) mask_mem (
         .clock(clk),
@@ -166,14 +199,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     // ========== Propagate Pieces ==========
     always_ff @(posedge clk) begin
         for (int pos=0; pos < 64; pos++) begin
-            localparam RANK = getRank(pos);
-            localparam FILE = getFile(pos);
+            automatic BoardRank RANK = getRank(pos);
+            automatic BoardFile FILE = getFile(pos);
 
             for (int layer=0; layer < 7; layer++) begin
                 // Copy the board down pipeline
                 board_pipe[layer] <= (layer==0 ? board_tiles : board_pipe[layer-1]);
 
-                for (int dir=0; dir < 8; dir++) begin
+                for (Direction dir=Direction'(0); dir < 8; dir=Direction'(dir+1)) begin
                     // Xs by default for first layer, copy previous value for later layers
                     adj_piece_in[layer][pos][dir] = (layer==0 ? UNKNOWN_PIECE : adj_piece_in[layer-1][pos][dir]);
                     adj_dist_in[layer][pos][dir] = (layer==0 ? 3'dx : adj_dist_in[layer-1][pos][dir]);
@@ -270,14 +303,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
             // If the move is NULL or UNKNOWN, we shouldn't care about mask update as it won't be written
             default: begin
-                NS_cardinal_mask[3] = 'dx;
-                EW_cardinal_mask[3] = 'dx;
-                pos_diag_mask[3] = 'dx;
-                neg_diag_mask[3] = 'dx;
-                NNE_SSW_knight_mask[3] = 'dx;
-                NEE_SWW_knight_mask[3] = 'dx;
-                SEE_NWW_knight_mask[3] = 'dx;
-                SSE_NNW_knight_mask[3] = 'dx;
+                NS_cardinal_mask[3] = '{default: 1'bx};
+                EW_cardinal_mask[3] = '{default: 1'bx};
+                pos_diag_mask[3] = '{default: 1'bx};
+                neg_diag_mask[3] = '{default: 1'bx};
+                NNE_SSW_knight_mask[3] = '{default: 1'bx};
+                NEE_SWW_knight_mask[3] = '{default: 1'bx};
+                SEE_NWW_knight_mask[3] = '{default: 1'bx};
+                SSE_NNW_knight_mask[3] = '{default: 1'bx};
             end
         endcase
     end
@@ -309,18 +342,18 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     always_comb begin
         for (int pos=0; pos < 64; pos++) begin
 
-            localparam RANK = getRank(pos);
-            localparam FILE = getFile(pos);
+            automatic BoardRank RANK = getRank(pos);
+            automatic BoardFile FILE = getFile(pos);
 
-            localparam Tile occupant = board_pipe[6][pos];
-            localparam Tile moving_color = turn_pipe[6];
-            localparam Tile curr_piece_in = adj_piece_in[6][pos];
-            localparam logic curr_dist = adj_dist_in[6][pos];
+            automatic Tile occupant = board_pipe[6][pos];
+            automatic Tile moving_color = turn_pipe[6];
+            automatic Tile curr_piece_in[8] = adj_piece_in[6][pos];
+            automatic logic [2:0] curr_dist[8] = adj_dist_in[6][pos];
 
             for (int layer=0; layer < 7; layer++) begin
-                localparam Tile occupant = board_pipe[layer][pos];
-                localparam Tile curr_piece_in = adj_piece_in[layer][pos];
-                localparam logic [2:0] curr_dist = adj_dist_in[layer][pos];
+                automatic Tile occupant = board_pipe[layer][pos];
+                automatic Tile curr_piece_in[8] = adj_piece_in[layer][pos];
+                automatic logic [2:0] curr_dist[8] = adj_dist_in[layer][pos];
 
                 // TODO: Evaluate certain tiles at earlier layers to save resources
 
@@ -335,7 +368,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
                 // Assert that Kings never touch
                 if (occupant.piece_type == KING) begin
-                    for (int dir=0; dir < 8; dir++) begin
+                    for (Direction dir=Direction'(0); dir < 8; dir=Direction'(dir+1)) begin
                         if (curr_piece_in[dir]==KING && curr_dist[dir]==3'd0) begin
                             $fatal("King Attacking King!");
                             tile_move_priority[pos] = UNKNOWN_MOVE_PRIORITY;
@@ -357,8 +390,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 tile_move_dist[pos] = 3'dx;
 
             // NULL score for no attackers and pawn moves
-            end else if (   ~has_attacker[PAWN] && ~has_attacker[KNIGHT] && ~has_attacker[BISHOP]
-                         && ~has_attacker[ROOK] && ~has_attacker[QUEEN] && ~has_attacker[KING]) begin
+            end else if (   ~has_attacker[pos][PAWN] && ~has_attacker[pos][KNIGHT] && ~has_attacker[pos][BISHOP]
+                         && ~has_attacker[pos][ROOK] && ~has_attacker[pos][QUEEN] && ~has_attacker[pos][KING]) begin
                 tile_move_priority[pos] = NULL_MOVE_PRIORITY;
                 tile_move_dir[pos] = Direction'('dx);
                 tile_move_dist[pos] = 3'dx;
@@ -371,24 +404,24 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
                 // - Score based on possible material trades -
                 // Bonus for killing a more valuable piece
-                if (PIECE_VALS_1[occupant.piece_type] > PIECE_VALS_1[weakest_attacker]) begin
+                if (PIECE_VALS_1[occupant.piece_type] > PIECE_VALS_1[weakest_attacker[pos]]) begin
                     tile_move_priority[pos] += 3'd2;
 
                 // Bonus for killing a piece of equal value when you have
                 // attacker count advantage
-                end else if (PIECE_VALS_1[occupant.piece_type] == PIECE_VALS_1[weakest_attacker]) begin
-                    if (attacker_count > defender_count) begin
+                end else if (PIECE_VALS_1[occupant.piece_type] == PIECE_VALS_1[weakest_attacker[pos]]) begin
+                    if (attacker_count[pos] > defender_count[pos]) begin
                         tile_move_priority[pos] += 3'd1;
                     end
 
                 // No kill or kill less valuable than attacker
                 end else begin
                     // Attacker advantage
-                    if (attacker_count > defender_count) begin
-                        if (defender_count == 3'd0) begin
+                    if (attacker_count[pos] > defender_count[pos]) begin
+                        if (defender_count[pos] == 3'd0) begin
                             tile_move_priority[pos] += 3'd1;
 
-                        end else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[occupant.piece_type] < PIECE_VALS_1[weakest_attacker]) begin
+                        end else if (PIECE_VALS_1[weakest_defender[pos]] + PIECE_VALS_1[occupant.piece_type] < PIECE_VALS_1[weakest_attacker[pos]]) begin
                             tile_move_priority[pos] -= 3'd1;
                         end
 
@@ -400,55 +433,55 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
                 // - Apply flags and choose attacker -
                 // Go by flags if there are no defenders
-                if (defender_count == 0) begin
-                    if (good_knight_target && has_attacker[KNIGHT]) begin
-                        tile_move_dir[pos] = attacker_dir[KNIGHT];
+                if (defender_count[pos] == 0) begin
+                    if (good_knight_target[pos] && has_attacker[pos][KNIGHT]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][KNIGHT];
                         tile_move_dist[pos] = 3'd0; // Distance is zero for knights
                         tile_move_priority[pos] += 2;
 
-                    end else if (good_diag_target && has_attacker[BISHOP]) begin
-                        tile_move_dir[pos] = attacker_dir[BISHOP];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (good_diag_target[pos] && has_attacker[pos][BISHOP]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][BISHOP];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
                         tile_move_priority[pos] += 2;
 
-                    end else if (good_cardinal_target && has_attacker[ROOK]) begin
-                        tile_move_dir[pos] = attacker_dir[ROOK];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (good_cardinal_target[pos] && has_attacker[pos][ROOK]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][ROOK];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
                         tile_move_priority[pos] += 2;
 
-                    end else if (good_cardinal_target && has_attacker[QUEEN]) begin
-                        tile_move_dir[pos] = attacker_dir[QUEEN];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (good_cardinal_target[pos] && has_attacker[pos][QUEEN]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][QUEEN];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
                         tile_move_priority[pos] += 1;
 
-                    end else if (good_diag_target && has_attacker[QUEEN]) begin
-                        tile_move_dir[pos] = attacker_dir[QUEEN];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (good_diag_target[pos] && has_attacker[pos][QUEEN]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][QUEEN];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
                         tile_move_priority[pos] += 1;
 
-                    end else if (has_attacker[PAWN]) begin
-                        tile_move_dir[pos] = attacker_dir[PAWN];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (has_attacker[pos][PAWN]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][PAWN];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
 
-                    end else if (has_attacker[KNIGHT]) begin
-                        tile_move_dir[pos] = attacker_dir[KNIGHT];
+                    end else if (has_attacker[pos][KNIGHT]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][KNIGHT];
                         tile_move_dist[pos] = 3'd0; // Distance is zero for knights
 
-                    end else if (has_attacker[BISHOP]) begin
-                        tile_move_dir[pos] = attacker_dir[BISHOP];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (has_attacker[pos][BISHOP]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][BISHOP];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
 
-                    end else if (has_attacker[ROOK]) begin
-                        tile_move_dir[pos] = attacker_dir[ROOK];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (has_attacker[pos][ROOK]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][ROOK];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
 
-                    end else if (has_attacker[QUEEN]) begin
-                        tile_move_dir[pos] = attacker_dir[QUEEN];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (has_attacker[pos][QUEEN]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][QUEEN];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
 
-                    end else if (has_attacker[KING]) begin
-                        tile_move_dir[pos] = attacker_dir[KING];
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                    end else if (has_attacker[pos][KING]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][KING];
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
 
                     // Should never reach here
                     end else begin
@@ -460,30 +493,30 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 // If there are defenders, use weakest attacker
                 end else begin
                     // Special case to deal with pawn forward moves
-                    if (has_attacker[PAWN]) begin
-                        tile_move_dir[pos] = attacker_dir[PAWN];
+                    if (has_attacker[pos][PAWN]) begin
+                        tile_move_dir[pos] = attacker_dir[pos][PAWN];
                     end else begin
-                        tile_move_dir[pos] = attacker_dir[weakest_attacker];
+                        tile_move_dir[pos] = attacker_dir[pos][weakest_attacker[pos]];
                     end
 
-                    if (weakest_attacker == KNIGHT) begin
+                    if (weakest_attacker[pos] == KNIGHT) begin
                         tile_move_dist[pos] = 3'd0; // Distance is zero for knights
                     end else begin
-                        tile_move_dist[pos] = adj_bus_in[tile_move_dir[pos]].distance;
+                        tile_move_dist[pos] = adj_dist_in[6][pos][tile_move_dir[pos]];
                     end
 
-                    if (weakest_attacker == QUEEN && (good_diag_target || good_cardinal_target)) begin
+                    if (weakest_attacker[pos] == QUEEN && (good_diag_target[pos] || good_cardinal_target[pos])) begin
                         tile_move_priority[pos] += 1;
-                    end else if (weakest_attacker == KNIGHT && good_knight_target) begin
+                    end else if (weakest_attacker[pos] == KNIGHT && good_knight_target[pos]) begin
                         tile_move_priority[pos] += 2;
-                    end else if (weakest_attacker == ROOK && good_cardinal_target) begin
+                    end else if (weakest_attacker[pos] == ROOK && good_cardinal_target[pos]) begin
                         tile_move_priority[pos] += 2;
-                    end else if (weakest_attacker == BISHOP && good_diag_target) begin
+                    end else if (weakest_attacker[pos] == BISHOP && good_diag_target[pos]) begin
                         tile_move_priority[pos] += 2;
                     end
 
                     // Should never happen
-                    if (weakest_attacker == SPARE_PIECE || weakest_attacker == NULL_PIECE) begin
+                    if (weakest_attacker[pos] == SPARE_PIECE || weakest_attacker[pos] == NULL_PIECE) begin
                         tile_move_dir[pos] = Direction'('dx);
                         tile_move_dist[pos] = 3'dx;
                         tile_move_priority[pos] = MovePriority'('dx);
@@ -504,20 +537,20 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 	always_comb begin
         for (int pos=0; pos<64; pos++) begin
             good_knight_target[pos] = 1'b0;
-            for (int dir=0; dir<8; dir+=1) begin
+            for (Direction dir=Direction'(0); dir<8; dir=Direction'(dir+1)) begin
                 good_knight_target[pos] |= (   knight_data_in[pos][dir].has_king_or_major
-                                            && knight_data_in[pos][dir].piece_color == ~turn);
+                                            && knight_data_in[pos][dir].piece_color == ~turn_pipe[6]);
             end
             
             good_cardinal_target[pos] = 1'b0;
             good_diag_target[pos] = 1'b0;
             for (int i=0; i<4; i+=1) begin
-                good_cardinal_target[pos] |= (adj_piece_in[6][pos][CARDINAL_DIR[i]] == Tile'({~turn, KING}));
-                good_cardinal_target[pos] |= (adj_piece_in[6][pos][CARDINAL_DIR[i]] == Tile'({~turn, QUEEN}));
+                good_cardinal_target[pos] |= (adj_piece_in[6][pos][CARDINAL_DIR[i]] == Tile'({~turn_pipe[6], KING}));
+                good_cardinal_target[pos] |= (adj_piece_in[6][pos][CARDINAL_DIR[i]] == Tile'({~turn_pipe[6], QUEEN}));
 
-                good_diag_target[pos] |= (adj_piece_in[6][pos][DIAG_DIR[i]] == Tile'({~turn, KING}));
-                good_diag_target[pos] |= (adj_piece_in[6][pos][DIAG_DIR[i]] == Tile'({~turn, QUEEN}));
-                good_diag_target[pos] |= (adj_piece_in[6][pos][DIAG_DIR[i]] == Tile'({~turn, ROOK}));
+                good_diag_target[pos] |= (adj_piece_in[6][pos][DIAG_DIR[i]] == Tile'({~turn_pipe[6], KING}));
+                good_diag_target[pos] |= (adj_piece_in[6][pos][DIAG_DIR[i]] == Tile'({~turn_pipe[6], QUEEN}));
+                good_diag_target[pos] |= (adj_piece_in[6][pos][DIAG_DIR[i]] == Tile'({~turn_pipe[6], ROOK}));
             end
         end
 	end
@@ -530,8 +563,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 	localparam Direction w_pawn_dir[2] = '{SOUTH_WEST, SOUTH_EAST};
 	always_comb begin
         for (int pos=0; pos<64; pos++) begin
-            localparam RANK = getRank(pos);
-            localparam FILE = getFile(pos);
+            automatic BoardRank RANK = getRank(pos);
+            automatic BoardFile FILE = getFile(pos);
 
             // Set default values
             weakest_attacker[pos] = KING;
@@ -544,31 +577,31 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             end
 
             // - Update king, queen, rook, and bishop influences -
-            for (int dir=0; dir<8; dir+=1) begin
-                if (   (adj_piece_in[pos][dir].piece_type==QUEEN)
-                    || (adj_piece_in[pos][dir].piece_type==ROOK && isDirCardinal(Direction'(dir)))
-                    || (adj_piece_in[pos][dir].piece_type==BISHOP && isDirDiag(Direction'(dir)))
-                    || (adj_piece_in[pos][dir].piece_type==KING && adj_dist_in[pos][dir]==3'd1)) begin
+            for (Direction dir=Direction'(0); dir<8; dir=Direction'(dir+1)) begin
+                if (   (adj_piece_in[6][pos][dir]==QUEEN)
+                    || (adj_piece_in[6][pos][dir]==ROOK && isDirCardinal(Direction'(dir)))
+                    || (adj_piece_in[6][pos][dir]==BISHOP && isDirDiag(Direction'(dir)))
+                    || (adj_piece_in[6][pos][dir]==KING && adj_dist_in[6][pos][dir]==3'd1)) begin
                     
                     // Attackers
-                    if (adj_piece_in[pos][dir].piece_color==turn) begin
-                        attacker_count += 'd1;
+                    if (adj_piece_in[6][pos][dir].piece_color==turn_pipe[6]) begin
+                        attacker_count[pos] += 'd1;
 
-                        if (weakest_attacker > adj_piece_in[pos][dir].piece_type) begin
-                            weakest_attacker = adj_piece_in[pos][dir].piece_type;
+                        if (weakest_attacker[pos] > adj_piece_in[6][pos][dir]) begin
+                            weakest_attacker[pos] = adj_piece_in[6][pos][dir].piece_type;
                         end
 
-                        if (adj_mask[search_depth][dir]) begin
-                            has_attacker[adj_piece_in[pos][dir].piece_type] = 1'b1;
-                            attacker_dir[adj_piece_in[pos][dir].piece_type] = Direction'(dir);
+                        if (adj_mask[pos][dir]) begin
+                            has_attacker[pos][adj_piece_in[6][pos][dir]] = 1'b1;
+                            attacker_dir[pos][adj_piece_in[6][pos][dir]] = Direction'(dir);
                         end
 
                     // Defenders
                     end else begin
-                        defender_count += 'd1;
+                        defender_count[pos] += 'd1;
 
-                        if (weakest_defender > adj_piece_in[pos][dir].piece_type) begin
-                            weakest_defender = adj_piece_in[pos][dir].piece_type;
+                        if (weakest_defender[pos] > adj_piece_in[6][pos][dir]) begin
+                            weakest_defender[pos] = adj_piece_in[6][pos][dir].piece_type;
                         end
                     end
                 end
@@ -577,29 +610,29 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
             // - Pawn Influences -
             // White pawn normal moves
-            if (turn == WHITE && adj_piece_in[pos][SOUTH] == Tile'({WHITE, PAWN}) && adj_mask[search_depth][SOUTH]) begin
-                if (adj_dist_in[pos][SOUTH] == 3'd1 || adj_dist_in[pos][SOUTH] == 3'd2) begin
+            if (turn_pipe[6] == WHITE && adj_piece_in[6][pos][SOUTH] == Tile'({WHITE, PAWN}) && adj_mask[pos][SOUTH]) begin
+                if (adj_dist_in[6][pos][SOUTH] == 3'd1 || adj_dist_in[6][pos][SOUTH] == 3'd2) begin
                     has_attacker[pos][PAWN] = 1'd1;
                     attacker_dir[pos][PAWN] = SOUTH;
                 end
             end
             // Black pawn normal moves
-            if (turn == BLACK && adj_piece_in[pos][NORTH] == Tile'({BLACK, PAWN}) && adj_mask[search_depth][NORTH]) begin
-                if (adj_dist_in[pos][NORTH] == 3'd1 || adj_dist_in[pos][NORTH] == 3'd2) begin
+            if (turn_pipe[6] == BLACK && adj_piece_in[6][pos][NORTH] == Tile'({BLACK, PAWN}) && adj_mask[pos][NORTH]) begin
+                if (adj_dist_in[6][pos][NORTH] == 3'd1 || adj_dist_in[6][pos][NORTH] == 3'd2) begin
                     has_attacker[pos][PAWN] = 1'd1;
                     attacker_dir[pos][PAWN] = NORTH;
                 end
             end
             for (int i=0; i<=1; i+=1) begin
                 // White pawn diag attacks
-                if (RANK>1 && adj_piece_in[pos][w_pawn_dir[i]] == Tile'({WHITE, PAWN})
-                    && adj_dist_in[pos][w_pawn_dir[i]] == 3'd1) begin
+                if (RANK>1 && adj_piece_in[6][pos][w_pawn_dir[i]] == Tile'({WHITE, PAWN})
+                    && adj_dist_in[6][pos][w_pawn_dir[i]] == 3'd1) begin
 
-                    if (turn==WHITE) begin
+                    if (turn_pipe[6]==WHITE) begin
                         attacker_count[pos] += 'd1;
                         weakest_attacker[pos] = PAWN;
 
-                        if (adj_mask[search_depth][w_pawn_dir[i]] && board_pipe[6][pos]!=NULL_PIECE) begin
+                        if (adj_mask[pos][w_pawn_dir[i]] && board_pipe[6][pos]!=NULL_PIECE) begin
                             has_attacker[pos][PAWN] = 1'b1;
                             attacker_dir[pos][PAWN] = Direction'(w_pawn_dir[i]);
                         end
@@ -610,14 +643,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 end
 
                 // Black pawn diag attacks
-                if (RANK<6 && adj_piece_in[pos][b_pawn_dir[i]] == Tile'({BLACK, PAWN})
-                    && adj_dist_in[pos][b_pawn_dir[i]] == 3'd1) begin
+                if (RANK<6 && adj_piece_in[6][pos][b_pawn_dir[i]] == Tile'({BLACK, PAWN})
+                    && adj_dist_in[6][pos][b_pawn_dir[i]] == 3'd1) begin
 
-                    if (turn==BLACK) begin
+                    if (turn_pipe[6]==BLACK) begin
                         attacker_count[pos] += 'd1;
                         weakest_attacker[pos] = PAWN;
 
-                        if (adj_mask[search_depth][b_pawn_dir[i]] && board_pipe[6][pos]!=NULL_PIECE) begin
+                        if (adj_mask[pos][b_pawn_dir[i]] && board_pipe[6][pos]!=NULL_PIECE) begin
                             has_attacker[pos][PAWN] = 1'b1;
                             attacker_dir[pos][PAWN] = Direction'(b_pawn_dir[i]);
                         end
@@ -630,13 +663,13 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
 
             // - Knight Directions -
-            for (int dir=0; dir<8; dir+=1) begin
+            for (Direction dir=Direction'(0); dir<8; dir=Direction'(dir+1)) begin
                 if (knight_data_in[pos][dir].has_knight) begin
-                    if (knight_data_in[pos][dir].piece_color == turn) begin
+                    if (knight_data_in[pos][dir].piece_color == turn_pipe[6]) begin
                         weakest_attacker[pos] = (weakest_attacker[pos] > KNIGHT) ? KNIGHT : weakest_attacker[pos];
                         attacker_count[pos] += 'd1;
 
-                        if (knight_mask[search_depth][dir]) begin
+                        if (knight_mask[pos][dir]) begin
                             has_attacker[pos][KNIGHT] = 1'b1;
                             attacker_dir[pos][KNIGHT] = Direction'(dir);
                         end
