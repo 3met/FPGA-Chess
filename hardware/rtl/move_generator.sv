@@ -6,7 +6,7 @@ package move_generator_defs;
 
     import general_chess_defs::*;
 
-    localparam move_gen_delay = 11;
+    localparam MOVE_GEN_STAGE_CNT = 11;
 
     // -- Define Move Generator Operations -- 
     typedef enum {
@@ -22,9 +22,10 @@ package move_generator_defs;
 		logic has_king_or_major;
 	} KnightBusData;
 
-    typedef reg [2:0] MovePriority;
+    typedef reg [3:0] MovePriority;
     localparam MovePriority NULL_MOVE_PRIORITY = MovePriority'('d0);
     localparam MovePriority UNKNOWN_MOVE_PRIORITY = MovePriority'('dx);
+    localparam MovePriority MAX_MOVE_PRIORITY = MovePriority'(4'd15);
 
 endpackage : move_generator_defs
 
@@ -93,12 +94,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     MovePriority tile_move_priority[64]; // The best score a given tile can produce
     Direction tile_move_dir[64]; // Distance of best move
     logic [2:0] tile_move_dist[64]; // Direction of best move
-    MovePriority overall_move_priority;  // The best score for the entire board
+    MovePriority best_move_priority;  // The best score for the entire board
+    Direction best_move_dir;  // The direction of origin from the best destination tile
+    logic [2:0] best_move_dist;  // The distance of the best move
 
     logic is_best_move_knight, is_best_move_knight_wire;
     Direction best_move_direction, best_move_direction_wire;
 
-    Move best_move_pipe; // Indexed like [layer]
+    Move best_move_pipe;
     Direction best_move_dir;
     logic [2:0] best_move_dist;
 
@@ -280,6 +283,28 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         for (int i=1; i<8; i++) castle_perms_pipe[i] <= castle_perms_pipe[i-1];
         for (int i=1; i<8; i++) has_ep_pipe[i] <= has_ep_pipe[i-1];
         for (int i=1; i<8; i++) ep_file_pipe[i] <= ep_file_pipe[i-1];
+    end
+
+
+    // ========== Compute Knight Data In ==========
+    always_comb begin
+        for (int pos=0; pos<64; pos++) begin
+            for (int dir=0; dir<8; dir++) begin
+                automatic Tile src_tile = board_pipe[6][shiftKnightPos(pos, dir)];
+
+                if (isKnightShiftOnBoard(pos, dir)) begin
+                    knight_data_in[pos][dir] = '{
+                        piece_color : src_tile.piece_color;
+                        has_knight : (src_tile.piece_type == KNIGHT);
+                        has_king_or_major : (src_tile.piece_type == KING || src_tile.piece_type == QUEEN || src_tile.piece_type == ROOK);
+                    };
+                end else begin
+                    knight_data_in[pos][dir].piece_color = 1'bx;
+                    knight_data_in[pos][dir].has_knight = 1'b0;
+                    knight_data_in[pos][dir].has_king_or_major = 1'b0;
+                end
+            end
+        end
     end
 
     

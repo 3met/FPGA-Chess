@@ -15,7 +15,9 @@ module move_generator_tile_PE #(parameter POS) (
     input wire knight_mask[8],
 
     // Selecting target move
-    input wire Move target_move,
+    input wire is_target_move_destination,
+    input wire is_target_move_knight,
+    input Direction target_move_dir, 
 
     // Board Data
     input wire Tile        tile_data,
@@ -26,7 +28,8 @@ module move_generator_tile_PE #(parameter POS) (
     // input reg [6:0]   halfmove_clock, // Unused?
 
     // Generated Output
-    output var Move best_local_move, // The best move that ends on this tile (not overall)
+    output var logic [2:0] best_move_dist, // Distance the best move travels (0 for knight)
+    output var Direction best_move_dir, // Direction the best move originates from
     output logic local_move_score
 );
 
@@ -78,12 +81,20 @@ module move_generator_tile_PE #(parameter POS) (
             local_move_score = UNKNOWN_MOVE_PRIORITY;
         end
 
-
         // NULL score if occupied by a friendly piece
         if (tile_data.piece_color==turn && tile_data.piece_type!=NULL_PIECE) begin
             local_move_score = NULL_MOVE_PRIORITY;
             tile_move_dir = Direction'('dx);
             tile_move_dist = 3'dx;
+
+        // Return target move if applicable
+        end else if (is_target_move_destination
+            && (    ( is_target_move_knight && knight_mask[dir])
+                 || (~is_target_move_knight && adj_mask[dir]))) begin
+            
+            local_move_score = MAX_MOVE_PRIORITY;
+            tile_move_dir = target_move_dir;
+            tile_move_dist = (is_target_move_knight ? 'd0 : adj_dist_in[target_move_dir]);
 
         // NULL score for no attackers and pawn moves
         end else if (   ~has_attacker[PAWN] && ~has_attacker[KNIGHT] && ~has_attacker[BISHOP]
@@ -96,18 +107,18 @@ module move_generator_tile_PE #(parameter POS) (
         end else begin
             // Initial score set such that final scores is >0 (non-null)
             // and will never overflow given its size
-            local_move_score = MovePriority'(3'd3);
+            local_move_score = MovePriority'(4'd3);
 
             // - Score based on possible material trades -
             // Bonus for killing a more valuable piece
             if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[weakest_attacker]) begin
-                local_move_score += 3'd2;
+                local_move_score += 4'd2;
 
             // Bonus for killing a piece of equal value when you have
             // attacker count advantage
             end else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[weakest_attacker]) begin
                 if (attacker_count > defender_count) begin
-                    local_move_score += 3'd1;
+                    local_move_score += 4'd1;
                 end
 
             // No kill or kill less valuable than attacker
@@ -118,12 +129,12 @@ module move_generator_tile_PE #(parameter POS) (
                         local_move_score += 3'd1;
 
                     end else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type] < PIECE_VALS_1[weakest_attacker]) begin
-                        local_move_score -= 3'd1;
+                        local_move_score -= 4'd1;
                     end
 
                 // And defender has advantage
                 end else begin
-                    local_move_score -= 3'd2;
+                    local_move_score -= 4'd2;
                 end
             end
 
