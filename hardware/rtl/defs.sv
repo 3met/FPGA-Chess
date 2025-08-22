@@ -55,12 +55,16 @@ package general_chess_defs;
 
 
 	// -- Data Type for Castling Information --
-	typedef struct packed{
+	typedef struct packed {
 		logic whiteKingside;
 		logic whiteQueenside;
 		logic blackKingside;
 		logic blackQueenside;
 	} CastlePerms;
+
+
+	// -- Data Type for a Half-Move Clock --
+	typedef logic [6:0] HalfMoveClk;
 
 
 	// -- Data Types for Board Positioning --
@@ -113,6 +117,30 @@ package general_chess_defs;
 
 	// Data type to store search depth
 	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] DepthType;
+
+	// Data type for a board hash
+	typedef logic [47:0] BoardHash;
+
+
+	// -- Evaluation Related Definitions --
+	typedef logic signed [11:0] EvalScore;
+
+	localparam EvalScore MAX_EVAL_SCORE = EvalScore'(2 ** ($bits(EvalScore)-1) - 1);
+	localparam EvalScore MIN_EVAL_SCORE = -MAX_EVAL_SCORE;
+	localparam EvalScore DRAW_EVAL_SCORE = EvalScore'(0);
+	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
+
+
+	// -- A Structure with Complete Board Positional Information --
+	typedef struct packed {
+		Tile tiles[64];
+		Color turn;
+		CastlePerms castle_perms;
+		logic has_ep;
+		BoardFile ep_file;
+		HalfMoveClk halfmove_clk;
+	} FullBoard;
+
 
 	// -- Direction Related Definitions --
 
@@ -259,6 +287,16 @@ package general_chess_defs;
 		8,	9,	10,	11,	12,	13,	14,	15,
 		0,	1,	2,	3,	4,	5,	6,	7
 	};
+
+
+	// -- Evaluation Related Definitions --
+
+	localparam THREAD_COUNT = 1;
+
+	localparam THREAD_ID_BITS = (THREAD_COUNT > 1) ? $clog2(THREAD_COUNT) : 1;
+
+	typedef logic [THREAD_ID_BITS-1:0] ThreadID;
+
 
 endpackage : general_chess_defs
 
