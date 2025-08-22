@@ -95,7 +95,7 @@ package general_chess_defs;
 	typedef struct packed {
 		Position start_pos;
 		Position end_pos;
-		logic [1:0] promo_piece;
+		PromoType promo_piece;
 	} Move;
 
 	// Define a "NULL" move
@@ -111,6 +111,21 @@ package general_chess_defs;
 		PieceType piece_type;
 	} Tile;
 
+	localparam Tile EMPTY_TILE   = Tile'({UNKNOWN_COLOR, NULL_PIECE});
+	localparam Tile WHITE_PAWN   = Tile'({WHITE, PAWN});
+	localparam Tile WHITE_KNIGHT = Tile'({WHITE, KNIGHT});
+	localparam Tile WHITE_BISHOP = Tile'({WHITE, BISHOP});
+	localparam Tile WHITE_ROOK   = Tile'({WHITE, ROOK});
+	localparam Tile WHITE_QUEEN  = Tile'({WHITE, QUEEN});
+	localparam Tile WHITE_KING   = Tile'({WHITE, KING});
+	localparam Tile BLACK_PAWN   = Tile'({BLACK, PAWN});
+	localparam Tile BLACK_KNIGHT = Tile'({BLACK, KNIGHT});
+	localparam Tile BLACK_BISHOP = Tile'({BLACK, BISHOP});
+	localparam Tile BLACK_ROOK   = Tile'({BLACK, ROOK});
+	localparam Tile BLACK_QUEEN  = Tile'({BLACK, QUEEN});
+	localparam Tile BLACK_KING   = Tile'({BLACK, KING});
+
+
 	// Maximum search depth
 	// Ideally a power of two
 	localparam MAX_PLY_COUNT = 8;
@@ -119,7 +134,7 @@ package general_chess_defs;
 	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] DepthType;
 
 	// Data type for a board hash
-	typedef logic [47:0] BoardHash;
+	typedef logic [31:0] BoardHash;
 
 
 	// -- Evaluation Related Definitions --
@@ -287,6 +302,12 @@ package general_chess_defs;
 		8,	9,	10,	11,	12,	13,	14,	15,
 		0,	1,	2,	3,	4,	5,	6,	7
 	};
+
+
+	// Mirrors a position between the black and white sides of the board
+	function Position mirrorPos(Position in);
+		return Position'({~getRank(in), getFile(in)});
+	endfunction
 
 
 	// -- Evaluation Related Definitions --
