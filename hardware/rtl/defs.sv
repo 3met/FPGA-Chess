@@ -126,6 +126,67 @@ package general_chess_defs;
 	localparam Tile BLACK_KING   = Tile'({BLACK, KING});
 
 
+	// Map position to rank
+	localparam BoardRank BOARD_RANK[64] = '{
+		7, 7, 7, 7, 7, 7, 7, 7,
+		6, 6, 6, 6, 6, 6, 6, 6,
+		5, 5, 5, 5, 5, 5, 5, 5,
+		4, 4, 4, 4, 4, 4, 4, 4,
+		3, 3, 3, 3, 3, 3, 3, 3,
+		2, 2, 2, 2, 2, 2, 2, 2,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		0, 0, 0, 0, 0, 0, 0, 0
+	};
+
+	// Map position to file
+	localparam BoardFile BOARD_FILE[0:63] = '{
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7,
+		0, 1, 2, 3, 4, 5, 6, 7
+	};
+
+	// Map position to positive-sloped diagonal
+	localparam logic[3:0] POSITIVE_DIAG[0:63] = '{
+		0,	1,	2,	3,	4,	5,	6,	7,
+		1,	2,	3,	4,	5,	6,	7,	8,
+		2,	3,	4,	5,	6,	7,	8,	9,
+		3,	4,	5,	6,	7,	8,	9,	10,
+		4,	5,	6,	7,	8,	9,	10,	11,
+		5,	6,	7,	8,	9,	10,	11,	12,
+		6,	7,	8,	9,	10,	11,	12,	13,
+		7,	8,	9,	10,	11,	12,	13,	14
+	};
+	
+	// Map position to negative-sloped diagonal
+	localparam logic[3:0] NEGATIVE_DIAG[0:63] = '{
+		7,	8,	9,	10,	11,	12,	13,	14,
+		6,	7,	8,	9,	10,	11,	12,	13,
+		5,	6,	7,	8,	9,	10,	11,	12,
+		4,	5,	6,	7,	8,	9,	10,	11,
+		3,	4,	5,	6,	7,	8,	9,	10,
+		2,	3,	4,	5,	6,	7,	8,	9,
+		1,	2,	3,	4,	5,	6,	7,	8,
+		0,	1,	2,	3,	4,	5,	6,	7
+	};
+
+	// Order in which the positions are displayed
+	localparam logic[5:0] SHOW_ORDER[0:63] = '{
+		56,	57,	58,	59,	60,	61,	62,	63,
+		48,	49,	50,	51,	52,	53,	54,	55,
+		40,	41,	42,	43,	44,	45,	46,	47,
+		32,	33,	34,	35,	36,	37,	38,	39,
+		24,	25,	26,	27,	28,	29,	30,	31,
+		16,	17,	18,	19,	20,	21,	22,	23,
+		8,	9,	10,	11,	12,	13,	14,	15,
+		0,	1,	2,	3,	4,	5,	6,	7
+	};
+
+
 	// Maximum search depth
 	// Ideally a power of two
 	localparam MAX_PLY_COUNT = 8;
@@ -146,15 +207,33 @@ package general_chess_defs;
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 
 
-	// -- A Structure with Complete Board Positional Information --
-	typedef struct packed {
-		Tile tiles[64];
-		Color turn;
-		CastlePerms castle_perms;
-		logic has_ep;
-		BoardFile ep_file;
-		HalfMoveClk halfmove_clk;
-	} FullBoard;
+	function pieceToChar(Tile t);
+		case (t)
+			WHITE_PAWN:   return "P";
+			WHITE_KNIGHT: return "N";
+			WHITE_BISHOP: return "B";
+			WHITE_ROOK:   return "R";
+			WHITE_QUEEN:  return "Q";
+			WHITE_KING:   return "K";
+			BLACK_PAWN:   return "p";
+			BLACK_KNIGHT: return "n";
+			BLACK_BISHOP: return "b";
+			BLACK_ROOK:   return "r";
+			BLACK_QUEEN:  return "q";
+			BLACK_KING:   return "k";
+			default: return "X";
+		endcase
+	endfunction
+
+
+	// -- Metric Tracking Definitions --
+	// Tracking Time
+	localparam TIME_BITS = 24;  // Ideally a multiple of 8
+	typedef logic[TIME_BITS-1:0] TimeType;
+
+	// Counting Nodes
+	localparam NODE_COUNT_BITS = 40;  // Ideally a multiple of 8
+	typedef logic[NODE_COUNT_BITS-1:0] NodeCountType;
 
 
 	// -- Direction Related Definitions --
@@ -242,66 +321,26 @@ package general_chess_defs;
 		6'd17, 6'd10, -6'd6, -6'd15, -6'd17, -6'd10, 6'd6, 6'd15
 	};
 
+	// Shift a position in some KNIGHT direction
+	function Position shiftKnightPos(Position pos, KnightDirection dir);
+		return Position'(pos + KNIGHT_SHIFT[dir]);
+	endfunction : shiftKnightPos
 
-	// Map position to rank
-	localparam BoardRank BOARD_RANK[64] = '{
-		7, 7, 7, 7, 7, 7, 7, 7,
-		6, 6, 6, 6, 6, 6, 6, 6,
-		5, 5, 5, 5, 5, 5, 5, 5,
-		4, 4, 4, 4, 4, 4, 4, 4,
-		3, 3, 3, 3, 3, 3, 3, 3,
-		2, 2, 2, 2, 2, 2, 2, 2,
-		1, 1, 1, 1, 1, 1, 1, 1,
-		0, 0, 0, 0, 0, 0, 0, 0
-	};
+	// Check if making a knight move for a given position+direction is possible
+	function bit isKnightShiftOnBoard(Position pos, KnightDirection dir);
+		case (dir)
+			NNE: return (isShiftOnBoard(pos, NORTH, 2) && isShiftOnBoard(pos, EAST, 1));
+			NEE: return (isShiftOnBoard(pos, NORTH, 1) && isShiftOnBoard(pos, EAST, 2));
+			SEE: return (isShiftOnBoard(pos, SOUTH, 1) && isShiftOnBoard(pos, EAST, 2));
+			SSE: return (isShiftOnBoard(pos, SOUTH, 2) && isShiftOnBoard(pos, EAST, 1));
+			SSW: return (isShiftOnBoard(pos, SOUTH, 2) && isShiftOnBoard(pos, WEST, 1));
+			SWW: return (isShiftOnBoard(pos, SOUTH, 1) && isShiftOnBoard(pos, WEST, 2));
+			NWW: return (isShiftOnBoard(pos, NORTH, 1) && isShiftOnBoard(pos, WEST, 2));
+			NNW: return (isShiftOnBoard(pos, NORTH, 2) && isShiftOnBoard(pos, WEST, 1));
+			default: return 1'bx;
+		endcase
 
-	// Map position to file
-	localparam BoardFile BOARD_FILE[0:63] = '{
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7
-	};
-
-	// Map position to positive-sloped diagonal
-	localparam logic[3:0] POSITIVE_DIAG[0:63] = '{
-		0,	1,	2,	3,	4,	5,	6,	7,
-		1,	2,	3,	4,	5,	6,	7,	8,
-		2,	3,	4,	5,	6,	7,	8,	9,
-		3,	4,	5,	6,	7,	8,	9,	10,
-		4,	5,	6,	7,	8,	9,	10,	11,
-		5,	6,	7,	8,	9,	10,	11,	12,
-		6,	7,	8,	9,	10,	11,	12,	13,
-		7,	8,	9,	10,	11,	12,	13,	14
-	};
-	
-	// Map position to negative-sloped diagonal
-	localparam logic[3:0] NEGATIVE_DIAG[0:63] = '{
-		7,	8,	9,	10,	11,	12,	13,	14,
-		6,	7,	8,	9,	10,	11,	12,	13,
-		5,	6,	7,	8,	9,	10,	11,	12,
-		4,	5,	6,	7,	8,	9,	10,	11,
-		3,	4,	5,	6,	7,	8,	9,	10,
-		2,	3,	4,	5,	6,	7,	8,	9,
-		1,	2,	3,	4,	5,	6,	7,	8,
-		0,	1,	2,	3,	4,	5,	6,	7
-	};
-
-	// Order in which the positions are displayed
-	localparam logic[5:0] SHOW_ORDER[0:63] = '{
-		56,	57,	58,	59,	60,	61,	62,	63,
-		48,	49,	50,	51,	52,	53,	54,	55,
-		40,	41,	42,	43,	44,	45,	46,	47,
-		32,	33,	34,	35,	36,	37,	38,	39,
-		24,	25,	26,	27,	28,	29,	30,	31,
-		16,	17,	18,	19,	20,	21,	22,	23,
-		8,	9,	10,	11,	12,	13,	14,	15,
-		0,	1,	2,	3,	4,	5,	6,	7
-	};
+	endfunction : isKnightShiftOnBoard
 
 
 	// Mirrors a position between the black and white sides of the board
@@ -319,6 +358,87 @@ package general_chess_defs;
 	typedef logic [THREAD_ID_BITS-1:0] ThreadID;
 
 
+	// -- A Structure with Complete Board Positional Information --
+	typedef struct packed {
+		Tile [63:0] tiles;
+		Color turn;
+		CastlePerms castle_perms;
+		logic has_ep;
+		BoardFile ep_file;
+		HalfMoveClk halfmove_clk;
+		
+	} FullBoard;
+
+		// // Define directions for modules that READ this board
+		// modport in  (
+		//     input tiles, turn, castle_perms, has_ep, ep_file, halfmove_clk
+		// );
+
+		// // Define directions for modules that WRITE this board
+		// modport out (
+		//     output tiles, turn, castle_perms, has_ep, ep_file, halfmove_clk
+		// );
+
+	// synopsys translate_off
+	function automatic string toFen(FullBoard b);
+		string str = "";
+		int empty_cnt = 0;
+
+		// Write Tiles
+		for (int row=0; row<8; row++) begin
+			for (int col=0; col<8; col++) begin
+				int sq = SHOW_ORDER[8*row + col];
+				if (b.tiles[sq].piece_type == NULL_PIECE) begin
+					empty_cnt += 1;
+				end else begin
+					if (empty_cnt > 0) begin
+						str = {str, $sformatf("%0d", empty_cnt)};
+						empty_cnt = 0;
+					end
+					str = {str, pieceToChar(b.tiles[sq])};
+				end
+			end
+
+			if (empty_cnt > 0) begin
+				str = {str, $sformatf("%0d", empty_cnt)};
+				empty_cnt = 0;
+			end
+
+			if (row < 7) str = {str, "/"};
+		end
+
+		// Write turn
+		if (b.turn == WHITE) str = {str, " w"};
+		else                 str = {str, " b"};
+
+		// Write Castle Perms
+		if (b.castle_perms == CastlePerms'(4'b0000)) begin
+			str = {str, " -"};
+		end else begin
+			str = {str, " "};
+			if (b.castle_perms.whiteKingside)  str = {str, "K"};
+			if (b.castle_perms.whiteQueenside) str = {str, "Q"};
+			if (b.castle_perms.blackKingside)  str = {str, "k"};
+			if (b.castle_perms.blackQueenside) str = {str, "q"};
+		end
+
+		// Write En Passant Info
+		if (b.has_ep) begin
+			if (b.turn == WHITE) str = {str, " ", byte'("a") + b.ep_file, "6"};
+			else                 str = {str, " ", byte'("a") + b.ep_file, "3"};
+		end else begin
+			str = {str, " -"};
+		end
+
+		// Write halfmove clock
+		str = {str, " ", $sformatf("%0d", b.halfmove_clk)};
+
+		return str;
+	endfunction
+	// synopsys translate_on
+
+
 endpackage : general_chess_defs
 
 `endif
+
