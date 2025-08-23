@@ -1,11 +1,8 @@
 
 // By Emet Behrendt
 
-// This file contains the engine_defs package which holds
-// definitions of various basic datatypes, constants, and functions.
-
-`ifndef ENGINE_INCLUDE_SV
-`define ENGINE_INCLUDE_SV
+// This file contains the general_chess_defs package which holds
+// definitions of various basic datatypes and constants.
 
 // A Package for general chess/engine definitions
 package general_chess_defs;
@@ -75,22 +72,6 @@ package general_chess_defs;
 	typedef logic [2:0] BoardRank;
 	typedef logic [2:0] BoardFile;
 
-	// Returns the rank from a given position
-	function BoardRank getRank(input Position pos);
-		return BoardRank'(pos[5:3]);
-	endfunction
-
-	// Returns the file from a given position
-	function BoardFile getFile(input Position pos);
-		return BoardFile'(pos[2:0]);
-	endfunction
-
-	// Returns the position from a given rank and file
-	function Position getPosition(input BoardRank rank, input BoardFile file);
-		return Position'({rank, file});
-	endfunction
-
-
 	// -- Data Type for a Move --
 	typedef struct packed {
 		Position start_pos;
@@ -100,10 +81,6 @@ package general_chess_defs;
 
 	// Define a "NULL" move
 	localparam Move NULL_MOVE = Move'({6'd0, 6'd0, 2'dx});
-	function logic isNullMove(Move m);
-		return (m.start_pos == 6'd0 && m.end_pos == 6'd0 ? 1'b1 : 1'b0);
-	endfunction
-
 
 	// Defines a board tile
 	typedef struct packed {
@@ -207,25 +184,6 @@ package general_chess_defs;
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 
 
-	function string pieceToChar(Tile t);
-		case (t)
-			WHITE_PAWN:   return "P";
-			WHITE_KNIGHT: return "N";
-			WHITE_BISHOP: return "B";
-			WHITE_ROOK:   return "R";
-			WHITE_QUEEN:  return "Q";
-			WHITE_KING:   return "K";
-			BLACK_PAWN:   return "p";
-			BLACK_KNIGHT: return "n";
-			BLACK_BISHOP: return "b";
-			BLACK_ROOK:   return "r";
-			BLACK_QUEEN:  return "q";
-			BLACK_KING:   return "k";
-			default: return "X";
-		endcase
-	endfunction
-
-
 	// -- Metric Tracking Definitions --
 	// Tracking Time
 	localparam TIME_BITS = 24;  // Ideally a multiple of 8
@@ -254,16 +212,6 @@ package general_chess_defs;
 	localparam Direction CARDINAL_DIR[4] = '{NORTH, SOUTH, EAST, WEST};
 	localparam Direction DIAG_DIR[4] = '{NORTH_EAST, SOUTH_EAST, SOUTH_WEST, NORTH_WEST};
 
-	// Function returns true if direction is cardinal
-	function logic isDirCardinal(Direction dir);
-		return (dir==NORTH || dir==SOUTH || dir==EAST || dir==WEST);
-	endfunction : isDirCardinal
-
-	// Function returns true if direction is diagonal
-	function logic isDirDiag(Direction dir);
-		return (dir==NORTH_EAST || dir==SOUTH_EAST || dir==NORTH_WEST || dir==SOUTH_WEST);
-	endfunction : isDirDiag
-
 	// Position shift of one tile given a direction
 	localparam logic[5:0] POS_SHIFT[8] = '{
 		6'd8, 6'd9, 6'd1, -6'd7,
@@ -282,71 +230,15 @@ package general_chess_defs;
 		'{6'd0,	6'd7,	6'd14,	6'd21,	6'd28,	6'd35,	6'd42,	6'd49}
 	};
 
-	// Shift a position in some direction for some distance
-	function Position shiftPos(Position pos, Direction dir, logic [2:0] distance);
-		return Position'(pos + DIST_SHIFT[dir][distance]);
-	endfunction : shiftPos
-
-	// Takes a position, direaction, and distance as input
-	// Outputs if shifting starting from pos in the given dir for the given distance
-	// will still be on the board
-	function bit isShiftOnBoard(Position pos, Direction dir, logic [2:0] distance);
-		automatic Position new_pos = shiftPos(pos, dir, distance);
-		automatic BoardRank old_rank = getRank(pos);
-		automatic BoardFile old_file = getFile(pos);
-		automatic BoardRank new_rank = getRank(new_pos);
-		automatic BoardFile new_file = getFile(new_pos);
-
-		if (distance == 0) return 1'b1;
-
-		case (dir)
-			NORTH, NORTH_EAST, NORTH_WEST: if (new_rank <= old_rank) return 1'b0;
-			SOUTH, SOUTH_EAST, SOUTH_WEST: if (new_rank >= old_rank) return 1'b0;
-		endcase
-
-		case (dir)
-			WEST, SOUTH_WEST, NORTH_WEST:  if (new_file >= old_file) return 1'b0;
-			EAST, SOUTH_EAST, NORTH_EAST:  if (new_file <= old_file) return 1'b0;
-		endcase
-
-		return 1'b1;
-	endfunction : isShiftOnBoard
-
 	// Defines board direction
 	typedef enum logic[2:0] {
 		NNE, NEE, SEE, SSE, SSW, SWW, NWW, NNW
 	} KnightDirection;
 
+	// Indicates how much a knight's position changes for a given knight direction
 	localparam logic[5:0] KNIGHT_SHIFT[8] = '{
 		6'd17, 6'd10, -6'd6, -6'd15, -6'd17, -6'd10, 6'd6, 6'd15
 	};
-
-	// Shift a position in some KNIGHT direction
-	function Position shiftKnightPos(Position pos, KnightDirection dir);
-		return Position'(pos + KNIGHT_SHIFT[dir]);
-	endfunction : shiftKnightPos
-
-	// Check if making a knight move for a given position+direction is possible
-	function bit isKnightShiftOnBoard(Position pos, KnightDirection dir);
-		case (dir)
-			NNE: return (isShiftOnBoard(pos, NORTH, 2) && isShiftOnBoard(pos, EAST, 1));
-			NEE: return (isShiftOnBoard(pos, NORTH, 1) && isShiftOnBoard(pos, EAST, 2));
-			SEE: return (isShiftOnBoard(pos, SOUTH, 1) && isShiftOnBoard(pos, EAST, 2));
-			SSE: return (isShiftOnBoard(pos, SOUTH, 2) && isShiftOnBoard(pos, EAST, 1));
-			SSW: return (isShiftOnBoard(pos, SOUTH, 2) && isShiftOnBoard(pos, WEST, 1));
-			SWW: return (isShiftOnBoard(pos, SOUTH, 1) && isShiftOnBoard(pos, WEST, 2));
-			NWW: return (isShiftOnBoard(pos, NORTH, 1) && isShiftOnBoard(pos, WEST, 2));
-			NNW: return (isShiftOnBoard(pos, NORTH, 2) && isShiftOnBoard(pos, WEST, 1));
-			default: return 1'bx;
-		endcase
-
-	endfunction : isKnightShiftOnBoard
-
-
-	// Mirrors a position between the black and white sides of the board
-	function Position mirrorPos(Position in);
-		return Position'({~getRank(in), getFile(in)});
-	endfunction
 
 
 	// -- Evaluation Related Definitions --
@@ -368,67 +260,4 @@ package general_chess_defs;
 		HalfMoveClk halfmove_clk;
 	} FullBoard;
 
-
-	// synopsys translate_off
-	function automatic string toFen(FullBoard b);
-		string str = "";
-		int empty_cnt = 0;
-
-		// Write Tiles
-		for (int row=0; row<8; row++) begin
-			for (int col=0; col<8; col++) begin
-				int sq = SHOW_ORDER[8*row + col];
-				if (b.tiles[sq].piece_type == NULL_PIECE) begin
-					empty_cnt += 1;
-				end else begin
-					if (empty_cnt > 0) begin
-						str = {str, $sformatf("%0d", empty_cnt)};
-						empty_cnt = 0;
-					end
-					str = {str, pieceToChar(b.tiles[sq])};
-				end
-			end
-
-			if (empty_cnt > 0) begin
-				str = {str, $sformatf("%0d", empty_cnt)};
-				empty_cnt = 0;
-			end
-
-			if (row < 7) str = {str, "/"};
-		end
-
-		// Write turn
-		if (b.turn == WHITE) str = {str, " w"};
-		else                 str = {str, " b"};
-
-		// Write Castle Perms
-		if (b.castle_perms == CastlePerms'(4'b0000)) begin
-			str = {str, " -"};
-		end else begin
-			str = {str, " "};
-			if (b.castle_perms.whiteKingside)  str = {str, "K"};
-			if (b.castle_perms.whiteQueenside) str = {str, "Q"};
-			if (b.castle_perms.blackKingside)  str = {str, "k"};
-			if (b.castle_perms.blackQueenside) str = {str, "q"};
-		end
-
-		// Write En Passant Info
-		if (b.has_ep) begin
-			if (b.turn == WHITE) str = {str, " ", byte'("a") + b.ep_file, "6"};
-			else                 str = {str, " ", byte'("a") + b.ep_file, "3"};
-		end else begin
-			str = {str, " -"};
-		end
-
-		// Write halfmove clock
-		str = {str, " ", $sformatf("%0d", b.halfmove_clk)};
-
-		return str;
-	endfunction
-	// synopsys translate_on
-
-
 endpackage : general_chess_defs
-
-`endif
-

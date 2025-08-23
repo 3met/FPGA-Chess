@@ -4,10 +4,13 @@
 // restart -f; run -all
 
 `timescale 1ns/1ps
+
+// Import definitions from the packages
+import general_chess_defs::*;
+import chess_helper_funcs::*;
+import board_controller_defs::*;
+
 module tb_board_controller;
-  // Import definitions from the packages
-  import general_chess_defs::*;
-  import board_controller_defs::*;
 
   // Testbench signals
   logic clk;
@@ -97,13 +100,13 @@ module tb_board_controller;
     @(posedge clk);
     board_op = BOARD_IDLE_OP;
 
-    // Wait for pipeline to propagate (7 pipeline stages)
-    repeat (7) @(posedge clk);
+    // Wait for pipeline to propagate
+    repeat (BOARD_CTRL_STAGE_CNT) @(posedge clk);
 
     // After PUSH, capture the updated board and PST eval
     board_after_push = board_out;
     pst_after_push   = pst_eval_out;
-    $display("Board after PUSH move:   %s", general_chess_defs::toFen(board_after_push));
+    $display("Board after PUSH move:   %s", toFen(board_after_push));
     $display("PST eval after PUSH move: %0d", pst_after_push);
 
     // --- Test 2: REVERSE Move --- //
@@ -116,12 +119,12 @@ module tb_board_controller;
     board_op = BOARD_IDLE_OP;
 
     // Wait for pipeline to propagate the reverse
-    repeat (7) @(posedge clk);
+    repeat (BOARD_CTRL_STAGE_CNT) @(posedge clk);
 
     // After REVERSE, capture the board and PST eval
     board_after_reverse = board_out;
     pst_after_reverse   = pst_eval_out;
-    $display("Board after REVERSE move:   %s", general_chess_defs::toFen(board_after_reverse));
+    $display("Board after REVERSE move:   %s", toFen(board_after_reverse));
     $display("PST eval after REVERSE move: %0d", pst_after_reverse);
 
     // Check that the board and PST match the initial state

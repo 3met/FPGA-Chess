@@ -1,7 +1,11 @@
 
+// By Emet Behrendt
+
 package board_controller_defs;
 
 	import general_chess_defs::*;
+
+    localparam BOARD_CTRL_STAGE_CNT = 7;
 
     // Enum for all board controller operations
     typedef enum {

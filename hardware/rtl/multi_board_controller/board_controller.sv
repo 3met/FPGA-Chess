@@ -1,5 +1,8 @@
 
+// By Emet Behrendt
+
 import general_chess_defs::*;
+import chess_helper_funcs::*;
 import board_controller_defs::*;
 
 module board_controller (
