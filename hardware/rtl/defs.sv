@@ -207,7 +207,7 @@ package general_chess_defs;
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 
 
-	function pieceToChar(Tile t);
+	function string pieceToChar(Tile t);
 		case (t)
 			WHITE_PAWN:   return "P";
 			WHITE_KNIGHT: return "N";
@@ -366,18 +366,8 @@ package general_chess_defs;
 		logic has_ep;
 		BoardFile ep_file;
 		HalfMoveClk halfmove_clk;
-		
 	} FullBoard;
 
-		// // Define directions for modules that READ this board
-		// modport in  (
-		//     input tiles, turn, castle_perms, has_ep, ep_file, halfmove_clk
-		// );
-
-		// // Define directions for modules that WRITE this board
-		// modport out (
-		//     output tiles, turn, castle_perms, has_ep, ep_file, halfmove_clk
-		// );
 
 	// synopsys translate_off
 	function automatic string toFen(FullBoard b);

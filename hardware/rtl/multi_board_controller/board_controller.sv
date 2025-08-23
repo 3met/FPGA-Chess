@@ -94,21 +94,26 @@ module board_controller (
     );
     
 
+    // Assign Outputs
+    assign board_out = ctx_pipe[6].board;
+    assign board_hash_out = ctx_pipe[6].board_hash;
+    assign pst_eval_out = ctx_pipe[6].pst_eval;
+
     // Move data down the pipeline
     always_ff @(posedge clk) begin
-        ctx_pipe <= next_ctx_pipe;
+        ctx_pipe = next_ctx_pipe;
     end
 
 
     // Pipeline Stage 0 (Register Initial Inputs)
     always_comb begin
-        next_ctx_pipe[0].board_op   <= board_op;
-        next_ctx_pipe[0].board      <= board_in;
-        next_ctx_pipe[0].board_hash <= board_hash_in;
-        next_ctx_pipe[0].pst_eval   <= pst_eval_in;
-        next_ctx_pipe[0].move       <= move_in;
-        next_ctx_pipe[0].set_data   <= set_data;
-        next_ctx_pipe[0].thread_id  <= thread_id;
+        next_ctx_pipe[0].board_op   = board_op;
+        next_ctx_pipe[0].board      = board_in;
+        next_ctx_pipe[0].board_hash = board_hash_in;
+        next_ctx_pipe[0].pst_eval   = pst_eval_in;
+        next_ctx_pipe[0].move       = move_in;
+        next_ctx_pipe[0].set_data   = set_data;
+        next_ctx_pipe[0].thread_id  = thread_id;
 
         move_record_rd_addr = {thread_id, search_depth};
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
@@ -117,8 +122,8 @@ module board_controller (
 
     // Pipeline Stage 1-2 (Idle)
     always_comb begin
-        next_ctx_pipe[1] <= ctx_pipe[0];
-        next_ctx_pipe[2] <= ctx_pipe[1];
+        next_ctx_pipe[1] = ctx_pipe[0];
+        next_ctx_pipe[2] = ctx_pipe[1];
     end
 
 
@@ -136,6 +141,11 @@ module board_controller (
         pst_killed_rd_en = 1'b0;
         pst_castle_rook_rd_en = 1'b0;
 
+        // Default to not caring is these values are set
+        out.is_ep = 1'bx;
+        out.is_castle = 1'bx;
+        out.is_pawn_move = 1'bx;
+
         // Update Main Tiles an
         case (in.board_op)
             // Forward Moves
@@ -144,8 +154,8 @@ module board_controller (
                 automatic Position end_pos = in.move.end_pos;
 
                 automatic logic is_promo = (in.board.tiles[start_pos].piece_type == PAWN && (getFile(end_pos) == BoardFile'('d0) || getFile(end_pos) == BoardFile'('d7)));
-                automatic logic is_castle = (in.board.tiles[start_pos].piece_type == KING && getFile(start_pos) == BoardFile'('d4) && (getFile(end_pos) == BoardFile'('d2) || end_pos == getFile(end_pos) == BoardFile'('d6)));
-                automatic logic is_ep = (in.board.tiles[start_pos].piece_type == PAWN && in.board.has_ep && in.board.ep_file == getFile(end_pos) && ((in.board.turn == WHITE && getRank(end_pos) == BoardFile'('d5)) || (in.board.turn == BLACK && getRank(end_pos) == BoardFile'('d2))));
+                automatic logic is_castle = (in.board.tiles[start_pos].piece_type == KING && getFile(start_pos) == BoardFile'('d4) && (getFile(end_pos) == BoardFile'('d2) || getFile(end_pos) == BoardFile'('d6)));
+                automatic logic is_ep = (in.board.tiles[start_pos].piece_type == PAWN && in.board.has_ep && in.board.ep_file == getFile(end_pos) && ((in.board.turn == WHITE && getRank(end_pos) == BoardRank'('d5)) || (in.board.turn == BLACK && getRank(end_pos) == BoardRank'('d2))));
 
                 // Set starting tile to be empty
                 out.board.tiles[start_pos] = EMPTY_TILE;
@@ -218,24 +228,20 @@ module board_controller (
                 end
 
                 // If making a reversable move, store data about current move
-                // Only need to write a full record if the move is meant to be reversable
-                if (in.board_op == BOARD_PUSH_MOVE_OP) begin
-                    out.move_record.start_pos = start_pos;
-                    out.move_record.end_pos = end_pos;
-                    out.move_record.killed_piece = in.board.tiles[end_pos].piece_type; // Correct for En Passant kills as NULL PIECE
-                    out.move_record.castle_perms = in.board.castle_perms;
-                    out.move_record.move_flag = (is_promo ? PROMO_MOVE : is_castle ? CASTLE_MOVE : is_ep ? EP_MOVE : NORM_MOVE);
-                    out.move_record.has_ep = in.board.has_ep;
-                    out.move_record.ep_file = in.board.ep_file;
-                    out.move_record.halfmove_clk = in.board.halfmove_clk;
-                end else begin
-                    out.move_record = MoveRecord'('dx);
-                    out.move_record.killed_piece = in.board.tiles[end_pos].piece_type; // Only store piece killed for later PST/Zobrist stages
-                end
+                // Stored record only written back if the move is meant to be reversable
+                out.move_record.start_pos = start_pos;
+                out.move_record.end_pos = end_pos;
+                out.move_record.killed_piece = in.board.tiles[end_pos].piece_type; // Correct for En Passant kills as NULL PIECE
+                out.move_record.castle_perms = in.board.castle_perms;
+                out.move_record.move_flag = (is_promo ? PROMO_MOVE : is_castle ? CASTLE_MOVE : is_ep ? EP_MOVE : NORM_MOVE);
+                out.move_record.has_ep = in.board.has_ep;
+                out.move_record.ep_file = in.board.ep_file;
+                out.move_record.halfmove_clk = in.board.halfmove_clk;
 
                 // Flag special moves for later stages
                 out.is_castle = is_castle;
                 out.is_ep = is_ep;
+                out.is_pawn_move = (in.board.tiles[start_pos].piece_type == PAWN);
             end
 
             // Reverse Move
@@ -328,6 +334,9 @@ module board_controller (
                 out.move_record = MoveRecord'('dx);
             end
         endcase
+
+        // Write all changes down pipeline
+        next_ctx_pipe[3] = out;
     end
 
 
@@ -370,9 +379,9 @@ module board_controller (
             BOARD_REVERSE_MOVE_OP: begin
                 if (in.is_ep) begin
                     if (in.board.turn == BLACK) begin
-                        out.board.tiles[{BoardRank'(4), getFile(in.move_record.end_pos)}] = PAWN;
+                        out.board.tiles[{BoardRank'(4), getFile(in.move_record.end_pos)}] = BLACK_PAWN;
                     end else begin
-                        out.board.tiles[{BoardRank'(3), getFile(in.move_record.end_pos)}] = PAWN;
+                        out.board.tiles[{BoardRank'(3), getFile(in.move_record.end_pos)}] = WHITE_PAWN;
                     end
                 end
 
@@ -400,6 +409,9 @@ module board_controller (
         move_record_in = in.move_record;
         move_record_wr_en = (in.board_op == BOARD_PUSH_MOVE_OP);
         move_record_wr_addr = {thread_id, search_depth};
+        
+        // Write all changes down pipeline
+        next_ctx_pipe[4] = out;
     end
 
 
@@ -441,6 +453,9 @@ module board_controller (
             // is_castle should never be asserted for other operations
             default: if (in.is_castle) out.board.tiles = 'dx;
         endcase
+
+        // Write all changes down pipeline
+        next_ctx_pipe[5] = out;
     end
 
 
@@ -453,12 +468,32 @@ module board_controller (
         out = in;
 
         case (in.board_op)
-            // Compute the updated PST score
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
+                automatic Position start_pos = in.move_record.start_pos;
+                automatic Position end_pos = in.move_record.end_pos;
+
+                // Compute the updated PST score
                 out.pst_eval -= pst_start_out;
                 out.pst_eval += pst_end_out;
                 if (in.is_ep || in.move_record.killed_piece != NULL_PIECE) out.pst_eval -= pst_killed_out;
                 if (in.is_castle) out.pst_eval += pst_castle_out;
+
+                // Update board state
+                out.board.turn = Color'(~in.board.turn);
+
+                if (start_pos == 'd4  || start_pos == 'd7  || end_pos == 'd7 ) out.board.castle_perms.whiteKingside  = 1'b0;
+                if (start_pos == 'd4  || start_pos == 'd0  || end_pos == 'd0 ) out.board.castle_perms.whiteQueenside = 1'b0;
+                if (start_pos == 'd60 || start_pos == 'd63 || end_pos == 'd63) out.board.castle_perms.blackKingside  = 1'b0;
+                if (start_pos == 'd60 || start_pos == 'd56 || end_pos == 'd56) out.board.castle_perms.blackQueenside = 1'b0;
+
+                out.board.has_ep = in.is_ep;
+                out.board.ep_file = getFile(end_pos);
+
+                if (in.is_ep || in.move_record.killed_piece != NULL_PIECE || in.is_pawn_move) begin
+                    out.board.halfmove_clk = HalfMoveClk'('d0);
+                end else begin
+                    out.board.halfmove_clk = in.board.halfmove_clk + HalfMoveClk'('d1);
+                end
             end
 
             BOARD_REVERSE_MOVE_OP: begin
@@ -466,6 +501,13 @@ module board_controller (
                 out.pst_eval -= pst_end_out;
                 if (in.is_ep || in.move_record.killed_piece != NULL_PIECE) out.pst_eval += pst_killed_out;
                 if (in.is_castle) out.pst_eval -= pst_castle_out;
+
+                // Update board state
+                out.board.turn = Color'(~in.board.turn);
+                out.board.castle_perms = in.move_record.castle_perms;
+                out.board.has_ep = in.move_record.has_ep;
+                out.board.ep_file = in.move_record.ep_file;
+                out.board.halfmove_clk = in.move_record.halfmove_clk;
             end
 
             BOARD_SET_TILE_OP: begin
@@ -491,6 +533,9 @@ module board_controller (
                 out.pst_eval = EvalScore'('dx);
             end
         endcase
+
+        // Write all changes down pipeline
+        next_ctx_pipe[6] = out;
     end
 
 

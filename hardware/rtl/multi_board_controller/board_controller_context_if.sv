@@ -50,6 +50,7 @@ package board_controller_defs;
         MoveRecord move_record;
         logic is_castle;
         logic is_ep;
+        logic is_pawn_move; // Used for halfmove clock
     } BoardControllerCtx;
 
 endpackage
