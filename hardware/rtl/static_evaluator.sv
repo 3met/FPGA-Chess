@@ -183,10 +183,6 @@ module static_evaluator (
 							eval_pipeline_change[layer] += (occupant.piece_color==WHITE ? curr_dist_result[DIAG_DIR[dir]] : -curr_dist_result[DIAG_DIR[dir]]);
 						end
 					end
-
-					// Material Bonus
-					// TODO: seperate evaluation would be much better
-					eval_pipeline_change[layer] += (occupant.piece_color==WHITE ? PIECE_VALS_64[occupant.piece_type] : -PIECE_VALS_64[occupant.piece_type]);
 				end
 			end
 		end

@@ -14,7 +14,6 @@ package general_chess_defs;
 
 	localparam Color UNKNOWN_COLOR = Color'(1'bx);
 
-
 	// -- Data Type for Piece Types --
 	typedef enum logic[2:0] {
 		NULL_PIECE,
@@ -28,19 +27,6 @@ package general_chess_defs;
 	} PieceType;
 
 	localparam PieceType UNKNOWN_PIECE = PieceType'(3'dx);
-
-	// Value of each type of piece in units of pawns
-	// Indexed by PieceType
-	localparam logic[3:0] PIECE_VALS_1[8] = '{
-		4'd0, 4'd1, 4'd3, 4'd3, 4'd5, 4'd9, 4'd12, 4'dx
-	};
-
-	// Value of each type of piece in units of 64th of a pawn
-	// Indexed by PieceType
-	// https://web.archive.org/web/20160314214435/http://www.danheisman.com/Articles/evaluation_of_material_imbalance.htm
-	localparam logic[9:0] PIECE_VALS_64[8] = '{
-		10'd0, 10'd64, 10'd208, 10'd208, 10'd320, 10'd576, 10'd1000, 10'dx
-	};
 
 
 	// -- Data Type for Pawn Promotion Types --
@@ -182,6 +168,19 @@ package general_chess_defs;
 	localparam EvalScore MIN_EVAL_SCORE = -MAX_EVAL_SCORE;
 	localparam EvalScore DRAW_EVAL_SCORE = EvalScore'(0);
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
+
+	// Value of each type of piece in units of pawns
+	// Indexed by PieceType
+	localparam logic[3:0] PIECE_VALS_1[8] = '{
+		4'd0, 4'd1, 4'd3, 4'd3, 4'd5, 4'd9, 4'd12, 4'dx
+	};
+
+	// Value of each type of piece in units of 64th of a pawn
+	// Indexed by PieceType
+	// https://web.archive.org/web/20160314214435/http://www.danheisman.com/Articles/evaluation_of_material_imbalance.htm
+	localparam EvalScore PIECE_VALS_128[8] = '{
+		'd0, 'd128, 'd416, 'd416, 'd640, 'd1152, 'd2000, 'dx
+	};
 
 
 	// -- Metric Tracking Definitions --

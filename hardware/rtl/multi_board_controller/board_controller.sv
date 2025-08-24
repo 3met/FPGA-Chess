@@ -65,17 +65,17 @@ module board_controller (
     };
 
     // --- Piece-Square Table ROM ---
-    logic [$clog2(6*64)-1:0] pst_start_addr, pst_end_addr, pst_killed_addr, pst_castle_rook_addr;
+    logic [3+6-1:0] pst_start_addr, pst_end_addr, pst_killed_addr, pst_castle_rook_addr;
     logic pst_start_rd_en, pst_end_rd_en, pst_killed_rd_en, pst_castle_rook_rd_en;
     EvalScore pst_start_out, pst_end_out, pst_killed_out, pst_castle_out;
 
     dual_port_rom #(
         .NUM_WORDS(6 * 64),
         .WORD_SIZE($bits(EvalScore)),
-        .MEM_INIT_FILE("../../data/pst_values/pst_values.mif")
+        .MEM_INIT_FILE("./hardware/data/pst_values/pst_values.mif")
     ) pst_rom_0 (
-        .address_a(pst_start_addr),
-        .address_b(pst_end_addr),
+        .address_a({pst_start_addr[8:6]-3'd1, pst_start_addr[5:0]}),
+        .address_b({pst_end_addr[8:6]-3'd1, pst_end_addr[5:0]}),
         .clock(clk),
         .rden_a(pst_start_rd_en),
         .rden_b(pst_end_rd_en),
@@ -85,10 +85,10 @@ module board_controller (
     dual_port_rom #(
         .NUM_WORDS(6 * 64),
         .WORD_SIZE($bits(EvalScore)),
-        .MEM_INIT_FILE("../../data/pst_values/pst_values.mif")
+        .MEM_INIT_FILE("./hardware/data/pst_values/pst_values.mif")
     ) pst_rom_1 (
-        .address_a(pst_killed_addr),
-        .address_b(pst_castle_rook_addr),
+        .address_a({pst_killed_addr[8:6]-3'd1, pst_killed_addr[5:0]}),
+        .address_b({pst_castle_rook_addr[8:6]-3'd1, pst_castle_rook_addr[5:0]}),
         .clock(clk),
         .rden_a(pst_killed_rd_en),
         .rden_b(pst_castle_rook_rd_en),
@@ -123,9 +123,38 @@ module board_controller (
     end
 
 
-    // Pipeline Stage 1-2 (Idle)
+    // Pipeline Stage 1 (Invert the PST score when the color to play is changing)
     always_comb begin
-        next_ctx_pipe[1] = ctx_pipe[0];
+        automatic BoardControllerCtx in = ctx_pipe[0];
+        automatic BoardControllerCtx out = next_ctx_pipe[1];
+
+        // By default nothing changes
+        out = in;
+
+        case (ctx_pipe[0].board_op)
+            BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP, BOARD_REVERSE_MOVE_OP: begin
+                out.pst_eval = -(in.pst_eval);
+            end
+
+            // Only invert PST if color turn actually changes
+            BOARD_SET_TURN_OP: begin
+                if (in.board.turn != in.set_data[0]) begin
+                    out.pst_eval = -(in.pst_eval);
+                end
+            end
+
+            // Don't care about idle operation
+            BOARD_IDLE_OP: begin
+                out = BoardControllerCtx'('dx);
+                out.board_op = in.board_op;
+            end
+        endcase
+
+        next_ctx_pipe[1] = out;
+    end
+
+    // Pipeline Stage 2 (Idle)
+    always_comb begin
         next_ctx_pipe[2] = ctx_pipe[1];
     end
 
@@ -149,23 +178,24 @@ module board_controller (
         out.is_castle = 1'bx;
         out.is_pawn_move = 1'bx;
 
-        // Update Main Tiles an
         case (in.board_op)
             // Forward Moves
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic Position start_pos = in.move.start_pos;
                 automatic Position end_pos = in.move.end_pos;
+                automatic Tile start_tile = in.board.tiles[start_pos];
+                automatic Tile end_tile = in.board.tiles[end_pos];
 
-                automatic logic is_promo = (in.board.tiles[start_pos].piece_type == PAWN && (getFile(end_pos) == BoardFile'('d0) || getFile(end_pos) == BoardFile'('d7)));
-                automatic logic is_castle = (in.board.tiles[start_pos].piece_type == KING && getFile(start_pos) == BoardFile'('d4) && (getFile(end_pos) == BoardFile'('d2) || getFile(end_pos) == BoardFile'('d6)));
-                automatic logic is_ep = (in.board.tiles[start_pos].piece_type == PAWN && in.board.has_ep && in.board.ep_file == getFile(end_pos) && ((in.board.turn == WHITE && getRank(end_pos) == BoardRank'('d5)) || (in.board.turn == BLACK && getRank(end_pos) == BoardRank'('d2))));
+                automatic logic is_promo = (start_tile.piece_type == PAWN && (getFile(end_pos) == BoardFile'('d0) || getFile(end_pos) == BoardFile'('d7)));
+                automatic logic is_castle = (start_tile.piece_type == KING && getFile(start_pos) == BoardFile'('d4) && (getFile(end_pos) == BoardFile'('d2) || getFile(end_pos) == BoardFile'('d6)));
+                automatic logic is_ep = (start_tile.piece_type == PAWN && in.board.has_ep && in.board.ep_file == getFile(end_pos) && ((in.board.turn == WHITE && getRank(end_pos) == BoardRank'('d5)) || (in.board.turn == BLACK && getRank(end_pos) == BoardRank'('d2))));
 
                 // Set starting tile to be empty
                 out.board.tiles[start_pos] = EMPTY_TILE;
 
                 // Check for promotions and promote to new piece
                 if (is_promo) begin
-                    out.board.tiles[end_pos].piece_color = in.board.tiles[start_pos].piece_color; // Copy Piece Color
+                    out.board.tiles[end_pos].piece_color = start_tile.piece_color; // Copy Piece Color
 
                     case (in.move.promo_piece)
                         PROMO_QUEEN:  out.board.tiles[end_pos].piece_type = QUEEN;
@@ -175,14 +205,14 @@ module board_controller (
                     endcase
                 // Else no promotion, move piece as normal
                 end else begin
-                    out.board.tiles[end_pos] = in.board.tiles[start_pos];
+                    out.board.tiles[end_pos] = start_tile;
                 end
 
-                // -- Fetch PST values --
+                // --- Fetch PST values ---
                 // Positions mirrored when moving black pieces
 
                 // Starting tile is always cleared
-                pst_start_addr = {in.board.tiles[start_pos].piece_type, (in.board.turn == BLACK ? mirrorPos(start_pos) : start_pos)};
+                pst_start_addr = {start_tile.piece_type, (in.board.turn == BLACK ? mirrorPos(start_pos) : start_pos)};
                 pst_start_rd_en = 1'b1;
 
                 // Ending tile matches starting tile expect in case of en passant
@@ -194,7 +224,7 @@ module board_controller (
                         PROMO_BISHOP: pst_end_addr = {BISHOP, (in.board.turn == BLACK ? mirrorPos(end_pos) : end_pos)};
                     endcase
                 end else begin
-                    pst_end_addr = {in.board.tiles[start_pos].piece_type, (in.board.turn == BLACK ? mirrorPos(end_pos) : end_pos)};
+                    pst_end_addr = {start_tile.piece_type, (in.board.turn == BLACK ? mirrorPos(end_pos) : end_pos)};
                 end
                 pst_end_rd_en = 1'b1;
 
@@ -212,8 +242,8 @@ module board_controller (
                     endcase
                     pst_killed_rd_en = 1'b1;
                 end else begin
-                    pst_killed_addr = {in.board.tiles[end_pos].piece_type, (in.board.turn == BLACK ? end_pos : mirrorPos(end_pos))};
-                    pst_killed_rd_en = (in.board.tiles[end_pos].piece_type != NULL_PIECE);
+                    pst_killed_addr = {end_tile.piece_type, (in.board.turn == BLACK ? end_pos : mirrorPos(end_pos))};
+                    pst_killed_rd_en = (end_tile.piece_type != NULL_PIECE);
                 end
 
                 // Place rook in new position in case of castle
@@ -230,11 +260,12 @@ module board_controller (
                     pst_castle_rook_addr = 'dx;
                 end
 
+                // --- Update Move Record ---
                 // If making a reversable move, store data about current move
                 // Stored record only written back if the move is meant to be reversable
                 out.move_record.start_pos = start_pos;
                 out.move_record.end_pos = end_pos;
-                out.move_record.killed_piece = in.board.tiles[end_pos].piece_type; // Correct for En Passant kills as NULL PIECE
+                out.move_record.killed_piece = end_tile.piece_type; // Correct for En Passant kills as NULL PIECE
                 out.move_record.castle_perms = in.board.castle_perms;
                 out.move_record.move_flag = (is_promo ? PROMO_MOVE : is_castle ? CASTLE_MOVE : is_ep ? EP_MOVE : NORM_MOVE);
                 out.move_record.has_ep = in.board.has_ep;
@@ -244,13 +275,14 @@ module board_controller (
                 // Flag special moves for later stages
                 out.is_castle = is_castle;
                 out.is_ep = is_ep;
-                out.is_pawn_move = (in.board.tiles[start_pos].piece_type == PAWN);
+                out.is_pawn_move = (start_tile.piece_type == PAWN);
             end
 
             // Reverse Move
             BOARD_REVERSE_MOVE_OP: begin
                 automatic Position start_pos = move_record_out.start_pos;
                 automatic Position end_pos = move_record_out.end_pos;
+                automatic Tile end_tile = in.board.tiles[end_pos];
                 automatic Color turn = in.board.turn;
                 automatic logic is_promo  = (move_record_out.move_flag == PROMO_MOVE);
                 automatic logic is_ep     = (move_record_out.move_flag == EP_MOVE);
@@ -260,7 +292,7 @@ module board_controller (
                 if (is_promo) begin
                     out.board.tiles[start_pos] = Tile'({~turn, PAWN});
                 end else begin
-                    out.board.tiles[start_pos] = Tile'({~turn, in.board.tiles[end_pos].piece_type});
+                    out.board.tiles[start_pos] = Tile'({~turn, end_tile.piece_type});
                 end
 
                 out.board.tiles[end_pos] = Tile'({turn, move_record_out.killed_piece}); // Will write NULL_PIECE for EP kill and killed pawn will be added later
@@ -273,12 +305,12 @@ module board_controller (
                 if (is_promo) begin
                     pst_start_addr = {PAWN, (in.board.turn == WHITE ? mirrorPos(start_pos) : start_pos)};
                 end else begin
-                    pst_start_addr = {in.board.tiles[end_pos].piece_type, (in.board.turn == WHITE ? mirrorPos(start_pos) : start_pos)};
+                    pst_start_addr = {end_tile.piece_type, (in.board.turn == WHITE ? mirrorPos(start_pos) : start_pos)};
                 end
                 pst_start_rd_en = 1'b1;
 
                 // Remove moving piece from ending tile
-                pst_end_addr = {in.board.tiles[end_pos].piece_type, (in.board.turn == WHITE ? mirrorPos(end_pos) : end_pos)};
+                pst_end_addr = {end_tile.piece_type, (in.board.turn == WHITE ? mirrorPos(end_pos) : end_pos)};
                 pst_end_rd_en = 1'b1;
 
                 // Add previously killed piece or in the case of a castle the rook on the starting position
@@ -326,15 +358,22 @@ module board_controller (
                 out.board.tiles[end_pos] = new_tile;
 
                 // Place piece on the board
-                pst_end_addr = {new_tile.piece_type, (in.board.turn == BLACK ? mirrorPos(end_pos) : end_pos)};
-                pst_end_rd_en = 1'b1;
+                pst_end_addr = {new_tile.piece_type, (new_tile.piece_color == BLACK ? mirrorPos(end_pos) : end_pos)};
+                pst_end_rd_en = (new_tile.piece_type != NULL_PIECE);
 
                 // Remove piece killed by placement
-                pst_killed_addr = {in.board.tiles[end_pos].piece_type, (in.board.turn == BLACK ? end_pos : mirrorPos(end_pos))};
+                pst_killed_addr = {in.board.tiles[end_pos].piece_type, (in.board.tiles[end_pos].piece_color == BLACK ? mirrorPos(end_pos) : end_pos)};
                 pst_killed_rd_en = (in.board.tiles[end_pos].piece_type != NULL_PIECE);
 
-                // Set only 
+                // Set only killed piece in move record
                 out.move_record = MoveRecord'('dx);
+                out.move_record.killed_piece = in.board.tiles[end_pos].piece_type; // Correct for En Passant kills as NULL PIECE
+            end
+
+            // Don't care about idle operation
+            BOARD_IDLE_OP: begin
+                out = BoardControllerCtx'('dx);
+                out.board_op = in.board_op;
             end
         endcase
 
@@ -404,8 +443,11 @@ module board_controller (
                 end
             end
 
-            // is_ep and is_castle should never be asserted for other operations
-            default: if (in.is_ep || in.is_castle) out.board.tiles = 'dx;
+            // Don't care about idle operation
+            BOARD_IDLE_OP: begin
+                out = BoardControllerCtx'('dx);
+                out.board_op = in.board_op;
+            end
         endcase
 
         // Write move record
@@ -418,7 +460,7 @@ module board_controller (
     end
 
 
-    // Pipeline Stage 5 (Update placing extra rook in castle operations)
+    // Pipeline Stage 5 (Update placing extra rook in castle operations and update)
     always_comb begin
         automatic BoardControllerCtx in = ctx_pipe[4];
         automatic BoardControllerCtx out = next_ctx_pipe[5];
@@ -438,6 +480,14 @@ module board_controller (
                         default: out.board.tiles = 'dx;
                     endcase
                 end
+
+                // --- Add killed piece to PST score ---
+                if (in.is_ep) begin
+                    out.pst_eval = in.pst_eval + PIECE_VALS_128[PAWN];
+                end else begin
+                    out.pst_eval = in.pst_eval + PIECE_VALS_128[in.move_record.killed_piece];
+                    if (in.move_record.killed_piece == KING) out.pst_eval = EvalScore'('dx); // Killed piece should never be a king
+                end
             end
 
             // Remove extra castle placed on the board
@@ -451,10 +501,28 @@ module board_controller (
                         default: out.board.tiles = 'dx;
                     endcase
                 end
+
+                // --- Subtract revived piece from killed piece to PST score ---
+                if (in.is_ep) begin
+                    out.pst_eval = in.pst_eval - PIECE_VALS_128[PAWN];
+                end else begin
+                    out.pst_eval = in.pst_eval - PIECE_VALS_128[in.move_record.killed_piece];
+                    if (in.move_record.killed_piece == KING) out.pst_eval = EvalScore'('dx); // Killed piece should never be a king
+                end
             end
 
-            // is_castle should never be asserted for other operations
-            default: if (in.is_castle) out.board.tiles = 'dx;
+            //
+            BOARD_SET_TILE_OP: begin
+                // --- Add new piece and remove killed piece ---
+                out.pst_eval = in.pst_eval - PIECE_VALS_128[in.move_record.killed_piece];
+                if (in.move_record.killed_piece == KING) out.pst_eval = EvalScore'('dx); // Killed piece should never be a king
+            end
+
+            // Don't care about idle operation
+            BOARD_IDLE_OP: begin
+                out = BoardControllerCtx'('dx);
+                out.board_op = in.board_op;
+            end
         endcase
 
         // Write all changes down pipeline
@@ -478,8 +546,12 @@ module board_controller (
                 // Compute the updated PST score
                 out.pst_eval -= pst_start_out;
                 out.pst_eval += pst_end_out;
-                if (in.is_ep || in.move_record.killed_piece != NULL_PIECE) out.pst_eval -= pst_killed_out;
-                if (in.is_castle) out.pst_eval += pst_castle_out;
+                if (in.is_ep || in.move_record.killed_piece != NULL_PIECE) out.pst_eval += pst_killed_out;
+                if (in.is_castle) begin
+                    out.pst_eval -= pst_killed_out; // Remove rook "killed" during castle
+                    out.pst_eval += pst_castle_out; // Add rook to new position
+                end
+                if ((in.is_ep || in.move_record.killed_piece != NULL_PIECE) && in.is_castle) out.pst_eval = EvalScore'('dx); // Kill and castle cannot happen at the same tiem
 
                 // Update board state
                 out.board.turn = Color'(~in.board.turn);
@@ -500,10 +572,15 @@ module board_controller (
             end
 
             BOARD_REVERSE_MOVE_OP: begin
+                // Compute the updated PST score
                 out.pst_eval += pst_start_out;
                 out.pst_eval -= pst_end_out;
-                if (in.is_ep || in.move_record.killed_piece != NULL_PIECE) out.pst_eval += pst_killed_out;
-                if (in.is_castle) out.pst_eval -= pst_castle_out;
+                if (in.is_ep || in.move_record.killed_piece != NULL_PIECE) out.pst_eval -= pst_killed_out;
+                if (in.is_castle) begin
+                    out.pst_eval += pst_killed_out; // Add rook that was "killed" during castle
+                    out.pst_eval -= pst_castle_out; // Remove rook added during forward move
+                end
+                if ((in.is_ep || in.move_record.killed_piece != NULL_PIECE) && in.is_castle) out.pst_eval = EvalScore'('dx); // Kill and castle cannot happen at the same tiem
 
                 // Update board state
                 out.board.turn = Color'(~in.board.turn);
@@ -514,7 +591,11 @@ module board_controller (
             end
 
             BOARD_SET_TILE_OP: begin
-                out.pst_eval += pst_end_out;
+                automatic Tile new_tile = Tile'(in.set_data);
+                if (new_tile.piece_type != NULL_PIECE) begin
+                    if (new_tile.piece_color == in.board.turn) out.pst_eval += pst_end_out;
+                    else                                       out.pst_eval -= pst_end_out;
+                end
                 if (in.move_record.killed_piece != NULL_PIECE) out.pst_eval -= pst_killed_out;
             end
 
@@ -531,9 +612,10 @@ module board_controller (
                 out.board.ep_file = BoardFile'(in.set_data[3:1]);
             end
 
-            // Don't care about the output in the idle case
+            // Don't care about idle operation
             BOARD_IDLE_OP: begin
-                out.pst_eval = EvalScore'('dx);
+                out = BoardControllerCtx'('dx);
+                out.board_op = in.board_op;
             end
         endcase
 
