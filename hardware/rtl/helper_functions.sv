@@ -157,8 +157,17 @@ package chess_helper_funcs;
 
 		// Write En Passant Info
 		if (b.has_ep) begin
-			if (b.turn == WHITE) str = {str, " ", byte'("a") + b.ep_file, "6"};
-			else                 str = {str, " ", byte'("a") + b.ep_file, "3"};
+            automatic Position ep_pos = Position'({b.turn == WHITE ? 3'd5 : 3'd2, b.ep_file});
+
+            // Check if EP is actually possible before printing location 
+            if (   (b.turn == WHITE && ((b.tiles[ep_pos-7] == WHITE_PAWN && getFile(ep_pos) < 'd7) || (b.tiles[ep_pos-9] == WHITE_PAWN && getFile(ep_pos) > 'd0)))
+                || (b.turn == BLACK && ((b.tiles[ep_pos+9] == BLACK_PAWN && getFile(ep_pos) < 'd7) || (b.tiles[ep_pos+7] == BLACK_PAWN && getFile(ep_pos) > 'd0)))) begin
+
+                if (b.turn == WHITE) str = {str, " ", byte'("a") + b.ep_file, "6"};
+                else                 str = {str, " ", byte'("a") + b.ep_file, "3"};
+            end else begin
+                str = {str, " -"};
+            end
 		end else begin
 			str = {str, " -"};
 		end

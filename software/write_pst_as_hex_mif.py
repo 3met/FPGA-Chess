@@ -6,7 +6,7 @@
 import json
 from pathlib import Path
 
-PST_WORD_BITS = 12
+PST_WORD_BITS = 16 # ENSURE THIS IS CORRECT!!!!
 
 PST_JSON_PATH = Path(__file__).parent.parent / "hardware" / "data" / "pst_values" / "pst_values.json"
 PST_HEX_PATH  = Path(__file__).parent.parent / "hardware" / "data" / "pst_values" / "pst_values.hex"

@@ -152,7 +152,7 @@ package general_chess_defs;
 
 	// Maximum search depth
 	// Ideally a power of two
-	localparam MAX_PLY_COUNT = 8;
+	localparam MAX_PLY_COUNT = 32;
 
 	// Data type to store search depth
 	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] DepthType;
@@ -162,7 +162,7 @@ package general_chess_defs;
 
 
 	// -- Evaluation Related Definitions --
-	typedef logic signed [11:0] EvalScore;
+	typedef logic signed [15:0] EvalScore;
 
 	localparam EvalScore MAX_EVAL_SCORE = EvalScore'(2 ** ($bits(EvalScore)-1) - 1);
 	localparam EvalScore MIN_EVAL_SCORE = -MAX_EVAL_SCORE;
@@ -172,14 +172,14 @@ package general_chess_defs;
 	// Value of each type of piece in units of pawns
 	// Indexed by PieceType
 	localparam logic[3:0] PIECE_VALS_1[8] = '{
-		4'd0, 4'd1, 4'd3, 4'd3, 4'd5, 4'd9, 4'd12, 4'dx
+		4'd0, 4'd1, 4'd3, 4'd3, 4'd5, 4'd9, 4'd0, 4'dx
 	};
 
-	// Value of each type of piece in units of 64th of a pawn
+	// Value of each type of piece in units of 128ths of a pawn
 	// Indexed by PieceType
 	// https://web.archive.org/web/20160314214435/http://www.danheisman.com/Articles/evaluation_of_material_imbalance.htm
 	localparam EvalScore PIECE_VALS_128[8] = '{
-		'd0, 'd128, 'd416, 'd416, 'd640, 'd1152, 'd2000, 'dx
+		'd0, 'd128, 'd416, 'd416, 'd640, 'd1152, 'd0, 'dx
 	};
 
 

@@ -55,6 +55,7 @@ package board_controller_defs;
         logic is_castle;
         logic is_ep;
         logic is_pawn_move; // Used for halfmove clock
+        logic overwritten_color_has_turn; // For SET TILE: Indicates if the overwritten tile belongs to the active player
     } BoardControllerCtx;
 
 endpackage
