@@ -1,0 +1,162 @@
+
+
+
+
+
+Main Tasks:
+- Board/Move Representation
+- Move Generation
+- Static Evaluation
+
+
+
+
+
+
+Move Generation:
+ - King + Knight => Hard-coded
+ - Pawn		=> Bit Shifting
+ - Bishop	=> Diagonal checking with enables
+ - Rook		=> Row/Col checking with enables
+ - Queen	=> bishop + rook
+
+ - Create another Move generator for only non-quiet moves?
+
+
+
+Board/Move Representation:
+ - Moves
+   - 0-5 Start Pos
+   - 6-11 End Pos
+   - 12-14 Kill Type
+   - 15-16 promotion Information
+
+ - Board Representation
+   - 4 bits per tile
+     - 0-2 Piece Type (or null)
+	 - 3 Piece Color
+   - 32 Bytes per board
+   - Also store number of each piece?
+   
+ - Idea: One set of reset locations
+   
+   
+   
+
+   
+Static Evaluation:
+ - Full Combinational?
+ - Shared Between Boards?
+ - Pipelined?
+
+ - Score data size/resolution?
+   - Under/Overflow management?
+   
+   
+
+Add flag system to catch errors like overflow
+
+
+=================================
+
+Potential Changes:
+
+- Change move_gen.piece_dist to be one hot
+
+- Move gen: look for future tiles while calculating original moves
+
+- Error checking for memory overflow 
+
+- Change depth_start to be combinational?
+
+- Property do_move has valid move
+
+- Property do_gen_moves has valid board data
+
+- Set full test bench
+
+- Add promotions later (track Queen Promo)
+
+=================================
+
+
+Move Ordering:
+
+PV Move
+Hash Move
+Killer Move
+Queen Promotions
+MVV/LVA
+Close to promotion
+
+
+
+Non-Queen Promotions
+
+
+
+
+
+
+=================================
+
+
+vlog *.sv; vlog -work work -refresh -force_refresh; vcom -work work -refresh -force_refresh; vsim work.tb_engine -L altera_mf_ver; restart -f; run -all
+
+
+
+=================================
+
+
+Initial:
+6052 ALM
+1474 registers
+64 DSP
+
+Multiplication to Look up
+5285 ALM
+1455 registers
+0 DSP!
+
+No longer pass starting position
+?
+
+Add generated move storage
+4814 ALM
+1657 registers
+70.82 MHz
+
+Add board history and move reversal
+4884 ALM
+1786 registers
+70.75 MHz
+
+Add full perft search ability
+6855 ALM
+2726 registers
+67.62 MHz
+
+=================================
+
+
+
+TODO:
+  - Do special moves
+  - Exit search early based on tile content
+  - Setup move memory
+  - Do perft test
+
+
+=================================
+
+1024 14-bit words per search
+
+
+=================================
+
+
+Last Status:
+
+The "move complete" variable is not working as intended.
+
+A new state-machine needs to be made with depth tracking and "move completeness" tracking.
