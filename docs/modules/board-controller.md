@@ -4,25 +4,15 @@
 | Direction | Port Name          | Description                                                                              |
 | --------- | ------------------ | ---------------------------------------------------------------------------------------- |
 | Input     | `clk`              | Clock.                                                                                   |
-| Input     | `board_operation`  | Operation code for what the board should do. Port only read when `ready` is asserted.    |
-| Input     | `board_tiles_in`   | 64 x 4 bit tiles.                                                                        |
-| Input     | `turn_in`          | Indicates color of moving player.                                                        |
-| Input     | `castle_perms_in`  | 4 bits of castling permissions.                                                          |
-| Input     | `has_ep_in`        | Indicated whether the current board has an en passant tile.                              |
-| Input     | `ep_file_in`       | File for which en passant exists if `has_ep` is true.                                    |
-| Input     | `halfmove_clk_in`  | Number of half-moves for tracking 50-move draw.                                          |
+| Input     | `board_op`         | Operation code for what the board controller should do.                                  |
+| Input     | `board_in`         | Input `FullBoard` state.                                                                 |
 | Input     | `board_hash_in`    | Initial hash of the board.                                                               |
 | Input     | `pst_eval_in`      | The current piece-square table evaluation.                                               |
-| Input     | `move`             | The move to be made.                                                                     |
-| Input     | `data_in`          | Either a tile, turn, castle perms, or en passant info depending on the set operation.    |
+| Input     | `move_in`          | The move to be made.                                                                     |
+| Input     | `set_data`         | Either a tile, turn, castle perms, or en passant info depending on the set operation.    |
 | Input     | `thread_id`        | ID to indicate which board should be updated.                                            |
 | Input     | `search_depth`     | The current search depth (before current operation).                                     |
-| Output    | `board_tiles_out`  | 64 x 4 bit tiles.                                                                        |
-| Output    | `turn_out`         | Indicates color of moving player.                                                        |
-| Output    | `castle_perms_out` | 4 bits of castling permissions.                                                          |
-| Output    | `has_ep_out`       | Indicated whether the current board has an en passant tile.                              |
-| Output    | `ep_file_out`      | File for which en passant exists if `has_ep` is true.                                    |
-| Output    | `halfmove_clk_out` | Number of half-moves for tracking 50-move draw.                                          |
+| Output    | `board_out`        | Output `FullBoard` state.                                                                |
 | Output    | `board_hash_out`   | Updated hash of the board.                                                               |
 | Output    | `pst_eval_out`     | A updated piece-square table evaluation. Evaluation is from perspective of active color. |
 

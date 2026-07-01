@@ -1,4 +1,4 @@
-# Systolic Evaluation (`static_evaluator`)
+# Static Evaluator (`static_evaluator`)
 
 | Direction | Port Name     | Description                              |
 | --------- | ------------- | ---------------------------------------- |

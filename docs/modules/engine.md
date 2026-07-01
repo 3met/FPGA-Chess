@@ -27,7 +27,7 @@ How to deal with two board squares arriving in the same byte?
 | Get Status             | Returns the status of the engine                    |                                        |
 | Write to Board Memory  | Write a board position to board memory              | Board Memory Address<br><br>Board Data |
 | Read from Board Memory | Read a board position form board memory             | Board Memory Address                   |
-| Load Board from Memory | Load a position from board memory to PE array       | Board Memory Address                   |
+| Load Board from Memory | Load a position from board memory as the active board state | Board Memory Address                   |
 | Copy Board to Memory   | Copy the active board to memory                     | Board Memory Address                   |
 | Make Move              | Make a move on active board                         | Move Data                              |
 | Reverse Move           | Reverse a move on active board                      |                                        |
@@ -50,10 +50,10 @@ A list of states the engine can occupy
 | Idle                   | Engine is awaiting a task                                                       |
 | Write Board Memory     | Write a board position to board memory                                          |
 | Read Board Memory      | Read a board position from board memory                                         |
-| Load Board from Memory | Load a position from board memory to PE array                                   |
+| Load Board from Memory | Load a position from board memory as the active board state                     |
 | Copy Board to Memory   | Copy the active board to memory                                                 |
-| Make Move              | Make a move on PE array                                                         |
-| Reverse Move           | Reverse a move on PE array                                                      |
+| Make Move              | Make a move on active board state                                               |
+| Reverse Move           | Reverse a move on active board state                                            |
 | Search                 | Sets search parameters, waits for search to complete, then saves search result. |
 | Perft                  | Count strictly legal moves to a certain depth.                                  |
 | Output Result          | Outputs the result one byte at a time.                                          |
@@ -77,5 +77,4 @@ A list of states the engine can occupy
 ---
 ### Engine Child Modules
 
-- [`search_controller`](search_controller)
-
+- [`search_controller`](search-controller.md)

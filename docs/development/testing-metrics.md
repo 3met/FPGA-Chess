@@ -6,5 +6,4 @@ Metrics used to measure the engine's performance.
 - Measure utilization
 - Cycles per Evaluation
 - EBF
-- Distribution of [[Search Operations|type of "end"]] in search
-
+- Distribution of search end types.

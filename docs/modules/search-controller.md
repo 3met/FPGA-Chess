@@ -53,5 +53,7 @@ A list of ports on the engine module.
 | `beta[MAX_PLY_COUNT]`  |                   | Beta values for the alpha/beta search.                |
 | `node_count`           | `NODE_COUNT_BITS` | Store the number of nodes searched.                   |
 ### Search Controller Child Modules
-- [`board`](board)
-- [`timer`](timer)
+- [`board_controller`](board-controller.md)
+- [`move_generator`](move-generator.md)
+- [`static_evaluator`](static-evaluator.md)
+- [`timer`](timer.md)

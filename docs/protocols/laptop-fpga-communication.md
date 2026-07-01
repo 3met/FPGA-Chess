@@ -56,7 +56,7 @@ Every data output shout output a data-valid signal
 ---
 
 **Laptop -> Engine**
-- See [[Engine FSM]] for list of engine commands
+- See [engine.md](../modules/engine.md) for the current command list.
 - Ask for status of engine
 - Hard reset signal
 - Prompt new game (reset board, clear memory and heuristics as needed)
@@ -74,4 +74,3 @@ Every data output shout output a data-valid signal
 * Send best move
 * Send board evaluation
 * Report error (?)
-
