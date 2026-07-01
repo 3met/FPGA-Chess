@@ -6,8 +6,7 @@ Information and status about each pending step in development:
 | ---------------------------------- | ------------------------------------------------------------------- | ------ | ----- |
 | Add alpha-beta search              |                                                                     |        |       |
 | Python Interface                   |                                                                     |        |       |
-| Advanced tests for move generation | Add tests for move generation in complex positions to `tb_board.sv` |        |       |
+| Advanced tests for move generation | Add tests for move generation in complex positions to the move-generator testbench |        |       |
 | Implement engine FSM               |                                                                     |        |       |
 |                                    |                                                                     |        |       |
-
 
