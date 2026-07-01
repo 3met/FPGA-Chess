@@ -12,8 +12,8 @@
 | Input     | `has_ep`          | Indicated whether the current board has an en passant tile.                                                             |
 | Input     | `ep_file`         | File for which en passant exists if `has_ep` is true.                                                                   |
 | Input     | `target_move`     | A move that will be assigned to `best_move` if legal.                                                                   |
-| Output    | `best_move`       | The best pseudo-legal move for the given position. If no remaining (and unsearched) move exists, returns a `NULL_MOVE`. |
-| Output    | `move_is_illegal` | Asserted if the generated move is illegal. In this case, pass the board through the pipeline again to get a new move.   |
+| Output    | `best_move`       | The best candidate move for the given position. If no remaining unsearched move exists, returns a `NULL_MOVE`. |
+| Output    | `move_is_legal`   | Asserted if the generated candidate move is legal. If deasserted, the candidate is still consumed and the position should be dispatched again to get the next candidate. |
 
 ### Operations
 
@@ -23,6 +23,8 @@
 | Normal Generation   |                 | Generates the next move.                                                                    |
 | Targeted Generation | Target Move     | Checks if the passed move is legal. If so return that move. Otherwise return the next move. |
 | QSearch Generation  |                 | Generates the next move for a quiescence search scenario.                                   |
+
+The input position is assumed to be legal. The move generator emits one candidate move per dispatch and marks that candidate as searched/consumed whether or not the candidate is legal.
 
 
 ### Implementation
@@ -179,5 +181,4 @@ If the king is in double check (attacker count = 2), the only valid move is a ki
 ### Startup/Reset Process
 
 **Scenario: A typical normal generation operation**
-
 

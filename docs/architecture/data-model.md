@@ -193,9 +193,9 @@ Material values are available in two forms:
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
-| `BoardHash` | `32` bits | Board hash value. Currently intended for Zobrist-style hashing. |
-| `THREAD_COUNT` | `1` | Number of hardware search threads currently configured. |
-| `THREAD_ID_BITS` | `1` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1. |
+| `BoardHash` | `32` bits | Zobrist-style board hash value. |
+| `THREAD_COUNT` | Parameter | Number of hardware search threads. The target design range is roughly 15-30 threads. |
+| `THREAD_ID_BITS` | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1. |
 | `ThreadID` | `THREAD_ID_BITS` bits | Hardware search thread identifier. |
 
 ## Directions

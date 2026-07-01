@@ -56,4 +56,6 @@ A list of ports on the engine module.
 - [`board_controller`](board-controller.md)
 - [`move_generator`](move-generator.md)
 - [`static_evaluator`](static-evaluator.md)
+- [`load_tt`](load-tt.md)
+- [`store_tt`](store-tt.md)
 - [`timer`](timer.md)
