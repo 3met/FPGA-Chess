@@ -15,6 +15,7 @@ package board_update_pipeline_defs;
         BOARD_SET_TURN_OP,
         BOARD_SET_CASTLE_PERMS_OP,
         BOARD_SET_EN_PASSANT_OP,
+        BOARD_SET_HALFMOVE_CLOCK_OP,
         BOARD_REVERSE_MOVE_OP,
         BOARD_IDLE_OP
     } BoardOp;
@@ -47,8 +48,9 @@ package board_update_pipeline_defs;
         ZobristKey zobrist_key;
         EvalScore pst_eval;
         Move move;
-        logic [3:0] set_data; // Either a tile, turn, castle perms, or en passant info depending on the SET operation
+        logic [6:0] set_data; // Tile, turn, castle perms, en passant, or halfmove info depending on the SET operation
         ThreadID thread_id;
+        PlyIndex search_ply;
 
         // Pipeline Internal Values
         MoveRecord move_record;

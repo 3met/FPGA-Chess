@@ -14,7 +14,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Input | `zobrist_key_in` | Input Zobrist key for the board position. |
 | Input | `pst_eval_in` | Current White-relative piece-square-table evaluation. |
 | Input | `move_in` | Move to apply for push/commit operations, or destination square for set-tile operations. |
-| Input | `set_data` | Tile, turn, castle perms, or en passant info depending on the set operation. |
+| Input | `set_data` | Tile, turn, castle perms, en passant info, or halfmove clock depending on the set operation. This signal is 7 bits wide; narrow setup values use the low bits. |
 | Input | `thread_id` | Search thread whose move-history record should be read or written. |
 | Input | `search_ply` | Search ply before the current operation. |
 | Output | `board_out` | Output `FullBoard` state. |
@@ -31,20 +31,21 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Set Turn | `set_data[0]` | Updates the side to move without changing tiles. |
 | Set Castle Perms | `set_data[3:0]` | Updates castling permissions without changing tiles. |
 | Set En Passant | `{ep_file[2:0], has_ep}` | Updates en passant state without changing tiles. |
+| Set Halfmove Clock | `set_data[6:0]` | Updates the 50-move-rule halfmove clock without changing tiles. |
 | Reverse Move | `thread_id`, `search_ply` | Reverses the previous pushed move for the thread. |
 | Idle | None | Does nothing. |
 
 ## Pipeline
 
-| Pipeline Stage | Description |
-| -------------- | ----------- |
-| 0 | Register inputs and fetch previous move data for reverse operations. |
-| 1 | Prepare side-data updates and preserve input context. |
-| 2 | Alignment stage. |
-| 3 | Compute primary tile updates and fetch Zobrist/PST data. |
-| 4 | Update first extra tile for en passant or castling and write move record. |
-| 5 | Update second extra tile for castling and account for captured material. |
-| 6 | Output board data, Zobrist key, and PST evaluation. |
+| Pipeline Stage | Description                                                               |
+| -------------- | ------------------------------------------------------------------------- |
+| 0              | Register inputs and fetch previous move data for reverse operations.      |
+| 1              | Prepare side-data updates and preserve input context.                     |
+| 2              | Alignment stage.                                                          |
+| 3              | Compute primary tile updates and fetch Zobrist/PST data.                  |
+| 4              | Update first extra tile for en passant or castling and write move record. |
+| 5              | Update second extra tile for castling and account for captured material.  |
+| 6              | Output board data, Zobrist key, and PST evaluation.                       |
 
 ```mermaid
 flowchart LR
@@ -68,13 +69,17 @@ flowchart LR
 
 ## Board Setup
 
-The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Resetting the board update pipeline should not be required to create a legal position.
+The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Resetting the board update pipeline should not be required to create a legal position.
 
 ## Hashing
 
-Zobrist hashing is required in the final design. Tile, turn, castling, and en passant hash components should be updated incrementally as part of board operations.
+Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations. The halfmove clock is part of `FullBoard` state but is not included in the Zobrist key.
 
-Current RTL note: the board update pipeline has placeholder 32-bit Zobrist constants but does not yet implement complete hash updates. The final design uses 64-bit hashes.
+The Zobrist constants are stored in a read-only table loaded from `hardware/data/zobrist/zobrist_values.hex` with `$readmemh`. Regenerate this file with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
+
+## PST Tables
+
+Piece-square-table constants are stored in `hardware/data/pst_values/pst_values.hex` and loaded with `$readmemh` by the inferred ROMs used in RTL and test benches. Regenerate this file from `hardware/data/pst_values/pst_values.json` with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
 
 ## Move History
 
@@ -84,4 +89,4 @@ Each thread may have one reversible move per ply. Search must reverse all pushed
 
 ## Current RTL Notes
 
-The current RTL maintains `pst_eval` from the active-color perspective. The final design should change this to White-relative PST evaluation or perform an explicit conversion at this module boundary.
+The current RTL maintains `pst_eval` as White-relative incremental material plus piece-square-table state. Positive scores favor White and negative scores favor Black.

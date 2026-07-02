@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Generate deterministic Zobrist keys for FPGA-Chess.
+
+The output file is a plain readmemh-compatible hex file. Candidates are derived
+from SHA-256 with domain-separated labels and accepted only if they are nonzero,
+unique, have balanced bit weight, and are not too close to any earlier key.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+OUT_FILE = ROOT / "hardware" / "data" / "zobrist" / "zobrist_values.hex"
+SEED = "FPGA-Chess zobrist v1"
+MIN_WEIGHT = 31
+MAX_WEIGHT = 33
+MIN_PAIRWISE_DISTANCE = 23
+MIN_BIT_COUNT = 350
+MAX_BIT_COUNT = 399
+
+
+def hamming_weight(value: int) -> int:
+    return value.bit_count()
+
+
+def hamming_distance(a: int, b: int) -> int:
+    return (a ^ b).bit_count()
+
+
+def candidate(label: str, attempt: int) -> int:
+    digest = hashlib.sha256(f"{SEED}|{label}|{attempt}".encode("ascii")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def choose_key(label: str, chosen: list[int]) -> int:
+    attempt = 0
+    while True:
+        value = candidate(label, attempt)
+        weight = hamming_weight(value)
+        if (
+            value != 0
+            and value not in chosen
+            and MIN_WEIGHT <= weight <= MAX_WEIGHT
+            and all(hamming_distance(value, prev) >= MIN_PAIRWISE_DISTANCE for prev in chosen)
+        ):
+            return value
+        attempt += 1
+
+
+def labels() -> list[tuple[str, bool]]:
+    result = [("turn:black", True)]
+    result += [(f"castle:{name}", True) for name in ("white_kingside", "white_queenside", "black_kingside", "black_queenside")]
+    result += [(f"ep_file:{file_idx}", True) for file_idx in range(8)]
+
+    for color in ("white", "black"):
+        for piece in ("pawn", "knight", "bishop", "rook", "queen", "king"):
+            for pos in range(64):
+                rank = pos // 8
+                is_legal_pawn_square = piece != "pawn" or rank not in (0, 7)
+                result.append((f"tile:{color}:{piece}:{pos}", is_legal_pawn_square))
+
+    return result
+
+
+def main() -> None:
+    chosen: list[int] = []
+    nonzero_keys: list[int] = []
+    zero_count = 0
+    for label, is_enabled in labels():
+        if is_enabled:
+            value = choose_key(label, nonzero_keys)
+            nonzero_keys.append(value)
+            chosen.append(value)
+        else:
+            zero_count += 1
+            chosen.append(0)
+
+    OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OUT_FILE.write_text("".join(f"{value:016X}\n" for value in chosen), encoding="ascii")
+
+    weights = [hamming_weight(value) for value in nonzero_keys]
+    min_distance = min(
+        hamming_distance(nonzero_keys[i], nonzero_keys[j])
+        for i in range(len(nonzero_keys))
+        for j in range(i)
+    )
+    bit_counts = [
+        sum((value >> bit_idx) & 1 for value in nonzero_keys)
+        for bit_idx in range(64)
+    ]
+    min_bit_count = min(bit_counts)
+    max_bit_count = max(bit_counts)
+
+    if min_bit_count < MIN_BIT_COUNT or max_bit_count > MAX_BIT_COUNT:
+        raise RuntimeError(
+            "Generated table failed global bit-balance check: "
+            f"expected {MIN_BIT_COUNT}..{MAX_BIT_COUNT}, found {min_bit_count}..{max_bit_count}"
+        )
+
+    print(f"wrote {OUT_FILE}")
+    print(
+        f"entries={len(chosen)} nonzero={len(nonzero_keys)} zero={zero_count} "
+        f"weight_range={min(weights)}..{max(weights)} min_pairwise_distance={min_distance} "
+        f"bit_count_range={min_bit_count}..{max_bit_count}"
+    )
+
+
+if __name__ == "__main__":
+    main()

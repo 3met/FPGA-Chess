@@ -12,7 +12,7 @@ Material values are maintained incrementally. The base material unit is 1/128 pa
 
 Piece-square-table scoring should be White-relative in the final design. White pieces add their table value; Black pieces subtract the mirrored-square table value.
 
-The board update pipeline may maintain a White-relative incremental PST score. The static evaluator may recompute PST terms if that proves smaller or easier to pipeline for a target FPGA.
+The board update pipeline maintains White-relative incremental material plus piece-square-table state. The static evaluator may recompute PST terms if that proves smaller or easier to pipeline for a target FPGA.
 
 ## Board-State Evaluation
 

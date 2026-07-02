@@ -65,7 +65,7 @@ sequenceDiagram
 
 The command payload encodings are defined in [binary-encoding.md](binary-encoding.md).
 
-`Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
+`Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
 
 `New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
 
