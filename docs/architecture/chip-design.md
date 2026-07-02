@@ -1,25 +1,29 @@
 # Chip Design
 
-The chip is a hardware chess search engine controlled by a minimal host-side Python program. The Python program exposes a UCI interface, validates and parses incoming positions and moves, logs activity, and translates UCI-level commands into a compact FPGA command protocol. The FPGA maintains game/search state between commands and performs the search work.
+The chip is a hardware chess search engine controlled by a minimal host-side Python program. The Python program exposes UCI, validates and parses incoming positions and moves, logs activity, and translates UCI-level commands into a compact FPGA command protocol. FPGA commands are assumed valid after host parsing; defensive legality validation for host-supplied commands is not a primary FPGA responsibility.
 
-The internal design uses explicit board-state values passed through shared pipelines. A board position is represented as `FullBoard` plus side data such as Zobrist board hash, incremental piece-square-table score, material information, search stack records, and per-thread control state.
+The FPGA maintains the active game/search state between commands and performs the search work. Once a search command begins, the FPGA should not require further host communication until it finishes, except for asynchronous control such as kill/reset or output backpressure.
 
-The engine has many parameterized search threads. The target range is roughly 15-30 threads, but the exact count should be selected per FPGA build. Threads cooperate using Lazy SMP: each thread runs an independent iterative-deepening alpha/beta search, and the transposition table is the only shared search knowledge between threads.
+The internal design uses explicit board-state values passed through shared pipelines. A board position is represented as `FullBoard` plus side data such as Zobrist board hash, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
+
+The target design has a parameterized number of search threads, with `THREAD_COUNT = 8` as the current documented default. Threads cooperate using Lazy SMP: each thread runs an independent iterative-deepening alpha/beta search, and the required shared transposition table is the only shared search knowledge between threads.
 
 ## Major Blocks
 
-| Block | Role |
-| ----- | ---- |
-| Host Python process | Implements UCI, validates/parses positions and moves, logs activity, and communicates with the FPGA. |
-| Engine command layer | Receives host commands, maintains engine-level state, and starts/stops searches. |
-| Search controller | Owns search threads, search stacks, alpha/beta state, pipeline dispatch, and result routing. |
-| Board update pipeline | Applies push move, commit move, reverse move, and board setup operations. |
-| Move generation pipeline | Produces one ordered candidate move per dispatch and reports whether that candidate is legal. |
-| Static evaluation pipeline | Computes full-position evaluation terms from a board-state input, likely using parallel per-square hardware internally. |
-| Load TT pipeline | Performs transposition-table lookup requests against external RAM and any internal cache. |
-| Store TT pipeline | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by loads. |
-| External RAM interface | Provides storage for the transposition table, likely using SDRAM or DDR. |
-| FPGA platform wrappers | Isolate vendor-specific RAM, ROM, PLL, FIFO, UART, and external-memory IP so Intel/Altera and Xilinx builds can share the same logical RTL. |
+| Block | Status | Role |
+| ----- | ------ | ---- |
+| Host Python process | Required | Implements UCI, validates/parses positions and moves, logs activity, and communicates with the FPGA. |
+| RX decode | Required | Converts UART input into command/data bytes and handles asynchronous kill/reset commands. |
+| TX encode | Required | Converts FPGA output bytes into UART output and reports backpressure. |
+| Engine command layer | Planned | Receives host commands, maintains engine-level state, and starts/stops searches. |
+| Search controller | Planned | Owns search threads, search stacks, alpha/beta state, pipeline dispatch, and result routing. |
+| Board update pipeline | Partially implemented | Applies push move, commit move, reverse move, and board setup operations. |
+| Move generation pipeline | Partially implemented | Produces one ordered candidate move per dispatch and reports whether that candidate is legal. |
+| Static evaluation pipeline | Partially implemented | Computes White-relative full-position evaluation terms from a board-state input. |
+| Load TT pipeline | Planned, required | Performs transposition-table lookup requests against external RAM and any internal cache. |
+| Store TT pipeline | Planned, required | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by loads. |
+| External RAM interface | Planned, required | Provides storage for the transposition table through a vendor-neutral wrapper around the selected SDRAM, DDR, or board memory interface. |
+| FPGA platform wrappers | Required | Isolate vendor-specific RAM, ROM, PLL, FIFO, UART, and external-memory IP so Intel/Altera and Xilinx builds can share the same logical RTL. |
 
 ## Search Pipelines
 
@@ -39,11 +43,11 @@ Search owns per-thread state. Each thread keeps an active search stack and stack
 
 Zobrist hashes are maintained incrementally because they are efficient to update. Piece-square-table and material evaluation may be recomputed rather than maintained incrementally if that reduces LUT usage. Static evaluation is hybrid: some terms are carried or recomputed incrementally through board update, while other terms are fully computed by the static evaluation pipeline on dispatch.
 
-Evaluation scores should be treated as point-of-view scores at search boundaries unless a module explicitly documents otherwise. The existing RTL is mixed: `board_controller` maintains `pst_eval` from the active-color perspective, while `static_evaluator` currently outputs a White-relative score.
+Raw static evaluation and incremental PST/material state should be White-relative in the final design. Search should normalize scores to point-of-view format at search boundaries, typically by negating White-relative evaluation when Black is to move. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
 
 ## Transposition Table
 
-The transposition table is the shared Lazy SMP data structure. The primary TT lives in external SDRAM/DDR. A BRAM cache may be used to reduce external-memory pressure.
+The transposition table is a required shared Lazy SMP data structure. The primary TT lives in external memory behind a vendor-neutral wrapper. A BRAM cache may be used to reduce external-memory pressure when a target FPGA has sufficient block memory.
 
 TT loads are more latency-sensitive than TT stores and receive priority when load/store bandwidth conflicts. Stores can be stalled when memory bandwidth is needed by loads. The memory arbitration policy is a tunable design parameter and should be selected based on measured search throughput.
 

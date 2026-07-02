@@ -1,63 +1,67 @@
-# Board Controller
-#### (`board_controller`)
+# Board Controller (`board_controller`)
 
-| Direction | Port Name          | Description                                                                              |
-| --------- | ------------------ | ---------------------------------------------------------------------------------------- |
-| Input     | `clk`              | Clock.                                                                                   |
-| Input     | `board_op`         | Operation code for what the board controller should do.                                  |
-| Input     | `board_in`         | Input `FullBoard` state.                                                                 |
-| Input     | `board_hash_in`    | Initial hash of the board.                                                               |
-| Input     | `pst_eval_in`      | The current piece-square table evaluation.                                               |
-| Input     | `move_in`          | The move to be made.                                                                     |
-| Input     | `set_data`         | Either a tile, turn, castle perms, or en passant info depending on the set operation.    |
-| Input     | `thread_id`        | ID to indicate which board should be updated.                                            |
-| Input     | `search_depth`     | The current search depth (before current operation).                                     |
-| Output    | `board_out`        | Output `FullBoard` state.                                                                |
-| Output    | `board_hash_out`   | Updated hash of the board.                                                               |
-| Output    | `pst_eval_out`     | A updated piece-square table evaluation. Evaluation is from perspective of active color. |
+Status: partially implemented; this document describes the final target contract.
 
+The board controller is a pipelined board-state transformer. It accepts a complete `FullBoard`, side data, and an operation, then outputs the transformed board and updated side data after a fixed latency. It does not own the long-term active board state.
 
-| Operation        | Inputs Required   | Description                                                  |
-| ---------------- | ----------------- | ------------------------------------------------------------ |
-| Push Move        | Move Data         | Makes a move as part of a search that can be later reversed. |
-| Commit Move      | Move Data         | Makes a move to update the board outside a search.           |
-| Set Tile         | Piece Data        | Places a piece (or `NULL_PIECE`) on the board.               |
-| Set Turn         | Turn Data         | Updates the turn without changing the board,                 |
-| Set Castle Perms | Castle Perm Data  | Updates the castling permissions without changing the board. |
-| Set En Passant   | En Passant Data   | Update the en passant status without changing the board.     |
-| Reverse Move     |                   | Reverses the previous move on the board.                     |
-| Idle             |                   | Does nothing.                                                |
+## Ports
 
+| Direction | Port Name | Description |
+| --------- | --------- | ----------- |
+| Input | `clk` | Clock. |
+| Input | `board_op` | Operation code for what the board controller should do. |
+| Input | `board_in` | Input `FullBoard` state. |
+| Input | `board_hash_in` | Initial hash of the board. |
+| Input | `pst_eval_in` | Current White-relative piece-square-table evaluation. |
+| Input | `move_in` | Move to apply for push/commit operations, or destination square for set-tile operations. |
+| Input | `set_data` | Tile, turn, castle perms, or en passant info depending on the set operation. |
+| Input | `thread_id` | Search thread whose move-history record should be read or written. |
+| Input | `search_depth` | Search ply before the current operation. |
+| Output | `board_out` | Output `FullBoard` state. |
+| Output | `board_hash_out` | Updated board hash. |
+| Output | `pst_eval_out` | Updated White-relative PST evaluation. |
 
-| Pipeline Stage | Description                                                                                                 |
-| -------------- | ----------------------------------------------------------------------------------------------------------- |
-| 0              | Register Inputs + Fetch previous move data                                                                  |
-| 1              | Invert the PST score for operations that change the turn POV                                                |
-| 2              | Idle?                                                                                                       |
-| 3              | Compute updated board (update the primary moving tiles) + fetch Zobrist hash and piece-square table values. |
-| 4              | Update first extra tile in the case of en-passant or castling + Write move record                           |
-| 5              | Update second extra tile in the case of castling + Update PST score with killed piece                       |
-| 6              | Output board data + Board Hash + PST Eval with new locations                                                |
+## Operations
 
-**Note:** Zobrist hash is stored in a ROM (BRAM) with 32 bit keys and 24 bit overlap.
+| Operation | Inputs Required | Description |
+| --------- | --------------- | ----------- |
+| Push Move | `move_in` | Makes a reversible search move and writes a move-history record. |
+| Commit Move | `move_in` | Makes an irreversible active-game move without writing a search undo record. |
+| Set Tile | `move_in.end_pos`, `set_data` tile | Places a piece or `NULL_PIECE` on one square. |
+| Set Turn | `set_data[0]` | Updates the side to move without changing tiles. |
+| Set Castle Perms | `set_data[3:0]` | Updates castling permissions without changing tiles. |
+| Set En Passant | `{ep_file[2:0], has_ep}` | Updates en passant state without changing tiles. |
+| Reverse Move | `thread_id`, `search_depth` | Reverses the previous pushed move for the thread. |
+| Idle | None | Does nothing. |
 
-**Scenario: After power up, board to be set to starting position**
-Toggle reset, which should set all tiles for all boards to `NULL_PIECE`. This should also reset the turn, castle perms, en passant info, board hash, and piece-square table evaluation. The pieces are then placed one by one on the board with the Set Tile operation. Next, the other board setup operations are executed. Finally the half move data can be written directly to the register file. At this point the piece-square table and board hash should be up-to-date.
+## Pipeline
 
-**Scenario: Search is over and the board is to be overwritten with a new position**
-The Set Tile is used to write all pieces (or `NULL_PIECE`) to the board one tile at a time. Everything else works like in normal startup.
+| Pipeline Stage | Description |
+| -------------- | ----------- |
+| 0 | Register inputs and fetch previous move data for reverse operations. |
+| 1 | Prepare side-data updates and preserve input context. |
+| 2 | Alignment stage. |
+| 3 | Compute primary tile updates and fetch Zobrist/PST data. |
+| 4 | Update first extra tile for en passant or castling and write move record. |
+| 5 | Update second extra tile for castling and account for captured material. |
+| 6 | Output board data, board hash, and PST evaluation. |
 
-**Scenario: Engine *is* in a search and needs to make a move***
-Execute Push Move operation and store the move data within the pipeline. This move data must be reversed by the end of the search and before any set/place/commit command is executed.
+## Board Setup
 
-**Scenario: Engine *is* in search and need to reverse a move***
-For the Reverse Move operation, the engine reads the past move data from within the pipeline.
+The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Board-controller reset should not be required to create a legal position.
 
-**Scenario: Engine is *not* in a search and needs to make a move***
-Since we are not in search, the move is considered un-reversable. Use the Commit Move operation and the move data will not be saved in the pipeline.
+## Hashing
 
----
+Zobrist hashing is required in the final design. Tile, turn, castling, and en passant hash components should be updated incrementally as part of board operations.
 
-### To Do:
-- Add the Zobrist hashing
-- Optimize the pipeline to only store the tiles for the starting and ending ranks
+Current RTL note: the board controller has placeholder 32-bit Zobrist constants but does not yet implement complete hash updates. The final design should use 64-bit hashes.
+
+## Move History
+
+Push Move writes enough data to reverse the move later, including origin, destination, captured piece, castling permissions, en passant state, halfmove clock, and special-move flag. Reverse Move reads the record for `thread_id` and `search_depth - 1`.
+
+Each thread may have one reversible move per ply. Search must reverse all pushed moves before reusing that ply record for a different line.
+
+## Current RTL Notes
+
+The current RTL maintains `pst_eval` from the active-color perspective. The final design should change this to White-relative PST evaluation or perform an explicit conversion at this module boundary.

@@ -1,15 +1,22 @@
-### Timer Parameters
+# Timer (`timer`)
 
-| Parameter Name | Description                                 |
-| -------------- | ------------------------------------------- |
-| `CLOCK_FREQ`   | Clock frequency in Hertz.                   |
+Status: planned final RTL spec.
 
-### Timer Ports
+The timer counts elapsed milliseconds for search time control.
 
-| Direction | Port Name | Size (bits) | Description                                                       |
-| --------- | --------- | ----------- | ----------------------------------------------------------------- |
-| Input     | `rst`     | 1           | Synchronous reset to the timer. Sets the time to zero.            |
-| Input     | `start`   | 1           | Timer only runs if `start` is asserted. Remains paused otherwise. |
-| Output    | `time_ms` | 24          | The current time in milliseconds.                                 |
+## Parameters
 
-Note: The 24-bit output port limits searches to a duration of 4.5 hours.
+| Parameter Name | Description |
+| -------------- | ----------- |
+| `CLOCK_FREQ` | Clock frequency in Hertz. |
+
+## Ports
+
+| Direction | Port Name | Size | Description |
+| --------- | --------- | ---- | ----------- |
+| Input | `clk` | 1 | Clock. |
+| Input | `rst` | 1 | Synchronous reset to zero. |
+| Input | `start` | 1 | Timer runs only when asserted and remains paused otherwise. |
+| Output | `time_ms` | `TIME_BITS` | Current elapsed time in milliseconds. |
+
+`TIME_BITS = 24` limits representable elapsed time to `16,777,215 ms`, about 4.66 hours.

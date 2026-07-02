@@ -1,20 +1,45 @@
-### Time Management
+# Time Management
 
-Time must be managed well when playing with a clock. Five checkpoints are used to manage time effectively. Iterations refer to the method of iterative deepening. Based on the hardware limitations, all checkpoints must be less than 4.5 hours.
+Time management applies to `Search on Clock`. Fixed-time, fixed-depth, fixed-node, and perft commands use their explicit limits instead.
 
-1. Earliest End
-	* Checkpoint @ Increment + 1/128 remaining time
-	* After iteration is over, exit if previous five iterations gave the same move with similar evaluations
-2. Early End
-	* Checkpoint @ Increment + 1/64 remaining time
-	* After iteration is over, exit if previous four iterations gave the same move with similar evaluations
-3. Target End
-	* Checkpoint @ Increment + 1/32 remaining time
-	* After iteration is over, exit if previous three iterations gave the same move with similar evaluations
-4. Late End
-	* Checkpoint @ Increment + 1/16 remaining time
-	* After iteration is over, exit if previous two iterations gave the same move with similar evaluations
-5. Latest End
-	* Checkpoint @ Increment + 1/8 remaining time
-	* End immediately and do not finish current iteration of search
+All time values use the 24-bit millisecond `TimeType`, so representable durations must be less than `16,777,215 ms`, about 4.66 hours.
 
+## Parameters
+
+| Name | Default | Description |
+| ---- | ------- | ----------- |
+| `MOVE_OVERHEAD_MS` | `50` | Time reserved for host/FPGA latency and command turnaround. |
+| `MIN_SEARCH_MS` | `10` | Minimum nonzero search budget when any usable time remains. |
+| `STABLE_EVAL_DELTA` | `32` | Evaluation delta, in 1/128 pawn units, considered similar for stable-move early exit. |
+
+## Budget Calculation
+
+For the side to move:
+
+```text
+usable_time = max(0, clock_time - MOVE_OVERHEAD_MS)
+earliest_end = min(usable_time, increment / 2 + usable_time / 64)
+target_end   = min(usable_time, increment * 3 / 4 + usable_time / 32)
+late_end     = min(usable_time, increment + usable_time / 16)
+hard_end     = min(usable_time, increment + usable_time / 8)
+```
+
+If `usable_time` is nonzero, every checkpoint should be at least `MIN_SEARCH_MS`, clamped back down to `usable_time` if the clock is nearly empty.
+
+The engine should never intentionally search past `hard_end`.
+
+## Iterative-Deepening Exit Rules
+
+The search controller checks time at iteration boundaries and may also check it between nodes.
+
+| Checkpoint | Behavior |
+| ---------- | -------- |
+| Before `earliest_end` | Always start the next iteration if another depth is allowed. |
+| At or after `earliest_end` | Stop after a completed iteration if the best move has been stable for five completed iterations and evaluations are similar. |
+| At or after `target_end` | Stop after a completed iteration if the best move has been stable for three completed iterations and evaluations are similar. |
+| At or after `late_end` | Stop after the current iteration unless the current best move changed this iteration or the score dropped by at least one pawn. |
+| At or after `hard_end` | Stop immediately and return the best fully completed result. Do not wait for the current iteration to finish. |
+
+Evaluations are similar when the absolute difference is at most `STABLE_EVAL_DELTA`.
+
+If no iteration has completed before `hard_end`, return the best legal move found so far. If no legal move has been found, keep searching only long enough to produce one legal move unless the game is already known to be over.

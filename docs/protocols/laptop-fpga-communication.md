@@ -1,76 +1,96 @@
 # Laptop-FPGA Communication
 
----
-### Engine Communication Protocol
+The host communicates with the FPGA as a single in-order byte stream. The host is responsible for UCI parsing, chess legality of incoming position/move commands, command serialization, and avoiding FIFO overflow.
 
-The engine receives inputs and sends outputs 1 byte at a time.
+The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum in the FPGA protocol. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command is complete or explicitly killed.
 
-Input to Engine:
-- Every input starts with an op-code for a certain operation
-- For every operation, there is a pre-determined number of data bytes to follow
-- Input operation or data is only considered valid if `data_in_valid` is asserted
-	- If not asserted, after an operation ends, engine goes into an idle state
-	- If not asserted mid-operation while engine expects input data, engine is to pause until asserted
+## UART Configuration
 
-Output from Engine:
-- Engine output is only considered valid if 
-- Every output starts with
+| Setting | Value |
+| ------- | ----- |
+| Data bits | 8 |
+| Parity | None |
+| Stop bits | 1 |
+| Byte order | Little-endian for multi-byte scalar fields |
 
----
-### UART Communication Protocol
+## Command Stream Rules
 
-Data is sent from the laptop to the FPGA via UART over USB.
+Every command starts with one opcode byte. Payload bytes immediately follow the opcode and have the fixed size shown in the command table.
 
-UART Config:
-- 8 data bits
-- no parity
-- 1 stop bit
+`data_in_valid` qualifies command and payload bytes. If the engine is waiting for a payload byte and `data_in_valid` is deasserted, the engine pauses in its current input state until the next valid byte arrives.
 
----
-### Communication Scenarios 
+The engine asserts `ready` when it can accept the next command byte. During fixed-size payload reception, `ready` may mean ready for the next payload byte rather than ready for a new command.
 
-**UART input continues despite buffer being full**
-- Laptop is responsible for ensuring no commands are sent if FIFO might be full
-- If FIFO is full, extra UART input is disregarded
-- `kill` and `remote_reset` operations is are exception to this and are always run
+The host should send no normal command while the engine is searching. The only expected mid-search communication is asynchronous kill/reset or output-flow control.
 
-**UART output buffer is full, but the engine has more output**
-- Output buffer should assert that it is full
-- Engine should pause output until `ready_for_result` is asserted again
+## Commands
 
-**Engine is ready for next operation, but next operation's data is only half transmitted**
-- The engine will begin processing the next operation and will stall when further data is required
+| Opcode | Command | Payload | Response |
+| ------ | ------- | ------- | -------- |
+| `0x00` | Get status | None | Status response. |
+| `0x01` | Set board | `FullBoard` payload, 36 bytes | Ack/status response. |
+| `0x02` | Make move | `Move`, 2 bytes | Ack/status response. |
+| `0x03` | Undo move | None | Ack/status response. |
+| `0x04` | New game | None | Ack/status response. |
+| `0x10` | Search depth | Depth, 1 byte | Search result when complete. |
+| `0x11` | Search fixed time | `TimeType`, 3 bytes | Search result when complete. |
+| `0x12` | Search on clock | `wtime`, `btime`, `winc`, `binc`; four `TimeType` values, 12 bytes total | Search result when complete. |
+| `0x13` | Search nodes | `NodeCountType`, 5 bytes | Search result when complete. |
+| `0x14` | Perft | Depth, 1 byte | Perft result when complete. |
+| `0x1f` | Kill | None | Status response after search is stopped. |
+| `0x20` | Get search result | None | Most recent search result. |
 
+The command payload encodings are defined in [binary-encoding.md](binary-encoding.md).
 
-Every data input should output a ready signal
-Every data output shout output a data-valid signal
+`Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into board-controller Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
 
-****
+`New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
 
-| Name       | Size (Bytes) | Description |
-| ---------- | ------------ | ----------- |
-|            |              |             |
-| Request ID |              |             |
-| Checksum   |              |             |
+## Responses
 
----
+Every response starts with a response-type byte followed by a fixed-size payload determined by the response type.
 
-**Laptop -> Engine**
-- See [engine.md](../modules/engine.md) for the current command list.
-- Ask for status of engine
-- Hard reset signal
-- Prompt new game (reset board, clear memory and heuristics as needed)
-- Set board position from encoding
-- Execute list of moves
-- Undo last move (?)
-- Execute operation (expects a response on completion)
-	- `SearchOnClock(clock data)`
-	- `SearchDepth(depth=10)`
-	- `Perft()`
+| Response Type | Name | Payload |
+| ------------- | ---- | ------- |
+| `0x80` | Status | Status byte, error byte, active operation byte. |
+| `0x81` | Ack | Status byte. |
+| `0x82` | Search result | Best move, score, node count, completed depth, end reason. |
+| `0x83` | Perft result | Node count and completed depth. |
+| `0xff` | Error | Error byte and status byte. |
 
+Search result payload:
 
-**Engine -> Laptop**
-* Send engine status
-* Send best move
-* Send board evaluation
-* Report error (?)
+| Field | Size | Encoding |
+| ----- | ---- | -------- |
+| Best move | 2 bytes | `Move`. |
+| Score | 2 bytes | Signed little-endian `EvalScore`, side-to-move point-of-view at the searched root. |
+| Node count | 5 bytes | `NodeCountType`. |
+| Completed depth | 1 byte | Unsigned depth. |
+| End reason | 1 byte | `0` normal, `1` depth limit, `2` time limit, `3` node limit, `4` killed, `5` error. |
+
+Status byte bits:
+
+| Bit | Meaning |
+| --- | ------- |
+| `0` | Engine ready for a new command. |
+| `1` | Search active. |
+| `2` | Output response pending. |
+| `3` | Error latched. |
+| `7:4` | Reserved zero. |
+
+Error byte values:
+
+| Value | Meaning |
+| ----- | ------- |
+| `0` | No error. |
+| `1` | Unknown opcode. |
+| `2` | Malformed payload or reserved bits were nonzero. |
+| `3` | RX overflow. |
+| `4` | UART framing error. |
+| `5` | Internal engine error. |
+
+## Backpressure
+
+Engine output is valid only when `data_out_valid` is asserted. If the host-side output path cannot accept another byte, the engine pauses response streaming until `ready_for_result` is asserted again.
+
+If the RX FIFO is full, normal incoming bytes may be dropped. The host must avoid this by respecting `ready` and by not streaming commands faster than the FPGA can accept them. Kill and reset are the only commands intended to bypass normal full-buffer behavior.

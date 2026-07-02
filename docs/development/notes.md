@@ -1,52 +1,43 @@
 # Miscellaneous Notes
 
-### Things to Look Into
-- Check if POSITIVE_DIAG/NEGATIVE_DIAG values are in the right order
-- Consider how to check if empty castle tile is safe during castling move generation.
-- Add assertions to check that parameters are valid 
+These notes contain open questions, speculative ideas, and implementation reminders. They are not final RTL requirements until promoted into architecture, protocol, or module docs.
 
+## Open Questions
 
-### Modules Hierarchy
-- Main
-	- rx_decode
-	- tx_encode
-	- Engine
-		- Board MEM
-		- Search Controller
-			- Timer
-			- Board Controller
-			- Move Generator
-			- Static Evaluator
+- Check whether the `BOARD_RANK` lookup table should be fixed or removed, because `getRank(pos)` already follows the documented `a1 = 0` convention.
+- Decide external-memory banking, cache structure, and physical packing for compact 96-bit TT entries.
+- Decide exact 7-segment display/debug behavior for the board wrapper.
 
+## Functionality to Test
 
-### Short-Term TODO
-- 
+- Castling, including blocked path, check on origin, transit-square attack, and destination-square attack.
+- En passant, including discovered-check rejection.
+- Check, double check, checkmate, and stalemate.
+- Promotion and underpromotion ordering.
+- Exact repetition-history memory layout for active game state and per-thread search lines.
+- TT hit, miss, replacement, and load/store conflict behavior.
 
+## Speculative Evaluation Ideas
 
-### Functionality to Test
-- castling
-- en passant
-- check
-- checkmate
-- stalemate
-- promotion
+- Game-phase interpolation between opening/middlegame/endgame tables.
+- Polynomial or cheaper fixed-point interpolation for game phase.
+- Pawn chains, connected pawns, isolated pawns, doubled pawns, weak pawns, and holes.
+- Attacker/defender counts and center-control bonuses.
+- King safety from nearby friendly pawns, nearby enemy pieces, and enemy-controlled surrounding squares.
+- Rook on open or half-open file.
+- Trapped bishop penalties.
+- Increase rook value as pawn count decreases.
+- Decrease knight value as pawn count decreases.
 
+## Future Search Ideas
 
-### Future Ideas
-- Search Algorithm
-	- [Add PVS search](https://www.chessprogramming.org/Principal_Variation_Search)
-	- Add transposition table
-	- Quiescence Search
-	- Add 3-move repetition
-	- Add 50-move draw
-- Error Detection/Prevention
-	- Add parity bit + stop bit checking
-	- Log unknown op-codes
-		- Clear on reset?
-	- Log FIFO overflow
-	- Enforce time limit on search
-- Hardware Design
-	- Optimize hardware by specify `'dx` for output when tile is occupied by `"SPARE_PIECE"`
-- Misc. Ideas
-	- Add attacker priority 
-	- [Use 64ths of a pawn instead of centi-pawns in evaluation](https://ieeexplore.ieee.org/document/1302962)
+- Principal variation search.
+- Quiescence search using captures and promotions only, without checking non-captures.
+- Root move diversity between Lazy SMP threads.
+
+## Error Detection Ideas
+
+- Log unknown opcodes.
+- Log FIFO overflow.
+- Distinguish UART framing errors from protocol errors.
+- Add optional host-side protocol tracing around every FPGA command and response.

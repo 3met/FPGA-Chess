@@ -1,80 +1,67 @@
-### Engine Ports
+# Engine (`engine`)
 
-A list of ports on the engine module.
+Status: planned final RTL spec.
 
-| Direction | Port Name          | Size (bits) | Descriptions and Usage                                                                                                                                             |
-| --------- | ------------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Input     | `clk`              | 1           |                                                                                                                                                                    |
-| Input     | `rst_n`            | 1           | Synchronous active-low reset                                                                                                                                       |
-| Input     | `data_in`          | 8           | Data input into the engine. Data can include operation codes, board data, etc.. Every operation is directly followed by data for a predetermined number of cycles. |
-| Input     | `data_in_valid`    | 1           | Indicates if `data_in` is valid                                                                                                                                    |
-| Input     | `kill`             | 1           |                                                                                                                                                                    |
-| Input     | `ready_for_result` | 1           | Indicates that the engine can continue streaming result. If this is not asserted, the engine should pause.                                                         |
-| Output    | `error_flag`       | 1           | Indicates the engine is in an error state (remove?)                                                                                                                |
-| Output    | `ready`            | 1           | Indicates the engine is ready for the next command or piece of data. Asserted as soon as current command is complete.                                              |
-| Output    | `data_out`         | 8           | Data the engine outputs.                                                                                                                                           |
-| Output    | `data_out_valid`   | 1           | Indicates that `data_out` is valid                                                                                                                                 |
+The engine module is the byte-command layer between RX/TX stream wrappers and the search controller. It parses fixed-size command payloads, owns engine-level state, keeps the active board state through the search controller direct-board path, and streams fixed-size responses.
 
----
-### Engine Commands
+## Ports
 
-*Note: For multi-byte values, the little-endian convention is used*
+| Direction | Port Name | Size | Description |
+| --------- | --------- | ---- | ----------- |
+| Input | `clk` | 1 | Engine clock. |
+| Input | `rst_n` | 1 | Synchronous active-low reset. |
+| Input | `data_in` | 8 | Command or payload byte from RX decode. |
+| Input | `data_in_valid` | 1 | Indicates `data_in` is valid. |
+| Input | `kill` | 1 | Asynchronous request to stop the current search. |
+| Input | `ready_for_result` | 1 | Indicates the downstream output path can accept another result byte. |
+| Output | `error_flag` | 1 | Indicates the engine has detected a protocol or internal error. |
+| Output | `ready` | 1 | Indicates the engine can accept the next command or payload byte for its current input state. |
+| Output | `data_out` | 8 | Response byte. |
+| Output | `data_out_valid` | 1 | Indicates `data_out` is valid. |
 
-How to deal with two board squares arriving in the same byte?
+## Commands
 
-| Command                | Description                                         | Inputs (In Order)                      |
-| ---------------------- | --------------------------------------------------- | -------------------------------------- |
-| Get Status             | Returns the status of the engine                    |                                        |
-| Write to Board Memory  | Write a board position to board memory              | Board Memory Address<br><br>Board Data |
-| Read from Board Memory | Read a board position form board memory             | Board Memory Address                   |
-| Load Board from Memory | Load a position from board memory as the active board state | Board Memory Address                   |
-| Copy Board to Memory   | Copy the active board to memory                     | Board Memory Address                   |
-| Make Move              | Make a move on active board                         | Move Data                              |
-| Reverse Move           | Reverse a move on active board                      |                                        |
-| Search Depth           | Searches Current Position to a given depth          | Depth to Search                        |
-| Search Fixed Time      | Searches for a fixed amount of time before stopping | Time to Search                         |
-| Search on Clock        | Completes a search given chess clock information    | `wtime`, `btime`, `winc`, `binc`       |
-| Search set Nodes       | Searches a set number of nodes                      | Nodes Count to Search                  |
-| Perft                  | Count strictly legal moves to a certain depth.      | Depth to Search                        |
-| Kill                   | Kills the current search                            |                                        |
-| Get search result      | Returns result of most recent search                |                                        |
+The engine command byte and payload formats are defined in [laptop-fpga-communication.md](../protocols/laptop-fpga-communication.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
----
-### Engine States
+The external protocol should expose `Set board` as a single fixed-size command. The engine may decompose it into multiple direct-board operations internally, but this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
 
-A list of states the engine can occupy
+## States
 
-| State                  | Description                                                                     |
-| ---------------------- | ------------------------------------------------------------------------------- |
-| Engine Error (remove?) | Indicates a fatal error with the engine                                         |
-| Idle                   | Engine is awaiting a task                                                       |
-| Write Board Memory     | Write a board position to board memory                                          |
-| Read Board Memory      | Read a board position from board memory                                         |
-| Load Board from Memory | Load a position from board memory as the active board state                     |
-| Copy Board to Memory   | Copy the active board to memory                                                 |
-| Make Move              | Make a move on active board state                                               |
-| Reverse Move           | Reverse a move on active board state                                            |
-| Search                 | Sets search parameters, waits for search to complete, then saves search result. |
-| Perft                  | Count strictly legal moves to a certain depth.                                  |
-| Output Result          | Outputs the result one byte at a time.                                          |
-| Output Paused          | Pause output as parent isn't ready for data.                                    |
-| Input Paused           | Paused while waiting for more input data.                                       |
+| State | Description |
+| ----- | ----------- |
+| Idle | Engine is awaiting a command byte. |
+| Receive Payload | Engine is collecting the fixed-size payload for the current command. |
+| Direct Board | Engine is applying setup, make-move, or undo-move operations through the search controller direct-board path. |
+| New Game | Engine is clearing game/search state and resetting the active board to the normal starting position. |
+| Search | Engine has started a search and waits for completion, kill, or error. |
+| Perft | Engine has started a perft operation and waits for completion, kill, or error. |
+| Output Result | Engine is streaming a response one byte at a time. |
+| Output Paused | Engine has response bytes pending but `ready_for_result` is deasserted. |
+| Error | Engine detected a malformed command, unsupported opcode, or internal error and will emit an error response. |
 
----
-### Engine Registers
+## Registers
 
-| Register Name | Size (bits) | Description                                          |
-| ------------- | ----------- | ---------------------------------------------------- |
-| `state`       |             | Current Engine State                                 |
-| `wtime`       | `TIME_BITS` | Time left on the clock for White (in milliseconds).  |
-| `btime`       | `TIME_BITS` | Time left on the clock for Black (in milliseconds).  |
-| `winc`        | `TIME_BITS` | Time increment per move for While (in milliseconds). |
-| `binc`        | `TIME_BITS` | Time increment per move for Black (in milliseconds). |
-| `depth_limit` |             | The max depth to search.                             |
-| `node_limit`  |             | The max number of evaluations to make.               |
-| `time_limit`  | `TIME_BITS` | Time max amount of time to spend.                    |
+| Register Name | Size | Description |
+| ------------- | ---- | ----------- |
+| `state` | Enum | Current engine FSM state. |
+| `curr_opcode` | 8 | Command currently being processed. |
+| `payload_count` | Small counter | Number of payload bytes received for the current command. |
+| `payload_shift` | Command-dependent | Temporary storage for the current command payload. |
+| `wtime` | `TIME_BITS` | White clock time in milliseconds. |
+| `btime` | `TIME_BITS` | Black clock time in milliseconds. |
+| `winc` | `TIME_BITS` | White increment in milliseconds. |
+| `binc` | `TIME_BITS` | Black increment in milliseconds. |
+| `depth_limit` | `DepthType` or wider command field | Maximum search depth. |
+| `node_limit` | `NODE_COUNT_BITS` | Maximum node count. |
+| `time_limit` | `TIME_BITS` | Fixed search duration. |
+| `last_score` | `EvalScore` | Score from the most recent completed search. |
+| `last_move` | `Move` | Best move from the most recent completed search. |
+| `last_node_count` | `NODE_COUNT_BITS` | Node count from the most recent completed search. |
 
----
-### Engine Child Modules
+## New Game Semantics
+
+The New Game command follows UCI `ucinewgame` semantics. It clears active search state, per-thread stacks, TT contents or TT generation validity, repetition/history state, latched errors, pending responses, and any command FIFO contents that can be safely discarded. It resets the active board to the normal chess starting position.
+
+## Child Modules
 
 - [`search_controller`](search-controller.md)

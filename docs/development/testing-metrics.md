@@ -1,9 +1,15 @@
 # Engine Testing Metrics
 
-Metrics used to measure the engine's performance.
+Metrics used to measure correctness, search quality, and hardware utilization.
 
-- Measure how many cycles spent in each state
-- Measure utilization
-- Cycles per Evaluation
-- EBF
-- Distribution of search end types.
+| Metric | Purpose |
+| ------ | ------- |
+| Cycles per engine state | Find FSM stalls and unexpected waits. |
+| Pipeline utilization | Measure accepted requests per cycle for board update, move generation, static evaluation, load TT, and store TT. |
+| Cycles per node | Compare search throughput across builds. |
+| Nodes per second | Compare host-visible engine speed. |
+| Effective branching factor | Measure move ordering and pruning quality. |
+| TT hit rate | Measure transposition-table effectiveness. |
+| TT load/store stalls | Measure external-memory pressure. |
+| Search end reason distribution | Confirm time, depth, node, kill, and error endings behave as expected. |
+| Perft correctness | Validate legal move generation and board update/reverse behavior. |

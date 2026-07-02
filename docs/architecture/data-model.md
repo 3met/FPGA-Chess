@@ -48,7 +48,7 @@ Unless otherwise stated, multi-bit scalar values are unsigned. Numeric enum valu
 
 `Position` is 6 bits wide and indexes a square from `0` to `63`.
 
-The current indexing convention is:
+The final indexing convention is:
 
 | Square | Position |
 | ------ | -------- |
@@ -76,6 +76,8 @@ Both are 3 bits wide.
 | `BoardFile` | File index from `0` for file a through `7` for file h. |
 
 The helper functions `getRank`, `getFile`, and `getPosition` should follow the same convention.
+
+Current RTL note: `getRank(pos)` and `getFile(pos)` follow this convention, but the `BOARD_RANK` lookup table in `hardware/rtl/defs.sv` is currently reversed and should be fixed or removed.
 
 ### Display Order
 
@@ -151,7 +153,7 @@ When serialized into a 4-bit field, use `{ep_file[2:0], has_ep}` so bit `0` is t
 
 The total packed width is 272 bits.
 
-`FullBoard` does not include the fullmove number, board hash, PST score, search history, or repetition history. Those values are tracked separately when needed.
+`FullBoard` does not include the fullmove number, board hash, PST score, search history, or repetition history. Those values are tracked separately when needed. A fully legal implementation must maintain repetition history outside `FullBoard`.
 
 ## Search, Evaluation, and Metric Types
 
@@ -164,7 +166,7 @@ The total packed width is 272 bits.
 
 ### Evaluation Scores
 
-`EvalScore` is a signed 16-bit value. Positive scores are good for the side specified by the module using the score. Module docs must state whether a score is from White's perspective or the side-to-move perspective.
+`EvalScore` is a signed 16-bit value. Raw static evaluation and incremental PST/material state should be White-relative in the final design: positive scores are good for White and negative scores are good for Black. Search should convert raw evaluation into side-to-move point-of-view scores at search boundaries.
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
@@ -193,10 +195,22 @@ Material values are available in two forms:
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
-| `BoardHash` | `32` bits | Zobrist-style board hash value. |
-| `THREAD_COUNT` | Parameter | Number of hardware search threads. The target design range is roughly 15-30 threads. |
+| `BOARD_HASH_BITS` | `64` default | Width of the live Zobrist board hash. Keep parameterized for experiments, but use 64 bits for the main design. |
+| `BoardHash` | `BOARD_HASH_BITS` bits | Zobrist-style board hash value. Current RTL note: `hardware/rtl/defs.sv` still uses 32 bits and should be widened before TT integration. |
+| `THREAD_COUNT` | Parameter | Number of hardware search threads. The current documented default is `8`, but the value must remain parameterized. |
 | `THREAD_ID_BITS` | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1. |
 | `ThreadID` | `THREAD_ID_BITS` bits | Hardware search thread identifier. |
+
+### Transposition-Table Format Parameters
+
+These parameters control TT storage format rather than the live board hash. The default should favor compact entries unless the external-memory interface naturally moves 128-bit entries.
+
+| Name | Default | Description |
+| ---- | ------- | ----------- |
+| `TT_ENTRY_BITS` | `96` | Logical TT entry width for the compact profile. |
+| `TT_VERIFY_BITS` | `48` | Number of high hash bits stored in each compact TT entry for hit verification. |
+| `TT_DEPTH_BITS` | `6` | Stored depth width. |
+| `TT_AGE_BITS` | `8` | Replacement generation/age width. |
 
 ## Directions
 
