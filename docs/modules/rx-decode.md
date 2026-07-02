@@ -8,7 +8,7 @@ The input decoder receives UART bytes, buffers normal command/data bytes, and ex
 
 The input decoder contains an 8-bit FIFO with parameterized depth. The documented default depth is 1024 words.
 
-If the FIFO is empty, `rx_stream_valid` is deasserted. The decoder should not emit a fake idle command byte as valid data.
+If the FIFO is empty, `rx_stream_valid` is deasserted. The decoder should not emit a synthetic idle command byte as valid data.
 
 Normal bytes may be dropped or flagged as overflow if the FIFO is full. The host is responsible for avoiding overflow by respecting engine readiness. Kill and remote reset are exceptions and should be recognized even when the normal FIFO is full.
 

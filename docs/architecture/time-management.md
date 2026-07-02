@@ -2,7 +2,7 @@
 
 Time management applies to `Search on Clock`. Fixed-time, fixed-depth, fixed-node, and perft commands use their explicit limits instead.
 
-All time values use the 24-bit millisecond `TimeType`, so representable durations must be less than `16,777,215 ms`, about 4.66 hours.
+All time values use the 24-bit millisecond `TimeType`; representable durations must be less than `16,777,215 ms`, about 4.66 hours.
 
 ## Parameters
 
@@ -24,7 +24,7 @@ late_end     = min(usable_time, increment + usable_time / 16)
 hard_end     = min(usable_time, increment + usable_time / 8)
 ```
 
-If `usable_time` is nonzero, every checkpoint should be at least `MIN_SEARCH_MS`, clamped back down to `usable_time` if the clock is nearly empty.
+If `usable_time` is nonzero, every checkpoint should be at least `MIN_SEARCH_MS`, clamped to `usable_time` if the clock is nearly empty.
 
 The engine should never intentionally search past `hard_end`.
 

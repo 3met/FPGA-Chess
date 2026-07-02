@@ -2,14 +2,14 @@
 
 Status: planned final RTL spec.
 
-The search controller owns the hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
+The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
 
 ## Operations
 
 | Operation | Description |
 | --------- | ----------- |
 | Idle | Search controller is idle. Result ports hold the most recent completed search result. |
-| Direct Board | Parent module directly applies a board operation. Used for setup, make move, undo move, and active-position maintenance. |
+| Direct Board | Parent module applies a board operation directly. Used for setup, make move, undo move, and active-position maintenance. |
 | Search Depth | Search current position to a fixed depth. |
 | Search Fixed Time | Search until the fixed time limit expires. |
 | Search on Clock | Search using clock and increment information from the engine layer. |

@@ -2,7 +2,7 @@
 
 Status: planned required final RTL spec.
 
-The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response is routed back.
+The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response returns.
 
 ## Request
 
@@ -15,7 +15,7 @@ Each request includes:
 | `depth` | Remaining search depth for replacement and cutoff decisions. |
 | `alpha` | Current alpha bound, if the search controller wants the TT pipeline to precompute cutoff usability. |
 | `beta` | Current beta bound, if the search controller wants the TT pipeline to precompute cutoff usability. |
-| Route metadata | Any state needed to route the response back to the correct thread state. In the base design, `thread_id` is sufficient because each thread has at most one in-flight TT lookup request. |
+| Route metadata | State needed to route the response back to the correct thread state. In the base design, `thread_id` is sufficient because each thread has at most one in-flight TT lookup request. |
 
 ## Response
 
@@ -67,7 +67,7 @@ A 128-bit full-key profile is also valid when external memory naturally moves 12
 | `111:104` | Age/generation | Replacement-policy generation. |
 | `127:112` | Aux | Optional cached static eval, replacement metadata, node type, or reserved bits. |
 
-Physical packing may differ if the external-memory interface has a different native width, but the logical fields should be preserved. Padding is driven by the memory-controller beat width and burst alignment, not by SDRAM versus DDR as abstract memory types. For example, dense 96-bit entries are compact but awkward on a 64-bit beat interface because some entries cross beat boundaries; a 128-bit beat interface may make a padded 128-bit entry faster and simpler even though it stores fewer entries.
+Physical packing may differ if the external-memory interface has a different native width, but the logical fields should be preserved. Padding is driven by the memory-controller beat width and burst alignment, not by SDRAM versus DDR as abstract memory types. For example, dense 96-bit entries are compact but awkward on a 64-bit beat interface because some entries cross beat boundaries; a 128-bit beat interface may make padded 128-bit entries faster and simpler even though it stores fewer entries.
 
 ## Replacement Policy
 

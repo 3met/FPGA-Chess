@@ -2,7 +2,7 @@
 
 Status: partially implemented; this document describes the final target contract.
 
-The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether that candidate is strictly legal. A candidate is consumed for the current node whether or not it is legal.
+The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is strictly legal. A candidate is consumed for the current node whether or not it is legal.
 
 ## Ports
 
@@ -48,9 +48,9 @@ The move generator accepts a legal input position and emits one ordered candidat
 
 ## Ordered Move Generation
 
-The intended ordering architecture scores candidate destination tiles and then selects the best board-wide candidate. Each tile has information about the closest piece in each cardinal, diagonal, and knight direction. Candidate scores may use material trades, attacker/defender counts, target-piece value, target-square flags, and TT/root move hints.
+The intended ordering architecture scores candidate destination tiles, then selects the best board-wide candidate. Each tile has information about the closest piece in each cardinal, diagonal, and knight direction. Candidate scores may use material trades, attacker/defender counts, target-piece value, target-square flags, and TT/root move hints.
 
-Targeted Generation is used for TT move ordering and root move forcing. If the target move is legal and unsearched, it must outrank all other candidates for that dispatch.
+Targeted Generation supports TT move ordering and root move forcing. If the target move is legal and unsearched, it must outrank all other candidates for that dispatch.
 
 Promotion ordering should prioritize queen promotions first. Underpromotion policy is part of the qsearch/search design and should be explicit before integration.
 

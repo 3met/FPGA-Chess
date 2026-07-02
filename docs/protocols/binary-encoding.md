@@ -1,6 +1,6 @@
 # Binary Encoding
 
-This file defines byte and bit encodings used by the host-FPGA protocol. Multi-byte integers are little-endian unless a table explicitly says otherwise.
+This document defines byte and bit encodings used by the host-FPGA protocol. Multi-byte integers are little-endian unless a table explicitly says otherwise.
 
 ## Tile Data Encoding
 

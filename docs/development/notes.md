@@ -1,6 +1,6 @@
 # Miscellaneous Notes
 
-These notes contain open questions, speculative ideas, and implementation reminders. They are not final RTL requirements until promoted into architecture, protocol, or module docs.
+These notes contain open questions, speculative ideas, and implementation reminders. They are not final RTL requirements unless promoted into architecture, protocol, or module docs.
 
 ## Open Questions
 
@@ -32,7 +32,7 @@ These notes contain open questions, speculative ideas, and implementation remind
 ## Future Search Ideas
 
 - Principal variation search.
-- Quiescence search using captures and promotions only, without checking non-captures.
+- Quiescence search refinements beyond the required captures-and-promotions baseline, still excluding checking non-captures unless promoted into the search design.
 - Root move diversity between Lazy SMP threads.
 
 ## Error Detection Ideas

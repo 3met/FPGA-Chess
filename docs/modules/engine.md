@@ -2,7 +2,7 @@
 
 Status: planned final RTL spec.
 
-The engine module is the byte-command layer between RX/TX stream wrappers and the search controller. It parses fixed-size command payloads, owns engine-level state, keeps the active board state through the search controller direct-board path, and streams fixed-size responses.
+The engine module is the byte-command layer between RX/TX stream wrappers and the search controller. It parses fixed-size command payloads, owns engine-level state, maintains active board state through the search controller direct-board path, and streams fixed-size responses.
 
 ## Ports
 
@@ -23,7 +23,7 @@ The engine module is the byte-command layer between RX/TX stream wrappers and th
 
 The engine command byte and payload formats are defined in [laptop-fpga-communication.md](../protocols/laptop-fpga-communication.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
-The external protocol should expose `Set board` as a single fixed-size command. The engine may decompose it into multiple direct-board operations internally, but this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
+The external protocol should expose `Set board` as a single fixed-size command. The engine may decompose it into multiple direct-board operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
 
 ## States
 
@@ -60,7 +60,7 @@ The external protocol should expose `Set board` as a single fixed-size command. 
 
 ## New Game Semantics
 
-The New Game command follows UCI `ucinewgame` semantics. It clears active search state, per-thread stacks, TT contents or TT generation validity, repetition/history state, latched errors, pending responses, and any command FIFO contents that can be safely discarded. It resets the active board to the normal chess starting position.
+The New Game command follows UCI `ucinewgame` semantics. It clears active search state, per-thread stacks, TT contents or TT generation validity, repetition/history state, latched errors, pending responses, and any command FIFO contents that can be safely discarded. It also resets the active board to the normal chess starting position.
 
 ## Child Modules
 

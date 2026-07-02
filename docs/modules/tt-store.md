@@ -2,7 +2,7 @@
 
 Status: planned required final RTL spec.
 
-The TT store pipeline writes completed search results into the shared transposition table. Stores are less latency-sensitive than lookups and may be buffered or stalled when memory bandwidth is needed for lookup requests.
+The TT store pipeline writes completed search results into the shared transposition table. Stores are less latency-sensitive than lookups and may be buffered or stalled when lookups need memory bandwidth.
 
 ## Request
 

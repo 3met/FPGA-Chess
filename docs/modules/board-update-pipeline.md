@@ -2,7 +2,7 @@
 
 Status: partially implemented; this document describes the final target contract.
 
-The board update pipeline is a pipelined board-state transformer. It accepts a complete `FullBoard`, side data, and an operation, then outputs the transformed board and updated side data after a fixed latency. It does not own the long-term active board state.
+The board update pipeline is a pipelined board-state transformer. It accepts a complete `FullBoard`, side data, and an operation, then outputs the transformed board and updated side data after fixed latency. It does not own long-term active board state.
 
 ## Ports
 
@@ -48,13 +48,13 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Board Setup
 
-The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Board-update-pipeline reset should not be required to create a legal position.
+The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Resetting the board update pipeline should not be required to create a legal position.
 
 ## Hashing
 
 Zobrist hashing is required in the final design. Tile, turn, castling, and en passant hash components should be updated incrementally as part of board operations.
 
-Current RTL note: the board update pipeline has placeholder 32-bit Zobrist constants but does not yet implement complete hash updates. The final design should use 64-bit hashes.
+Current RTL note: the board update pipeline has placeholder 32-bit Zobrist constants but does not yet implement complete hash updates. The final design uses 64-bit hashes.
 
 ## Move History
 

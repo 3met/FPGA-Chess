@@ -2,7 +2,7 @@
 
 The host communicates with the FPGA as a single in-order byte stream. The host is responsible for UCI parsing, chess legality of incoming position/move commands, command serialization, and avoiding FIFO overflow.
 
-The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum in the FPGA protocol. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command is complete or explicitly killed.
+The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command is complete or explicitly killed.
 
 ## UART Configuration
 
@@ -17,7 +17,7 @@ The FPGA command protocol uses a command byte followed by an implicit fixed-size
 
 Every command starts with one opcode byte. Payload bytes immediately follow the opcode and have the fixed size shown in the command table.
 
-`data_in_valid` qualifies command and payload bytes. If the engine is waiting for a payload byte and `data_in_valid` is deasserted, the engine pauses in its current input state until the next valid byte arrives.
+`data_in_valid` qualifies command and payload bytes. If the engine is waiting for a payload byte and `data_in_valid` is deasserted, the engine remains in its current input state until the next valid byte arrives.
 
 The engine asserts `ready` when it can accept the next command byte. During fixed-size payload reception, `ready` may mean ready for the next payload byte rather than ready for a new command.
 

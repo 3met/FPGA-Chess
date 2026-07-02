@@ -18,7 +18,7 @@ The board update pipeline may maintain a White-relative incremental PST score. T
 
 ## Board-State Evaluation
 
-The static evaluator operates from board-state inputs. Evaluation terms may be computed with a PE-style internal array or other parallel per-square hardware, but the module interface should be a board-state pipeline interface and should not own the canonical board state.
+The static evaluator operates from board-state inputs. Evaluation terms may be computed with a processing-element-style internal array or other parallel per-square hardware, but the module interface should be a board-state pipeline interface and should not own the canonical board state.
 
 Evaluation is hybrid. Some terms may be maintained or recomputed alongside board update, while other terms are fully computed by static evaluation on dispatch.
 
@@ -33,4 +33,4 @@ Evaluation is hybrid. Some terms may be maintained or recomputed alongside board
 
 ## Current RTL Notes
 
-The current `static_evaluator` RTL is incomplete and outputs a White-relative score. The current `board_update_pipeline` maintains `pst_eval` from the active-color perspective; final integration should normalize this to White-relative PST state or explicitly convert at the boundary.
+The current `static_evaluator` RTL is incomplete and outputs a White-relative score. The current `board_update_pipeline` maintains `pst_eval` from the active-color perspective; final integration should normalize it to White-relative PST state or explicitly convert at the boundary.

@@ -1,10 +1,10 @@
 # Chip Design
 
-The chip is a hardware chess search engine controlled by a minimal host-side Python program. The Python program exposes UCI, validates and parses incoming positions and moves, logs activity, and translates UCI-level commands into a compact FPGA command protocol. FPGA commands are assumed valid after host parsing; defensive legality validation for host-supplied commands is not a primary FPGA responsibility.
+The chip is a hardware chess search engine controlled by a minimal host-side Python program. The host exposes UCI, validates and parses incoming positions and moves, logs activity, and translates UCI commands into a compact FPGA protocol. FPGA commands are assumed valid after host parsing; defensive legality validation for host-supplied commands is not a primary FPGA responsibility.
 
 The FPGA maintains the active game/search state between commands and performs the search work. Once a search command begins, the FPGA should not require further host communication until it finishes, except for asynchronous control such as kill/reset or output backpressure.
 
-The internal design uses explicit board-state values passed through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
+The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
 The target design has a parameterized number of search threads, with `THREAD_COUNT = 8` as the current documented default. Threads cooperate using Lazy SMP: each thread runs an independent iterative-deepening alpha/beta search, and the required shared transposition table is the only shared search knowledge between threads.
 
@@ -29,15 +29,15 @@ The target design has a parameterized number of search threads, with `THREAD_COU
 
 The five major search pipelines are board update, static evaluation, ordered move generation, TT lookup, and TT store.
 
-Board update, static evaluation, and move generation are high-area pipelines and should be kept busy by dispatching work from many search threads. For the base design, each search thread may have at most one in-flight request in each pipeline. This avoids spending pipeline slots on duplicate work for the same thread position and allows pipeline results to be routed using `thread_id` without requiring a wider request ID.
+Board update, static evaluation, and move generation are high-area pipelines and should be kept busy with work from many search threads. For the base design, each search thread may have at most one in-flight request in each pipeline. This avoids duplicate work for the same thread position and lets pipeline results be routed by `thread_id` without a wider request ID.
 
-Pipeline-parallelism means different threads can occupy different stages of the same pipeline at the same time. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
+Pipeline parallelism means different threads can occupy different stages of the same pipeline at the same time. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
 
 The main pipelines should be designed as throughput pipelines that can accept a new request each cycle when input work is available and downstream resources are not stalled. The latency may be many cycles; the throughput goal is one accepted request per cycle. TT lookup/store throughput is limited by external memory bandwidth.
 
 ## State Ownership
 
-The FPGA maintains the active game state between commands. The host can send setup, make-move, undo-move, and search commands; the Python host is responsible for parsing and validating UCI inputs before encoding those commands.
+The FPGA maintains active game state between commands. The host can send setup, make-move, undo-move, and search commands; the Python host is responsible for parsing and validating UCI inputs before encoding those commands.
 
 Search owns per-thread state. Each thread keeps an active search stack and stack records for undo rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but should not be treated as the long-term owner of the engine position.
 

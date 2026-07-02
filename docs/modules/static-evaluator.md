@@ -26,4 +26,4 @@ Positive `static_eval` values favor White. Negative values favor Black. The eval
 
 ## Current RTL Notes
 
-The current RTL is incomplete and currently targets White-relative output, which matches the final evaluation convention.
+The current RTL is incomplete and targets White-relative output, which matches the final evaluation convention.

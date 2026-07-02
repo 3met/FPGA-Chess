@@ -2,7 +2,7 @@
 
 ## Search Model
 
-Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP using only the shared transposition table.
+Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP and share only the transposition table.
 
 The number of threads is parameterized at build time. The current documented default is `THREAD_COUNT = 8`, but this is a design parameter and should remain easy to change for each FPGA build.
 
@@ -16,7 +16,7 @@ Each thread owns its search stack, alpha/beta values, depth counters, node count
 
 Search uses stack records for undo rather than storing a full board state at every ply. A push move sends the current board state and move into the board update pipeline, and a reverse move uses the stored move record to recover the previous state.
 
-For the base design, a thread may have at most one in-flight request per major pipeline. This rule lets pipeline results be routed by `thread_id` alone. If future designs allow multiple in-flight requests from the same thread to the same pipeline, requests must add a generation counter or request ID so stale results can be discarded safely.
+For the base design, a thread may have at most one in-flight request per major pipeline. This lets pipeline results be routed by `thread_id` alone. If future designs allow multiple in-flight requests from the same thread to the same pipeline, requests must add a generation counter or request ID so stale results can be discarded safely.
 
 ## Pipeline Scheduling
 
@@ -28,7 +28,7 @@ Pipeline arbitration prioritizes TT lookups over TT stores, because lookups bloc
 
 ## Move Generation and Legality
 
-The move generator accepts a legal input position and emits one ordered candidate move per dispatch. The generator also reports whether the emitted candidate is legal. If the candidate is illegal, it is still considered dispatched/consumed for that node, and the thread should send the position through move generation again to obtain the next candidate.
+The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is legal. If the candidate is illegal, it is still consumed for that node, and the thread should dispatch move generation again to obtain the next candidate.
 
 Illegal-move filtering is intended to cover cases such as pinned pieces, king moves into attacked squares, check restrictions, double-check restrictions, en passant discovered checks, and castling through check. The board update pipeline should not be responsible for selecting a replacement move after an illegal move is rejected.
 
@@ -36,7 +36,7 @@ Host-supplied game-position commands are assumed valid because the Python host v
 
 ## Transposition Table Use
 
-The TT is a required shared Lazy SMP structure between threads. TT lookup can provide cutoffs, scores, and move-ordering hints. TT stores publish completed node results for use by other threads.
+The TT is the required shared Lazy SMP structure between threads. TT lookup can provide cutoffs, scores, and move-ordering hints. TT stores publish completed node results for use by other threads.
 
 The primary TT is stored in external memory behind a vendor-neutral wrapper, with a BRAM cache when the target FPGA has enough block memory to make caching useful.
 
