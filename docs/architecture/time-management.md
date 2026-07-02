@@ -6,11 +6,11 @@ All time values use the 24-bit millisecond `TimeType`; representable durations m
 
 ## Parameters
 
-| Name | Default | Description |
-| ---- | ------- | ----------- |
-| `MOVE_OVERHEAD_MS` | `50` | Time reserved for host/FPGA latency and command turnaround. |
-| `MIN_SEARCH_MS` | `10` | Minimum nonzero search budget when any usable time remains. |
-| `STABLE_EVAL_DELTA` | `32` | Evaluation delta, in 1/128 pawn units, considered similar for stable-move early exit. |
+| Name                | Default | Description                                                                           |
+| ------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `MOVE_OVERHEAD_MS`  | `20`    | Time reserved for host/FPGA latency and command turnaround.                           |
+| `MIN_SEARCH_MS`     | `10`    | Minimum nonzero search budget when any usable time remains.                           |
+| `STABLE_EVAL_DELTA` | `32`    | Evaluation delta, in 1/128 pawn units, considered similar for stable-move early exit. |
 
 ## Budget Calculation
 

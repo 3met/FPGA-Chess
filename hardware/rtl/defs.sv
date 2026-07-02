@@ -89,30 +89,6 @@ package general_chess_defs;
 	localparam Tile BLACK_KING   = Tile'({BLACK, KING});
 
 
-	// Map position to rank
-	localparam BoardRank BOARD_RANK[64] = '{
-		7, 7, 7, 7, 7, 7, 7, 7,
-		6, 6, 6, 6, 6, 6, 6, 6,
-		5, 5, 5, 5, 5, 5, 5, 5,
-		4, 4, 4, 4, 4, 4, 4, 4,
-		3, 3, 3, 3, 3, 3, 3, 3,
-		2, 2, 2, 2, 2, 2, 2, 2,
-		1, 1, 1, 1, 1, 1, 1, 1,
-		0, 0, 0, 0, 0, 0, 0, 0
-	};
-
-	// Map position to file
-	localparam BoardFile BOARD_FILE[0:63] = '{
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7,
-		0, 1, 2, 3, 4, 5, 6, 7
-	};
-
 	// Map position to positive-sloped diagonal
 	localparam logic[3:0] POSITIVE_DIAG[0:63] = '{
 		0,	1,	2,	3,	4,	5,	6,	7,
@@ -158,7 +134,7 @@ package general_chess_defs;
 	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] PlyIndex;
 
 	// Data type for a Zobrist position key
-	typedef logic [31:0] ZobristKey;
+	typedef logic [63:0] ZobristKey;
 
 
 	// -- Evaluation Related Definitions --

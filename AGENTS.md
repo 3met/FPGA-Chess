@@ -7,7 +7,7 @@ Relevant docs are under `docs/`. Start with [docs/README.md](docs/README.md), th
 * All software should be written such that it can be run on both Windows and Linux
 * All RTL should be written such that it synthesizes for both Altera and Xilinx
 * FPGA setup, startup, and configuration time is irrelevantly small compared to search time, so minimize area where possible and reasonable here
-
+* After any RTL changes, correct any docs if they are now invalid or out of date
 
 ### Code Style
 

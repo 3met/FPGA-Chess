@@ -4,7 +4,6 @@ These notes contain open questions, speculative ideas, and implementation remind
 
 ## Open Questions
 
-- Check whether the `BOARD_RANK` lookup table should be fixed or removed, because `getRank(pos)` already follows the documented `a1 = 0` convention.
 - Decide external-memory banking, cache structure, and physical packing for compact 96-bit TT entries.
 - Decide exact 7-segment display/debug behavior for the board wrapper.
 
@@ -41,3 +40,7 @@ These notes contain open questions, speculative ideas, and implementation remind
 - Log FIFO overflow.
 - Distinguish UART framing errors from protocol errors.
 - Add optional host-side protocol tracing around every FPGA command and response.
+
+## Current RTL Notes
+
+The current `static_evaluator` RTL is incomplete and outputs a White-relative score. The current `board_update_pipeline` maintains `pst_eval` from the active-color perspective; final integration should normalize it to White-relative PST state or explicitly convert at the boundary.

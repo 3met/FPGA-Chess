@@ -77,11 +77,9 @@ Both are 3 bits wide.
 
 The helper functions `getRank`, `getFile`, and `getPosition` should follow the same convention.
 
-Current RTL note: `getRank(pos)` and `getFile(pos)` follow this convention, but the `BOARD_RANK` lookup table in `hardware/rtl/defs.sv` is currently reversed and should be fixed or removed.
-
 ### Display Order
 
-`SHOW_ORDER` lists positions in human board-display order from `a8` through `h1`. This is useful for debug output and displays, not for core board storage.
+`SHOW_ORDER` lists positions in human board-display order from `a8` through `h1`. This is useful for debug output and displays.
 
 ## Packed Structs
 
@@ -106,11 +104,11 @@ Common tile constants:
 
 `Move` is a 14-bit packed struct.
 
-| Bits | Field | Meaning |
-| ---- | ----- | ------- |
-| `13:8` | `from_pos` | Origin square. |
-| `7:2` | `to_pos` | Destination square. |
-| `1:0` | `promo_piece` | Promotion piece if the move promotes. Otherwise don't-care. |
+| Bits   | Field         | Meaning                                                     |
+| ------ | ------------- | ----------------------------------------------------------- |
+| `13:8` | `from_pos`    | Origin square.                                              |
+| `7:2`  | `to_pos`      | Destination square.                                         |
+| `1:0`  | `promo_piece` | Promotion piece if the move promotes. Otherwise don't-care. |
 
 `NULL_MOVE` is encoded as `{from_pos=0, to_pos=0, promo_piece=x}`.
 
@@ -125,8 +123,6 @@ Common tile constants:
 | `1` | `black_kingside` | Black can castle king-side. |
 | `0` | `black_queenside` | Black can castle queen-side. |
 
-When serialized outside SystemVerilog structs, use the order `{white_kingside, white_queenside, black_kingside, black_queenside}` unless a module-specific interface explicitly documents a different bit order.
-
 ### En Passant State
 
 The canonical internal representation is two fields:
@@ -135,8 +131,6 @@ The canonical internal representation is two fields:
 | ----- | ----- | ------- |
 | `has_ep` | 1 bit | Current position has an en passant target file. |
 | `ep_file` | 3 bits | Target file if `has_ep` is asserted. |
-
-When serialized into a 4-bit field, use `{ep_file[2:0], has_ep}` so bit `0` is the valid bit and bits `3:1` are the file. This matches the newer `board_update_pipeline` set-data interface.
 
 ### `FullBoard`
 
@@ -153,7 +147,7 @@ When serialized into a 4-bit field, use `{ep_file[2:0], has_ep}` so bit `0` is t
 
 The total packed width is 272 bits.
 
-`FullBoard` does not include the fullmove number, Zobrist key, PST score, search history, or repetition history. Those values are tracked separately when needed. A fully legal implementation must maintain repetition history outside `FullBoard`.
+`FullBoard` does not include the fullmove number, Zobrist key, PST score, search history, or repetition history. Those values are tracked separately when needed.
 
 ## Search, Evaluation, and Metric Types
 
@@ -184,22 +178,22 @@ Material values are available in two forms:
 
 ### Time and Node Counts
 
-| Name | Value | Description |
-| ---- | ----- | ----------- |
-| `TIME_BITS` | `24` | Number of bits used to store milliseconds. Maximum representable duration is `16,777,215 ms`, about 4.66 hours. |
-| `TimeType` | `24` bits | Time value in milliseconds. |
-| `NODE_COUNT_BITS` | `40` | Number of bits used to count searched nodes. |
-| `NodeCountType` | `40` bits | Node count value. |
+| Name              | Value     | Description                                                                                                     |
+| ----------------- | --------- | --------------------------------------------------------------------------------------------------------------- |
+| `TIME_BITS`       | `24`      | Number of bits used to store milliseconds. Maximum representable duration is `16,777,215 ms`, about 4.66 hours. |
+| `TimeType`        | `24` bits | Time value in milliseconds.                                                                                     |
+| `NODE_COUNT_BITS` | `40`      | Number of bits used to count searched nodes.                                                                    |
+| `NodeCountType`   | `40` bits | Node count value.                                                                                               |
 
 ### Hashes and Threads
 
-| Name | Value | Description |
-| ---- | ----- | ----------- |
-| `ZOBRIST_KEY_BITS` | `64` default | Width of the live Zobrist key. Keep parameterized for experiments, but use 64 bits for the main design. |
-| `ZobristKey` | `ZOBRIST_KEY_BITS` bits | Zobrist-style position key. Current RTL note: `hardware/rtl/defs.sv` still uses 32 bits and should be widened before TT integration. |
-| `THREAD_COUNT` | Parameter | Number of hardware search threads. The current documented default is `8`, but the value must remain parameterized. |
-| `THREAD_ID_BITS` | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1. |
-| `ThreadID` | `THREAD_ID_BITS` bits | Hardware search thread identifier. |
+| Name               | Value                         | Description                                                                                             |
+| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `ZOBRIST_KEY_BITS` | `64` default                  | Width of the live Zobrist key. Keep parameterized for experiments, but use 64 bits for the main design. |
+| `ZobristKey`       | `ZOBRIST_KEY_BITS` bits       | Zobrist-style position key.                                                                             |
+| `THREAD_COUNT`     | Parameter                     | Number of hardware search threads. Default of 8 threads.                                                |
+| `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |
+| `ThreadID`         | `THREAD_ID_BITS` bits         | Hardware search thread identifier.                                                                      |
 
 ### Transposition-Table Format Parameters
 
