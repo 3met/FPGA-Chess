@@ -49,11 +49,11 @@ TT scores use the same side-to-move point-of-view convention as search. Mate sco
 
 ## Required Child Pipelines
 
-- [`board_controller`](board-controller.md)
+- [`board_update_pipeline`](board-update-pipeline.md)
 - [`move_generator`](move-generator.md)
 - [`static_evaluator`](static-evaluator.md)
-- [`load_tt`](load-tt.md)
-- [`store_tt`](store-tt.md)
+- [`tt_lookup`](tt-lookup.md)
+- [`tt_store`](tt-store.md)
 - [`timer`](timer.md)
 
 ## Registers

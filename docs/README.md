@@ -19,10 +19,10 @@ These docs describe the intended final RTL architecture unless a section explici
 | 2 | [architecture/data-model.md](architecture/data-model.md) | Shared internal datatypes and constants. |
 | 3 | [protocols/binary-encoding.md](protocols/binary-encoding.md) | Common byte and bit encodings used between host and FPGA. |
 | 4 | [protocols/laptop-fpga-communication.md](protocols/laptop-fpga-communication.md) | Host-to-FPGA command and response protocol. |
-| 5 | [modules/board-controller.md](modules/board-controller.md) | Board-state update pipeline. |
+| 5 | [modules/board-update-pipeline.md](modules/board-update-pipeline.md) | Board-state update pipeline. |
 | 6 | [modules/move-generator.md](modules/move-generator.md) | Move generation interface and behavior. |
 | 7 | [modules/static-evaluator.md](modules/static-evaluator.md) | Static evaluation interface and latency. |
-| 8 | [modules/load-tt.md](modules/load-tt.md) and [modules/store-tt.md](modules/store-tt.md) | Required transposition-table access pipelines. |
+| 8 | [modules/tt-lookup.md](modules/tt-lookup.md) and [modules/tt-store.md](modules/tt-store.md) | Required transposition-table access pipelines. |
 | 9 | [modules/search-controller.md](modules/search-controller.md) | Search orchestration. |
 | 10 | [modules/engine.md](modules/engine.md), [modules/rx-decode.md](modules/rx-decode.md), and [modules/tx-encode.md](modules/tx-encode.md) | Top-level command and byte-stream interfaces. |
 

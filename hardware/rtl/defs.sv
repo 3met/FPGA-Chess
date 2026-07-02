@@ -39,15 +39,15 @@ package general_chess_defs;
 
 	// -- Data Type for Castling Information --
 	typedef struct packed {
-		logic whiteKingside;
-		logic whiteQueenside;
-		logic blackKingside;
-		logic blackQueenside;
+		logic white_kingside;
+		logic white_queenside;
+		logic black_kingside;
+		logic black_queenside;
 	} CastlePerms;
 
 
 	// -- Data Type for a Half-Move Clock --
-	typedef logic [6:0] HalfMoveClk;
+	typedef logic [6:0] HalfmoveClock;
 
 
 	// -- Data Types for Board Positioning --
@@ -60,8 +60,8 @@ package general_chess_defs;
 
 	// -- Data Type for a Move --
 	typedef struct packed {
-		Position start_pos;
-		Position end_pos;
+		Position from_pos;
+		Position to_pos;
 		PromoType promo_piece;
 	} Move;
 
@@ -154,11 +154,11 @@ package general_chess_defs;
 	// Ideally a power of two
 	localparam MAX_PLY_COUNT = 32;
 
-	// Data type to store search depth
-	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] DepthType;
+	// Data type to index search plies
+	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] PlyIndex;
 
-	// Data type for a board hash
-	typedef logic [31:0] BoardHash;
+	// Data type for a Zobrist position key
+	typedef logic [31:0] ZobristKey;
 
 
 	// -- Evaluation Related Definitions --
@@ -256,7 +256,7 @@ package general_chess_defs;
 		CastlePerms castle_perms;
 		logic has_ep;
 		BoardFile ep_file;
-		HalfMoveClk halfmove_clk;
+		HalfmoveClock halfmove_clock;
 	} FullBoard;
 
 endpackage : general_chess_defs

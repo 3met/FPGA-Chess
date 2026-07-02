@@ -41,7 +41,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     // Move Generation Config
     input MoveGenOp move_gen_op,
     input ThreadID thread_id,
-    input DepthType ply,
+    input PlyIndex ply,
     input wire Move target_move,
 
     // Board Data
@@ -53,14 +53,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     // input reg [6:0]   halfmove_clock, // Unused?
 
     // Generated Output
-    output var Move best_move,
+    output var Move candidate_move,
     output logic move_is_legal
 );
 
     // Move Config Pipeline
     MoveGenOp move_gen_op_pipe[11];
     ThreadID thread_id_pipe[11];
-    DepthType ply_pipe[11];
+    PlyIndex ply_pipe[11];
     Move target_move_pipe[9];
     logic is_target_move_knight, is_target_move_knight_wire;
     Direction target_move_direction, target_move_direction_wire;
@@ -78,7 +78,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     BoardFile   ep_file_pipe[8];
 
     // Move Generation State
-    DepthType prev_ply[THREAD_COUNT];
+    PlyIndex prev_ply[THREAD_COUNT];
 
     // Board Mask Pipeline
     reg NS_cardinal_mask[4][8][7];    // Indexed like [layer][file][rank]
@@ -94,16 +94,16 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     MovePriority tile_move_priority[64]; // The best score a given tile can produce
     Direction tile_move_dir[64]; // Distance of best move
     logic [2:0] tile_move_dist[64]; // Direction of best move
-    MovePriority best_move_priority;  // The best score for the entire board
-    Direction best_move_dir;  // The direction of origin from the best destination tile
-    logic [2:0] best_move_dist;  // The distance of the best move
+    MovePriority candidate_move_priority;  // The best score for the entire board
+    Direction candidate_move_dir;  // The direction of origin from the best destination tile
+    logic [2:0] candidate_move_dist;  // The distance of the best move
 
-    logic is_best_move_knight, is_best_move_knight_wire;
-    Direction best_move_direction, best_move_direction_wire;
+    logic is_candidate_move_knight, is_candidate_move_knight_wire;
+    Direction candidate_move_direction, candidate_move_direction_wire;
 
-    Move best_move_pipe;
-    Direction best_move_dir;
-    logic [2:0] best_move_dist;
+    Move candidate_move_pipe;
+    Direction candidate_move_dir;
+    logic [2:0] candidate_move_dist;
 
     // Depth of memory to allocate
     // TODO: Round up to BRAM size?
@@ -322,24 +322,24 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             SSE_NNW_knight_mask[i] = SSE_NNW_knight_mask[i-1];
         end
 
-        unique case ({is_best_move_knight, best_move_direction})
-            {1'b0, NORTH}: NS_cardinal_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)-1] = 1'b0;
-            {1'b0, SOUTH}: NS_cardinal_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b0, EAST}: EW_cardinal_mask[3][getFile(best_move_pipe.end_pos)-1][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b0, WEST}: EW_cardinal_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b0, NORTH_EAST}: pos_diag_mask[3][getFile(best_move_pipe.end_pos)-1][getRank(best_move_pipe.end_pos)-1] = 1'b0;
-            {1'b0, SOUTH_WEST}: pos_diag_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b0, SOUTH_EAST}: neg_diag_mask[3][getFile(best_move_pipe.end_pos)-1][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b0, NORTH_WEST}: neg_diag_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)-1] = 1'b0;
+        unique case ({is_candidate_move_knight, candidate_move_direction})
+            {1'b0, NORTH}: NS_cardinal_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)-1] = 1'b0;
+            {1'b0, SOUTH}: NS_cardinal_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b0, EAST}: EW_cardinal_mask[3][getFile(candidate_move_pipe.to_pos)-1][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b0, WEST}: EW_cardinal_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b0, NORTH_EAST}: pos_diag_mask[3][getFile(candidate_move_pipe.to_pos)-1][getRank(candidate_move_pipe.to_pos)-1] = 1'b0;
+            {1'b0, SOUTH_WEST}: pos_diag_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b0, SOUTH_EAST}: neg_diag_mask[3][getFile(candidate_move_pipe.to_pos)-1][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b0, NORTH_WEST}: neg_diag_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)-1] = 1'b0;
 
-            {1'b1, NNE}: NNE_SSW_knight_mask[3][getFile(best_move_pipe.start_pos)][getRank(best_move_pipe.start_pos)] = 1'b0;
-            {1'b1, SSW}: NNE_SSW_knight_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b1, NEE}: NEE_SWW_knight_mask[3][getFile(best_move_pipe.start_pos)][getRank(best_move_pipe.start_pos)] = 1'b0;
-            {1'b1, SWW}: NEE_SWW_knight_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b1, SEE}: SEE_NWW_knight_mask[3][getFile(best_move_pipe.start_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b1, NWW}: SEE_NWW_knight_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.start_pos)] = 1'b0;
-            {1'b1, SSE}: SSE_NNW_knight_mask[3][getFile(best_move_pipe.start_pos)][getRank(best_move_pipe.end_pos)] = 1'b0;
-            {1'b1, NNW}: SSE_NNW_knight_mask[3][getFile(best_move_pipe.end_pos)][getRank(best_move_pipe.start_pos)] = 1'b0;
+            {1'b1, NNE}: NNE_SSW_knight_mask[3][getFile(candidate_move_pipe.from_pos)][getRank(candidate_move_pipe.from_pos)] = 1'b0;
+            {1'b1, SSW}: NNE_SSW_knight_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b1, NEE}: NEE_SWW_knight_mask[3][getFile(candidate_move_pipe.from_pos)][getRank(candidate_move_pipe.from_pos)] = 1'b0;
+            {1'b1, SWW}: NEE_SWW_knight_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b1, SEE}: SEE_NWW_knight_mask[3][getFile(candidate_move_pipe.from_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b1, NWW}: SEE_NWW_knight_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.from_pos)] = 1'b0;
+            {1'b1, SSE}: SSE_NNW_knight_mask[3][getFile(candidate_move_pipe.from_pos)][getRank(candidate_move_pipe.to_pos)] = 1'b0;
+            {1'b1, NNW}: SSE_NNW_knight_mask[3][getFile(candidate_move_pipe.to_pos)][getRank(candidate_move_pipe.from_pos)] = 1'b0;
 
             // If the move is NULL or UNKNOWN, we shouldn't care about mask update as it won't be written
             default: begin
@@ -363,10 +363,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     end
 
 
-    // ========== Compute best_move and move_is_illegal ==========
+    // ========== Compute candidate_move and move_is_illegal ==========
     always_ff @(posedge clk) begin
-        best_move <= (overall_move_priority == NULL_MOVE_PRIORITY ? NULL_MOVE : best_move_pipe);
-        // best_move_pipe <= ;
+        candidate_move <= (overall_move_priority == NULL_MOVE_PRIORITY ? NULL_MOVE : candidate_move_pipe);
+        // candidate_move_pipe <= ;
     end
 
 
@@ -374,8 +374,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     get_move_dir get_target_move_dir(target_move_pipe[5], is_target_move_knight_wire, target_move_direction_wire);
     always_ff @(posedge clk) {is_target_move_knight, target_move_direction} <= {is_target_move_knight_wire, target_move_direction_wire};
 
-    get_move_dir get_best_move_dir(best_move_pipe[5], is_best_move_knight_wire, best_move_direction_wire);
-    always_ff @(posedge clk) {is_best_move_knight, best_move_direction} <= {is_best_move_knight_wire, best_move_direction_wire};
+    get_move_dir get_candidate_move_dir(candidate_move_pipe[5], is_candidate_move_knight_wire, candidate_move_direction_wire);
+    always_ff @(posedge clk) {is_candidate_move_knight, candidate_move_direction} <= {is_candidate_move_knight_wire, candidate_move_direction_wire};
 
 
 endmodule

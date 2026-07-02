@@ -1,13 +1,13 @@
 
 // By Emet Behrendt
 
-package board_controller_defs;
+package board_update_pipeline_defs;
 
 	import general_chess_defs::*;
 
-    localparam BOARD_CTRL_STAGE_CNT = 7;
+    localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 7;
 
-    // Enum for all board controller operations
+    // Enum for all board update pipeline operations
     typedef enum {
         BOARD_PUSH_MOVE_OP,   // A move made during a search
         BOARD_COMMIT_MOVE_OP, // A move made to simply update the board
@@ -29,14 +29,14 @@ package board_controller_defs;
 
 	// ---- Data Type to store Move History ----
 	typedef struct packed {
-		Position start_pos;         // Move start position
-		Position end_pos;           // Move end position
+		Position from_pos;         // Move origin position
+		Position to_pos;           // Move destination position
 		PieceType killed_piece;     // Stores NULL_PIECE if nothing is killed (all NULL for en passant kills)
 		CastlePerms castle_perms;   // Castle perms before move
 		MoveFlag move_flag;         // Flag indicating special moves
 		logic has_ep;               // Position contains an en passant kill tile
 		BoardFile ep_file;          // En passant file
-		HalfMoveClk halfmove_clk; // Halfmove clock before 
+		HalfmoveClock halfmove_clock; // Halfmove clock before the move
 	} MoveRecord;	// 32 bits total
 
     // ---- Struct to store data passed down pipeline ----
@@ -44,7 +44,7 @@ package board_controller_defs;
         // Pipeline Inputs
         BoardOp board_op;
         FullBoard board;
-        BoardHash board_hash;
+        ZobristKey zobrist_key;
         EvalScore pst_eval;
         Move move;
         logic [3:0] set_data; // Either a tile, turn, castle perms, or en passant info depending on the SET operation
@@ -56,6 +56,6 @@ package board_controller_defs;
         logic is_ep;
         logic is_pawn_move; // Used for halfmove clock
         logic overwritten_color_has_turn; // For SET TILE: Indicates if the overwritten tile belongs to the active player
-    } BoardControllerCtx;
+    } BoardUpdatePipelineCtx;
 
 endpackage

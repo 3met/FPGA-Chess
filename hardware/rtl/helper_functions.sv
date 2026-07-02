@@ -25,7 +25,7 @@ package chess_helper_funcs;
 
     // Checks if a move is NULL
     function logic isNullMove(Move m);
-		return (m.start_pos == 6'd0 && m.end_pos == 6'd0 ? 1'b1 : 1'b0);
+		return (m.from_pos == 6'd0 && m.to_pos == 6'd0 ? 1'b1 : 1'b0);
 	endfunction
 
     // Mirrors a position between the black and white sides of the board
@@ -149,10 +149,10 @@ package chess_helper_funcs;
 			str = {str, " -"};
 		end else begin
 			str = {str, " "};
-			if (b.castle_perms.whiteKingside)  str = {str, "K"};
-			if (b.castle_perms.whiteQueenside) str = {str, "Q"};
-			if (b.castle_perms.blackKingside)  str = {str, "k"};
-			if (b.castle_perms.blackQueenside) str = {str, "q"};
+			if (b.castle_perms.white_kingside)  str = {str, "K"};
+			if (b.castle_perms.white_queenside) str = {str, "Q"};
+			if (b.castle_perms.black_kingside)  str = {str, "k"};
+			if (b.castle_perms.black_queenside) str = {str, "q"};
 		end
 
 		// Write En Passant Info
@@ -173,7 +173,7 @@ package chess_helper_funcs;
 		end
 
 		// Write halfmove clock
-		str = {str, " ", $sformatf("%0d", b.halfmove_clk)};
+		str = {str, " ", $sformatf("%0d", b.halfmove_clock)};
 
 		return str;
 	endfunction

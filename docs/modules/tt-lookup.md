@@ -1,8 +1,8 @@
-# Load TT Pipeline (`load_tt`)
+# TT Lookup Pipeline (`tt_lookup`)
 
 Status: planned required final RTL spec.
 
-The load TT pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response is routed back.
+The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response is routed back.
 
 ## Request
 
@@ -11,11 +11,11 @@ Each request includes:
 | Field | Meaning |
 | ----- | ------- |
 | `thread_id` | Search thread that issued the lookup. |
-| `board_hash` | Full hash key for the position. |
+| `zobrist_key` | Full hash key for the position. |
 | `depth` | Remaining search depth for replacement and cutoff decisions. |
 | `alpha` | Current alpha bound, if the search controller wants the TT pipeline to precompute cutoff usability. |
 | `beta` | Current beta bound, if the search controller wants the TT pipeline to precompute cutoff usability. |
-| Route metadata | Any state needed to route the response back to the correct thread state. In the base design, `thread_id` is sufficient because each thread has at most one in-flight load TT request. |
+| Route metadata | Any state needed to route the response back to the correct thread state. In the base design, `thread_id` is sufficient because each thread has at most one in-flight TT lookup request. |
 
 ## Response
 
@@ -25,7 +25,7 @@ Each lookup returns a response to the requesting thread.
 | ----- | ------- |
 | `thread_id` | Requesting thread. |
 | `valid` | Response is valid. |
-| `hit` | TT key matched the requested board hash. |
+| `hit` | TT key matched the requested Zobrist key. |
 | `score` | Stored score, side-to-move point-of-view. |
 | `bound_type` | Exact, lower-bound, upper-bound, or invalid. |
 | `depth` | Stored search depth. |
@@ -36,13 +36,13 @@ Each lookup returns a response to the requesting thread.
 
 The primary TT storage is external memory behind a vendor-neutral wrapper. A BRAM cache is optional but recommended when the target FPGA has enough block memory to reduce external-memory pressure.
 
-Loads have priority over stores when external memory bandwidth conflicts. If stores and loads target the same cache line or external-memory bank, load correctness must be preserved even when a store is delayed.
+Lookups have priority over stores when external memory bandwidth conflicts. If stores and lookups target the same cache line or external-memory bank, lookup correctness must be preserved even when a store is delayed.
 
 The pipeline must verify hash-key equality before reporting a hit. Partial-key schemes are allowed only if the collision risk is accepted and documented with the chosen TT format.
 
 ## Logical Entry Format
 
-TT entry storage should be parameterized. The live board hash should remain 64 bits, but the TT entry does not always need to store all 64 bits because table index bits already come from the hash.
+TT entry storage should be parameterized. The live Zobrist key should remain 64 bits, but the TT entry does not always need to store all 64 bits because table index bits already come from the key.
 
 The recommended default is a compact 96-bit entry:
 

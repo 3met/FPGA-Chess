@@ -4,7 +4,7 @@ The chip is a hardware chess search engine controlled by a minimal host-side Pyt
 
 The FPGA maintains the active game/search state between commands and performs the search work. Once a search command begins, the FPGA should not require further host communication until it finishes, except for asynchronous control such as kill/reset or output backpressure.
 
-The internal design uses explicit board-state values passed through shared pipelines. A board position is represented as `FullBoard` plus side data such as Zobrist board hash, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
+The internal design uses explicit board-state values passed through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
 The target design has a parameterized number of search threads, with `THREAD_COUNT = 8` as the current documented default. Threads cooperate using Lazy SMP: each thread runs an independent iterative-deepening alpha/beta search, and the required shared transposition table is the only shared search knowledge between threads.
 
@@ -20,20 +20,20 @@ The target design has a parameterized number of search threads, with `THREAD_COU
 | Board update pipeline | Partially implemented | Applies push move, commit move, reverse move, and board setup operations. |
 | Move generation pipeline | Partially implemented | Produces one ordered candidate move per dispatch and reports whether that candidate is legal. |
 | Static evaluation pipeline | Partially implemented | Computes White-relative full-position evaluation terms from a board-state input. |
-| Load TT pipeline | Planned, required | Performs transposition-table lookup requests against external RAM and any internal cache. |
-| Store TT pipeline | Planned, required | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by loads. |
+| TT lookup pipeline | Planned, required | Performs transposition-table lookup requests against external RAM and any internal cache. |
+| TT store pipeline | Planned, required | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by lookups. |
 | External RAM interface | Planned, required | Provides storage for the transposition table through a vendor-neutral wrapper around the selected SDRAM, DDR, or board memory interface. |
 | FPGA platform wrappers | Required | Isolate vendor-specific RAM, ROM, PLL, FIFO, UART, and external-memory IP so Intel/Altera and Xilinx builds can share the same logical RTL. |
 
 ## Search Pipelines
 
-The five major search pipelines are board update, static evaluation, ordered move generation, load TT, and store TT.
+The five major search pipelines are board update, static evaluation, ordered move generation, TT lookup, and TT store.
 
 Board update, static evaluation, and move generation are high-area pipelines and should be kept busy by dispatching work from many search threads. For the base design, each search thread may have at most one in-flight request in each pipeline. This avoids spending pipeline slots on duplicate work for the same thread position and allows pipeline results to be routed using `thread_id` without requiring a wider request ID.
 
 Pipeline-parallelism means different threads can occupy different stages of the same pipeline at the same time. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
 
-The main pipelines should be designed as throughput pipelines that can accept a new request each cycle when input work is available and downstream resources are not stalled. The latency may be many cycles; the throughput goal is one accepted request per cycle. TT load/store throughput is limited by external memory bandwidth.
+The main pipelines should be designed as throughput pipelines that can accept a new request each cycle when input work is available and downstream resources are not stalled. The latency may be many cycles; the throughput goal is one accepted request per cycle. TT lookup/store throughput is limited by external memory bandwidth.
 
 ## State Ownership
 
@@ -49,7 +49,7 @@ Raw static evaluation and incremental PST/material state should be White-relativ
 
 The transposition table is a required shared Lazy SMP data structure. The primary TT lives in external memory behind a vendor-neutral wrapper. A BRAM cache may be used to reduce external-memory pressure when a target FPGA has sufficient block memory.
 
-TT loads are more latency-sensitive than TT stores and receive priority when load/store bandwidth conflicts. Stores can be stalled when memory bandwidth is needed by loads. The memory arbitration policy is a tunable design parameter and should be selected based on measured search throughput.
+TT lookups are more latency-sensitive than TT stores and receive priority when lookup/store bandwidth conflicts. Stores can be stalled when memory bandwidth is needed by lookups. The memory arbitration policy is a tunable design parameter and should be selected based on measured search throughput.
 
 ## Vendor Support
 

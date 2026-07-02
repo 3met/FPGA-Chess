@@ -19,8 +19,8 @@ The move generator accepts a legal input position and emits one ordered candidat
 | Input | `has_ep` | Whether the position has an en passant target. |
 | Input | `ep_file` | En passant file if `has_ep` is asserted. |
 | Input | `target_move` | Move that should receive highest priority if legal and unsearched. |
-| Output | `best_move` | Best remaining candidate move, or `NULL_MOVE` if no remaining candidate exists. |
-| Output | `move_is_legal` | Asserted when `best_move` is strictly legal. If deasserted, the candidate is still consumed. |
+| Output | `candidate_move` | Next ordered candidate move, or `NULL_MOVE` if no remaining candidate exists. |
+| Output | `move_is_legal` | Asserted when `candidate_move` is strictly legal. If deasserted, the candidate is still consumed. |
 
 ## Operations
 
@@ -41,10 +41,10 @@ The move generator accepts a legal input position and emits one ordered candidat
 | 3 | Propagate pieces and begin valid-move chunk loading. |
 | 4-5 | Propagate state. |
 | 6 | Finish propagation, register valid move mask, and compute target-move direction/distance. |
-| 7 | Compute best move on a per-tile basis and identify pinned-piece axes. |
+| 7 | Compute the best candidate on a per-tile basis and identify pinned-piece axes. |
 | 8 | Promote target-move score to maximum if legal and unsearched. |
-| 9 | Compute best move across the board. |
-| 10 | Check strict legality, output best move, and update/save searched-move mask. |
+| 9 | Compute the best candidate across the board. |
+| 10 | Check strict legality, output the candidate move, and update/save searched-move mask. |
 
 ## Ordered Move Generation
 

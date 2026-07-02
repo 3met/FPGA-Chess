@@ -20,11 +20,11 @@ For the base design, a thread may have at most one in-flight request per major p
 
 ## Pipeline Scheduling
 
-The search controller feeds five shared pipelines: board update, move generation, static evaluation, load TT, and store TT.
+The search controller feeds five shared pipelines: board update, move generation, static evaluation, TT lookup, and TT store.
 
 Board update, move generation, and static evaluation are high-area pipelines and should be kept busy by scheduling work across the available threads. These pipelines should target one accepted request per cycle when work is available. TT pipelines are constrained by external memory bandwidth.
 
-Pipeline arbitration prioritizes TT loads over TT stores, because loads block search progress while stores can usually be delayed.
+Pipeline arbitration prioritizes TT lookups over TT stores, because lookups block search progress while stores can usually be delayed.
 
 ## Move Generation and Legality
 
@@ -40,7 +40,7 @@ The TT is a required shared Lazy SMP structure between threads. TT lookup can pr
 
 The primary TT is stored in external memory behind a vendor-neutral wrapper, with a BRAM cache when the target FPGA has enough block memory to make caching useful.
 
-The live board hash should be 64 bits. TT storage should be parameterized separately: the recommended default is a compact 96-bit entry with a 48-bit verification key, while a 128-bit full-key entry is allowed when the external-memory interface naturally moves 128-bit records. This is wider than the current 32-bit RTL hash, but it materially reduces false-hit risk. Scores stored in the TT should use the same side-to-move point-of-view convention as the search controller.
+The live Zobrist key should be 64 bits. TT storage should be parameterized separately: the recommended default is a compact 96-bit entry with a 48-bit verification key, while a 128-bit full-key entry is allowed when the external-memory interface naturally moves 128-bit records. This is wider than the current 32-bit RTL key, but it materially reduces false-hit risk. Scores stored in the TT should use the same side-to-move point-of-view convention as the search controller.
 
 The first TT replacement policy is single-entry depth/age replacement. Store into an invalid entry, a stale entry that is not much deeper than the new result, a shallower entry, or a same-depth non-exact entry when the new result is exact. A future 2-way bucket profile may be added after measuring memory bandwidth and collision behavior.
 
@@ -58,7 +58,7 @@ if score <= -MATE_THRESHOLD: tt_score = score - ply
 otherwise: tt_score = score
 ```
 
-TT loads should restore scores relative to the current root search:
+TT lookups should restore scores relative to the current root search:
 
 ```text
 if tt_score >= MATE_THRESHOLD: score = tt_score - ply
@@ -66,7 +66,7 @@ if tt_score <= -MATE_THRESHOLD: score = tt_score + ply
 otherwise: score = tt_score
 ```
 
-Draw scores are `DRAW_EVAL_SCORE = 0`. A fully legal implementation must detect checkmate, stalemate, the 50-move rule, insufficient material, and repetition draws. The 50-move rule uses `halfmove_clk` from `FullBoard`. Repetition detection uses a separate history of reversible-position hashes because repetition history is intentionally not part of `FullBoard`.
+Draw scores are `DRAW_EVAL_SCORE = 0`. A fully legal implementation must detect checkmate, stalemate, the 50-move rule, insufficient material, and repetition draws. The 50-move rule uses `halfmove_clock` from `FullBoard`. Repetition detection uses a separate history of reversible-position hashes because repetition history is intentionally not part of `FullBoard`.
 
 For threefold repetition, the engine should track hashes for the active game history since the last irreversible move and each search thread should track hashes along its current search line. A search node is drawn if the current position has occurred at least twice earlier in the combined relevant history, making the current occurrence the third. The repetition hash must include side to move, castling rights, and en passant availability.
 

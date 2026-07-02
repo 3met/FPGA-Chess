@@ -139,7 +139,7 @@ endmodule : uart_receiver
 
 // Input Decoder
 // Reads UART RX into buffer
-module rx_decoder
+module rx_decode
 	#(
 		parameter BAUD_RATE,
 		parameter CLOCK_FREQ
@@ -169,4 +169,4 @@ module rx_decoder
 	assign remote_reset = 1'b0;
 	assign error = 1'b0;
 
-endmodule : rx_decoder
+endmodule : rx_decode

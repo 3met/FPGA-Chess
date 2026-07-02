@@ -37,7 +37,7 @@ module main(input CLOCK_50,
 	// parameter BAUD_RATE = 1_000_000;
 	parameter BAUD_RATE = 12_000_000;
 
-	rx_decoder #(.BAUD_RATE(BAUD_RATE), .CLOCK_FREQ(CLOCK_FREQ)) rx_decode (
+	rx_decode #(.BAUD_RATE(BAUD_RATE), .CLOCK_FREQ(CLOCK_FREQ)) rx_decode (
 		.clk(clk),
 		.rst_n(rst_n),
 		.uart_rx(GPIO_0[9]),

@@ -14,7 +14,7 @@ Material may be recomputed instead of maintained incrementally if recomputation 
 
 Piece-square-table scoring should be White-relative in the final design. White pieces add their table value; Black pieces subtract the mirrored-square table value.
 
-The board controller may maintain a White-relative incremental PST score. The static evaluator may recompute PST terms if that proves smaller or easier to pipeline for a target FPGA.
+The board update pipeline may maintain a White-relative incremental PST score. The static evaluator may recompute PST terms if that proves smaller or easier to pipeline for a target FPGA.
 
 ## Board-State Evaluation
 
@@ -33,4 +33,4 @@ Evaluation is hybrid. Some terms may be maintained or recomputed alongside board
 
 ## Current RTL Notes
 
-The current `static_evaluator` RTL is incomplete and outputs a White-relative score. The current `board_controller` maintains `pst_eval` from the active-color perspective; final integration should normalize this to White-relative PST state or explicitly convert at the boundary.
+The current `static_evaluator` RTL is incomplete and outputs a White-relative score. The current `board_update_pipeline` maintains `pst_eval` from the active-color perspective; final integration should normalize this to White-relative PST state or explicitly convert at the boundary.

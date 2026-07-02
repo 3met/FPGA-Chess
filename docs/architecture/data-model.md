@@ -108,11 +108,11 @@ Common tile constants:
 
 | Bits | Field | Meaning |
 | ---- | ----- | ------- |
-| `13:8` | `start_pos` | Origin square. |
-| `7:2` | `end_pos` | Destination square. |
+| `13:8` | `from_pos` | Origin square. |
+| `7:2` | `to_pos` | Destination square. |
 | `1:0` | `promo_piece` | Promotion piece if the move promotes. Otherwise don't-care. |
 
-`NULL_MOVE` is encoded as `{start_pos=0, end_pos=0, promo_piece=x}`.
+`NULL_MOVE` is encoded as `{from_pos=0, to_pos=0, promo_piece=x}`.
 
 ### `CastlePerms`
 
@@ -120,12 +120,12 @@ Common tile constants:
 
 | Bit | Field | Meaning |
 | --- | ----- | ------- |
-| `3` | `whiteKingside` | White can castle king-side. |
-| `2` | `whiteQueenside` | White can castle queen-side. |
-| `1` | `blackKingside` | Black can castle king-side. |
-| `0` | `blackQueenside` | Black can castle queen-side. |
+| `3` | `white_kingside` | White can castle king-side. |
+| `2` | `white_queenside` | White can castle queen-side. |
+| `1` | `black_kingside` | Black can castle king-side. |
+| `0` | `black_queenside` | Black can castle queen-side. |
 
-When serialized outside SystemVerilog structs, use the order `{whiteKingside, whiteQueenside, blackKingside, blackQueenside}` unless a module-specific interface explicitly documents a different bit order.
+When serialized outside SystemVerilog structs, use the order `{white_kingside, white_queenside, black_kingside, black_queenside}` unless a module-specific interface explicitly documents a different bit order.
 
 ### En Passant State
 
@@ -136,7 +136,7 @@ The canonical internal representation is two fields:
 | `has_ep` | 1 bit | Current position has an en passant target file. |
 | `ep_file` | 3 bits | Target file if `has_ep` is asserted. |
 
-When serialized into a 4-bit field, use `{ep_file[2:0], has_ep}` so bit `0` is the valid bit and bits `3:1` are the file. This matches the newer `board_controller` set-data interface.
+When serialized into a 4-bit field, use `{ep_file[2:0], has_ep}` so bit `0` is the valid bit and bits `3:1` are the file. This matches the newer `board_update_pipeline` set-data interface.
 
 ### `FullBoard`
 
@@ -149,11 +149,11 @@ When serialized into a 4-bit field, use `{ep_file[2:0], has_ep}` so bit `0` is t
 | `castle_perms` | 4 | Castling permissions. |
 | `has_ep` | 1 | Whether en passant is available. |
 | `ep_file` | 3 | En passant file if available. |
-| `halfmove_clk` | 7 | Halfmove clock for the 50-move rule. |
+| `halfmove_clock` | 7 | Halfmove clock for the 50-move rule. |
 
 The total packed width is 272 bits.
 
-`FullBoard` does not include the fullmove number, board hash, PST score, search history, or repetition history. Those values are tracked separately when needed. A fully legal implementation must maintain repetition history outside `FullBoard`.
+`FullBoard` does not include the fullmove number, Zobrist key, PST score, search history, or repetition history. Those values are tracked separately when needed. A fully legal implementation must maintain repetition history outside `FullBoard`.
 
 ## Search, Evaluation, and Metric Types
 
@@ -161,8 +161,8 @@ The total packed width is 272 bits.
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
-| `MAX_PLY_COUNT` | `32` | Maximum number of plies tracked by search-depth-indexed structures. |
-| `DepthType` | `log2(MAX_PLY_COUNT)` bits | Search ply/depth index. Currently 5 bits. |
+| `MAX_PLY_COUNT` | `32` | Maximum number of plies tracked by ply-indexed structures. |
+| `PlyIndex` | `log2(MAX_PLY_COUNT)` bits | Search ply index. Currently 5 bits. |
 
 ### Evaluation Scores
 
@@ -195,15 +195,15 @@ Material values are available in two forms:
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
-| `BOARD_HASH_BITS` | `64` default | Width of the live Zobrist board hash. Keep parameterized for experiments, but use 64 bits for the main design. |
-| `BoardHash` | `BOARD_HASH_BITS` bits | Zobrist-style board hash value. Current RTL note: `hardware/rtl/defs.sv` still uses 32 bits and should be widened before TT integration. |
+| `ZOBRIST_KEY_BITS` | `64` default | Width of the live Zobrist key. Keep parameterized for experiments, but use 64 bits for the main design. |
+| `ZobristKey` | `ZOBRIST_KEY_BITS` bits | Zobrist-style position key. Current RTL note: `hardware/rtl/defs.sv` still uses 32 bits and should be widened before TT integration. |
 | `THREAD_COUNT` | Parameter | Number of hardware search threads. The current documented default is `8`, but the value must remain parameterized. |
 | `THREAD_ID_BITS` | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1. |
 | `ThreadID` | `THREAD_ID_BITS` bits | Hardware search thread identifier. |
 
 ### Transposition-Table Format Parameters
 
-These parameters control TT storage format rather than the live board hash. The default should favor compact entries unless the external-memory interface naturally moves 128-bit entries.
+These parameters control TT storage format rather than the live Zobrist key. The default should favor compact entries unless the external-memory interface naturally moves 128-bit entries.
 
 | Name | Default | Description |
 | ---- | ------- | ----------- |

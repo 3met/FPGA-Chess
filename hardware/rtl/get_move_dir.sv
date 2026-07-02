@@ -15,10 +15,10 @@ module get_move_dir(input Move m, output logic is_knight_move, output Direction 
         is_knight_move = 1'bx;
         dir = Direction'('bx);
 
-        start_rank = getRank(m.start_pos);
-        start_file = getFile(m.start_pos);
-        end_rank = getRank(m.end_pos);
-        end_file = getFile(m.end_pos);
+        start_rank = getRank(m.from_pos);
+        start_file = getFile(m.from_pos);
+        end_rank = getRank(m.to_pos);
+        end_file = getFile(m.to_pos);
 
         // North-South Moves
         if (start_file == end_file) begin

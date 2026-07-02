@@ -1,6 +1,6 @@
 
 // Run in modelsim with:
-// vsim -L altera_mf_ver -L lpm -L 220model -t ns work.tb_board_controller
+// vsim -L altera_mf_ver -L lpm -L 220model -t ns work.tb_board_update_pipeline
 // restart -f; run -all
 
 `timescale 1ns/1ns
@@ -8,42 +8,42 @@
 // Import definitions from the packages
 import general_chess_defs::*;
 import chess_helper_funcs::*;
-import board_controller_defs::*;
+import board_update_pipeline_defs::*;
 
-module tb_board_controller;
+module tb_board_update_pipeline;
 
     // Testbench signals
     logic clk;
     // Inputs to DUT
     FullBoard board_in;
-    BoardHash board_hash_in;
+    ZobristKey zobrist_key_in;
     Move move_in;
     logic [3:0] set_data;
     ThreadID thread_id;
-    DepthType search_depth;
+    PlyIndex search_ply;
     BoardOp board_op;
     // Outputs from DUT
     FullBoard board_out;
-    BoardHash board_hash_out;
+    ZobristKey zobrist_key_out;
     EvalScore pst_eval_out;
 
     // Variables to store states for comparison
     FullBoard test_board;
     EvalScore test_pst;
 
-    // Instantiate the board_controller module
-    board_controller dut (
+    // Instantiate the board_update_pipeline module
+    board_update_pipeline dut (
         .clk(clk),
         .board_op(board_op),
         .board_in(board_in),
-        .board_hash_in(board_hash_in),
+        .zobrist_key_in(zobrist_key_in),
         .pst_eval_in(test_pst),
         .move_in(move_in),
         .set_data(set_data),
         .thread_id(thread_id),
-        .search_depth(search_depth),
+        .search_ply(search_ply),
         .board_out(board_out),
-        .board_hash_out(board_hash_out),
+        .zobrist_key_out(zobrist_key_out),
         .pst_eval_out(pst_eval_out)
     );
 
@@ -76,7 +76,7 @@ module tb_board_controller;
 
         board_in = test_board;
         set_data = t;
-        move_in.end_pos = pos;
+        move_in.to_pos = pos;
         board_op = BOARD_SET_TILE_OP;
 
         do_clock(1);
@@ -84,7 +84,7 @@ module tb_board_controller;
         set_data = 'dx;
         move_in = 'dx;
         board_op = BOARD_IDLE_OP;
-        do_clock(BOARD_CTRL_STAGE_CNT-1);
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT-1);
         test_board = board_out;
         test_pst = pst_eval_out;
     endtask
@@ -100,11 +100,11 @@ module tb_board_controller;
         set_data = 'dx;
         move_in = 'dx;
         board_op = BOARD_IDLE_OP;
-        do_clock(BOARD_CTRL_STAGE_CNT-1);
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT-1);
 
         test_board = board_out;
         test_pst = pst_eval_out;
-        search_depth += 1;
+        search_ply += 1;
     endtask
 
     // Completes a move on the board
@@ -117,11 +117,11 @@ module tb_board_controller;
         set_data = 'dx;
         move_in = 'dx;
         board_op = BOARD_IDLE_OP;
-        do_clock(BOARD_CTRL_STAGE_CNT-1);
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT-1);
 
         test_board = board_out;
         test_pst = pst_eval_out;
-        search_depth -= 1;
+        search_ply -= 1;
     endtask
 
     // Sets the turn
@@ -129,7 +129,7 @@ module tb_board_controller;
         board_in = test_board;
         set_data = {3'bxxx, c};
         board_op = BOARD_SET_TURN_OP;
-        do_clock(BOARD_CTRL_STAGE_CNT);
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT);
         test_board = board_out;
         test_pst = pst_eval_out;
     endtask
@@ -139,7 +139,7 @@ module tb_board_controller;
         board_in = test_board;
         set_data = cp;
         board_op = BOARD_SET_CASTLE_PERMS_OP;
-        do_clock(BOARD_CTRL_STAGE_CNT);
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT);
         test_board = board_out;
         test_pst = pst_eval_out;
     endtask
@@ -149,7 +149,7 @@ module tb_board_controller;
         board_in = test_board;
         set_data = {ep_file, has_ep};
         board_op = BOARD_SET_EN_PASSANT_OP;
-        do_clock(BOARD_CTRL_STAGE_CNT);
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT);
         test_board = board_out;
         test_pst = pst_eval_out;
     endtask
@@ -157,10 +157,10 @@ module tb_board_controller;
 
     initial begin
         // Initialize inputs
-        board_hash_in = 32'h0;
+        zobrist_key_in = 32'h0;
         test_pst   = 16'd0;
         thread_id     = '0;
-        search_depth  = '0;
+        search_ply  = '0;
         set_data      = 4'd0;
         // Initialize full board to empty
         for (int i = 0; i < 64; i++) begin
@@ -170,7 +170,7 @@ module tb_board_controller;
         test_board.castle_perms = '{1'b0, 1'b0, 1'b0, 1'b0}; // No castling rights
         test_board.has_ep       = 1'b0;
         test_board.ep_file      = '0;
-        test_board.halfmove_clk = 7'd0;
+        test_board.halfmove_clock = 7'd0;
         
 
         board_op = BOARD_IDLE_OP;  // Idle by default

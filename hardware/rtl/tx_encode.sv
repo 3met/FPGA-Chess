@@ -139,7 +139,7 @@ module uart_transmitter
 endmodule : uart_transmitter
 
 
-module tx_encoder
+module tx_encode
 	#(
 		parameter BAUD_RATE,
 		parameter CLOCK_FREQ
@@ -164,4 +164,4 @@ module tx_encoder
 
 
 
-endmodule : tx_encoder
+endmodule : tx_encode

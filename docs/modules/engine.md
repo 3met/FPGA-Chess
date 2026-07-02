@@ -51,7 +51,7 @@ The external protocol should expose `Set board` as a single fixed-size command. 
 | `btime` | `TIME_BITS` | Black clock time in milliseconds. |
 | `winc` | `TIME_BITS` | White increment in milliseconds. |
 | `binc` | `TIME_BITS` | Black increment in milliseconds. |
-| `depth_limit` | `DepthType` or wider command field | Maximum search depth. |
+| `depth_limit` | `PlyIndex` or wider command field | Maximum search depth. |
 | `node_limit` | `NODE_COUNT_BITS` | Maximum node count. |
 | `time_limit` | `TIME_BITS` | Fixed search duration. |
 | `last_score` | `EvalScore` | Score from the most recent completed search. |
