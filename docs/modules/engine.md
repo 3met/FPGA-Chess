@@ -39,6 +39,32 @@ The external protocol should expose `Set board` as a single fixed-size command. 
 | Output Paused | Engine has response bytes pending but `ready_for_result` is deasserted. |
 | Error | Engine detected a malformed command, unsupported opcode, or internal error and will emit an error response. |
 
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> ReceivePayload: command with payload
+    Idle --> DirectBoard: board command without extra payload
+    Idle --> NewGame: new game
+    Idle --> Search: search command
+    Idle --> Perft: perft command
+    Idle --> OutputResult: status or cached result command
+    Idle --> Error: unknown opcode
+    ReceivePayload --> DirectBoard: setup or move payload complete
+    ReceivePayload --> Search: search payload complete
+    ReceivePayload --> Perft: perft payload complete
+    ReceivePayload --> Error: malformed payload
+    DirectBoard --> OutputResult: direct operation complete
+    NewGame --> OutputResult: reset complete
+    Search --> OutputResult: search complete or killed
+    Search --> Error: internal error
+    Perft --> OutputResult: perft complete or killed
+    Perft --> Error: internal error
+    OutputResult --> OutputPaused: output backpressure
+    OutputPaused --> OutputResult: ready_for_result
+    OutputResult --> Idle: response complete
+    Error --> OutputResult: error response queued
+```
+
 ## Registers
 
 | Register Name | Size | Description |

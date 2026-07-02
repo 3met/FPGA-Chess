@@ -46,6 +46,25 @@ The move generator accepts a legal input position and emits one ordered candidat
 | 9 | Compute the best candidate across the board. |
 | 10 | Check strict legality, output the candidate move, and update/save searched-move mask. |
 
+```mermaid
+flowchart LR
+    Input["Legal board input"]
+    MaskLoad["Load searched-move mask"]
+    Propagate["Propagate nearest pieces and valid chunks"]
+    TileScore["Score best candidate per tile"]
+    TargetBoost["Apply target-move priority"]
+    BoardSelect["Select best board-wide candidate"]
+    LegalCheck["Strict legality filter"]
+    Output["candidate_move and move_is_legal"]
+    MaskSave["Mark candidate consumed"]
+    MaskMemory["Per-thread per-ply mask memory"]
+
+    Input --> MaskLoad --> Propagate --> TileScore --> TargetBoost --> BoardSelect --> LegalCheck --> Output
+    MaskMemory --> MaskLoad
+    LegalCheck -->|"Legal or illegal candidate"| MaskSave
+    MaskSave --> MaskMemory
+```
+
 ## Ordered Move Generation
 
 The intended ordering architecture scores candidate destination tiles, then selects the best board-wide candidate. Each tile has information about the closest piece in each cardinal, diagonal, and knight direction. Candidate scores may use material trades, attacker/defender counts, target-piece value, target-square flags, and TT/root move hints.

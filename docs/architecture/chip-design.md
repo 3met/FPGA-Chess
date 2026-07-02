@@ -25,6 +25,35 @@ The target design has a parameterized number of search threads, with `THREAD_COU
 | External RAM interface     | Provides storage for the transposition table through a vendor-neutral wrapper around the selected SDRAM, DDR, or board memory interface.    |
 | FPGA platform wrappers     | Isolate vendor-specific RAM, ROM, PLL, FIFO, UART, and external-memory IP so Intel/Altera and Xilinx builds can share the same logical RTL. |
 
+```mermaid
+flowchart LR
+    Host["Host Python process"]
+    RX["RX decode"]
+    Engine["Engine command layer"]
+    Search["Search controller"]
+    BoardUpdate["Board update pipeline"]
+    MoveGen["Move generation pipeline"]
+    StaticEval["Static evaluation pipeline"]
+    TTLookup["TT lookup pipeline"]
+    TTStore["TT store pipeline"]
+    RAM["External RAM interface"]
+    TX["TX encode"]
+
+    Host -->|"Command bytes"| RX
+    RX -->|"Command stream, kill, reset"| Engine
+    Engine -->|"Operations and limits"| Search
+    Search -->|"Board operations"| BoardUpdate
+    Search -->|"Candidate requests"| MoveGen
+    Search -->|"Leaf eval requests"| StaticEval
+    Search -->|"Lookup requests"| TTLookup
+    Search -->|"Store requests"| TTStore
+    TTLookup -->|"Prioritized reads"| RAM
+    TTStore -->|"Delayed writes"| RAM
+    Search -->|"Search result"| Engine
+    Engine -->|"Response bytes"| TX
+    TX -->|"UART output"| Host
+```
+
 ## Search Pipelines
 
 The five major search pipelines are board update, static evaluation, ordered move generation, TT lookup, and TT store.

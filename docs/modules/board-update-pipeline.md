@@ -46,6 +46,26 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | 5 | Update second extra tile for castling and account for captured material. |
 | 6 | Output board data, Zobrist key, and PST evaluation. |
 
+```mermaid
+flowchart LR
+    S0["Stage 0: register inputs and read undo record"]
+    S1["Stage 1: side-data preparation"]
+    S2["Stage 2: alignment"]
+    S3["Stage 3: primary tile update and table reads"]
+    S4["Stage 4: en passant or castling extra tile"]
+    S5["Stage 5: second extra tile and captured material"]
+    S6["Stage 6: board, Zobrist, and PST outputs"]
+    History["Per-thread move history"]
+    Tables["Zobrist and PST tables"]
+
+    S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6
+    History -->|"Reverse Move read"| S0
+    S4 -->|"Push Move write"| History
+    Tables -->|"Hash and PST deltas"| S3
+    Tables -->|"Extra-square deltas"| S4
+    Tables -->|"Capture and castle deltas"| S5
+```
+
 ## Board Setup
 
 The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, and Set En Passant operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Resetting the board update pipeline should not be required to create a legal position.

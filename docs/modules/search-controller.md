@@ -56,6 +56,35 @@ TT scores use the same side-to-move point-of-view convention as search. Mate sco
 - [`tt_store`](tt-store.md)
 - [`timer`](timer.md)
 
+```mermaid
+flowchart LR
+    Engine["Engine command layer"]
+    Scheduler["Search scheduler and arbitration"]
+    Threads["Thread state array"]
+    BoardUpdate["Board update pipeline"]
+    MoveGen["Move generator"]
+    StaticEval["Static evaluator"]
+    TTLookup["TT lookup"]
+    TTStore["TT store"]
+    Timer["Timer"]
+    Result["Best result registers"]
+
+    Engine -->|"Operation, limits, direct-board ops"| Scheduler
+    Scheduler <--> Threads
+    Scheduler -->|"Push, commit, reverse, setup"| BoardUpdate
+    BoardUpdate -->|"Updated board state"| Threads
+    Scheduler -->|"Next candidate request"| MoveGen
+    MoveGen -->|"Candidate and legality"| Scheduler
+    Scheduler -->|"Leaf board state"| StaticEval
+    StaticEval -->|"White-relative score"| Scheduler
+    Scheduler -->|"Probe current node"| TTLookup
+    TTLookup -->|"Hit, bound, best move"| Scheduler
+    Scheduler -->|"Publish searched node"| TTStore
+    Timer -->|"Elapsed milliseconds"| Scheduler
+    Scheduler --> Result
+    Result --> Engine
+```
+
 ## Registers
 
 | Register Name | Size | Description |
