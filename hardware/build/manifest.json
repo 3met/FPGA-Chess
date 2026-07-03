@@ -37,11 +37,17 @@
       "hardware/rtl/memory/inferred_dual_port_rom.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline.sv"
     ],
+    "tt-load-store": [
+      "@common",
+      "hardware/rtl/tt/tt_defs.sv",
+      "hardware/rtl/tt/tt_load_store.sv"
+    ],
     "portable-rtl": [
       "@uart",
       "@static-evaluator",
       "@move-generator",
-      "@board-update-pipeline"
+      "@board-update-pipeline",
+      "@tt-load-store"
     ],
     "quartus-de1-soc": [
       "@portable-rtl",
@@ -66,6 +72,11 @@
       "source_set": "static-evaluator",
       "testbench": "hardware/tb/static_evaluator/tb_static_evaluator.sv",
       "top": "tb_static_evaluator"
+    },
+    "tt-load-store": {
+      "source_set": "tt-load-store",
+      "testbench": "hardware/tb/tt/tb_tt_load_store.sv",
+      "top": "tb_tt_load_store"
     },
     "uart-rx": {
       "source_set": "uart",

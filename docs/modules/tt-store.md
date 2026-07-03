@@ -1,6 +1,6 @@
 # TT Store Pipeline (`tt_store`)
 
-Status: planned required final RTL spec.
+Status: implemented first portable load/store slice; external-memory wrapper, BRAM cache, and 128-bit profile remain planned extension points.
 
 The TT store pipeline writes completed search results into the shared transposition table. Stores are less latency-sensitive than lookups and may be buffered or stalled when lookups need memory bandwidth.
 
@@ -17,12 +17,17 @@ Each store request includes:
 | `bound_type` | Exact, lower-bound, or upper-bound. |
 | `best_move` | Best move found or best ordering hint. |
 | `replacement_metadata` | Age/generation, node type, or other replacement-policy data. |
+| `ply` | Current root-relative search ply, used to normalize mate scores before storage. |
 
 ## Behavior
 
-Stores update the primary external-memory TT. A BRAM cache should also be updated or invalidated when the selected cache design requires it.
+The first RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable inferred RAM backend with one compact 96-bit logical entry per word. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
 
-The store pipeline must not block latency-sensitive TT lookups unless required by a memory hazard that cannot be safely bypassed. Under sustained memory pressure, stores may be dropped only if the replacement policy explicitly allows that behavior.
+Stores use `store_req_valid` and `store_req_ready`. Accepted stores enter a depth-4 FIFO by default. Stores are not dropped; when the FIFO is full, `store_req_ready` deasserts until queued stores drain.
+
+Queued stores drain only during lookup-free cycles. The store path reads the old entry, applies replacement policy, and writes the new compact entry only if replacement is allowed. If a lookup arrives while a store is ready to write, the lookup runs first and the store write is delayed.
+
+The `clear` input starts one sequential invalidation pass on its rising edge and clears queued stores. Request readiness remains deasserted while `clear_busy` is asserted.
 
 Scores stored in the TT use the search controller's side-to-move point-of-view convention. Mate scores must be adjusted consistently on store/lookup so mate distance remains correct.
 

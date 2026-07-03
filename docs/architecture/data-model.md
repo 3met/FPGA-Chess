@@ -197,7 +197,7 @@ Material values are available in two forms:
 
 ### Transposition-Table Format Parameters
 
-These parameters control TT storage format rather than the live Zobrist key. The default should favor compact entries unless the external-memory interface naturally moves 128-bit entries.
+These parameters control TT storage format rather than the live Zobrist key. The implemented first slice defines the matching SystemVerilog constants and structs in `hardware/rtl/tt/tt_defs.sv`. The default favors compact entries unless a future external-memory interface naturally moves 128-bit entries.
 
 | Name | Default | Description |
 | ---- | ------- | ----------- |
@@ -205,6 +205,8 @@ These parameters control TT storage format rather than the live Zobrist key. The
 | `TT_VERIFY_BITS` | `48` | Number of high hash bits stored in each compact TT entry for hit verification. |
 | `TT_DEPTH_BITS` | `6` | Stored depth width. |
 | `TT_AGE_BITS` | `8` | Replacement generation/age width. |
+
+The current compact RTL stores one 96-bit entry per inferred-RAM word, indexes entries with low Zobrist bits, and verifies hits with the high `TT_VERIFY_BITS` Zobrist bits.
 
 ## Directions
 

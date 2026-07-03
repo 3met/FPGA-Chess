@@ -1,6 +1,6 @@
 # TT Lookup Pipeline (`tt_lookup`)
 
-Status: planned required final RTL spec.
+Status: implemented first portable load/store slice; external-memory wrapper, BRAM cache, and 128-bit profile remain planned extension points.
 
 The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response returns.
 
@@ -15,6 +15,7 @@ Each request includes:
 | `depth` | Remaining search depth for replacement and cutoff decisions. |
 | `alpha` | Current alpha bound, if the search controller wants the TT pipeline to precompute cutoff usability. |
 | `beta` | Current beta bound, if the search controller wants the TT pipeline to precompute cutoff usability. |
+| `ply` | Current root-relative search ply, used to restore stored mate scores into root-relative form. |
 | Route metadata | State needed to route the response back to the correct thread state. In the base design, `thread_id` is sufficient because each thread has at most one in-flight TT lookup request. |
 
 ## Response
@@ -34,11 +35,15 @@ Each lookup returns a response to the requesting thread.
 
 ## Behavior
 
-The primary TT storage is external memory behind a vendor-neutral wrapper. A BRAM cache is optional but recommended when the target FPGA has enough block memory to reduce external-memory pressure.
+The first RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable inferred RAM backend with one compact 96-bit logical TT entry per memory word. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
 
-Lookups have priority over stores when external memory bandwidth conflicts. If stores and lookups target the same cache line or external-memory bank, lookup correctness must be preserved even when a store is delayed.
+The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, and `lookup_resp_valid`. Lookup requests are accepted whenever `clear` is not active. A lookup response is produced for each accepted request, with `hit` deasserted on empty, invalid, or verification-key mismatch entries.
 
-The pipeline must verify hash-key equality before reporting a hit. Partial-key schemes are allowed only if the collision risk is accepted and documented with the chosen TT format.
+Lookups have priority over stores when memory bandwidth conflicts. If a store is queued or ready to write and a lookup arrives, the lookup runs first and the store remains delayed. This preserves lookup correctness for same-index conflicts by preventing a store write in the same cycle as a lookup.
+
+The first implementation includes a `clear` input for `ucinewgame` and reset-style invalidation. A rising edge on `clear` starts one sequential table clear. While `clear_busy` is asserted, lookup and store request readiness are deasserted and the table is filled with invalid entries.
+
+The pipeline verifies a 48-bit high-hash verification key before reporting a hit. The low `TT_INDEX_BITS` of the Zobrist key index the table, so compact mode leaves any middle hash bits outside the selected index and verification fields unchecked.
 
 ## Logical Entry Format
 
@@ -90,3 +95,7 @@ The generation counter should advance on `ucinewgame` and may also advance once 
 - BRAM cache structure.
 - External-memory physical packing for 96-bit entries and any target-specific aligned entry profile.
 - Whether to add a future 2-way bucket profile after measuring TT bandwidth and collision behavior.
+
+## Current RTL Notes
+
+The shared TT constants, request/response structs, bound enum, and compact entry codec live in `hardware/rtl/tt/tt_defs.sv`. The first implementation stores mate scores node-relative on store and restores them with lookup `ply`; non-mate scores are unchanged.
