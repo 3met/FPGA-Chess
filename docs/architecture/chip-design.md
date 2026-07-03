@@ -70,7 +70,7 @@ The FPGA maintains active game state between commands. The host can send setup, 
 
 Search owns per-thread state. Each thread keeps an active search stack and stack records for undo rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but should not be treated as the long-term owner of the engine position.
 
-Zobrist hashes are maintained incrementally because they are efficient to update. Piece-square-table and material evaluation are recomputed to reduce LUT usage. The remainder of the static evaluation is fully computed by the pipeline on dispatch.
+Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. The remainder of the static evaluation is fully computed by the static evaluation pipeline on dispatch.
 
 Raw static evaluation and incremental PST/material state should be White-relative in the final design. Search should normalize scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
 

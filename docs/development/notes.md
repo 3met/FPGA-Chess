@@ -43,4 +43,4 @@ These notes contain open questions, speculative ideas, and implementation remind
 
 ## Current RTL Notes
 
-The current `static_evaluator` RTL is incomplete and outputs a White-relative score. The current `board_update_pipeline` also maintains White-relative incremental material plus PST state.
+The current `static_evaluator` RTL adds V1 positional terms to the board update pipeline's White-relative incremental material plus PST state.
