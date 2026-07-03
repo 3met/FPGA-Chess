@@ -5,6 +5,7 @@
 // Assumes the move is non-NULL and pseudo-legal.
 
 import general_chess_defs::*;
+import chess_helper_funcs::*;
 
 module get_move_dir(input Move m, output logic is_knight_move, output Direction dir);
 
@@ -62,35 +63,35 @@ module get_move_dir(input Move m, output logic is_knight_move, output Direction 
 
         end else if (end_rank == start_rank + 3'd2 && end_file == start_file + 3'd1) begin
             is_knight_move = 1'b1;
-            dir = NNE;
+            dir = Direction'(NNE);
 
         end else if (end_rank == start_rank - 3'd2 && end_file == start_file - 3'd1) begin
             is_knight_move = 1'b1;
-            dir = SSW;
+            dir = Direction'(SSW);
 
         end else if (end_rank == start_rank + 3'd1 && end_file == start_file + 3'd2) begin
             is_knight_move = 1'b1;
-            dir = NEE;
+            dir = Direction'(NEE);
 
         end else if (end_rank == start_rank - 3'd1 && end_file == start_file - 3'd2) begin
             is_knight_move = 1'b1;
-            dir = SWW;
+            dir = Direction'(SWW);
 
         end else if (end_rank == start_rank - 3'd1 && end_file == start_file + 3'd2) begin
             is_knight_move = 1'b1;
-            dir = SEE;
+            dir = Direction'(SEE);
 
         end else if (end_rank == start_rank + 3'd1 && end_file == start_file - 3'd2) begin
             is_knight_move = 1'b1;
-            dir = NWW;
+            dir = Direction'(NWW);
 
         end else if (end_rank == start_rank - 3'd2 && end_file == start_file + 3'd1) begin
             is_knight_move = 1'b1;
-            dir = SSE;
+            dir = Direction'(SSE);
 
         end else if (end_rank == start_rank + 3'd2 && end_file == start_file - 3'd1) begin
             is_knight_move = 1'b1;
-            dir = NNW;
+            dir = Direction'(NNW);
 
         end
     end
