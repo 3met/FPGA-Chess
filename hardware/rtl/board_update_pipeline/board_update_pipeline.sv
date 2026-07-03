@@ -8,10 +8,10 @@ import zobrist_defs::*;
 module board_update_pipeline (
     input wire clk,
     input BoardOp board_op,
-    input wire FullBoard board_in,
+    input FullBoard board_in,
     input ZobristKey zobrist_key_in,
     input EvalScore pst_eval_in,
-    input wire Move move_in,
+    input Move move_in,
     input logic [6:0] set_data,
     input ThreadID thread_id,
     input PlyIndex search_ply,

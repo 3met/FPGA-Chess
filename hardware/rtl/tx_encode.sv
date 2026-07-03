@@ -17,8 +17,8 @@ module uart_transmitter
 		input rst_n,
 		input [7:0] tx_stream,
 		input tx_stream_valid,
-		output ready,
-		output uart_tx
+		output logic ready,
+		output logic uart_tx
 	);
 
 	// Calculate CLKS_PER_BIT with rounding to nearest int

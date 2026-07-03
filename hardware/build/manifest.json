@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "simulator": {
+    "modelsim": {
+      "vlog_args": ["-sv"],
+      "vsim_args": ["-c", "-t", "ns"],
+      "run_do": "run -all; quit -f"
+    }
+  },
+  "source_sets": {
+    "common": [
+      "hardware/rtl/defs.sv",
+      "hardware/rtl/helper_functions.sv"
+    ],
+    "uart": [
+      "@common",
+      "hardware/rtl/rx_decode.sv",
+      "hardware/rtl/tx_encode.sv"
+    ],
+    "static-evaluator": [
+      "@common",
+      "hardware/rtl/static_evaluator/defs.sv",
+      "hardware/rtl/static_evaluator/static_evaluator.sv"
+    ],
+    "move-generator": [
+      "@common",
+      "hardware/rtl/move_generator/defs.sv",
+      "hardware/rtl/move_generator/get_move_dir.sv",
+      "hardware/rtl/move_generator/move_generator_tile_PE.sv",
+      "hardware/rtl/move_generator/move_generator.sv"
+    ],
+    "board-update-pipeline": [
+      "@common",
+      "hardware/rtl/zobrist_defs.sv",
+      "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
+      "hardware/rtl/memory/simple_dual_port_ram.sv",
+      "hardware/rtl/memory/inferred_dual_port_rom.sv",
+      "hardware/rtl/board_update_pipeline/board_update_pipeline.sv"
+    ],
+    "portable-rtl": [
+      "@uart",
+      "@static-evaluator",
+      "@move-generator",
+      "@board-update-pipeline"
+    ],
+    "quartus-de1-soc": [
+      "@portable-rtl",
+      "hardware/rtl/main.sv"
+    ],
+    "vivado-generic": [
+      "@portable-rtl"
+    ]
+  },
+  "tests": {
+    "board-update-pipeline": {
+      "source_set": "board-update-pipeline",
+      "testbench": "hardware/tb/board_update_pipeline/tb_board_update_pipeline.sv",
+      "top": "tb_board_update_pipeline"
+    },
+    "move-generator": {
+      "source_set": "move-generator",
+      "testbench": "hardware/tb/move_generator/tb_move_generator.sv",
+      "top": "tb_move_generator"
+    },
+    "static-evaluator": {
+      "source_set": "static-evaluator",
+      "testbench": "hardware/tb/static_evaluator/tb_static_evaluator.sv",
+      "top": "tb_static_evaluator"
+    },
+    "uart-rx": {
+      "source_set": "uart",
+      "testbench": "hardware/tb/tb_rx_decode.sv",
+      "top": "tb_uart_receiver"
+    }
+  },
+  "generated_data": {
+    "pst-values": {
+      "script": "hardware/scripts/generate_pst_values.py",
+      "outputs": ["hardware/data/pst_values/pst_values.hex"]
+    },
+    "zobrist-values": {
+      "script": "hardware/scripts/generate_zobrist_values.py",
+      "outputs": ["hardware/data/zobrist/zobrist_values.hex"]
+    }
+  },
+  "synthesis_targets": {
+    "quartus-de1-soc": {
+      "tool": "quartus",
+      "top": "main",
+      "source_set": "quartus-de1-soc",
+      "family": "Cyclone V",
+      "device": "5CSEMA5F31C6",
+      "sdc": "hardware/constraints/engine.sdc",
+      "qsf_template": "hardware/constraints/DE1_SoC.qsf",
+      "qip_files": [
+        "hardware/ip/pll/pll_ip.qip"
+      ]
+    },
+    "vivado-generic": {
+      "tool": "vivado",
+      "top": "board_update_pipeline",
+      "source_set": "vivado-generic",
+      "clock_port": "clk",
+      "clock_period_ns": 10.0
+    }
+  }
+}

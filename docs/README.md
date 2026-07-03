@@ -36,3 +36,9 @@ These docs describe the intended final RTL architecture unless a section explici
 | [modules/](modules/) | Per-module target contracts, including planned modules. |
 | [protocols/](protocols/) | Binary encoding and laptop-FPGA communication. |
 | [development/](development/) | Roadmap, open questions, metrics, and speculative design notes. |
+
+## Development Workflows
+
+| Document | Purpose |
+| -------- | ------- |
+| [development/build-test-synthesis.md](development/build-test-synthesis.md) | Unified Python CLI, manifests, simulator tests, generated data checks, and synthesis flows. |
