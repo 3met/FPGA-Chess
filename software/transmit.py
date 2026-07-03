@@ -156,7 +156,7 @@ def main():
 
     engine_port = get_serial_port()
 
-    uart_manager = UART_Manager(port=engine_port, baudrate=12_000_000)
+    uart_manager = UART_Manager(port=engine_port, baudrate=2_000_000)
 
     data_out = bytes([i for i in range(0,256)])
 

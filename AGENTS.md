@@ -8,8 +8,8 @@ Relevant docs are under `docs/`. Start with [docs/README.md](docs/README.md), th
 * All RTL should be written such that it synthesizes for both Altera and Xilinx
 * FPGA setup, startup, and configuration time is irrelevantly small compared to search time, so minimize area where possible and reasonable here
 * After any RTL changes, correct any docs if they are now invalid or out of date
+* When writing any chess-related RTL, consider if any properties of the game or game rules can be taken advantage of
 
 ### Code Style
 
-* Paragraphs in Markdown should be written as single lines. Keep tables and code blocks formatted normally
-
+* Paragraphs in Markdown should be written as single lines

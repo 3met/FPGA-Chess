@@ -2,7 +2,7 @@
 
 The chip is a hardware chess engine controlled by a minimal host-side Python program. The host exposes UCI, validates and parses incoming positions and moves, logs activity, and translates UCI commands into a compact FPGA protocol. FPGA commands are assumed valid after host parsing.
 
-The FPGA maintains the active game/search state between commands and performs the search work. Once a search command begins, the FPGA does not require further host communication until it finishes, except for asynchronous control such as kill/reset or output backpressure.
+The FPGA maintains the active game/search state between commands and performs the search work. Once a search command begins, the FPGA does not require further host communication until it finishes, except for in-band kill, UART BREAK remote reset, or output backpressure.
 
 The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
@@ -13,7 +13,7 @@ The target design has a parameterized number of search threads, with `THREAD_COU
 | Block                      | Role                                                                                                                                        |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | Host Python process        | Implements UCI, validates/parses positions and moves, logs activity, and communicates with the FPGA.                                        |
-| RX decode                  | Converts UART input into command/data bytes and handles asynchronous kill/reset commands.                                                   |
+| RX decode                  | Converts UART input into command/data bytes, buffers them across the UART/engine clock boundary, and detects UART BREAK remote reset.       |
 | TX encode                  | Converts FPGA output bytes into UART output and reports backpressure.                                                                       |
 | Engine command layer       | Receives host commands, maintains engine-level state, and starts/stops searches.                                                            |
 | Search controller          | Owns search threads, search stacks, alpha/beta state, pipeline dispatch, and result routing.                                                |
@@ -40,7 +40,7 @@ flowchart LR
     TX["TX encode"]
 
     Host -->|"Command bytes"| RX
-    RX -->|"Command stream, kill, reset"| Engine
+    RX -->|"Command stream, remote reset"| Engine
     Engine -->|"Operations and limits"| Search
     Search -->|"Board operations"| BoardUpdate
     Search -->|"Candidate requests"| MoveGen

@@ -8,6 +8,7 @@ The FPGA command protocol uses a command byte followed by an implicit fixed-size
 
 | Setting | Value |
 | ------- | ----- |
+| Baud rate | 2,000,000 |
 | Data bits | 8 |
 | Parity | None |
 | Stop bits | 1 |
@@ -21,7 +22,7 @@ Every command starts with one opcode byte. Payload bytes immediately follow the 
 
 The engine asserts `ready` when it can accept the next command byte. During fixed-size payload reception, `ready` may mean ready for the next payload byte rather than ready for a new command.
 
-The host should send no normal command while the engine is searching. The only expected mid-search communication is asynchronous kill/reset or output-flow control.
+The host should send no normal command while the engine is searching. The expected mid-search communication is the in-band Kill command, UART BREAK for remote reset, or output-flow control.
 
 ```mermaid
 sequenceDiagram
@@ -36,9 +37,9 @@ sequenceDiagram
     Engine->>Search: Start operation
     Search-->>Engine: Search active
     Note over Host,Engine: Host sends no normal command while search is active
-    opt Asynchronous stop
-        Host->>RX: Kill opcode
-        RX->>Engine: kill pulse
+    opt Stop or reset
+        Host->>RX: Kill opcode or UART BREAK
+        RX->>Engine: In-band kill byte or remote_reset pulse
         Engine->>Search: Kill request
     end
     Search-->>Engine: Result and end reason
@@ -68,6 +69,8 @@ The command payload encodings are defined in [binary-encoding.md](binary-encodin
 `Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
 
 `New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
+
+UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads.
 
 ## Responses
 
@@ -116,4 +119,4 @@ Error byte values:
 
 Engine output is valid only when `data_out_valid` is asserted. If the host-side output path cannot accept another byte, the engine pauses response streaming until `ready_for_result` is asserted again.
 
-If the RX FIFO is full, normal incoming bytes may be dropped. The host must avoid this by respecting `ready` and by not streaming commands faster than the FPGA can accept them. Kill and reset are the only commands intended to bypass normal full-buffer behavior.
+If the RX FIFO is full, normal incoming bytes may be dropped and RX overflow is latched. The host must avoid this by respecting `ready` and by not streaming commands faster than the FPGA can accept them. UART BREAK is still recognized as remote reset when the FIFO is full.

@@ -12,8 +12,12 @@
       "hardware/rtl/defs.sv",
       "hardware/rtl/helper_functions.sv"
     ],
+    "async-fifo": [
+      "hardware/rtl/memory/async_fifo.sv"
+    ],
     "uart": [
       "@common",
+      "@async-fifo",
       "hardware/rtl/rx_decode.sv",
       "hardware/rtl/tx_encode.sv"
     ],
@@ -78,10 +82,25 @@
       "testbench": "hardware/tb/tt/tb_tt_load_store.sv",
       "top": "tb_tt_load_store"
     },
-    "uart-rx": {
+    "async-fifo": {
+      "source_set": "async-fifo",
+      "testbench": "hardware/tb/tb_async_fifo.sv",
+      "top": "tb_async_fifo"
+    },
+    "uart-primitives": {
       "source_set": "uart",
       "testbench": "hardware/tb/tb_rx_decode.sv",
-      "top": "tb_uart_receiver"
+      "top": "tb_uart_primitives"
+    },
+    "rx-decode": {
+      "source_set": "uart",
+      "testbench": "hardware/tb/tb_rx_wrapper.sv",
+      "top": "tb_rx_decode"
+    },
+    "tx-encode": {
+      "source_set": "uart",
+      "testbench": "hardware/tb/tb_tx_encode.sv",
+      "top": "tb_tx_encode"
     }
   },
   "generated_data": {

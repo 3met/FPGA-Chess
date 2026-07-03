@@ -15,16 +15,20 @@ module main(input CLOCK_50,
             output logic [9:0] LEDR
             );
 
-	parameter CLOCK_FREQ = 100_000_000;	// Main clock at 100 MHz
+	parameter ENGINE_CLOCK_FREQ = 100_000_000;	// Main clock at 100 MHz
+	parameter UART_CLOCK_FREQ = 50_000_000;
+	parameter BAUD_RATE = 2_000_000;
 
 	wire rst_n;
 	assign rst_n = KEY[3];
 
 	wire clk;
+	wire uart_clk;
 	wire pll_reset, pll_locked_status;
 	pll_ip pll_1(.refclk(CLOCK_50), .rst(pll_reset), .outclk_0(clk), .locked(pll_locked_status));
 	assign pll_reset = ~KEY[2];
 	assign LEDR[9] = ~pll_locked_status;
+	assign uart_clk = CLOCK_50;
 
 
 
@@ -34,19 +38,24 @@ module main(input CLOCK_50,
 	reg [7:0] mem;
 	assign LEDR[7:0] = mem;
 
-	// parameter BAUD_RATE = 1_000_000;
-	parameter BAUD_RATE = 12_000_000;
+	wire rx_error;
+	wire remote_reset;
+	wire tx_full;
 
-	rx_decode #(.BAUD_RATE(BAUD_RATE), .CLOCK_FREQ(CLOCK_FREQ)) rx_decode (
+	rx_decode #(
+		.BAUD_RATE(BAUD_RATE),
+		.UART_CLOCK_FREQ(UART_CLOCK_FREQ)
+	) rx_decode (
 		.clk(clk),
+		.uart_clk(uart_clk),
 		.rst_n(rst_n),
 		.uart_rx(GPIO_0[9]),
-		.mark_read(),
+		.mark_read(rx_stream_valid && !tx_full),
 		.rx_stream(rx_stream),
 		.rx_stream_valid(rx_stream_valid),
 		.kill(),
-		.remote_reset(),
-		.error()
+		.remote_reset(remote_reset),
+		.error(rx_error)
 	);
 
 	always_ff @(posedge clk) begin
@@ -57,16 +66,22 @@ module main(input CLOCK_50,
 		end
 	end
 
+	assign LEDR[8] = rx_error | remote_reset | tx_full;
+
 	
 
 	// --- UART Output Encoding ---
-	uart_transmitter #(.BAUD_RATE(BAUD_RATE), .CLOCK_FREQ(CLOCK_FREQ)) engine_uart_transmitter (
+	tx_encode #(
+		.BAUD_RATE(BAUD_RATE),
+		.UART_CLOCK_FREQ(UART_CLOCK_FREQ)
+	) tx_encode (
 		.clk(clk),
+		.uart_clk(uart_clk),
 		.rst_n(rst_n),
 		.tx_stream(rx_stream),
-		.tx_stream_valid(rx_stream_valid),
-		.ready(),
-		.uart_tx(GPIO_0[7])
+		.tx_stream_valid(rx_stream_valid && !tx_full),
+		.uart_tx(GPIO_0[7]),
+		.full(tx_full)
 	);
 
 

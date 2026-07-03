@@ -18,4 +18,4 @@ The `main` module maps board-level FPGA pins to the vendor-neutral engine design
 
 ## Current RTL Notes
 
-The current RTL maps PLL lock and recent RX byte status to LEDs and loops received UART bytes into the UART transmitter. The final design should instantiate the engine command layer between RX and TX.
+The current RTL maps PLL lock and recent RX byte status to LEDs and loops received bytes through `rx_decode` and `tx_encode` using a 50 MHz UART clock and PLL-derived engine clock. The final design should instantiate the engine command layer between RX and TX.
