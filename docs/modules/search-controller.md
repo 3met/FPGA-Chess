@@ -2,6 +2,8 @@
 
 Status: planned final RTL spec.
 
+Current RTL note: board builds currently use `search_controller_stub` only to terminate the V1 engine request/response boundary. The stub acknowledges direct-board, new-game, and kill requests and returns deterministic placeholder search/perft responses; it does not own real board state, perform legal search, use TT pipelines, or implement timing policy. The real controller must only assert request readiness for direct-board operations when the operation is committed or strictly ordered before any later accepted operation, because the engine emits ACKs based on request acceptance.
+
 The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
 
 ## Operations

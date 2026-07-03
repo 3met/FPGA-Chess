@@ -46,12 +46,20 @@
       "hardware/rtl/tt/tt_defs.sv",
       "hardware/rtl/tt/tt_load_store.sv"
     ],
+    "engine": [
+      "@common",
+      "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
+      "hardware/rtl/engine_defs.sv",
+      "hardware/rtl/engine.sv",
+      "hardware/rtl/search_controller_stub.sv"
+    ],
     "portable-rtl": [
       "@uart",
       "@static-evaluator",
       "@move-generator",
       "@board-update-pipeline",
-      "@tt-load-store"
+      "@tt-load-store",
+      "@engine"
     ],
     "quartus-de1-soc": [
       "@portable-rtl",
@@ -101,6 +109,11 @@
       "source_set": "uart",
       "testbench": "hardware/tb/tb_tx_encode.sv",
       "top": "tb_tx_encode"
+    },
+    "engine": {
+      "source_set": "engine",
+      "testbench": "hardware/tb/tb_engine.sv",
+      "top": "tb_engine"
     }
   },
   "generated_data": {

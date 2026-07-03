@@ -6,6 +6,8 @@
 // The file also controls the LEDs and HEX displays on the DE1.
 // Lastly, this file contains configuration information for the engine.
 
+import engine_defs::*;
+
 module main(input CLOCK_50,
             input [3:0] KEY, input [9:0] SW,
             input GPIO_0[36],
@@ -40,7 +42,18 @@ module main(input CLOCK_50,
 
 	wire rx_error;
 	wire remote_reset;
+	wire engine_rst_n;
 	wire tx_full;
+	wire engine_ready;
+	wire engine_error;
+	wire [7:0] engine_data_out;
+	wire engine_data_out_valid;
+	wire search_req_valid;
+	wire search_req_ready;
+	wire search_resp_valid;
+	EngineControllerRequest search_req;
+	EngineControllerResponse search_resp;
+	assign engine_rst_n = rst_n && !remote_reset;
 
 	rx_decode #(
 		.BAUD_RATE(BAUD_RATE),
@@ -50,7 +63,7 @@ module main(input CLOCK_50,
 		.uart_clk(uart_clk),
 		.rst_n(rst_n),
 		.uart_rx(GPIO_0[9]),
-		.mark_read(rx_stream_valid && !tx_full),
+		.mark_read(rx_stream_valid && engine_ready),
 		.rx_stream(rx_stream),
 		.rx_stream_valid(rx_stream_valid),
 		.kill(),
@@ -66,9 +79,40 @@ module main(input CLOCK_50,
 		end
 	end
 
-	assign LEDR[8] = rx_error | remote_reset | tx_full;
+	assign LEDR[8] = rx_error | remote_reset | tx_full | engine_error;
 
 	
+
+	// --- Engine Command Layer ---
+	engine engine (
+		.clk(clk),
+		.rst_n(engine_rst_n),
+		.data_in(rx_stream),
+		.data_in_valid(rx_stream_valid),
+		.kill(1'b0),
+		.ready_for_result(!tx_full),
+		.error_flag(engine_error),
+		.ready(engine_ready),
+		.data_out(engine_data_out),
+		.data_out_valid(engine_data_out_valid),
+		.search_req_valid(search_req_valid),
+		.search_req_ready(search_req_ready),
+		.search_req(search_req),
+		.search_resp_valid(search_resp_valid),
+		.search_resp(search_resp)
+	);
+
+	search_controller_stub search_controller (
+		.clk(clk),
+		.rst_n(engine_rst_n),
+		.req_valid(search_req_valid),
+		.req_ready(search_req_ready),
+		.req(search_req),
+		.resp_valid(search_resp_valid),
+		.resp(search_resp)
+	);
+
+
 
 	// --- UART Output Encoding ---
 	tx_encode #(
@@ -77,9 +121,9 @@ module main(input CLOCK_50,
 	) tx_encode (
 		.clk(clk),
 		.uart_clk(uart_clk),
-		.rst_n(rst_n),
-		.tx_stream(rx_stream),
-		.tx_stream_valid(rx_stream_valid && !tx_full),
+		.rst_n(engine_rst_n),
+		.tx_stream(engine_data_out),
+		.tx_stream_valid(engine_data_out_valid),
 		.uart_tx(GPIO_0[7]),
 		.full(tx_full)
 	);
