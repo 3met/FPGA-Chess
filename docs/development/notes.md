@@ -7,12 +7,8 @@ These notes contain open questions, speculative ideas, and implementation remind
 - Decide external-memory banking, cache structure, and physical packing for compact 96-bit TT entries.
 - Decide exact 7-segment display/debug behavior for the board wrapper.
 
-## Functionality to Test
+## Additional Functionality to Test
 
-- Castling, including blocked path, check on origin, transit-square attack, and destination-square attack.
-- En passant, including discovered-check rejection.
-- Check, double check, checkmate, and stalemate.
-- Promotion and underpromotion ordering.
 - Exact repetition-history memory layout for active game state and per-thread search lines.
 - TT hit, miss, replacement, and load/store conflict behavior.
 

@@ -307,6 +307,14 @@ module tb_move_generator;
                 || (board.turn == BLACK && getRank(move.to_pos) == BoardRank'('d2) && getRank(move.from_pos) == BoardRank'('d3))));
     endfunction
 
+    function automatic bit ref_is_capture_or_promotion(input FullBoard board, input Move move);
+        automatic Tile end_tile = norm_tile(board.tiles[move.to_pos]);
+
+        return ref_move_is_promotion(board, move)
+            || (end_tile.piece_type != NULL_PIECE && end_tile.piece_color != board.turn)
+            || ref_is_ep_move(board, move);
+    endfunction
+
     function automatic bit ref_square_attacked(input FullBoard board, input Position square, input Color attacker_color);
         automatic Position test_pos;
         automatic Tile test_tile;
@@ -508,6 +516,30 @@ module tb_move_generator;
         return nodes;
     endfunction
 
+    function automatic int ref_qsearch_count(input FullBoard board);
+        automatic int nodes = 0;
+        automatic Move move;
+        automatic bit is_promotion;
+
+        for (int from_pos = 0; from_pos < 64; from_pos++) begin
+            if (norm_tile(board.tiles[from_pos]).piece_color == board.turn && norm_tile(board.tiles[from_pos]).piece_type != NULL_PIECE) begin
+                for (int to_pos = 0; to_pos < 64; to_pos++) begin
+                    for (int promo_idx = 0; promo_idx < 4; promo_idx++) begin
+                        move = make_move(Position'(from_pos), Position'(to_pos), PromoType'(promo_idx));
+                        is_promotion = ref_move_is_promotion(board, move);
+                        if ((is_promotion || promo_idx == 0)
+                            && ref_is_capture_or_promotion(board, move)
+                            && ref_is_legal(board, move)) begin
+                            nodes += 1;
+                        end
+                    end
+                end
+            end
+        end
+
+        return nodes;
+    endfunction
+
     task automatic record_pass();
         pass_count += 1;
     endtask
@@ -553,6 +585,12 @@ module tb_move_generator;
 
     function automatic bit is_null_move_value(input Move move);
         return (move.from_pos == 6'd0 && move.to_pos == 6'd0);
+    endfunction
+
+    function automatic bit same_move_exact(input Move left, input Move right);
+        return (left.from_pos == right.from_pos
+            && left.to_pos == right.to_pos
+            && left.promo_piece == right.promo_piece);
     endfunction
 
     task automatic dispatch_dut_candidate(
@@ -730,6 +768,140 @@ module tb_move_generator;
         board.has_ep = 1'b1;
         board.ep_file = BoardFile'('d6);
         run_legality_case("en passant discovered check", board, make_move(Position'('d37), Position'('d46), PROMO_QUEEN), 1'b0);
+
+        setup_kings(board, WHITE);
+        board.tiles[Position'('d0)] = WHITE_ROOK;
+        board.tiles[Position'('d56)] = BLACK_KING;
+        board.castle_perms.white_queenside = 1'b1;
+        run_legality_case("legal white queenside castle", board, make_move(Position'('d4), Position'('d2), PROMO_QUEEN), 1'b1);
+
+        setup_kings(board, WHITE);
+        board.tiles[Position'('d0)] = WHITE_ROOK;
+        board.tiles[Position'('d1)] = WHITE_KNIGHT;
+        board.tiles[Position'('d56)] = BLACK_KING;
+        board.castle_perms.white_queenside = 1'b1;
+        run_legality_case("queenside castle blocked path", board, make_move(Position'('d4), Position'('d2), PROMO_QUEEN), 1'b0);
+
+        setup_kings(board, WHITE);
+        board.tiles[Position'('d0)] = WHITE_ROOK;
+        board.tiles[Position'('d56)] = BLACK_KING;
+        board.tiles[Position'('d20)] = BLACK_ROOK;
+        board.castle_perms.white_queenside = 1'b1;
+        run_legality_case("castle while in check", board, make_move(Position'('d4), Position'('d2), PROMO_QUEEN), 1'b0);
+
+        setup_kings(board, BLACK);
+        board.tiles[Position'('d63)] = BLACK_ROOK;
+        board.castle_perms.black_kingside = 1'b1;
+        run_legality_case("legal black kingside castle", board, make_move(Position'('d60), Position'('d62), PROMO_QUEEN), 1'b1);
+
+        setup_kings(board, BLACK);
+        board.tiles[Position'('d56)] = BLACK_ROOK;
+        board.castle_perms.black_queenside = 1'b1;
+        run_legality_case("legal black queenside castle", board, make_move(Position'('d60), Position'('d58), PROMO_QUEEN), 1'b1);
+    endtask
+
+    task automatic test_targeted_generation();
+        automatic FullBoard board;
+        automatic Move move;
+        automatic Move target;
+        automatic logic legal;
+
+        setup_kings(board, WHITE);
+        board.tiles[Position'('d1)] = WHITE_KNIGHT;
+        board.tiles[Position'('d17)] = BLACK_QUEEN;
+
+        target = make_move(Position'('d1), Position'('d18), PROMO_QUEEN);
+        dispatch_dut_candidate(board, MOVE_GEN_TARGETED_OP, 1'b1, target, move, legal);
+        expect_equal(same_move_exact(move, target) && legal,
+            $sformatf("targeted legal move first expected %0d->%0d found %0d->%0d legal=%0d", target.from_pos, target.to_pos, move.from_pos, move.to_pos, legal));
+
+        dispatch_dut_candidate(board, MOVE_GEN_TARGETED_OP, 1'b0, target, move, legal);
+        expect_equal(!same_move_exact(move, target),
+            "targeted already-consumed move skipped");
+
+        target = make_move(Position'('d1), Position'('d17), PROMO_QUEEN);
+        dispatch_dut_candidate(board, MOVE_GEN_TARGETED_OP, 1'b1, target, move, legal);
+        expect_equal(!same_move_exact(move, target) && legal,
+            $sformatf("targeted illegal move skipped found %0d->%0d legal=%0d", move.from_pos, move.to_pos, legal));
+    endtask
+
+    task automatic test_qsearch_filtering();
+        automatic FullBoard board;
+        automatic int candidates;
+        automatic int legal;
+        automatic Move quiet_check;
+        automatic Move ep_capture;
+
+        setup_kings(board, WHITE);
+        board.tiles[Position'('d8)] = WHITE_ROOK;
+        quiet_check = make_move(Position'('d8), Position'('d12), PROMO_QUEEN);
+        run_legality_case("quiet checking move is legal", board, quiet_check, 1'b1);
+        collect_dut_candidates("quiet-check qsearch", board, MOVE_GEN_QSEARCH_OP, candidates, legal);
+        expect_equal(candidates == 0 && legal == 0 && ref_qsearch_count(board) == 0,
+            $sformatf("quiet-check qsearch expected=0/0 found=%0d/%0d ref=%0d", candidates, legal, ref_qsearch_count(board)));
+
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d37)] = WHITE_PAWN;
+        board.tiles[Position'('d38)] = BLACK_PAWN;
+        board.tiles[Position'('d56)] = BLACK_KING;
+        board.turn = WHITE;
+        board.has_ep = 1'b1;
+        board.ep_file = BoardFile'('d6);
+        ep_capture = make_move(Position'('d37), Position'('d46), PROMO_QUEEN);
+        run_legality_case("legal en passant qsearch candidate", board, ep_capture, 1'b1);
+        collect_dut_candidates("en passant qsearch", board, MOVE_GEN_QSEARCH_OP, candidates, legal);
+        expect_equal(legal == ref_qsearch_count(board),
+            $sformatf("en passant qsearch legal count expected=%0d found=%0d", ref_qsearch_count(board), legal));
+    endtask
+
+    task automatic test_promotion_ordering();
+        automatic FullBoard board;
+        automatic Move move;
+        automatic logic legal;
+
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d48)] = WHITE_PAWN;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_QUEEN)) && legal,
+            $sformatf("promotion order queen first found promo=%0d legal=%0d", move.promo_piece, legal));
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_KNIGHT)) && legal,
+            $sformatf("promotion order knight second found promo=%0d legal=%0d", move.promo_piece, legal));
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_ROOK)) && legal,
+            $sformatf("promotion order rook third found promo=%0d legal=%0d", move.promo_piece, legal));
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_BISHOP)) && legal,
+            $sformatf("promotion order bishop fourth found promo=%0d legal=%0d", move.promo_piece, legal));
+    endtask
+
+    task automatic test_no_legal_moves();
+        automatic FullBoard board;
+        automatic int candidates;
+        automatic int legal;
+
+        init_empty_board(board);
+        board.tiles[Position'('d53)] = WHITE_KING;
+        board.tiles[Position'('d46)] = WHITE_QUEEN;
+        board.tiles[Position'('d63)] = BLACK_KING;
+        board.turn = BLACK;
+        collect_dut_candidates("stalemate normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
+        expect_equal(legal == 0 && ref_perft(board, 1) == 0,
+            $sformatf("stalemate expected no legal moves found candidates=%0d legal=%0d ref=%0d", candidates, legal, ref_perft(board, 1)));
+
+        init_empty_board(board);
+        board.tiles[Position'('d45)] = WHITE_KING;
+        board.tiles[Position'('d54)] = WHITE_QUEEN;
+        board.tiles[Position'('d63)] = BLACK_KING;
+        board.turn = BLACK;
+        collect_dut_candidates("checkmate normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
+        expect_equal(legal == 0 && ref_perft(board, 1) == 0,
+            $sformatf("checkmate expected no legal moves found candidates=%0d legal=%0d ref=%0d", candidates, legal, ref_perft(board, 1)));
     endtask
 
     task automatic test_small_reference_perft();
@@ -820,6 +992,10 @@ module tb_move_generator;
         $display("=== Move generator testbench ===");
         test_pins_and_checks();
         test_king_castle_and_ep();
+        test_targeted_generation();
+        test_qsearch_filtering();
+        test_promotion_ordering();
+        test_no_legal_moves();
         test_small_reference_perft();
         test_dut_streaming_perft();
 
