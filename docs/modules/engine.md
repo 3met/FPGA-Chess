@@ -1,10 +1,10 @@
 # Engine (`engine`)
 
-Status: implemented V1 protocol FSM; search-controller integration is stubbed.
+Status: implemented V1 protocol FSM; board builds use the real search-controller boundary.
 
 The engine module is the byte-command layer between RX/TX stream wrappers and the search controller. It parses fixed-size command payloads, owns engine-level protocol state, maintains active board state through the search controller direct-board path, and streams fixed-size responses.
 
-The current RTL implements the protocol FSM and emits typed controller requests, but the real search controller is not implemented yet. Board-level builds connect this boundary to `search_controller_stub`, which acknowledges direct-board operations and returns deterministic placeholder search/perft results.
+The current RTL implements the protocol FSM and emits typed controller requests. Board-level builds connect this boundary to the real `search_controller`; the lightweight `search_controller_stub` remains available only as a protocol mock.
 
 ## Ports
 
@@ -21,9 +21,9 @@ The current RTL implements the protocol FSM and emits typed controller requests,
 | Output | `data_out` | 8 | Response byte. |
 | Output | `data_out_valid` | 1 | Indicates `data_out` is valid. |
 | Output | `search_req_valid` | 1 | Indicates `search_req` contains a valid direct-board, search, perft, new-game, or kill request. |
-| Input | `search_req_ready` | 1 | Indicates the downstream controller accepted the current request. For direct-board requests, acceptance means the operation is committed or strictly ordered before any later accepted request. |
+| Input | `search_req_ready` | 1 | Indicates the downstream controller captured the current request. |
 | Output | `search_req` | `EngineControllerRequest` | Typed controller request defined in `engine_defs`. |
-| Input | `search_resp_valid` | 1 | Indicates `search_resp` contains a completed search/perft result or controller error. |
+| Input | `search_resp_valid` | 1 | Indicates `search_resp` contains a completed direct-board, new-game, search, perft, kill, or controller-error result. |
 | Input | `search_resp` | `EngineControllerResponse` | Typed controller response defined in `engine_defs`. |
 
 ## Commands
@@ -99,10 +99,10 @@ The New Game command follows UCI `ucinewgame` semantics. It clears active search
 
 ## Current RTL Notes
 
-`Set board` is decomposed into 68 direct-board requests: 64 tile writes followed by castling permissions, en passant state, side to move, and halfmove clock. `Make move` and `Undo move` emit single direct-board requests. The engine sends an ACK after the final direct-board request is accepted, so the controller must treat accepted direct-board requests as committed or strictly ordered before any later accepted search request.
+`Set board` is decomposed into 68 direct-board requests: 64 tile writes followed by castling permissions, en passant state, side to move, and halfmove clock. `Make move` and `Undo move` emit single direct-board requests. The engine keeps only one direct-board request in flight, advances the Set Board sequence only after `search_resp_valid`, and sends an ACK only after the final direct-board response completes.
 
 Search and perft commands wait for a controller response, latch the result, and stream the documented response format. While waiting for search/perft, the engine accepts only in-band Kill (`0x1f`) as a command byte. Any other byte is rejected as malformed protocol input.
 
 ## Child Modules
 
-- [`search_controller`](search-controller.md), currently represented in board builds by `search_controller_stub`.
+- [`search_controller`](search-controller.md).

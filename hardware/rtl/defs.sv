@@ -218,7 +218,7 @@ package general_chess_defs;
 
 	// -- Evaluation Related Definitions --
 
-	localparam THREAD_COUNT = 1;
+	localparam THREAD_COUNT = 8;
 
 	localparam THREAD_ID_BITS = (THREAD_COUNT > 1) ? $clog2(THREAD_COUNT) : 1;
 

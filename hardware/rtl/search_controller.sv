@@ -1,0 +1,2199 @@
+// By Emet Behrendt
+
+import general_chess_defs::*;
+import chess_helper_funcs::*;
+import board_update_pipeline_defs::*;
+import engine_defs::*;
+import move_generator_defs::*;
+import static_evaluator_defs::*;
+import tt_defs::*;
+
+module search_controller #(
+    parameter int CLOCK_FREQ = 100_000_000,
+    parameter int TT_INDEX_BITS = 10,
+    parameter int ACTIVE_HISTORY_DEPTH = 256
+) (
+    input wire clk,
+    input wire rst_n,
+    input logic req_valid,
+    output logic req_ready,
+    input EngineControllerRequest req,
+    output logic resp_valid,
+    output EngineControllerResponse resp
+);
+
+    localparam int BOARD_WAIT_BITS = $clog2(BOARD_UPDATE_PIPELINE_STAGE_CNT + 1);
+    localparam int MOVE_WAIT_CYCLES = MOVE_GEN_STAGE_CNT + 1;
+    localparam int MOVE_WAIT_BITS = $clog2(MOVE_WAIT_CYCLES + 1);
+    localparam int EVAL_WAIT_CYCLES = STATIC_EVAL_PIPELINE_STAGE_CNT;
+    localparam int EVAL_WAIT_BITS = $clog2(EVAL_WAIT_CYCLES + 1);
+    localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1) ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
+    localparam int SEARCH_MOVE_TAG_PIPE_LEN = (MOVE_WAIT_CYCLES <= 1) ? 1 : MOVE_WAIT_CYCLES;
+    localparam int SEARCH_EVAL_TAG_PIPE_LEN = EVAL_WAIT_CYCLES + 1;
+    localparam int HISTORY_PTR_BITS = (ACTIVE_HISTORY_DEPTH <= 1) ? 1 : $clog2(ACTIVE_HISTORY_DEPTH + 1);
+    localparam int THREAD_COUNT_BITS = (THREAD_COUNT <= 1) ? 1 : $clog2(THREAD_COUNT + 1);
+    localparam int NEW_GAME_OPS = 68;
+    localparam EvalScore SEARCH_INF = EvalScore'(30000);
+
+    typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
+    typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
+    typedef logic [EVAL_WAIT_BITS-1:0] EvalWaitCount;
+    typedef logic [HISTORY_PTR_BITS-1:0] HistoryCount;
+    typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
+
+    typedef enum logic [4:0] {
+        ST_IDLE,
+        ST_DIRECT_POP,
+        ST_BOARD_ISSUE,
+        ST_BOARD_WAIT,
+        ST_DIRECT_DONE,
+        ST_NEW_CLEAR_START,
+        ST_NEW_CLEAR_WAIT,
+        ST_NEW_SETUP_ISSUE,
+        ST_NEW_SETUP_WAIT,
+        ST_NEW_DONE,
+        ST_PERFT_GEN_ISSUE,
+        ST_PERFT_GEN_WAIT,
+        ST_PERFT_PUSH_ISSUE,
+        ST_PERFT_PUSH_WAIT,
+        ST_SEARCH_ITER_START,
+        ST_SEARCH_RUN,
+        ST_RESPOND,
+        ST_KILL_DONE
+    } SearchControllerState;
+
+    typedef enum logic [1:0] {
+        BOARD_DEST_ACTIVE,
+        BOARD_DEST_NEW_GAME,
+        BOARD_DEST_PERFT_STACK
+    } BoardDest;
+
+    typedef enum logic [1:0] {
+        SEARCH_THREAD_IDLE,
+        SEARCH_THREAD_ACTIVE,
+        SEARCH_THREAD_DONE
+    } SearchThreadStatus;
+
+    typedef enum logic [3:0] {
+        SEARCH_PHASE_IDLE,
+        SEARCH_PHASE_READY,
+        SEARCH_PHASE_TT_WAIT,
+        SEARCH_PHASE_EVAL_WAIT,
+        SEARCH_PHASE_MOVE_WAIT,
+        SEARCH_PHASE_BOARD_WAIT,
+        SEARCH_PHASE_STORE_WAIT,
+        SEARCH_PHASE_DONE
+    } SearchThreadPhase;
+
+    typedef struct packed {
+        FullBoard board;
+        ZobristKey zobrist_key;
+        EvalScore pst_eval;
+        HistoryCount repetition_key_count;
+        HistoryCount repetition_start;
+    } BoardSnapshot;
+
+    SearchControllerState state;
+    EngineControllerRequest active_req;
+    EngineControllerResponse resp_reg;
+    BoardWaitCount board_wait_count;
+    MoveWaitCount move_wait_count;
+    BoardDest board_dest;
+
+    FullBoard active_board;
+    ZobristKey active_zobrist_key;
+    EvalScore active_pst_eval;
+
+    BoardSnapshot active_history[0:ACTIVE_HISTORY_DEPTH-1];
+    HistoryCount active_history_count;
+    ZobristKey active_repetition_keys[0:ACTIVE_HISTORY_DEPTH-1];
+    HistoryCount active_repetition_key_count;
+    HistoryCount active_repetition_start;
+
+    logic [6:0] new_setup_index;
+
+    FullBoard perft_board_stack[0:MAX_PLY_COUNT-1];
+    ZobristKey perft_zobrist_stack[0:MAX_PLY_COUNT-1];
+    EvalScore perft_pst_stack[0:MAX_PLY_COUNT-1];
+    logic perft_first_request[0:MAX_PLY_COUNT-1];
+    PlyIndex perft_ply;
+    logic [7:0] perft_target_depth;
+    NodeCountType perft_nodes;
+    Move perft_pending_move;
+
+    Move search_best_move[0:THREAD_COUNT-1];
+    NodeCountType search_nodes;
+    NodeCountType search_thread_nodes[0:THREAD_COUNT-1];
+    BoardWaitCount search_board_wait_count[0:THREAD_COUNT-1];
+    MoveWaitCount search_move_wait_count[0:THREAD_COUNT-1];
+    EvalWaitCount search_eval_wait_count[0:THREAD_COUNT-1];
+    logic search_board_inflight[0:THREAD_COUNT-1];
+    logic search_move_inflight[0:THREAD_COUNT-1];
+    logic search_eval_inflight[0:THREAD_COUNT-1];
+    logic search_tt_lookup_inflight[0:THREAD_COUNT-1];
+    logic search_tt_store_inflight[0:THREAD_COUNT-1];
+    logic search_tt_response_pending[0:THREAD_COUNT-1];
+    TTLookupResponse search_tt_response[0:THREAD_COUNT-1];
+    ThreadID search_board_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
+    ThreadID search_move_tag_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
+    ThreadID search_eval_tag_pipe[0:SEARCH_EVAL_TAG_PIPE_LEN-1];
+    logic search_board_tag_valid_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
+    logic search_move_tag_valid_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
+    logic search_eval_tag_valid_pipe[0:SEARCH_EVAL_TAG_PIPE_LEN-1];
+    ThreadID search_board_result_thread_id;
+    ThreadID search_move_result_thread_id;
+    ThreadID search_eval_result_thread_id;
+    logic search_board_result_valid;
+    logic search_move_result_valid;
+    logic search_eval_result_valid;
+    Move search_pending_move[0:THREAD_COUNT-1];
+    FullBoard search_board_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    ZobristKey search_zobrist_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    EvalScore search_pst_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    Move search_move_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    Move search_best_move_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    EvalScore search_best_score_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    EvalScore search_alpha_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    EvalScore search_orig_alpha_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    EvalScore search_beta_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    Move search_tt_move_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    PlyIndex search_repetition_start_stack[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    logic search_first_request[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    logic search_has_legal[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    logic search_tt_checked[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    logic search_has_tt_move[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    logic search_stand_pat_done[0:THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+    PlyIndex search_ply[0:THREAD_COUNT-1];
+    logic [7:0] search_target_depth;
+    logic [7:0] search_current_depth;
+    logic [7:0] search_max_depth;
+    logic [7:0] search_completed_depth;
+    Move search_completed_best_move;
+    EvalScore search_completed_score;
+    logic [7:0] search_thread_completed_depth[0:THREAD_COUNT-1];
+    Move search_thread_completed_best_move[0:THREAD_COUNT-1];
+    EvalScore search_thread_completed_score[0:THREAD_COUNT-1];
+    ThreadID search_thread_id;
+    ThreadID search_dispatch_cursor;
+    ThreadID search_board_dispatch_cursor;
+    ThreadID search_move_dispatch_cursor;
+    ThreadID search_eval_dispatch_cursor;
+    ThreadID search_tt_lookup_dispatch_cursor;
+    ThreadID search_tt_store_dispatch_cursor;
+    ThreadID search_return_dispatch_cursor;
+    ThreadID search_tt_response_dispatch_cursor;
+    SearchThreadStatus search_thread_status[0:THREAD_COUNT-1];
+    SearchThreadPhase search_thread_phase[0:THREAD_COUNT-1];
+    ThreadCount search_active_thread_count;
+    logic search_iteration_has_result;
+    Move search_iteration_best_move;
+    EvalScore search_iteration_best_score;
+    EvalScore search_return_score[0:THREAD_COUNT-1];
+    logic search_return_valid[0:THREAD_COUNT-1];
+    logic search_eval_is_stand_pat[0:THREAD_COUNT-1];
+
+    BoardOp board_update_op;
+    FullBoard board_update_in;
+    ZobristKey board_update_zobrist_in;
+    EvalScore board_update_pst_in;
+    Move board_update_move;
+    logic [6:0] board_update_set_data;
+    ThreadID board_update_thread_id;
+    PlyIndex board_update_ply;
+    FullBoard board_update_out;
+    ZobristKey board_update_zobrist_out;
+    EvalScore board_update_pst_out;
+
+    MoveGenOp move_gen_op;
+    logic move_gen_start_node;
+    ThreadID move_gen_thread_id;
+    PlyIndex move_gen_ply;
+    Move move_gen_target_move;
+    Tile move_gen_tiles[64];
+    Color move_gen_turn;
+    CastlePerms move_gen_castle_perms;
+    logic move_gen_has_ep;
+    BoardFile move_gen_ep_file;
+    Move candidate_move;
+    logic move_is_legal;
+
+    Tile eval_board_tiles[64];
+    EvalScore eval_base;
+    EvalScore static_eval_out;
+
+    logic tt_clear;
+    logic tt_clear_busy;
+    logic tt_lookup_req_valid;
+    logic tt_lookup_req_ready;
+    TTLookupRequest tt_lookup_req;
+    logic tt_lookup_resp_valid;
+    TTLookupResponse tt_lookup_resp;
+    logic tt_store_req_valid;
+    logic tt_store_req_ready;
+    TTStoreRequest tt_store_req;
+    TTAge tt_age;
+
+    logic timer_rst;
+    logic timer_run;
+    TimeType elapsed_ms;
+    TimeType search_budget_ms;
+    EngineControllerRequest setup_req_comb;
+    logic search_board_issue_valid;
+    logic search_move_issue_valid;
+    logic search_eval_issue_valid;
+    logic search_tt_lookup_issue_valid;
+    logic search_tt_store_issue_valid;
+    ThreadID search_board_issue_thread;
+    ThreadID search_move_issue_thread;
+    ThreadID search_eval_issue_thread;
+    ThreadID search_tt_lookup_issue_thread;
+    ThreadID search_tt_store_issue_thread;
+
+    assign resp = resp_reg;
+    assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
+        || (state == ST_IDLE)
+        || (state == ST_KILL_DONE);
+
+    board_update_pipeline board_update_pipeline (
+        .clk(clk),
+        .board_op(board_update_op),
+        .board_in(board_update_in),
+        .zobrist_key_in(board_update_zobrist_in),
+        .pst_eval_in(board_update_pst_in),
+        .move_in(board_update_move),
+        .set_data(board_update_set_data),
+        .thread_id(board_update_thread_id),
+        .search_ply(board_update_ply),
+        .board_out(board_update_out),
+        .zobrist_key_out(board_update_zobrist_out),
+        .pst_eval_out(board_update_pst_out)
+    );
+
+    move_generator #(
+        .MAX_PLY_COUNT(MAX_PLY_COUNT),
+        .THREAD_COUNT(THREAD_COUNT)
+    ) move_generator (
+        .clk(clk),
+        .rst_n(rst_n),
+        .move_gen_op(move_gen_op),
+        .start_node(move_gen_start_node),
+        .thread_id(move_gen_thread_id),
+        .ply(move_gen_ply),
+        .target_move(move_gen_target_move),
+        .board_tiles(move_gen_tiles),
+        .turn(move_gen_turn),
+        .castle_perms(move_gen_castle_perms),
+        .has_ep(move_gen_has_ep),
+        .ep_file(move_gen_ep_file),
+        .candidate_move(candidate_move),
+        .move_is_legal(move_is_legal)
+    );
+
+    tt_load_store #(
+        .TT_INDEX_BITS(TT_INDEX_BITS)
+    ) tt_load_store (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(tt_clear),
+        .clear_busy(tt_clear_busy),
+        .lookup_req_valid(tt_lookup_req_valid),
+        .lookup_req_ready(tt_lookup_req_ready),
+        .lookup_req(tt_lookup_req),
+        .lookup_resp_valid(tt_lookup_resp_valid),
+        .lookup_resp(tt_lookup_resp),
+        .store_req_valid(tt_store_req_valid),
+        .store_req_ready(tt_store_req_ready),
+        .store_req(tt_store_req)
+    );
+
+    timer #(
+        .CLOCK_FREQ(CLOCK_FREQ)
+    ) search_timer (
+        .clk(clk),
+        .rst(timer_rst),
+        .run(timer_run),
+        .time_ms(elapsed_ms)
+    );
+
+    static_evaluator static_evaluator (
+        .clk(clk),
+        .board_tiles(eval_board_tiles),
+        .base_eval(eval_base),
+        .static_eval(static_eval_out)
+    );
+
+    function automatic logic is_null_move(input Move move);
+        return move.from_pos == Position'(0) && move.to_pos == Position'(0);
+    endfunction : is_null_move
+
+    function automatic logic is_direct_setup_op(input BoardOp op);
+        return op == BOARD_SET_TILE_OP
+            || op == BOARD_SET_TURN_OP
+            || op == BOARD_SET_CASTLE_PERMS_OP
+            || op == BOARD_SET_EN_PASSANT_OP
+            || op == BOARD_SET_HALFMOVE_CLOCK_OP;
+    endfunction : is_direct_setup_op
+
+    function automatic Tile normalize_tile(input Tile tile);
+        if (tile.piece_type == NULL_PIECE) begin
+            return EMPTY_TILE;
+        end
+        return tile;
+    endfunction : normalize_tile
+
+    function automatic logic is_line_attacker(input PieceType piece, input Direction dir);
+        return (piece == QUEEN || (piece == ROOK && isDirCardinal(dir)) || (piece == BISHOP && isDirDiag(dir)));
+    endfunction : is_line_attacker
+
+    function automatic Position find_king(input FullBoard board, input Color king_color);
+        for (int pos = 0; pos < 64; pos++) begin
+            if (normalize_tile(board.tiles[pos]) == Tile'({king_color, KING})) begin
+                return Position'(pos);
+            end
+        end
+        return Position'('x);
+    endfunction : find_king
+
+    function automatic logic square_attacked(input FullBoard board, input Position square, input Color attacker_color);
+        automatic Position test_pos;
+        automatic Tile test_tile;
+
+        if (attacker_color == WHITE) begin
+            if (isShiftOnBoard(square, SOUTH_WEST, 3'd1)
+                    && normalize_tile(board.tiles[shiftPos(square, SOUTH_WEST, 3'd1)]) == WHITE_PAWN) return 1'b1;
+            if (isShiftOnBoard(square, SOUTH_EAST, 3'd1)
+                    && normalize_tile(board.tiles[shiftPos(square, SOUTH_EAST, 3'd1)]) == WHITE_PAWN) return 1'b1;
+        end else begin
+            if (isShiftOnBoard(square, NORTH_WEST, 3'd1)
+                    && normalize_tile(board.tiles[shiftPos(square, NORTH_WEST, 3'd1)]) == BLACK_PAWN) return 1'b1;
+            if (isShiftOnBoard(square, NORTH_EAST, 3'd1)
+                    && normalize_tile(board.tiles[shiftPos(square, NORTH_EAST, 3'd1)]) == BLACK_PAWN) return 1'b1;
+        end
+
+        for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
+            if (isKnightShiftOnBoard(square, KnightDirection'(knight_dir))) begin
+                test_pos = shiftKnightPos(square, KnightDirection'(knight_dir));
+                if (normalize_tile(board.tiles[test_pos]) == Tile'({attacker_color, KNIGHT})) return 1'b1;
+            end
+        end
+
+        for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
+            automatic Direction dir = Direction'(dir_idx);
+            for (int distance = 1; distance < 8; distance++) begin
+                if (isShiftOnBoard(square, dir, distance[2:0])) begin
+                    test_pos = shiftPos(square, dir, distance[2:0]);
+                    test_tile = normalize_tile(board.tiles[test_pos]);
+                    if (test_tile.piece_type != NULL_PIECE) begin
+                        if (test_tile.piece_color == attacker_color) begin
+                            if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
+                            if (is_line_attacker(test_tile.piece_type, dir)) return 1'b1;
+                        end
+                        break;
+                    end
+                end
+            end
+        end
+
+        return 1'b0;
+    endfunction : square_attacked
+
+    function automatic logic side_in_check(input FullBoard board);
+        return square_attacked(board, find_king(board, board.turn), Color'(~board.turn));
+    endfunction : side_in_check
+
+    function automatic logic square_is_light(input Position pos);
+        automatic BoardFile file = getFile(pos);
+        automatic BoardRank rank = getRank(pos);
+        return file[0] ^ rank[0];
+    endfunction : square_is_light
+
+    function automatic logic insufficient_material(input FullBoard board);
+        automatic int white_minor_count = 0;
+        automatic int black_minor_count = 0;
+        automatic int knight_count = 0;
+        automatic int bishop_count = 0;
+        automatic logic bishop_color_seen = 1'b0;
+        automatic logic bishop_light_color = 1'b0;
+
+        for (int pos = 0; pos < 64; pos++) begin
+            automatic Tile tile = normalize_tile(board.tiles[pos]);
+            if (tile.piece_type == PAWN || tile.piece_type == ROOK || tile.piece_type == QUEEN) begin
+                return 1'b0;
+            end
+            if (tile.piece_type == BISHOP || tile.piece_type == KNIGHT) begin
+                if (tile.piece_color == WHITE) white_minor_count += 1;
+                else black_minor_count += 1;
+                if (tile.piece_type == KNIGHT) begin
+                    knight_count += 1;
+                end else begin
+                    bishop_count += 1;
+                    if (!bishop_color_seen) begin
+                        bishop_color_seen = 1'b1;
+                        bishop_light_color = square_is_light(Position'(pos));
+                    end else if (bishop_light_color != square_is_light(Position'(pos))) begin
+                        return 1'b0;
+                    end
+                end
+            end
+        end
+
+        if ((white_minor_count + black_minor_count) <= 1) begin
+            return 1'b1;
+        end
+        return knight_count == 0 && bishop_count != 0;
+    endfunction : insufficient_material
+
+    function automatic logic committed_move_is_irreversible(input FullBoard before_board, input FullBoard after_board, input Move move);
+        automatic Tile start_tile;
+        automatic Tile end_tile;
+
+        start_tile = normalize_tile(before_board.tiles[move.from_pos]);
+        end_tile = normalize_tile(before_board.tiles[move.to_pos]);
+        return start_tile.piece_type == PAWN
+            || end_tile.piece_type != NULL_PIECE
+            || before_board.castle_perms != after_board.castle_perms;
+    endfunction : committed_move_is_irreversible
+
+    function automatic logic repetition_draw(
+        input ThreadID thread,
+        input ZobristKey zobrist_key,
+        input PlyIndex ply
+    );
+        automatic int occurrence_count = 0;
+        automatic int current_occurrence_count;
+
+        if (search_repetition_start_stack[thread][ply] == PlyIndex'(0)) begin
+            for (int idx = 0; idx < ACTIVE_HISTORY_DEPTH; idx++) begin
+                if (idx >= int'(active_repetition_start) && idx < int'(active_repetition_key_count)) begin
+                    if (active_repetition_keys[idx] == zobrist_key) begin
+                        occurrence_count += 1;
+                    end
+                end
+            end
+        end
+
+        for (int idx = 1; idx < MAX_PLY_COUNT; idx++) begin
+            if (idx >= int'(search_repetition_start_stack[thread][ply]) && idx < int'(ply)) begin
+                if (search_zobrist_stack[thread][idx] == zobrist_key) begin
+                    occurrence_count += 1;
+                end
+            end
+        end
+
+        current_occurrence_count = occurrence_count + ((ply == PlyIndex'(0)) ? 0 : 1);
+        return current_occurrence_count >= 3;
+    endfunction : repetition_draw
+
+    function automatic EvalScore terminal_no_move_score(input FullBoard board, input PlyIndex ply);
+        if (side_in_check(board)) begin
+            return EvalScore'(-int'(MATE_SCORE) + int'(ply));
+        end
+        return DRAW_EVAL_SCORE;
+    endfunction : terminal_no_move_score
+
+    function automatic Tile start_tile(input int pos);
+        case (pos)
+            0: return WHITE_ROOK;
+            1: return WHITE_KNIGHT;
+            2: return WHITE_BISHOP;
+            3: return WHITE_QUEEN;
+            4: return WHITE_KING;
+            5: return WHITE_BISHOP;
+            6: return WHITE_KNIGHT;
+            7: return WHITE_ROOK;
+            8, 9, 10, 11, 12, 13, 14, 15: return WHITE_PAWN;
+            48, 49, 50, 51, 52, 53, 54, 55: return BLACK_PAWN;
+            56: return BLACK_ROOK;
+            57: return BLACK_KNIGHT;
+            58: return BLACK_BISHOP;
+            59: return BLACK_QUEEN;
+            60: return BLACK_KING;
+            61: return BLACK_BISHOP;
+            62: return BLACK_KNIGHT;
+            63: return BLACK_ROOK;
+            default: return EMPTY_TILE;
+        endcase
+    endfunction : start_tile
+
+    function automatic logic [3:0] start_tile_bits(input int pos);
+        automatic Tile tile;
+
+        tile = start_tile(pos);
+        if (tile.piece_type == NULL_PIECE) begin
+            return 4'h0;
+        end
+        return tile;
+    endfunction : start_tile_bits
+
+    function automatic EngineControllerRequest new_game_setup_request(input logic [6:0] idx);
+        automatic EngineControllerRequest setup_req;
+
+        setup_req = EngineControllerRequest'('0);
+        setup_req.operation = ENGINE_CTRL_DIRECT_BOARD;
+        setup_req.direct_board_op = BOARD_IDLE_OP;
+        if (idx < 7'd64) begin
+            setup_req.direct_board_op = BOARD_SET_TILE_OP;
+            setup_req.move.to_pos = Position'(idx[5:0]);
+            setup_req.board_wr_data = {3'b000, start_tile_bits(int'(idx))};
+        end else if (idx == 7'd64) begin
+            setup_req.direct_board_op = BOARD_SET_CASTLE_PERMS_OP;
+            setup_req.board_wr_data = 7'b000_1111;
+        end else if (idx == 7'd65) begin
+            setup_req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
+            setup_req.board_wr_data = 7'd0;
+        end else if (idx == 7'd66) begin
+            setup_req.direct_board_op = BOARD_SET_TURN_OP;
+            setup_req.board_wr_data = 7'd0;
+        end else begin
+            setup_req.direct_board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+            setup_req.board_wr_data = 7'd0;
+        end
+        return setup_req;
+    endfunction : new_game_setup_request
+
+    function automatic TimeType clock_budget(input EngineControllerRequest request);
+        automatic TimeType stm_time;
+        automatic TimeType stm_inc;
+        automatic TimeType usable;
+        automatic TimeType budget;
+
+        stm_time = (active_board.turn == WHITE) ? request.wtime : request.btime;
+        stm_inc = (active_board.turn == WHITE) ? request.winc : request.binc;
+        usable = (stm_time > TimeType'(20)) ? (stm_time - TimeType'(20)) : TimeType'(0);
+        budget = (stm_inc >> 1) + (usable >> 6);
+        if (budget > usable) begin
+            return usable;
+        end
+        if (budget != TimeType'(0) && budget < TimeType'(10)) begin
+            return (usable < TimeType'(10)) ? usable : TimeType'(10);
+        end
+        return budget;
+    endfunction : clock_budget
+
+    function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);
+        return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
+    endfunction : pov_eval
+
+    function automatic logic search_stop_requested();
+        if (active_req.operation == ENGINE_CTRL_SEARCH_NODES && search_nodes >= active_req.node_limit) begin
+            return 1'b1;
+        end
+        if ((active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
+                && elapsed_ms >= search_budget_ms) begin
+            return 1'b1;
+        end
+        return 1'b0;
+    endfunction : search_stop_requested
+
+    function automatic logic search_in_qsearch(input PlyIndex ply);
+        return int'(ply) >= int'(search_target_depth);
+    endfunction : search_in_qsearch
+
+    function automatic int search_wrap_thread_index(input int index);
+        if (index >= THREAD_COUNT) begin
+            return index - THREAD_COUNT;
+        end
+        return index;
+    endfunction : search_wrap_thread_index
+
+    function automatic ThreadID search_thread_after(input ThreadID thread);
+        if (int'(thread) >= THREAD_COUNT - 1) begin
+            return ThreadID'(0);
+        end
+        return ThreadID'(int'(thread) + 1);
+    endfunction : search_thread_after
+
+    function automatic logic search_thread_ready(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_READY;
+    endfunction : search_thread_ready
+
+    function automatic logic search_has_ready_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_ready(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_ready_thread_from
+
+    function automatic ThreadID search_next_ready_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_ready(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_ready_thread_from
+
+    function automatic logic search_thread_store_pending(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_STORE_WAIT
+            && search_tt_store_inflight[thread_index];
+    endfunction : search_thread_store_pending
+
+    function automatic logic search_thread_return_pending(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_MOVE_WAIT
+            && search_return_valid[thread_index]
+            && !search_move_inflight[thread_index];
+    endfunction : search_thread_return_pending
+
+    function automatic logic search_thread_tt_response_pending(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_TT_WAIT
+            && search_tt_response_pending[thread_index]
+            && !search_tt_lookup_inflight[thread_index];
+    endfunction : search_thread_tt_response_pending
+
+    function automatic logic search_thread_board_pending(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_BOARD_WAIT
+            && !search_board_inflight[thread_index];
+    endfunction : search_thread_board_pending
+
+    function automatic logic search_thread_terminal_draw_ready(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_READY
+            && (search_board_stack[thread_index][search_ply[thread_index]].halfmove_clock >= HalfmoveClock'(100)
+                || insufficient_material(search_board_stack[thread_index][search_ply[thread_index]])
+                || repetition_draw(
+                    ThreadID'(thread_index),
+                    search_zobrist_stack[thread_index][search_ply[thread_index]],
+                    search_ply[thread_index]
+                ));
+    endfunction : search_thread_terminal_draw_ready
+
+    function automatic logic search_thread_tt_lookup_ready(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_READY
+            && !search_thread_terminal_draw_ready(thread_index)
+            && !search_in_qsearch(search_ply[thread_index])
+            && !search_tt_checked[thread_index][search_ply[thread_index]]
+            && should_probe_search_tt(ThreadID'(thread_index), search_ply[thread_index])
+            && !search_tt_lookup_inflight[thread_index];
+    endfunction : search_thread_tt_lookup_ready
+
+    function automatic logic search_thread_eval_ready(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_READY
+            && !search_thread_terminal_draw_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && !search_eval_inflight[thread_index]
+            && ((search_in_qsearch(search_ply[thread_index])
+                    && !search_stand_pat_done[thread_index][search_ply[thread_index]])
+                || int'(search_ply[thread_index]) >= MAX_PLY_COUNT - 1);
+    endfunction : search_thread_eval_ready
+
+    function automatic logic search_thread_move_issue_ready(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_READY
+            && !search_thread_terminal_draw_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && !search_thread_eval_ready(thread_index)
+            && !search_move_inflight[thread_index];
+    endfunction : search_thread_move_issue_ready
+
+    function automatic logic search_has_store_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_store_pending(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_store_thread_from
+
+    function automatic ThreadID search_next_store_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_store_pending(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_store_thread_from
+
+    function automatic logic search_has_board_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_board_pending(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_board_thread_from
+
+    function automatic ThreadID search_next_board_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_board_pending(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_board_thread_from
+
+    function automatic logic search_has_move_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_move_issue_ready(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_move_issue_thread_from
+
+    function automatic ThreadID search_next_move_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_move_issue_ready(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_move_issue_thread_from
+
+    function automatic logic search_has_eval_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_eval_ready(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_eval_issue_thread_from
+
+    function automatic ThreadID search_next_eval_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_eval_ready(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_eval_issue_thread_from
+
+    function automatic logic search_has_tt_lookup_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_tt_lookup_ready(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_tt_lookup_issue_thread_from
+
+    function automatic ThreadID search_next_tt_lookup_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_tt_lookup_ready(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_tt_lookup_issue_thread_from
+
+    function automatic logic search_has_return_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_return_pending(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_return_thread_from
+
+    function automatic ThreadID search_next_return_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_return_pending(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_return_thread_from
+
+    function automatic logic search_has_tt_response_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_tt_response_pending(idx)) begin
+                return 1'b1;
+            end
+        end
+        return 1'b0;
+    endfunction : search_has_tt_response_thread_from
+
+    function automatic ThreadID search_next_tt_response_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_tt_response_pending(idx)) begin
+                return ThreadID'(idx);
+            end
+        end
+        return ThreadID'(0);
+    endfunction : search_next_tt_response_thread_from
+
+    function automatic logic should_probe_search_tt(input ThreadID thread, input PlyIndex ply);
+        return !(ply == PlyIndex'(0) && thread != ThreadID'(0));
+    endfunction : should_probe_search_tt
+
+    function automatic Move root_hint_for_thread(input ThreadID thread);
+        case (int'(thread) % 8)
+            0: return Move'({Position'(1), Position'(16), PROMO_QUEEN});
+            1: return Move'({Position'(1), Position'(18), PROMO_QUEEN});
+            2: return Move'({Position'(6), Position'(21), PROMO_QUEEN});
+            3: return Move'({Position'(6), Position'(23), PROMO_QUEEN});
+            4: return Move'({Position'(12), Position'(28), PROMO_QUEEN});
+            5: return Move'({Position'(11), Position'(27), PROMO_QUEEN});
+            6: return Move'({Position'(14), Position'(30), PROMO_QUEEN});
+            default: return Move'({Position'(13), Position'(29), PROMO_QUEEN});
+        endcase
+    endfunction : root_hint_for_thread
+
+    function automatic logic move_tiebreak_less(input Move candidate, input Move current);
+        if (is_null_move(current)) begin
+            return !is_null_move(candidate);
+        end
+        if (candidate.from_pos != current.from_pos) begin
+            return candidate.from_pos < current.from_pos;
+        end
+        if (candidate.to_pos != current.to_pos) begin
+            return candidate.to_pos < current.to_pos;
+        end
+        return candidate.promo_piece < current.promo_piece;
+    endfunction : move_tiebreak_less
+
+    function automatic logic root_result_better(
+        input EvalScore candidate_score,
+        input Move candidate_move,
+        input logic has_current,
+        input EvalScore current_score,
+        input Move current_move
+    );
+        return !has_current
+            || candidate_score > current_score
+            || (candidate_score == current_score && move_tiebreak_less(candidate_move, current_move));
+    endfunction : root_result_better
+
+    function automatic TTDepth search_remaining_depth(input PlyIndex ply);
+        if (int'(ply) >= int'(search_target_depth)) begin
+            return TTDepth'(0);
+        end
+        return TTDepth'(int'(search_target_depth) - int'(ply));
+    endfunction : search_remaining_depth
+
+    function automatic TTBoundType tt_bound_for_score(
+        input EvalScore score,
+        input EvalScore original_alpha,
+        input EvalScore beta
+    );
+        if (score <= original_alpha) begin
+            return TT_BOUND_UPPER;
+        end
+        if (score >= beta) begin
+            return TT_BOUND_LOWER;
+        end
+        return TT_BOUND_EXACT;
+    endfunction : tt_bound_for_score
+
+    function automatic logic [7:0] requested_search_depth(input EngineControllerRequest request);
+        if (request.operation == ENGINE_CTRL_SEARCH_DEPTH) begin
+            return request.depth_limit;
+        end
+        return 8'(MAX_PLY_COUNT - 1);
+    endfunction : requested_search_depth
+
+    always_comb begin
+        setup_req_comb = new_game_setup_request(new_setup_index);
+        search_board_issue_valid = (state == ST_SEARCH_RUN) && search_has_board_thread_from(search_board_dispatch_cursor);
+        search_move_issue_valid = (state == ST_SEARCH_RUN) && search_has_move_issue_thread_from(search_move_dispatch_cursor);
+        search_eval_issue_valid = (state == ST_SEARCH_RUN) && search_has_eval_issue_thread_from(search_eval_dispatch_cursor);
+        search_tt_lookup_issue_valid = (state == ST_SEARCH_RUN) && search_has_tt_lookup_issue_thread_from(search_tt_lookup_dispatch_cursor);
+        search_tt_store_issue_valid = (state == ST_SEARCH_RUN) && search_has_store_thread_from(search_tt_store_dispatch_cursor);
+        search_board_issue_thread = search_board_issue_valid
+            ? search_next_board_thread_from(search_board_dispatch_cursor)
+            : ThreadID'(0);
+        search_move_issue_thread = search_move_issue_valid
+            ? search_next_move_issue_thread_from(search_move_dispatch_cursor)
+            : ThreadID'(0);
+        search_eval_issue_thread = search_eval_issue_valid
+            ? search_next_eval_issue_thread_from(search_eval_dispatch_cursor)
+            : ThreadID'(0);
+        search_tt_lookup_issue_thread = search_tt_lookup_issue_valid
+            ? search_next_tt_lookup_issue_thread_from(search_tt_lookup_dispatch_cursor)
+            : ThreadID'(0);
+        search_tt_store_issue_thread = search_tt_store_issue_valid
+            ? search_next_store_thread_from(search_tt_store_dispatch_cursor)
+            : ThreadID'(0);
+
+        board_update_op = BOARD_IDLE_OP;
+        board_update_in = active_board;
+        board_update_zobrist_in = active_zobrist_key;
+        board_update_pst_in = active_pst_eval;
+        board_update_move = active_req.move;
+        board_update_set_data = active_req.board_wr_data;
+        board_update_thread_id = (state == ST_SEARCH_RUN) ? search_board_issue_thread : ThreadID'(0);
+        board_update_ply = PlyIndex'(0);
+
+        if (state == ST_BOARD_ISSUE) begin
+            board_update_op = active_req.direct_board_op;
+        end else if (state == ST_NEW_SETUP_ISSUE) begin
+            board_update_op = setup_req_comb.direct_board_op;
+            board_update_move = setup_req_comb.move;
+            board_update_set_data = setup_req_comb.board_wr_data;
+        end else if (state == ST_PERFT_PUSH_ISSUE) begin
+            board_update_op = BOARD_PUSH_MOVE_OP;
+            board_update_in = perft_board_stack[perft_ply];
+            board_update_zobrist_in = perft_zobrist_stack[perft_ply];
+            board_update_pst_in = perft_pst_stack[perft_ply];
+            board_update_move = perft_pending_move;
+            board_update_ply = perft_ply;
+        end else if (search_board_issue_valid) begin
+            board_update_op = BOARD_PUSH_MOVE_OP;
+            board_update_in = search_board_stack[search_board_issue_thread][search_ply[search_board_issue_thread]];
+            board_update_zobrist_in = search_zobrist_stack[search_board_issue_thread][search_ply[search_board_issue_thread]];
+            board_update_pst_in = search_pst_stack[search_board_issue_thread][search_ply[search_board_issue_thread]];
+            board_update_move = search_pending_move[search_board_issue_thread];
+            board_update_ply = search_ply[search_board_issue_thread];
+        end
+
+        move_gen_op = MOVE_GEN_IDLE_OP;
+        move_gen_start_node = 1'b0;
+        move_gen_thread_id = (state == ST_SEARCH_RUN) ? search_move_issue_thread : ThreadID'(0);
+        move_gen_ply = PlyIndex'(0);
+        move_gen_target_move = NULL_MOVE;
+        move_gen_turn = active_board.turn;
+        move_gen_castle_perms = active_board.castle_perms;
+        move_gen_has_ep = active_board.has_ep;
+        move_gen_ep_file = active_board.ep_file;
+        for (int pos = 0; pos < 64; pos++) begin
+            move_gen_tiles[pos] = active_board.tiles[pos];
+        end
+
+        if (state == ST_PERFT_GEN_ISSUE) begin
+            move_gen_op = MOVE_GEN_NORMAL_OP;
+            move_gen_start_node = perft_first_request[perft_ply];
+            move_gen_ply = perft_ply;
+            move_gen_turn = perft_board_stack[perft_ply].turn;
+            move_gen_castle_perms = perft_board_stack[perft_ply].castle_perms;
+            move_gen_has_ep = perft_board_stack[perft_ply].has_ep;
+            move_gen_ep_file = perft_board_stack[perft_ply].ep_file;
+            for (int pos = 0; pos < 64; pos++) begin
+                move_gen_tiles[pos] = perft_board_stack[perft_ply].tiles[pos];
+            end
+        end else if (search_move_issue_valid) begin
+            if (!search_in_qsearch(search_ply[search_move_issue_thread]) && search_has_tt_move[search_move_issue_thread][search_ply[search_move_issue_thread]] && search_first_request[search_move_issue_thread][search_ply[search_move_issue_thread]]) begin
+                move_gen_op = MOVE_GEN_TARGETED_OP;
+                move_gen_target_move = search_tt_move_stack[search_move_issue_thread][search_ply[search_move_issue_thread]];
+            end else if (search_ply[search_move_issue_thread] == PlyIndex'(0) && search_first_request[search_move_issue_thread][search_ply[search_move_issue_thread]] && !search_in_qsearch(search_ply[search_move_issue_thread])) begin
+                move_gen_op = MOVE_GEN_TARGETED_OP;
+                move_gen_target_move = root_hint_for_thread(search_move_issue_thread);
+            end else begin
+                move_gen_op = search_in_qsearch(search_ply[search_move_issue_thread]) ? MOVE_GEN_QSEARCH_OP : MOVE_GEN_NORMAL_OP;
+            end
+            move_gen_start_node = search_first_request[search_move_issue_thread][search_ply[search_move_issue_thread]];
+            move_gen_ply = search_ply[search_move_issue_thread];
+            move_gen_turn = search_board_stack[search_move_issue_thread][search_ply[search_move_issue_thread]].turn;
+            move_gen_castle_perms = search_board_stack[search_move_issue_thread][search_ply[search_move_issue_thread]].castle_perms;
+            move_gen_has_ep = search_board_stack[search_move_issue_thread][search_ply[search_move_issue_thread]].has_ep;
+            move_gen_ep_file = search_board_stack[search_move_issue_thread][search_ply[search_move_issue_thread]].ep_file;
+            for (int pos = 0; pos < 64; pos++) begin
+                move_gen_tiles[pos] = search_board_stack[search_move_issue_thread][search_ply[search_move_issue_thread]].tiles[pos];
+            end
+        end
+
+        eval_base = (state == ST_SEARCH_RUN)
+            ? search_pst_stack[search_eval_issue_thread][search_ply[search_eval_issue_thread]]
+            : search_pst_stack[search_thread_id][search_ply[search_thread_id]];
+        for (int pos = 0; pos < 64; pos++) begin
+            eval_board_tiles[pos] = (state == ST_SEARCH_RUN)
+                ? search_board_stack[search_eval_issue_thread][search_ply[search_eval_issue_thread]].tiles[pos]
+                : search_board_stack[search_thread_id][search_ply[search_thread_id]].tiles[pos];
+        end
+
+        tt_clear = (state == ST_NEW_CLEAR_START);
+        tt_lookup_req_valid = search_tt_lookup_issue_valid;
+        tt_lookup_req = TTLookupRequest'('0);
+        tt_lookup_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
+        tt_lookup_req.zobrist_key = search_zobrist_stack[tt_lookup_req.thread_id][search_ply[tt_lookup_req.thread_id]];
+        tt_lookup_req.depth = search_remaining_depth(search_ply[tt_lookup_req.thread_id]);
+        tt_lookup_req.alpha = search_alpha_stack[tt_lookup_req.thread_id][search_ply[tt_lookup_req.thread_id]];
+        tt_lookup_req.beta = search_beta_stack[tt_lookup_req.thread_id][search_ply[tt_lookup_req.thread_id]];
+        tt_lookup_req.ply = search_ply[tt_lookup_req.thread_id];
+
+        tt_store_req_valid = search_tt_store_issue_valid;
+        tt_store_req = TTStoreRequest'('0);
+        tt_store_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_store_issue_thread : search_thread_id;
+        tt_store_req.zobrist_key = search_zobrist_stack[tt_store_req.thread_id][search_ply[tt_store_req.thread_id]];
+        tt_store_req.depth = search_remaining_depth(search_ply[tt_store_req.thread_id]);
+        tt_store_req.score = search_return_score[tt_store_req.thread_id];
+        tt_store_req.bound_type = tt_bound_for_score(
+            search_return_score[tt_store_req.thread_id],
+            search_orig_alpha_stack[tt_store_req.thread_id][search_ply[tt_store_req.thread_id]],
+            search_beta_stack[tt_store_req.thread_id][search_ply[tt_store_req.thread_id]]
+        );
+        tt_store_req.best_move = search_best_move_stack[tt_store_req.thread_id][search_ply[tt_store_req.thread_id]];
+        tt_store_req.age = tt_age;
+        tt_store_req.ply = search_ply[tt_store_req.thread_id];
+
+        timer_rst = (state == ST_IDLE);
+        timer_run = (state == ST_PERFT_GEN_ISSUE)
+            || (state == ST_PERFT_GEN_WAIT)
+            || (state == ST_PERFT_PUSH_ISSUE)
+            || (state == ST_PERFT_PUSH_WAIT)
+            || (state == ST_SEARCH_ITER_START)
+            || (state == ST_SEARCH_RUN);
+    end
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            state <= ST_IDLE;
+            active_req <= EngineControllerRequest'('0);
+            resp_reg <= EngineControllerResponse'('0);
+            resp_valid <= 1'b0;
+            board_wait_count <= BoardWaitCount'(0);
+            move_wait_count <= MoveWaitCount'(0);
+            board_dest <= BOARD_DEST_ACTIVE;
+            active_board <= FullBoard'('0);
+            active_zobrist_key <= ZobristKey'(0);
+            active_pst_eval <= EvalScore'(0);
+            active_history_count <= HistoryCount'(0);
+            active_repetition_key_count <= HistoryCount'(0);
+            active_repetition_start <= HistoryCount'(0);
+            new_setup_index <= 7'd0;
+            perft_ply <= PlyIndex'(0);
+            perft_target_depth <= 8'd0;
+            perft_nodes <= NodeCountType'(0);
+            perft_pending_move <= NULL_MOVE;
+            search_nodes <= NodeCountType'(0);
+            search_target_depth <= 8'd0;
+            search_current_depth <= 8'd0;
+            search_max_depth <= 8'd0;
+            search_completed_depth <= 8'd0;
+            search_completed_best_move <= NULL_MOVE;
+            search_completed_score <= EvalScore'(0);
+            search_thread_id <= ThreadID'(0);
+            search_dispatch_cursor <= ThreadID'(0);
+            search_board_dispatch_cursor <= ThreadID'(0);
+            search_move_dispatch_cursor <= ThreadID'(0);
+            search_eval_dispatch_cursor <= ThreadID'(0);
+            search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+            search_tt_store_dispatch_cursor <= ThreadID'(0);
+            search_return_dispatch_cursor <= ThreadID'(0);
+            search_tt_response_dispatch_cursor <= ThreadID'(0);
+            search_board_result_thread_id <= ThreadID'(0);
+            search_move_result_thread_id <= ThreadID'(0);
+            search_eval_result_thread_id <= ThreadID'(0);
+            search_board_result_valid <= 1'b0;
+            search_move_result_valid <= 1'b0;
+            search_eval_result_valid <= 1'b0;
+            search_active_thread_count <= ThreadCount'(0);
+            search_iteration_has_result <= 1'b0;
+            search_iteration_best_move <= NULL_MOVE;
+            search_iteration_best_score <= -SEARCH_INF;
+            search_budget_ms <= TimeType'(0);
+            tt_age <= TTAge'(0);
+            for (int idx = 0; idx < MAX_PLY_COUNT; idx++) begin
+                perft_board_stack[idx] <= FullBoard'('0);
+                perft_zobrist_stack[idx] <= ZobristKey'(0);
+                perft_pst_stack[idx] <= EvalScore'(0);
+                perft_first_request[idx] <= 1'b1;
+            end
+            for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                search_best_move[tid] <= NULL_MOVE;
+                search_thread_status[tid] <= SEARCH_THREAD_IDLE;
+                search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
+                search_thread_nodes[tid] <= NodeCountType'(0);
+                search_thread_completed_depth[tid] <= 8'd0;
+                search_thread_completed_best_move[tid] <= NULL_MOVE;
+                search_thread_completed_score[tid] <= EvalScore'(0);
+                search_board_wait_count[tid] <= BoardWaitCount'(0);
+                search_move_wait_count[tid] <= MoveWaitCount'(0);
+                search_eval_wait_count[tid] <= EvalWaitCount'(0);
+                search_board_inflight[tid] <= 1'b0;
+                search_move_inflight[tid] <= 1'b0;
+                search_eval_inflight[tid] <= 1'b0;
+                search_tt_lookup_inflight[tid] <= 1'b0;
+                search_tt_store_inflight[tid] <= 1'b0;
+                search_tt_response_pending[tid] <= 1'b0;
+                search_tt_response[tid] <= TTLookupResponse'('0);
+                search_pending_move[tid] <= NULL_MOVE;
+                search_ply[tid] <= PlyIndex'(0);
+                search_return_score[tid] <= EvalScore'(0);
+                search_return_valid[tid] <= 1'b0;
+                search_eval_is_stand_pat[tid] <= 1'b0;
+                for (int idx = 0; idx < MAX_PLY_COUNT; idx++) begin
+                    search_board_stack[tid][idx] <= FullBoard'('0);
+                    search_zobrist_stack[tid][idx] <= ZobristKey'(0);
+                    search_pst_stack[tid][idx] <= EvalScore'(0);
+                    search_move_stack[tid][idx] <= NULL_MOVE;
+                    search_best_move_stack[tid][idx] <= NULL_MOVE;
+                    search_best_score_stack[tid][idx] <= -SEARCH_INF;
+                    search_alpha_stack[tid][idx] <= -SEARCH_INF;
+                    search_orig_alpha_stack[tid][idx] <= -SEARCH_INF;
+                    search_beta_stack[tid][idx] <= SEARCH_INF;
+                    search_tt_move_stack[tid][idx] <= NULL_MOVE;
+                    search_repetition_start_stack[tid][idx] <= PlyIndex'(0);
+                    search_first_request[tid][idx] <= 1'b1;
+                    search_has_legal[tid][idx] <= 1'b0;
+                    search_tt_checked[tid][idx] <= 1'b0;
+                    search_has_tt_move[tid][idx] <= 1'b0;
+                    search_stand_pat_done[tid][idx] <= 1'b0;
+                end
+            end
+            for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
+                search_board_tag_pipe[idx] <= ThreadID'(0);
+                search_board_tag_valid_pipe[idx] <= 1'b0;
+            end
+            for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
+                search_move_tag_pipe[idx] <= ThreadID'(0);
+                search_move_tag_valid_pipe[idx] <= 1'b0;
+            end
+            for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
+                search_eval_tag_pipe[idx] <= ThreadID'(0);
+                search_eval_tag_valid_pipe[idx] <= 1'b0;
+            end
+            for (int idx = 0; idx < ACTIVE_HISTORY_DEPTH; idx++) begin
+                active_repetition_keys[idx] <= ZobristKey'(0);
+            end
+        end else begin
+            resp_valid <= 1'b0;
+            search_board_result_valid <= 1'b0;
+            search_move_result_valid <= 1'b0;
+            search_eval_result_valid <= 1'b0;
+
+            if (tt_lookup_resp_valid) begin
+                search_tt_response[tt_lookup_resp.thread_id] <= tt_lookup_resp;
+                search_tt_response_pending[tt_lookup_resp.thread_id] <= 1'b1;
+                search_tt_lookup_inflight[tt_lookup_resp.thread_id] <= 1'b0;
+            end
+
+            if (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE) begin
+                resp_reg <= EngineControllerResponse'('0);
+                resp_reg.end_reason <= ENGINE_END_KILLED;
+                for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                    search_board_wait_count[tid] <= BoardWaitCount'(0);
+                    search_move_wait_count[tid] <= MoveWaitCount'(0);
+                    search_eval_wait_count[tid] <= EvalWaitCount'(0);
+                    search_board_inflight[tid] <= 1'b0;
+                    search_move_inflight[tid] <= 1'b0;
+                    search_eval_inflight[tid] <= 1'b0;
+                    search_tt_lookup_inflight[tid] <= 1'b0;
+                    search_tt_store_inflight[tid] <= 1'b0;
+                    search_tt_response_pending[tid] <= 1'b0;
+                    search_thread_status[tid] <= SEARCH_THREAD_IDLE;
+                    search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
+                end
+                for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
+                    search_board_tag_pipe[idx] <= ThreadID'(0);
+                    search_board_tag_valid_pipe[idx] <= 1'b0;
+                end
+                for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
+                    search_move_tag_pipe[idx] <= ThreadID'(0);
+                    search_move_tag_valid_pipe[idx] <= 1'b0;
+                end
+                for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
+                    search_eval_tag_pipe[idx] <= ThreadID'(0);
+                    search_eval_tag_valid_pipe[idx] <= 1'b0;
+                end
+                state <= ST_KILL_DONE;
+            end else begin
+            case (state)
+                ST_IDLE: begin
+                    if (req_valid) begin
+                        active_req <= req;
+                        case (req.operation)
+                            ENGINE_CTRL_DIRECT_BOARD: begin
+                                if (req.direct_board_op == BOARD_REVERSE_MOVE_OP) begin
+                                    state <= ST_DIRECT_POP;
+                                end else begin
+                                    if (is_direct_setup_op(req.direct_board_op)) begin
+                                        active_history_count <= HistoryCount'(0);
+                                    end
+
+                                    if (req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
+                                        if (active_history_count < HistoryCount'(ACTIVE_HISTORY_DEPTH)
+                                                && active_repetition_key_count < HistoryCount'(ACTIVE_HISTORY_DEPTH)) begin
+                                            active_history[active_history_count].board <= active_board;
+                                            active_history[active_history_count].zobrist_key <= active_zobrist_key;
+                                            active_history[active_history_count].pst_eval <= active_pst_eval;
+                                            active_history[active_history_count].repetition_key_count <= active_repetition_key_count;
+                                            active_history[active_history_count].repetition_start <= active_repetition_start;
+                                            active_history_count <= active_history_count + HistoryCount'(1);
+                                            board_dest <= BOARD_DEST_ACTIVE;
+                                            state <= ST_BOARD_ISSUE;
+                                        end else begin
+                                            resp_reg <= EngineControllerResponse'('0);
+                                            resp_reg.error <= 1'b1;
+                                            resp_reg.end_reason <= ENGINE_END_ERROR;
+                                            state <= ST_DIRECT_DONE;
+                                        end
+                                    end else begin
+                                        board_dest <= BOARD_DEST_ACTIVE;
+                                        state <= ST_BOARD_ISSUE;
+                                    end
+                                end
+                            end
+
+                            ENGINE_CTRL_NEW_GAME: begin
+                                active_history_count <= HistoryCount'(0);
+                                perft_nodes <= NodeCountType'(0);
+                                search_best_move[search_thread_id] <= NULL_MOVE;
+                                search_nodes <= NodeCountType'(0);
+                                search_dispatch_cursor <= ThreadID'(0);
+                                search_board_dispatch_cursor <= ThreadID'(0);
+                                search_move_dispatch_cursor <= ThreadID'(0);
+                                search_eval_dispatch_cursor <= ThreadID'(0);
+                                search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+                                search_tt_store_dispatch_cursor <= ThreadID'(0);
+                                search_return_dispatch_cursor <= ThreadID'(0);
+                                search_tt_response_dispatch_cursor <= ThreadID'(0);
+                                search_active_thread_count <= ThreadCount'(0);
+                                for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                                    search_thread_nodes[tid] <= NodeCountType'(0);
+                                    search_thread_status[tid] <= SEARCH_THREAD_IDLE;
+                                    search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
+                                    search_board_wait_count[tid] <= BoardWaitCount'(0);
+                                    search_move_wait_count[tid] <= MoveWaitCount'(0);
+                                    search_eval_wait_count[tid] <= EvalWaitCount'(0);
+                                    search_board_inflight[tid] <= 1'b0;
+                                    search_move_inflight[tid] <= 1'b0;
+                                    search_eval_inflight[tid] <= 1'b0;
+                                    search_tt_lookup_inflight[tid] <= 1'b0;
+                                    search_tt_store_inflight[tid] <= 1'b0;
+                                    search_tt_response_pending[tid] <= 1'b0;
+                                end
+                                for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
+                                    search_board_tag_pipe[idx] <= ThreadID'(0);
+                                    search_board_tag_valid_pipe[idx] <= 1'b0;
+                                end
+                                for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
+                                    search_move_tag_pipe[idx] <= ThreadID'(0);
+                                    search_move_tag_valid_pipe[idx] <= 1'b0;
+                                end
+                                for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
+                                    search_eval_tag_pipe[idx] <= ThreadID'(0);
+                                    search_eval_tag_valid_pipe[idx] <= 1'b0;
+                                end
+                                tt_age <= tt_age + TTAge'(1);
+                                state <= ST_NEW_CLEAR_START;
+                            end
+
+                            ENGINE_CTRL_PERFT: begin
+                                if (req.depth_limit >= 8'(MAX_PLY_COUNT)) begin
+                                    resp_reg <= EngineControllerResponse'('0);
+                                    resp_reg.error <= 1'b1;
+                                    resp_reg.end_reason <= ENGINE_END_ERROR;
+                                    state <= ST_RESPOND;
+                                end else begin
+                                    perft_board_stack[0] <= active_board;
+                                    perft_zobrist_stack[0] <= active_zobrist_key;
+                                    perft_pst_stack[0] <= active_pst_eval;
+                                    for (int idx = 0; idx < MAX_PLY_COUNT; idx++) begin
+                                        perft_first_request[idx] <= 1'b1;
+                                    end
+                                    perft_ply <= PlyIndex'(0);
+                                    perft_target_depth <= req.depth_limit;
+                                    perft_nodes <= (req.depth_limit == 8'd0) ? NodeCountType'(1) : NodeCountType'(0);
+                                    if (req.depth_limit == 8'd0) begin
+                                        resp_reg <= EngineControllerResponse'('0);
+                                        resp_reg.nodes_count <= NodeCountType'(1);
+                                        resp_reg.completed_depth <= 8'd0;
+                                        resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                                        state <= ST_RESPOND;
+                                    end else begin
+                                        state <= ST_PERFT_GEN_ISSUE;
+                                    end
+                                end
+                            end
+
+                            ENGINE_CTRL_SEARCH_DEPTH,
+                            ENGINE_CTRL_SEARCH_FIXED_TIME,
+                            ENGINE_CTRL_SEARCH_ON_CLOCK,
+                            ENGINE_CTRL_SEARCH_NODES: begin
+                                if (requested_search_depth(req) >= 8'(MAX_PLY_COUNT)) begin
+                                    resp_reg <= EngineControllerResponse'('0);
+                                    resp_reg.error <= 1'b1;
+                                    resp_reg.end_reason <= ENGINE_END_ERROR;
+                                    state <= ST_RESPOND;
+                                end else begin
+                                    search_ply[search_thread_id] <= PlyIndex'(0);
+                                    search_max_depth <= requested_search_depth(req);
+                                    search_current_depth <= (requested_search_depth(req) == 8'd0) ? 8'd0 : 8'd1;
+                                    search_target_depth <= (requested_search_depth(req) == 8'd0) ? 8'd0 : 8'd1;
+                                    search_completed_depth <= 8'd0;
+                                    search_completed_best_move <= NULL_MOVE;
+                                    search_completed_score <= EvalScore'(0);
+                                    search_thread_id <= ThreadID'(0);
+                                    search_dispatch_cursor <= ThreadID'(0);
+                                    search_board_dispatch_cursor <= ThreadID'(0);
+                                    search_move_dispatch_cursor <= ThreadID'(0);
+                                    search_eval_dispatch_cursor <= ThreadID'(0);
+                                    search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+                                    search_tt_store_dispatch_cursor <= ThreadID'(0);
+                                    search_return_dispatch_cursor <= ThreadID'(0);
+                                    search_tt_response_dispatch_cursor <= ThreadID'(0);
+                                    search_active_thread_count <= ThreadCount'(0);
+                                    search_iteration_has_result <= 1'b0;
+                                    search_iteration_best_move <= NULL_MOVE;
+                                    search_iteration_best_score <= -SEARCH_INF;
+                                    perft_nodes <= NodeCountType'(0);
+                                    search_nodes <= NodeCountType'(0);
+                                    search_best_move[search_thread_id] <= NULL_MOVE;
+                                    search_pending_move[search_thread_id] <= NULL_MOVE;
+                                    search_return_score[search_thread_id] <= EvalScore'(0);
+                                    search_return_valid[search_thread_id] <= 1'b0;
+                                    search_eval_is_stand_pat[search_thread_id] <= 1'b0;
+                                    tt_age <= tt_age + TTAge'(1);
+                                    if (req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME) begin
+                                        search_budget_ms <= req.time_limit;
+                                    end else if (req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK) begin
+                                        search_budget_ms <= clock_budget(req);
+                                    end else begin
+                                        search_budget_ms <= TimeType'('1);
+                                    end
+                                    for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                                        search_thread_nodes[tid] <= NodeCountType'(0);
+                                        search_thread_status[tid] <= SEARCH_THREAD_IDLE;
+                                        search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
+                                        search_thread_completed_depth[tid] <= 8'd0;
+                                        search_thread_completed_best_move[tid] <= NULL_MOVE;
+                                        search_thread_completed_score[tid] <= EvalScore'(0);
+                                        search_board_wait_count[tid] <= BoardWaitCount'(0);
+                                        search_move_wait_count[tid] <= MoveWaitCount'(0);
+                                        search_eval_wait_count[tid] <= EvalWaitCount'(0);
+                                        search_board_inflight[tid] <= 1'b0;
+                                        search_move_inflight[tid] <= 1'b0;
+                                        search_eval_inflight[tid] <= 1'b0;
+                                        search_tt_lookup_inflight[tid] <= 1'b0;
+                                        search_tt_store_inflight[tid] <= 1'b0;
+                                        search_tt_response_pending[tid] <= 1'b0;
+                                    end
+                                    for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
+                                        search_board_tag_pipe[idx] <= ThreadID'(0);
+                                        search_board_tag_valid_pipe[idx] <= 1'b0;
+                                    end
+                                    for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
+                                        search_move_tag_pipe[idx] <= ThreadID'(0);
+                                        search_move_tag_valid_pipe[idx] <= 1'b0;
+                                    end
+                                    for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
+                                        search_eval_tag_pipe[idx] <= ThreadID'(0);
+                                        search_eval_tag_valid_pipe[idx] <= 1'b0;
+                                    end
+                                    state <= ST_SEARCH_ITER_START;
+                                end
+                            end
+
+                            ENGINE_CTRL_KILL: begin
+                                resp_reg <= EngineControllerResponse'('0);
+                                resp_reg.end_reason <= ENGINE_END_KILLED;
+                                search_dispatch_cursor <= ThreadID'(0);
+                                search_board_dispatch_cursor <= ThreadID'(0);
+                                search_move_dispatch_cursor <= ThreadID'(0);
+                                search_eval_dispatch_cursor <= ThreadID'(0);
+                                search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+                                search_tt_store_dispatch_cursor <= ThreadID'(0);
+                                search_return_dispatch_cursor <= ThreadID'(0);
+                                search_tt_response_dispatch_cursor <= ThreadID'(0);
+                                search_active_thread_count <= ThreadCount'(0);
+                                for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                                    search_board_wait_count[tid] <= BoardWaitCount'(0);
+                                    search_move_wait_count[tid] <= MoveWaitCount'(0);
+                                    search_eval_wait_count[tid] <= EvalWaitCount'(0);
+                                    search_board_inflight[tid] <= 1'b0;
+                                    search_move_inflight[tid] <= 1'b0;
+                                    search_eval_inflight[tid] <= 1'b0;
+                                    search_tt_lookup_inflight[tid] <= 1'b0;
+                                    search_tt_store_inflight[tid] <= 1'b0;
+                                    search_tt_response_pending[tid] <= 1'b0;
+                                    search_thread_status[tid] <= SEARCH_THREAD_IDLE;
+                                    search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
+                                end
+                                for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
+                                    search_board_tag_pipe[idx] <= ThreadID'(0);
+                                    search_board_tag_valid_pipe[idx] <= 1'b0;
+                                end
+                                for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
+                                    search_move_tag_pipe[idx] <= ThreadID'(0);
+                                    search_move_tag_valid_pipe[idx] <= 1'b0;
+                                end
+                                for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
+                                    search_eval_tag_pipe[idx] <= ThreadID'(0);
+                                    search_eval_tag_valid_pipe[idx] <= 1'b0;
+                                end
+                                state <= ST_KILL_DONE;
+                            end
+
+                            default: begin
+                                resp_reg <= EngineControllerResponse'('0);
+                                resp_reg.error <= 1'b1;
+                                resp_reg.end_reason <= ENGINE_END_ERROR;
+                                state <= ST_RESPOND;
+                            end
+                        endcase
+                    end
+                end
+
+                ST_DIRECT_POP: begin
+                    if (active_history_count != HistoryCount'(0)) begin
+                        active_board <= active_history[active_history_count - HistoryCount'(1)].board;
+                        active_zobrist_key <= active_history[active_history_count - HistoryCount'(1)].zobrist_key;
+                        active_pst_eval <= active_history[active_history_count - HistoryCount'(1)].pst_eval;
+                        active_repetition_key_count <= active_history[active_history_count - HistoryCount'(1)].repetition_key_count;
+                        active_repetition_start <= active_history[active_history_count - HistoryCount'(1)].repetition_start;
+                        active_history_count <= active_history_count - HistoryCount'(1);
+                        resp_reg <= EngineControllerResponse'('0);
+                    end else begin
+                        resp_reg <= EngineControllerResponse'('0);
+                        resp_reg.error <= 1'b1;
+                        resp_reg.end_reason <= ENGINE_END_ERROR;
+                    end
+                    state <= ST_DIRECT_DONE;
+                end
+
+                ST_BOARD_ISSUE: begin
+                    board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
+                    state <= ST_BOARD_WAIT;
+                end
+
+                ST_BOARD_WAIT: begin
+                    if (board_wait_count == BoardWaitCount'(0)) begin
+                        active_board <= board_update_out;
+                        active_zobrist_key <= board_update_zobrist_out;
+                        active_pst_eval <= board_update_pst_out;
+                        if (active_req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
+                            active_repetition_keys[active_repetition_key_count] <= board_update_zobrist_out;
+                            active_repetition_key_count <= active_repetition_key_count + HistoryCount'(1);
+                            if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
+                                active_repetition_start <= active_repetition_key_count;
+                            end
+                        end else if (is_direct_setup_op(active_req.direct_board_op)) begin
+                            active_repetition_keys[0] <= board_update_zobrist_out;
+                            active_repetition_key_count <= HistoryCount'(1);
+                            active_repetition_start <= HistoryCount'(0);
+                        end
+                        resp_reg <= EngineControllerResponse'('0);
+                        state <= ST_DIRECT_DONE;
+                    end else begin
+                        board_wait_count <= board_wait_count - BoardWaitCount'(1);
+                    end
+                end
+
+                ST_DIRECT_DONE: begin
+                    resp_valid <= 1'b1;
+                    state <= ST_IDLE;
+                end
+
+                ST_NEW_CLEAR_START: begin
+                    state <= ST_NEW_CLEAR_WAIT;
+                end
+
+                ST_NEW_CLEAR_WAIT: begin
+                    if (!tt_clear_busy) begin
+                        new_setup_index <= 7'd0;
+                        board_dest <= BOARD_DEST_NEW_GAME;
+                        state <= ST_NEW_SETUP_ISSUE;
+                    end
+                end
+
+                ST_NEW_SETUP_ISSUE: begin
+                    board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
+                    state <= ST_NEW_SETUP_WAIT;
+                end
+
+                ST_NEW_SETUP_WAIT: begin
+                    if (board_wait_count == BoardWaitCount'(0)) begin
+                        active_board <= board_update_out;
+                        active_zobrist_key <= board_update_zobrist_out;
+                        active_pst_eval <= board_update_pst_out;
+                        if (new_setup_index == 7'd67) begin
+                            active_repetition_keys[0] <= board_update_zobrist_out;
+                            active_repetition_key_count <= HistoryCount'(1);
+                            active_repetition_start <= HistoryCount'(0);
+                            resp_reg <= EngineControllerResponse'('0);
+                            state <= ST_NEW_DONE;
+                        end else begin
+                            new_setup_index <= new_setup_index + 7'd1;
+                            state <= ST_NEW_SETUP_ISSUE;
+                        end
+                    end else begin
+                        board_wait_count <= board_wait_count - BoardWaitCount'(1);
+                    end
+                end
+
+                ST_NEW_DONE: begin
+                    resp_valid <= 1'b1;
+                    state <= ST_IDLE;
+                end
+
+                ST_PERFT_GEN_ISSUE: begin
+                    move_wait_count <= MoveWaitCount'(MOVE_WAIT_CYCLES);
+                    state <= ST_PERFT_GEN_WAIT;
+                end
+
+                ST_PERFT_GEN_WAIT: begin
+                    if (move_wait_count == MoveWaitCount'(1)) begin
+                        if (is_null_move(candidate_move)) begin
+                            if (perft_ply == PlyIndex'(0)) begin
+                                resp_reg <= EngineControllerResponse'('0);
+                                resp_reg.nodes_count <= perft_nodes;
+                                resp_reg.completed_depth <= perft_target_depth;
+                                resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                                state <= ST_RESPOND;
+                            end else begin
+                                perft_ply <= perft_ply - PlyIndex'(1);
+                                state <= ST_PERFT_GEN_ISSUE;
+                            end
+                        end else begin
+                            perft_first_request[perft_ply] <= 1'b0;
+                            if (move_is_legal) begin
+                                if (int'(perft_ply) + 1 >= int'(perft_target_depth)) begin
+                                    perft_nodes <= perft_nodes + NodeCountType'(1);
+                                    state <= ST_PERFT_GEN_ISSUE;
+                                end else begin
+                                    perft_pending_move <= candidate_move;
+                                    state <= ST_PERFT_PUSH_ISSUE;
+                                end
+                            end else begin
+                                state <= ST_PERFT_GEN_ISSUE;
+                            end
+                        end
+                    end else begin
+                        move_wait_count <= move_wait_count - MoveWaitCount'(1);
+                    end
+                end
+
+                ST_PERFT_PUSH_ISSUE: begin
+                    board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
+                    state <= ST_PERFT_PUSH_WAIT;
+                end
+
+                ST_PERFT_PUSH_WAIT: begin
+                    if (board_wait_count == BoardWaitCount'(0)) begin
+                        perft_board_stack[perft_ply + PlyIndex'(1)] <= board_update_out;
+                        perft_zobrist_stack[perft_ply + PlyIndex'(1)] <= board_update_zobrist_out;
+                        perft_pst_stack[perft_ply + PlyIndex'(1)] <= board_update_pst_out;
+                        perft_first_request[perft_ply + PlyIndex'(1)] <= 1'b1;
+                        perft_ply <= perft_ply + PlyIndex'(1);
+                        state <= ST_PERFT_GEN_ISSUE;
+                    end else begin
+                        board_wait_count <= board_wait_count - BoardWaitCount'(1);
+                    end
+                end
+
+                ST_SEARCH_ITER_START: begin
+                    for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                        search_thread_status[tid] <= SEARCH_THREAD_ACTIVE;
+                        search_thread_phase[tid] <= SEARCH_PHASE_READY;
+                        search_board_stack[tid][0] <= active_board;
+                        search_zobrist_stack[tid][0] <= active_zobrist_key;
+                        search_pst_stack[tid][0] <= active_pst_eval;
+                        search_ply[tid] <= PlyIndex'(0);
+                        search_best_move[tid] <= NULL_MOVE;
+                        search_pending_move[tid] <= NULL_MOVE;
+                        search_return_score[tid] <= EvalScore'(0);
+                        search_return_valid[tid] <= 1'b0;
+                        search_eval_is_stand_pat[tid] <= 1'b0;
+                        for (int idx = 0; idx < MAX_PLY_COUNT; idx++) begin
+                            search_first_request[tid][idx] <= 1'b1;
+                            search_has_legal[tid][idx] <= 1'b0;
+                            search_best_score_stack[tid][idx] <= -SEARCH_INF;
+                            search_alpha_stack[tid][idx] <= -SEARCH_INF;
+                            search_orig_alpha_stack[tid][idx] <= -SEARCH_INF;
+                            search_beta_stack[tid][idx] <= SEARCH_INF;
+                            search_move_stack[tid][idx] <= NULL_MOVE;
+                            search_best_move_stack[tid][idx] <= NULL_MOVE;
+                            search_tt_move_stack[tid][idx] <= NULL_MOVE;
+                            search_repetition_start_stack[tid][idx] <= PlyIndex'(0);
+                            search_tt_checked[tid][idx] <= 1'b0;
+                            search_has_tt_move[tid][idx] <= 1'b0;
+                            search_stand_pat_done[tid][idx] <= 1'b0;
+                        end
+                    end
+                    search_thread_id <= ThreadID'(0);
+                    search_dispatch_cursor <= ThreadID'(0);
+                    search_board_dispatch_cursor <= ThreadID'(0);
+                    search_move_dispatch_cursor <= ThreadID'(0);
+                    search_eval_dispatch_cursor <= ThreadID'(0);
+                    search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+                    search_tt_store_dispatch_cursor <= ThreadID'(0);
+                    search_return_dispatch_cursor <= ThreadID'(0);
+                    search_tt_response_dispatch_cursor <= ThreadID'(0);
+                    search_active_thread_count <= ThreadCount'(THREAD_COUNT);
+                    search_target_depth <= search_current_depth;
+                    state <= ST_SEARCH_RUN;
+                end
+
+                ST_SEARCH_RUN: begin
+                    automatic ThreadCount active_count_next;
+                    automatic logic iteration_has_result_next;
+                    automatic Move iteration_best_move_next;
+                    automatic EvalScore iteration_best_score_next;
+                    automatic NodeCountType nodes_next;
+                    automatic logic node_stop_next;
+                    automatic logic time_stop_next;
+
+                    active_count_next = search_active_thread_count;
+                    iteration_has_result_next = search_iteration_has_result;
+                    iteration_best_move_next = search_iteration_best_move;
+                    iteration_best_score_next = search_iteration_best_score;
+                    nodes_next = search_nodes;
+
+                    for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                        if (search_board_wait_count[tid] != BoardWaitCount'(0)) begin
+                            search_board_wait_count[tid] <= search_board_wait_count[tid] - BoardWaitCount'(1);
+                        end
+                        if (search_move_wait_count[tid] != MoveWaitCount'(0)) begin
+                            search_move_wait_count[tid] <= search_move_wait_count[tid] - MoveWaitCount'(1);
+                        end
+                        if (search_eval_wait_count[tid] != EvalWaitCount'(0)) begin
+                            search_eval_wait_count[tid] <= search_eval_wait_count[tid] - EvalWaitCount'(1);
+                        end
+                    end
+
+                    for (int idx = SEARCH_BOARD_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
+                        search_board_tag_pipe[idx] <= search_board_tag_pipe[idx - 1];
+                        search_board_tag_valid_pipe[idx] <= search_board_tag_valid_pipe[idx - 1];
+                    end
+                    search_board_tag_pipe[0] <= search_board_issue_thread;
+                    search_board_tag_valid_pipe[0] <= search_board_issue_valid;
+                    for (int idx = SEARCH_MOVE_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
+                        search_move_tag_pipe[idx] <= search_move_tag_pipe[idx - 1];
+                        search_move_tag_valid_pipe[idx] <= search_move_tag_valid_pipe[idx - 1];
+                    end
+                    search_move_tag_pipe[0] <= search_move_issue_thread;
+                    search_move_tag_valid_pipe[0] <= search_move_issue_valid;
+                    for (int idx = SEARCH_EVAL_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
+                        search_eval_tag_pipe[idx] <= search_eval_tag_pipe[idx - 1];
+                        search_eval_tag_valid_pipe[idx] <= search_eval_tag_valid_pipe[idx - 1];
+                    end
+                    search_eval_tag_pipe[0] <= search_eval_issue_thread;
+                    search_eval_tag_valid_pipe[0] <= search_eval_issue_valid;
+
+                    if (search_stop_requested()) begin
+                        automatic Move stop_best_move;
+                        automatic EvalScore stop_score;
+
+                        stop_best_move = search_best_move[0];
+                        stop_score = search_best_score_stack[0][0];
+                        if (search_iteration_has_result) begin
+                            stop_best_move = search_iteration_best_move;
+                            stop_score = search_iteration_best_score;
+                        end
+                        if (search_completed_depth != 8'd0) begin
+                            stop_best_move = search_completed_best_move;
+                            stop_score = search_completed_score;
+                        end
+
+                        resp_reg <= EngineControllerResponse'('0);
+                        resp_reg.best_move <= stop_best_move;
+                        resp_reg.score <= stop_score;
+                        resp_reg.nodes_count <= search_nodes;
+                        resp_reg.completed_depth <= search_completed_depth;
+                        resp_reg.end_reason <= (active_req.operation == ENGINE_CTRL_SEARCH_NODES && search_nodes >= active_req.node_limit)
+                            ? ENGINE_END_NODE_LIMIT
+                            : ENGINE_END_TIME_LIMIT;
+                        state <= ST_RESPOND;
+                    end else begin
+                        if (search_board_tag_valid_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1]) begin
+                            automatic ThreadID board_thread_id;
+                            automatic PlyIndex board_ply;
+                            automatic PlyIndex child_ply;
+
+                            board_thread_id = search_board_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1];
+                            board_ply = search_ply[board_thread_id];
+                            child_ply = board_ply + PlyIndex'(1);
+                            search_board_result_thread_id <= board_thread_id;
+                            search_board_result_valid <= 1'b1;
+                            search_board_wait_count[board_thread_id] <= BoardWaitCount'(0);
+                            search_board_inflight[board_thread_id] <= 1'b0;
+                            search_board_stack[board_thread_id][child_ply] <= board_update_out;
+                            search_zobrist_stack[board_thread_id][child_ply] <= board_update_zobrist_out;
+                            search_pst_stack[board_thread_id][child_ply] <= board_update_pst_out;
+                            search_move_stack[board_thread_id][child_ply] <= search_pending_move[board_thread_id];
+                            search_best_move_stack[board_thread_id][child_ply] <= NULL_MOVE;
+                            search_best_score_stack[board_thread_id][child_ply] <= -SEARCH_INF;
+                            search_alpha_stack[board_thread_id][child_ply] <= -search_beta_stack[board_thread_id][board_ply];
+                            search_orig_alpha_stack[board_thread_id][child_ply] <= -search_beta_stack[board_thread_id][board_ply];
+                            search_beta_stack[board_thread_id][child_ply] <= -search_alpha_stack[board_thread_id][board_ply];
+                            search_tt_move_stack[board_thread_id][child_ply] <= NULL_MOVE;
+                            search_repetition_start_stack[board_thread_id][child_ply] <= committed_move_is_irreversible(
+                                search_board_stack[board_thread_id][board_ply],
+                                board_update_out,
+                                search_pending_move[board_thread_id]
+                            ) ? child_ply : search_repetition_start_stack[board_thread_id][board_ply];
+                            search_has_legal[board_thread_id][child_ply] <= 1'b0;
+                            search_first_request[board_thread_id][child_ply] <= 1'b1;
+                            search_tt_checked[board_thread_id][child_ply] <= 1'b0;
+                            search_has_tt_move[board_thread_id][child_ply] <= 1'b0;
+                            search_stand_pat_done[board_thread_id][child_ply] <= 1'b0;
+                            search_eval_is_stand_pat[board_thread_id] <= 1'b0;
+                            search_return_valid[board_thread_id] <= 1'b0;
+                            search_ply[board_thread_id] <= child_ply;
+                            search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                        end
+
+                        if (search_move_tag_valid_pipe[SEARCH_MOVE_TAG_PIPE_LEN - 1]) begin
+                            automatic ThreadID move_thread_id;
+                            automatic PlyIndex move_ply;
+
+                            move_thread_id = search_move_tag_pipe[SEARCH_MOVE_TAG_PIPE_LEN - 1];
+                            move_ply = search_ply[move_thread_id];
+                            search_move_result_thread_id <= move_thread_id;
+                            search_move_result_valid <= 1'b1;
+                            search_move_wait_count[move_thread_id] <= MoveWaitCount'(0);
+                            search_move_inflight[move_thread_id] <= 1'b0;
+
+                            if (is_null_move(candidate_move)) begin
+                                automatic EvalScore node_score;
+
+                                node_score = search_in_qsearch(move_ply)
+                                    ? search_best_score_stack[move_thread_id][move_ply]
+                                    : search_has_legal[move_thread_id][move_ply]
+                                    ? search_best_score_stack[move_thread_id][move_ply]
+                                    : terminal_no_move_score(search_board_stack[move_thread_id][move_ply], move_ply);
+                                search_return_score[move_thread_id] <= node_score;
+                                search_return_valid[move_thread_id] <= 1'b1;
+                                if (!search_in_qsearch(move_ply)) begin
+                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_STORE_WAIT;
+                                    search_tt_store_inflight[move_thread_id] <= 1'b1;
+                                end else if (move_ply == PlyIndex'(0)) begin
+                                    search_thread_status[move_thread_id] <= SEARCH_THREAD_DONE;
+                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_DONE;
+                                    search_thread_completed_depth[move_thread_id] <= search_target_depth;
+                                    search_thread_completed_best_move[move_thread_id] <= search_best_move[move_thread_id];
+                                    search_thread_completed_score[move_thread_id] <= node_score;
+                                    if (root_result_better(
+                                            node_score,
+                                            search_best_move[move_thread_id],
+                                            iteration_has_result_next,
+                                            iteration_best_score_next,
+                                            iteration_best_move_next)) begin
+                                        iteration_best_move_next = search_best_move[move_thread_id];
+                                        iteration_best_score_next = node_score;
+                                    end
+                                    iteration_has_result_next = 1'b1;
+                                    if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                end else begin
+                                    search_ply[move_thread_id] <= move_ply - PlyIndex'(1);
+                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                end
+                            end else begin
+                                search_first_request[move_thread_id][move_ply] <= 1'b0;
+                                if (move_is_legal) begin
+                                    search_pending_move[move_thread_id] <= candidate_move;
+                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
+                                end else begin
+                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
+                                end
+                            end
+                        end
+
+                        if (search_eval_tag_valid_pipe[SEARCH_EVAL_TAG_PIPE_LEN - 1]) begin
+                            automatic EvalScore eval_score;
+                            automatic ThreadID eval_thread_id;
+                            automatic PlyIndex eval_ply;
+
+                            eval_thread_id = search_eval_tag_pipe[SEARCH_EVAL_TAG_PIPE_LEN - 1];
+                            eval_ply = search_ply[eval_thread_id];
+                            search_eval_result_thread_id <= eval_thread_id;
+                            search_eval_result_valid <= 1'b1;
+                            search_eval_wait_count[eval_thread_id] <= EvalWaitCount'(0);
+                            search_eval_inflight[eval_thread_id] <= 1'b0;
+                            eval_score = pov_eval(search_board_stack[eval_thread_id][eval_ply], static_eval_out);
+                            nodes_next += NodeCountType'(1);
+                            search_thread_nodes[eval_thread_id] <= search_thread_nodes[eval_thread_id] + NodeCountType'(1);
+
+                            if (search_eval_is_stand_pat[eval_thread_id]) begin
+                                search_stand_pat_done[eval_thread_id][eval_ply] <= 1'b1;
+                                search_best_score_stack[eval_thread_id][eval_ply] <= eval_score;
+                                if (eval_score > search_alpha_stack[eval_thread_id][eval_ply]) begin
+                                    search_alpha_stack[eval_thread_id][eval_ply] <= eval_score;
+                                end
+                                if (eval_score >= search_beta_stack[eval_thread_id][eval_ply]) begin
+                                    search_return_score[eval_thread_id] <= eval_score;
+                                    search_return_valid[eval_thread_id] <= 1'b1;
+                                    if (eval_ply == PlyIndex'(0)) begin
+                                        search_thread_status[eval_thread_id] <= SEARCH_THREAD_DONE;
+                                        search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
+                                        search_thread_completed_depth[eval_thread_id] <= search_target_depth;
+                                        search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
+                                        search_thread_completed_score[eval_thread_id] <= eval_score;
+                                        if (root_result_better(
+                                                eval_score,
+                                                NULL_MOVE,
+                                                iteration_has_result_next,
+                                                iteration_best_score_next,
+                                                iteration_best_move_next)) begin
+                                            iteration_best_move_next = NULL_MOVE;
+                                            iteration_best_score_next = eval_score;
+                                        end
+                                        iteration_has_result_next = 1'b1;
+                                        if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                    end else begin
+                                        search_ply[eval_thread_id] <= eval_ply - PlyIndex'(1);
+                                        search_thread_phase[eval_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                    end
+                                end else begin
+                                    search_thread_phase[eval_thread_id] <= SEARCH_PHASE_READY;
+                                end
+                            end else begin
+                                search_return_score[eval_thread_id] <= eval_score;
+                                search_return_valid[eval_thread_id] <= 1'b1;
+                                if (eval_ply == PlyIndex'(0)) begin
+                                    search_thread_status[eval_thread_id] <= SEARCH_THREAD_DONE;
+                                    search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
+                                    search_thread_completed_depth[eval_thread_id] <= search_target_depth;
+                                    search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
+                                    search_thread_completed_score[eval_thread_id] <= eval_score;
+                                    if (root_result_better(
+                                            eval_score,
+                                            NULL_MOVE,
+                                            iteration_has_result_next,
+                                            iteration_best_score_next,
+                                            iteration_best_move_next)) begin
+                                        iteration_best_move_next = NULL_MOVE;
+                                        iteration_best_score_next = eval_score;
+                                    end
+                                    iteration_has_result_next = 1'b1;
+                                    if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                end else begin
+                                    search_ply[eval_thread_id] <= eval_ply - PlyIndex'(1);
+                                    search_thread_phase[eval_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                end
+                            end
+                        end
+
+                        if (search_has_tt_response_thread_from(search_tt_response_dispatch_cursor)) begin
+                            automatic EvalScore tt_alpha_after;
+                            automatic logic tt_cutoff;
+                            automatic ThreadID lookup_thread_id;
+                            automatic PlyIndex lookup_ply;
+                            automatic TTLookupResponse lookup_resp;
+
+                            lookup_thread_id = search_next_tt_response_thread_from(search_tt_response_dispatch_cursor);
+                            lookup_resp = search_tt_response[lookup_thread_id];
+                            lookup_ply = search_ply[lookup_thread_id];
+                            tt_alpha_after = search_alpha_stack[lookup_thread_id][lookup_ply];
+                            tt_cutoff = 1'b0;
+                            search_thread_id <= lookup_thread_id;
+                            search_tt_response_dispatch_cursor <= search_thread_after(lookup_thread_id);
+                            search_tt_response_pending[lookup_thread_id] <= 1'b0;
+
+                            if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_ply)) begin
+                                search_tt_move_stack[lookup_thread_id][lookup_ply] <= lookup_resp.best_move;
+                                search_has_tt_move[lookup_thread_id][lookup_ply] <= !is_null_move(lookup_resp.best_move);
+                                if (lookup_resp.bound_type == TT_BOUND_EXACT) begin
+                                    search_return_score[lookup_thread_id] <= lookup_resp.score;
+                                    search_return_valid[lookup_thread_id] <= 1'b1;
+                                    tt_cutoff = 1'b1;
+                                end else if (lookup_resp.bound_type == TT_BOUND_LOWER) begin
+                                    if (lookup_resp.score > search_alpha_stack[lookup_thread_id][lookup_ply]) begin
+                                        tt_alpha_after = lookup_resp.score;
+                                        search_alpha_stack[lookup_thread_id][lookup_ply] <= lookup_resp.score;
+                                    end
+                                    if (tt_alpha_after >= search_beta_stack[lookup_thread_id][lookup_ply]) begin
+                                        search_return_score[lookup_thread_id] <= lookup_resp.score;
+                                        search_return_valid[lookup_thread_id] <= 1'b1;
+                                        tt_cutoff = 1'b1;
+                                    end
+                                end else if (lookup_resp.bound_type == TT_BOUND_UPPER) begin
+                                    if (lookup_resp.score <= search_alpha_stack[lookup_thread_id][lookup_ply]) begin
+                                        search_return_score[lookup_thread_id] <= lookup_resp.score;
+                                        search_return_valid[lookup_thread_id] <= 1'b1;
+                                        tt_cutoff = 1'b1;
+                                    end
+                                end
+                            end
+
+                            if (tt_cutoff) begin
+                                if (lookup_ply == PlyIndex'(0)) begin
+                                    search_thread_status[lookup_thread_id] <= SEARCH_THREAD_DONE;
+                                    search_thread_phase[lookup_thread_id] <= SEARCH_PHASE_DONE;
+                                    search_thread_completed_depth[lookup_thread_id] <= search_target_depth;
+                                    search_thread_completed_best_move[lookup_thread_id] <= lookup_resp.best_move;
+                                    search_thread_completed_score[lookup_thread_id] <= lookup_resp.score;
+                                    if (root_result_better(
+                                            lookup_resp.score,
+                                            lookup_resp.best_move,
+                                            iteration_has_result_next,
+                                            iteration_best_score_next,
+                                            iteration_best_move_next)) begin
+                                        iteration_best_move_next = lookup_resp.best_move;
+                                        iteration_best_score_next = lookup_resp.score;
+                                    end
+                                    iteration_has_result_next = 1'b1;
+                                    if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                end else begin
+                                    search_ply[lookup_thread_id] <= lookup_ply - PlyIndex'(1);
+                                    search_thread_phase[lookup_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                end
+                            end else begin
+                                search_thread_phase[lookup_thread_id] <= SEARCH_PHASE_READY;
+                            end
+                        end
+
+                        if (search_has_return_thread_from(search_return_dispatch_cursor)) begin
+                            automatic ThreadID return_thread_id;
+                            automatic EvalScore parent_score;
+                            automatic PlyIndex return_ply;
+
+                            return_thread_id = search_next_return_thread_from(search_return_dispatch_cursor);
+                            return_ply = search_ply[return_thread_id];
+                            parent_score = -search_return_score[return_thread_id];
+                            search_thread_id <= return_thread_id;
+                            search_return_dispatch_cursor <= search_thread_after(return_thread_id);
+                            if (!search_has_legal[return_thread_id][return_ply] || parent_score > search_best_score_stack[return_thread_id][return_ply]) begin
+                                search_best_score_stack[return_thread_id][return_ply] <= parent_score;
+                                search_best_move_stack[return_thread_id][return_ply] <= search_move_stack[return_thread_id][return_ply + PlyIndex'(1)];
+                                if (return_ply == PlyIndex'(0)) begin
+                                    search_best_move[return_thread_id] <= search_move_stack[return_thread_id][1];
+                                end
+                            end
+                            search_has_legal[return_thread_id][return_ply] <= 1'b1;
+                            if (parent_score > search_alpha_stack[return_thread_id][return_ply]) begin
+                                search_alpha_stack[return_thread_id][return_ply] <= parent_score;
+                            end
+                            search_return_valid[return_thread_id] <= 1'b0;
+                            if (parent_score >= search_beta_stack[return_thread_id][return_ply]) begin
+                                search_return_score[return_thread_id] <= parent_score;
+                                search_return_valid[return_thread_id] <= 1'b1;
+                                if (!search_in_qsearch(return_ply)) begin
+                                    search_thread_phase[return_thread_id] <= SEARCH_PHASE_STORE_WAIT;
+                                    search_tt_store_inflight[return_thread_id] <= 1'b1;
+                                end else if (return_ply == PlyIndex'(0)) begin
+                                    automatic Move root_move;
+
+                                    root_move = (is_null_move(search_best_move[return_thread_id]) && !is_null_move(search_move_stack[return_thread_id][1]))
+                                        ? search_move_stack[return_thread_id][1]
+                                        : search_best_move[return_thread_id];
+                                    search_thread_status[return_thread_id] <= SEARCH_THREAD_DONE;
+                                    search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
+                                    search_thread_completed_depth[return_thread_id] <= search_target_depth;
+                                    search_thread_completed_best_move[return_thread_id] <= root_move;
+                                    search_thread_completed_score[return_thread_id] <= parent_score;
+                                    if (root_result_better(
+                                            parent_score,
+                                            root_move,
+                                            iteration_has_result_next,
+                                            iteration_best_score_next,
+                                            iteration_best_move_next)) begin
+                                        iteration_best_move_next = root_move;
+                                        iteration_best_score_next = parent_score;
+                                    end
+                                    iteration_has_result_next = 1'b1;
+                                    if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                end else begin
+                                    search_ply[return_thread_id] <= return_ply - PlyIndex'(1);
+                                    search_thread_phase[return_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                end
+                            end else begin
+                                search_thread_phase[return_thread_id] <= SEARCH_PHASE_READY;
+                            end
+                        end
+
+                        if (search_has_ready_thread_from(search_dispatch_cursor)) begin
+                            automatic ThreadID terminal_thread_id;
+                            automatic logic found_terminal;
+
+                            found_terminal = 1'b0;
+                            terminal_thread_id = ThreadID'(0);
+                            for (int offset = 0; offset < THREAD_COUNT; offset++) begin
+                                automatic int idx = search_wrap_thread_index(int'(search_dispatch_cursor) + offset);
+                                if (!found_terminal && search_thread_terminal_draw_ready(idx)) begin
+                                    found_terminal = 1'b1;
+                                    terminal_thread_id = ThreadID'(idx);
+                                end
+                            end
+                            if (found_terminal) begin
+                                search_thread_id <= terminal_thread_id;
+                                search_dispatch_cursor <= search_thread_after(terminal_thread_id);
+                                search_return_score[terminal_thread_id] <= DRAW_EVAL_SCORE;
+                                search_return_valid[terminal_thread_id] <= 1'b1;
+                                if (search_ply[terminal_thread_id] == PlyIndex'(0)) begin
+                                    search_thread_status[terminal_thread_id] <= SEARCH_THREAD_DONE;
+                                    search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_DONE;
+                                    search_thread_completed_depth[terminal_thread_id] <= search_target_depth;
+                                    search_thread_completed_best_move[terminal_thread_id] <= NULL_MOVE;
+                                    search_thread_completed_score[terminal_thread_id] <= DRAW_EVAL_SCORE;
+                                    if (root_result_better(
+                                            DRAW_EVAL_SCORE,
+                                            NULL_MOVE,
+                                            iteration_has_result_next,
+                                            iteration_best_score_next,
+                                            iteration_best_move_next)) begin
+                                        iteration_best_move_next = NULL_MOVE;
+                                        iteration_best_score_next = DRAW_EVAL_SCORE;
+                                    end
+                                    iteration_has_result_next = 1'b1;
+                                    if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                end else begin
+                                    search_ply[terminal_thread_id] <= search_ply[terminal_thread_id] - PlyIndex'(1);
+                                    search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                end
+                            end
+                        end
+
+                        if (search_tt_lookup_issue_valid && tt_lookup_req_ready) begin
+                            search_thread_id <= search_tt_lookup_issue_thread;
+                            search_tt_checked[search_tt_lookup_issue_thread][search_ply[search_tt_lookup_issue_thread]] <= 1'b1;
+                            search_thread_phase[search_tt_lookup_issue_thread] <= SEARCH_PHASE_TT_WAIT;
+                            search_tt_lookup_inflight[search_tt_lookup_issue_thread] <= 1'b1;
+                            search_tt_lookup_dispatch_cursor <= search_thread_after(search_tt_lookup_issue_thread);
+                        end
+
+                        if (search_eval_issue_valid) begin
+                            search_thread_id <= search_eval_issue_thread;
+                            search_eval_wait_count[search_eval_issue_thread] <= EvalWaitCount'(EVAL_WAIT_CYCLES);
+                            search_thread_phase[search_eval_issue_thread] <= SEARCH_PHASE_EVAL_WAIT;
+                            search_eval_inflight[search_eval_issue_thread] <= 1'b1;
+                            search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_ply[search_eval_issue_thread])
+                                && !search_stand_pat_done[search_eval_issue_thread][search_ply[search_eval_issue_thread]];
+                            search_eval_dispatch_cursor <= search_thread_after(search_eval_issue_thread);
+                        end
+
+                        if (search_move_issue_valid) begin
+                            search_thread_id <= search_move_issue_thread;
+                            search_move_wait_count[search_move_issue_thread] <= MoveWaitCount'(MOVE_WAIT_CYCLES);
+                            search_thread_phase[search_move_issue_thread] <= SEARCH_PHASE_MOVE_WAIT;
+                            search_move_inflight[search_move_issue_thread] <= 1'b1;
+                            search_move_dispatch_cursor <= search_thread_after(search_move_issue_thread);
+                        end
+
+                        if (search_board_issue_valid) begin
+                            search_thread_id <= search_board_issue_thread;
+                            search_board_wait_count[search_board_issue_thread] <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
+                            search_thread_phase[search_board_issue_thread] <= SEARCH_PHASE_BOARD_WAIT;
+                            search_board_inflight[search_board_issue_thread] <= 1'b1;
+                            search_board_dispatch_cursor <= search_thread_after(search_board_issue_thread);
+                        end
+
+                        if (search_tt_store_issue_valid && tt_store_req_ready) begin
+                            automatic ThreadID store_thread_id;
+                            automatic PlyIndex store_ply;
+
+                            store_thread_id = search_tt_store_issue_thread;
+                            store_ply = search_ply[store_thread_id];
+                            search_thread_id <= store_thread_id;
+                            search_tt_store_inflight[store_thread_id] <= 1'b0;
+                            search_tt_store_dispatch_cursor <= search_thread_after(store_thread_id);
+                            search_return_valid[store_thread_id] <= 1'b1;
+                            if (store_ply == PlyIndex'(0)) begin
+                                search_thread_status[store_thread_id] <= SEARCH_THREAD_DONE;
+                                search_thread_phase[store_thread_id] <= SEARCH_PHASE_DONE;
+                                search_thread_completed_depth[store_thread_id] <= search_target_depth;
+                                search_thread_completed_best_move[store_thread_id] <= search_best_move_stack[store_thread_id][0];
+                                search_thread_completed_score[store_thread_id] <= search_return_score[store_thread_id];
+                                if (root_result_better(
+                                        search_return_score[store_thread_id],
+                                        search_best_move_stack[store_thread_id][0],
+                                        iteration_has_result_next,
+                                        iteration_best_score_next,
+                                        iteration_best_move_next)) begin
+                                    iteration_best_move_next = search_best_move_stack[store_thread_id][0];
+                                    iteration_best_score_next = search_return_score[store_thread_id];
+                                end
+                                iteration_has_result_next = 1'b1;
+                                if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                            end else begin
+                                search_ply[store_thread_id] <= store_ply - PlyIndex'(1);
+                                search_thread_phase[store_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                            end
+                        end
+
+                        search_nodes <= nodes_next;
+                        search_active_thread_count <= active_count_next;
+                        search_iteration_has_result <= iteration_has_result_next;
+                        search_iteration_best_move <= iteration_best_move_next;
+                        search_iteration_best_score <= iteration_best_score_next;
+
+                        node_stop_next = active_req.operation == ENGINE_CTRL_SEARCH_NODES && nodes_next >= active_req.node_limit;
+                        time_stop_next = (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
+                            && elapsed_ms >= search_budget_ms;
+                        if (active_count_next == ThreadCount'(0) && iteration_has_result_next) begin
+                            search_completed_depth <= search_target_depth;
+                            search_completed_best_move <= iteration_best_move_next;
+                            search_completed_score <= iteration_best_score_next;
+                            resp_reg <= EngineControllerResponse'('0);
+                            resp_reg.best_move <= iteration_best_move_next;
+                            resp_reg.score <= iteration_best_score_next;
+                            resp_reg.nodes_count <= nodes_next;
+                            resp_reg.completed_depth <= search_target_depth;
+                            if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH && search_target_depth >= search_max_depth) begin
+                                resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                                state <= ST_RESPOND;
+                            end else if (node_stop_next) begin
+                                resp_reg.end_reason <= ENGINE_END_NODE_LIMIT;
+                                state <= ST_RESPOND;
+                            end else if (time_stop_next) begin
+                                resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
+                                state <= ST_RESPOND;
+                            end else if (search_target_depth >= search_max_depth) begin
+                                resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                                state <= ST_RESPOND;
+                            end else begin
+                                search_current_depth <= search_target_depth + 8'd1;
+                                search_thread_id <= ThreadID'(0);
+                                search_dispatch_cursor <= ThreadID'(0);
+                                search_board_dispatch_cursor <= ThreadID'(0);
+                                search_move_dispatch_cursor <= ThreadID'(0);
+                                search_eval_dispatch_cursor <= ThreadID'(0);
+                                search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+                                search_tt_store_dispatch_cursor <= ThreadID'(0);
+                                search_return_dispatch_cursor <= ThreadID'(0);
+                                search_tt_response_dispatch_cursor <= ThreadID'(0);
+                                search_active_thread_count <= ThreadCount'(0);
+                                search_iteration_has_result <= 1'b0;
+                                search_iteration_best_move <= NULL_MOVE;
+                                search_iteration_best_score <= -SEARCH_INF;
+                                state <= ST_SEARCH_ITER_START;
+                            end
+                        end else begin
+                            state <= ST_SEARCH_RUN;
+                        end
+                    end
+                end
+
+                ST_RESPOND: begin
+                    resp_valid <= 1'b1;
+                    state <= ST_IDLE;
+                end
+
+                ST_KILL_DONE: begin
+                    resp_valid <= 1'b1;
+                    state <= ST_IDLE;
+                end
+
+                default: begin
+                    resp_reg <= EngineControllerResponse'('0);
+                    resp_reg.error <= 1'b1;
+                    resp_reg.end_reason <= ENGINE_END_ERROR;
+                    state <= ST_RESPOND;
+                end
+            endcase
+            end
+        end
+    end
+
+endmodule : search_controller
+

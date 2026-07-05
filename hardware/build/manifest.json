@@ -46,11 +46,24 @@
       "hardware/rtl/tt/tt_defs.sv",
       "hardware/rtl/tt/tt_load_store.sv"
     ],
-    "engine": [
+    "search-controller": [
+      "@common",
+      "@board-update-pipeline",
+      "@move-generator",
+      "@static-evaluator",
+      "@tt-load-store",
+      "hardware/rtl/engine_defs.sv",
+      "hardware/rtl/timer.sv",
+      "hardware/rtl/search_controller.sv"
+    ],
+    "engine-rtl": [
       "@common",
       "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
       "hardware/rtl/engine_defs.sv",
-      "hardware/rtl/engine.sv",
+      "hardware/rtl/engine.sv"
+    ],
+    "engine": [
+      "@engine-rtl",
       "hardware/rtl/search_controller_stub.sv"
     ],
     "portable-rtl": [
@@ -59,7 +72,8 @@
       "@move-generator",
       "@board-update-pipeline",
       "@tt-load-store",
-      "@engine"
+      "@search-controller",
+      "@engine-rtl"
     ],
     "quartus-de1-soc": [
       "@portable-rtl",
@@ -114,6 +128,11 @@
       "source_set": "engine",
       "testbench": "hardware/tb/tb_engine.sv",
       "top": "tb_engine"
+    },
+    "search-controller": {
+      "source_set": "search-controller",
+      "testbench": "hardware/tb/tb_search_controller.sv",
+      "top": "tb_search_controller"
     }
   },
   "generated_data": {

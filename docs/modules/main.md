@@ -20,6 +20,6 @@ The `main` module maps board-level FPGA pins to the vendor-neutral engine design
 
 The current RTL maps PLL lock, recent RX byte status, and RX/TX/engine error status to LEDs. UART bytes flow through `rx_decode`, the V1 `engine` command layer, and `tx_encode` using a 50 MHz UART clock and PLL-derived engine clock.
 
-`rx_decode` receives the raw button reset so it can detect UART BREAK and emit `remote_reset`. The engine, search-controller stub, and TX path use `KEY[3]` combined with `remote_reset`, so BREAK clears latched engine/output state as an out-of-band reset.
+`rx_decode` receives the raw button reset so it can detect UART BREAK and emit `remote_reset`. The engine, real search controller, and TX path use `KEY[3]` combined with `remote_reset`, so BREAK clears latched engine/output/search state as an out-of-band reset.
 
-The board wrapper currently instantiates `search_controller_stub` behind the engine's typed controller boundary. The stub is only a protocol integration placeholder until the real search controller is implemented.
+The board wrapper instantiates the real `search_controller` behind the engine's typed controller boundary. The older `search_controller_stub` remains as a lightweight protocol mock for focused tests or temporary experiments only.

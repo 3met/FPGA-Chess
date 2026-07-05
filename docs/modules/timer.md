@@ -1,6 +1,6 @@
 # Timer (`timer`)
 
-Status: planned final RTL spec.
+Status: implemented.
 
 The timer counts elapsed milliseconds for search time control.
 

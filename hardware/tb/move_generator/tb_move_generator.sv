@@ -593,11 +593,12 @@ module tb_move_generator;
             && left.promo_piece == right.promo_piece);
     endfunction
 
-    task automatic dispatch_dut_candidate(
+    task automatic dispatch_dut_candidate_for_thread(
         input FullBoard board,
         input MoveGenOp op,
         input bit is_first_request,
         input Move target,
+        input ThreadID request_thread_id,
         output Move move,
         output logic legal
     );
@@ -606,7 +607,7 @@ module tb_move_generator;
         drive_board(board);
         move_gen_op = op;
         start_node = is_first_request;
-        thread_id = ThreadID'(0);
+        thread_id = request_thread_id;
         ply = PlyIndex'(0);
         target_move = target;
         do_clock(1);
@@ -621,6 +622,17 @@ module tb_move_generator;
                 captured = 1'b1;
             end
         end
+    endtask
+
+    task automatic dispatch_dut_candidate(
+        input FullBoard board,
+        input MoveGenOp op,
+        input bit is_first_request,
+        input Move target,
+        output Move move,
+        output logic legal
+    );
+        dispatch_dut_candidate_for_thread(board, op, is_first_request, target, ThreadID'(0), move, legal);
     endtask
 
     task automatic collect_dut_candidates(
@@ -825,6 +837,25 @@ module tb_move_generator;
             $sformatf("targeted illegal move skipped found %0d->%0d legal=%0d", move.from_pos, move.to_pos, legal));
     endtask
 
+    task automatic test_thread_mask_isolation();
+        automatic FullBoard board;
+        automatic Move thread0_first;
+        automatic Move thread0_second;
+        automatic Move thread1_first;
+        automatic logic legal0_first;
+        automatic logic legal0_second;
+        automatic logic legal1_first;
+
+        setup_start_position(board);
+        dispatch_dut_candidate_for_thread(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, ThreadID'(0), thread0_first, legal0_first);
+        dispatch_dut_candidate_for_thread(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, ThreadID'(0), thread0_second, legal0_second);
+        dispatch_dut_candidate_for_thread(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, ThreadID'(1), thread1_first, legal1_first);
+
+        expect_equal(legal0_first && legal0_second && legal1_first, "thread mask isolation generated legal candidates");
+        expect_equal(!same_move_exact(thread0_first, thread0_second), "thread 0 consumed first candidate");
+        expect_equal(same_move_exact(thread0_first, thread1_first), "thread 1 candidate mask starts independently");
+    endtask
+
     task automatic test_qsearch_filtering();
         automatic FullBoard board;
         automatic int candidates;
@@ -993,6 +1024,7 @@ module tb_move_generator;
         test_pins_and_checks();
         test_king_castle_and_ep();
         test_targeted_generation();
+        test_thread_mask_isolation();
         test_qsearch_filtering();
         test_promotion_ordering();
         test_no_legal_moves();

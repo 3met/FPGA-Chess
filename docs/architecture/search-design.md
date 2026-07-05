@@ -4,7 +4,7 @@
 
 Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP and share only the transposition table.
 
-The number of threads is parameterized at build time. It currently defaults at `THREAD_COUNT = 8`.
+The number of threads is parameterized at build time. Current RTL uses `THREAD_COUNT = 8`; shared pipelines have explicit multi-thread isolation tests, and the search controller initializes all root thread contexts as active and ready each iterative-deepening pass, then runs a concurrent search scheduler with active-thread count, root round-robin cursor, child-return round-robin cursor, TT-response round-robin cursor, and per-pipeline dispatch cursors for board update, move generation, static evaluation, TT lookup, and TT store issue. The scheduler can have different threads in different tagged pipelines at the same time, applies deterministic per-thread root move hints, and uses a stable score/move tie-break for reproducible best-result selection.
 
 Search uses side-to-move point-of-view scores internally. Raw evaluation inputs are White-relative, so the search controller normalizes leaf/static scores by negating them when Black is to move.
 
@@ -12,11 +12,11 @@ The search uses iterative deepening with plain alpha/beta, transposition tables,
 
 ## Thread State
 
-Each thread owns its search stack, alpha/beta values, depth counters, node counters, current board state, move history stack records, and pipeline wait state.
+Each thread owns its search stack, alpha/beta values, depth counters, node counters, current board state, move history stack records, scheduler phase, pipeline wait state, and per-pipeline in-flight flags.
 
 Search uses stack records for undo rather than storing a full board state at every ply. A push move sends the current board state and move into the board update pipeline, and a reverse move uses the stored move record to recover the previous state.
 
-For the base design, a thread may have at most one in-flight request per major pipeline. This lets pipeline results be routed by `thread_id` alone.
+For the base design, a thread may have at most one in-flight request per major pipeline. Current controller RTL tags board-update, move-generation, and static-evaluation requests with fixed-latency thread tag shift registers and routes completions through those tags; TT requests carry `thread_id` in the request/response records, and TT lookup responses are captured into per-thread pending records before dispatcher-selected application. Completed child scores are held as per-thread return-pending work and folded into parent nodes only after dispatcher selection, so result routing is no longer tied directly to the thread that happened to be current when a pipeline completed. The controller tracks per-pipeline in-flight flags and dispatch cursors, issues independent ready threads into board, move, eval, TT lookup, and TT store paths when work is available, and tests assert overlapping move-generator requests plus overlap between different tagged pipelines.
 
 ## Pipeline Scheduling
 
@@ -24,7 +24,7 @@ The search controller feeds five shared pipelines: board update, move generation
 
 Board update, move generation, and static evaluation are high-area pipelines and should be kept busy by scheduling work across the available threads. These pipelines allow one accepted request per cycle when work is available. TT pipelines are constrained by external memory bandwidth.
 
-Pipeline arbitration prioritizes TT lookups over TT stores, because lookups block search progress while stores can usually be delayed.
+Pipeline arbitration prioritizes captured TT lookup responses, parent-return folding, TT lookups, and normal ready search progress over TT stores, because lookups and returned child values block search progress while stores can usually be delayed. Current controller RTL captures lookup responses by thread, leaves accepted-but-not-issued stores as per-thread `STORE_WAIT` pending work, and retries delayed work from the concurrent run scheduler when higher-priority contexts are not available.
 
 ## Move Generation and Legality
 

@@ -392,6 +392,36 @@ module tb_board_update_pipeline;
         expect_ref_state(test_name);
     endtask
 
+    task automatic run_raw_op(
+        input BoardOp op,
+        input FullBoard in_board,
+        input ZobristKey in_zobrist,
+        input EvalScore in_pst,
+        input Move move,
+        input logic [6:0] data,
+        input ThreadID request_thread_id,
+        input PlyIndex request_ply,
+        output FullBoard out_board,
+        output ZobristKey out_zobrist,
+        output EvalScore out_pst
+    );
+        board_in = in_board;
+        zobrist_key_in = in_zobrist;
+        pst_eval_in = in_pst;
+        move_in = move;
+        set_data = data;
+        thread_id = request_thread_id;
+        search_ply = request_ply;
+        board_op = op;
+
+        do_clock(1);
+        drive_idle();
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
+        out_board = board_out;
+        out_zobrist = zobrist_key_out;
+        out_pst = pst_eval_out;
+    endtask
+
     task automatic set_tile(input Tile tile, input Position pos, input string test_name);
         automatic Move move = NULL_MOVE;
         automatic logic [6:0] data = 7'd0;
@@ -589,6 +619,89 @@ module tb_board_update_pipeline;
         expect_equal(dut.move_hist_mem.mem[0] === saved_record, "commit move must not overwrite push history slot 0");
     endtask
 
+    task automatic test_thread_history_isolation();
+        automatic FullBoard start_board;
+        automatic FullBoard thread0_after;
+        automatic FullBoard thread1_after;
+        automatic FullBoard thread0_restored;
+        automatic FullBoard thread1_restored;
+        automatic ZobristKey start_zobrist;
+        automatic ZobristKey thread0_zobrist;
+        automatic ZobristKey thread1_zobrist;
+        automatic ZobristKey thread0_restored_zobrist;
+        automatic ZobristKey thread1_restored_zobrist;
+        automatic EvalScore start_pst;
+        automatic EvalScore thread0_pst;
+        automatic EvalScore thread1_pst;
+        automatic EvalScore thread0_restored_pst;
+        automatic EvalScore thread1_restored_pst;
+
+        setup_start_position();
+        start_board = ref_board;
+        start_zobrist = ref_zobrist;
+        start_pst = ref_pst;
+
+        run_raw_op(
+            BOARD_PUSH_MOVE_OP,
+            start_board,
+            start_zobrist,
+            start_pst,
+            Move'({Position'(12), Position'(28), PROMO_QUEEN}),
+            7'd0,
+            ThreadID'(0),
+            PlyIndex'(0),
+            thread0_after,
+            thread0_zobrist,
+            thread0_pst
+        );
+        run_raw_op(
+            BOARD_PUSH_MOVE_OP,
+            start_board,
+            start_zobrist,
+            start_pst,
+            Move'({Position'(11), Position'(27), PROMO_QUEEN}),
+            7'd0,
+            ThreadID'(1),
+            PlyIndex'(0),
+            thread1_after,
+            thread1_zobrist,
+            thread1_pst
+        );
+        run_raw_op(
+            BOARD_REVERSE_MOVE_OP,
+            thread0_after,
+            thread0_zobrist,
+            thread0_pst,
+            NULL_MOVE,
+            7'd0,
+            ThreadID'(0),
+            PlyIndex'(1),
+            thread0_restored,
+            thread0_restored_zobrist,
+            thread0_restored_pst
+        );
+        run_raw_op(
+            BOARD_REVERSE_MOVE_OP,
+            thread1_after,
+            thread1_zobrist,
+            thread1_pst,
+            NULL_MOVE,
+            7'd0,
+            ThreadID'(1),
+            PlyIndex'(1),
+            thread1_restored,
+            thread1_restored_zobrist,
+            thread1_restored_pst
+        );
+
+        expect_equal(thread0_restored === start_board, "thread 0 reverse restores board");
+        expect_equal(thread0_restored_zobrist === start_zobrist, "thread 0 reverse restores zobrist");
+        expect_equal(thread0_restored_pst === start_pst, "thread 0 reverse restores pst");
+        expect_equal(thread1_restored === start_board, "thread 1 reverse restores board");
+        expect_equal(thread1_restored_zobrist === start_zobrist, "thread 1 reverse restores zobrist");
+        expect_equal(thread1_restored_pst === start_pst, "thread 1 reverse restores pst");
+    endtask
+
     task automatic test_back_to_back_independent_requests();
         automatic FullBoard base_board;
         automatic FullBoard expected_a;
@@ -650,6 +763,7 @@ module tb_board_update_pipeline;
         test_castles();
         test_set_tile_overwrite();
         test_commit_history_not_written();
+        test_thread_history_isolation();
 
         $display("Testbench run complete.");
         $display("Pass Count: %0d", pass_count);

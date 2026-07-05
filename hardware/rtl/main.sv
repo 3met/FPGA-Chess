@@ -102,7 +102,9 @@ module main(input CLOCK_50,
 		.search_resp(search_resp)
 	);
 
-	search_controller_stub search_controller (
+	search_controller #(
+		.CLOCK_FREQ(ENGINE_CLOCK_FREQ)
+	) search_controller (
 		.clk(clk),
 		.rst_n(engine_rst_n),
 		.req_valid(search_req_valid),

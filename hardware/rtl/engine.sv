@@ -65,6 +65,7 @@ module engine (
     ResponseKind request_response_kind;
     logic request_waits_for_result;
     logic request_clears_error;
+    logic direct_request_inflight;
     logic search_active;
     logic [7:0] active_operation;
 
@@ -223,7 +224,7 @@ module engine (
     endfunction : set_board_request
 
     always_comb begin
-        search_req_valid = (state == ST_DIRECT_BOARD) || (state == ST_ISSUE_REQUEST) || (state == ST_ISSUE_KILL);
+        search_req_valid = (state == ST_DIRECT_BOARD && !direct_request_inflight) || (state == ST_ISSUE_REQUEST) || (state == ST_ISSUE_KILL);
         if (state == ST_DIRECT_BOARD) begin
             search_req = set_board_request(direct_index);
         end else begin
@@ -340,6 +341,9 @@ module engine (
         req = zero_request();
         req.operation = ENGINE_CTRL_KILL;
         request_reg <= req;
+        request_response_kind <= RESP_STATUS;
+        request_waits_for_result <= 1'b0;
+        request_clears_error <= 1'b0;
         state <= ST_ISSUE_KILL;
     endtask : issue_kill_request
 
@@ -393,6 +397,7 @@ module engine (
                 ENGINE_CMD_SET_BOARD: begin
                     active_operation <= ENGINE_CMD_SET_BOARD;
                     direct_index <= 7'd0;
+                    direct_request_inflight <= 1'b0;
                     state <= ST_DIRECT_BOARD;
                 end
 
@@ -467,6 +472,7 @@ module engine (
             request_response_kind <= RESP_NONE;
             request_waits_for_result <= 1'b0;
             request_clears_error <= 1'b0;
+            direct_request_inflight <= 1'b0;
             search_active <= 1'b0;
             active_operation <= 8'h00;
             last_move <= Move'('0);
@@ -513,8 +519,16 @@ module engine (
                 end
 
                 ST_DIRECT_BOARD: begin
-                    if (search_req_ready) begin
-                        if (direct_index == 7'd67) begin
+                    if (!direct_request_inflight && search_req_ready && !search_resp_valid) begin
+                        direct_request_inflight <= 1'b1;
+                    end else if ((direct_request_inflight && search_resp_valid)
+                            || (!direct_request_inflight && search_req_ready && search_resp_valid)) begin
+                        direct_request_inflight <= 1'b0;
+                        if (search_resp_valid && search_resp.error) begin
+                            error_code <= ENGINE_ERR_INTERNAL;
+                            active_operation <= 8'h00;
+                            start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
+                        end else if (direct_index == 7'd67) begin
                             active_operation <= 8'h00;
                             start_response(RESP_ACK, error_code, 1'b1, 1'b0);
                         end else begin
@@ -534,22 +548,16 @@ module engine (
                             last_end_reason <= ENGINE_END_NORMAL;
                         end
 
-                        if (request_waits_for_result) begin
-                            search_active <= 1'b1;
-                            state <= ST_WAIT_RESULT;
-                        end else begin
-                            search_active <= 1'b0;
-                            active_operation <= 8'h00;
-                            start_response(request_response_kind, request_clears_error ? ENGINE_ERR_NONE : error_code, 1'b1, 1'b0);
-                        end
+                        search_active <= request_waits_for_result;
+                        state <= ST_WAIT_RESULT;
                     end
                 end
 
                 ST_WAIT_RESULT: begin
-                    if (kill) begin
+                    if (kill && search_active) begin
                         issue_kill_request();
                     end else if (data_in_valid) begin
-                        if (data_in == ENGINE_CMD_KILL) begin
+                        if (search_active && data_in == ENGINE_CMD_KILL) begin
                             issue_kill_request();
                         end else begin
                             latch_error(ENGINE_ERR_MALFORMED_PAYLOAD);
@@ -567,17 +575,20 @@ module engine (
                             last_node_count <= search_resp.nodes_count;
                             last_completed_depth <= search_resp.completed_depth;
                             last_end_reason <= search_resp.end_reason;
-                            start_response(request_response_kind, error_code, 1'b1, 1'b0);
+                            active_operation <= 8'h00;
+                            start_response(
+                                request_response_kind,
+                                request_clears_error ? ENGINE_ERR_NONE : error_code,
+                                1'b1,
+                                1'b0
+                            );
                         end
                     end
                 end
 
                 ST_ISSUE_KILL: begin
                     if (search_req_ready) begin
-                        search_active <= 1'b0;
-                        active_operation <= 8'h00;
-                        last_end_reason <= ENGINE_END_KILLED;
-                        start_response(RESP_STATUS, error_code, 1'b1, 1'b0);
+                        state <= ST_WAIT_RESULT;
                     end
                 end
 

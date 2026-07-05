@@ -6,7 +6,7 @@ The FPGA maintains the active game/search state between commands and performs th
 
 The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
-The target design has a parameterized number of search threads, with `THREAD_COUNT = 8` as the current documented default. Threads cooperate using Lazy SMP: each thread runs an independent iterative-deepening alpha/beta search, and the required shared transposition table is the only shared search knowledge between threads.
+The design has a parameterized number of search threads, with `THREAD_COUNT = 8` in the current tested RTL. Current search-controller RTL runs Lazy SMP root contexts concurrently through shared tagged board-update, move-generation, static-evaluation, TT lookup, and TT store paths; threads cooperate using the shared transposition table as the only shared search knowledge.
 
 ## Major Blocks
 

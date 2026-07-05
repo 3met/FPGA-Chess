@@ -107,8 +107,48 @@ module tb_engine;
         end
         #1;
         captured = search_req;
-        do_clock(1);
+        if (captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                && captured.direct_board_op != BOARD_COMMIT_MOVE_OP
+                && captured.direct_board_op != BOARD_REVERSE_MOVE_OP) begin
+            search_resp = EngineControllerResponse'('0);
+            search_resp_valid = 1'b1;
+            do_clock(1);
+            search_resp_valid = 1'b0;
+            search_resp = EngineControllerResponse'('0);
+        end else if (captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                || captured.operation == ENGINE_CTRL_NEW_GAME
+                || captured.operation == ENGINE_CTRL_KILL) begin
+            do_clock(1);
+            search_resp = EngineControllerResponse'('0);
+            if (captured.operation == ENGINE_CTRL_KILL) begin
+                search_resp.end_reason = ENGINE_END_KILLED;
+            end
+            search_resp_valid = 1'b1;
+            do_clock(1);
+            search_resp_valid = 1'b0;
+            search_resp = EngineControllerResponse'('0);
+        end else begin
+            do_clock(1);
+        end
     endtask : accept_request
+
+    task automatic capture_request_without_response(output EngineControllerRequest captured);
+        #1;
+        while (!search_req_valid) begin
+            do_clock(1);
+        end
+        #1;
+        captured = search_req;
+        do_clock(1);
+    endtask : capture_request_without_response
+
+    task automatic expect_no_output(input int cycles, input string label);
+        for (int idx = 0; idx < cycles; idx++) begin
+            #1;
+            check(!data_out_valid, $sformatf("%s no output cycle %0d", label, idx));
+            do_clock(1);
+        end
+    endtask : expect_no_output
 
     task automatic send_mock_response(
         input Move best_move,
@@ -266,12 +306,14 @@ module tb_engine;
         send_byte(ENGINE_CMD_MAKE_MOVE);
         send_byte(8'h72);
         send_byte(8'h0c);
-        accept_request(captured);
+        capture_request_without_response(captured);
         check(captured.operation == ENGINE_CTRL_DIRECT_BOARD, "make move direct op");
         check(captured.direct_board_op == BOARD_COMMIT_MOVE_OP, "make move commit board op");
         check(captured.move.from_pos == Position'('d12), "make move from position");
         check(captured.move.to_pos == Position'('d28), "make move to position");
         check(captured.move.promo_piece == PROMO_ROOK, "make move promo");
+        expect_no_output(5, "make move waits for controller completion");
+        send_mock_response(NULL_MOVE, EvalScore'(0), NodeCountType'(0), 8'd0, ENGINE_END_NORMAL);
         expect_ack(8'h01);
 
         send_byte(ENGINE_CMD_UNDO_MOVE);

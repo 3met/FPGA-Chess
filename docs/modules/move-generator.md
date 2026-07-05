@@ -1,6 +1,6 @@
 # Move Generator (`move_generator`)
 
-Status: implemented as standalone RTL; search-controller integration is still planned.
+Status: implemented and integrated with `search_controller`.
 
 The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is strictly legal. A candidate is consumed for the current node whether or not it is legal.
 

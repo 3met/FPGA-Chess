@@ -1,8 +1,8 @@
 # Search Controller (`search_controller`)
 
-Status: planned final RTL spec.
+Status: implemented current RTL contract.
 
-Current RTL note: board builds currently use `search_controller_stub` only to terminate the V1 engine request/response boundary. The stub acknowledges direct-board, new-game, and kill requests and returns deterministic placeholder search/perft responses; it does not own real board state, perform legal search, use TT pipelines, or implement timing policy. The real controller must only assert request readiness for direct-board operations when the operation is committed or strictly ordered before any later accepted operation, because the engine emits ACKs based on request acceptance.
+Current RTL note: board builds instantiate the real `search_controller`. It owns active board state, applies direct-board operations through `board_update_pipeline`, stores host-visible undo snapshots for committed active-game moves, clears the compact TT on New Game, initializes the normal starting position through board-update setup operations, runs generic stack-based perft through the real move generator, and runs iterative-deepening Lazy SMP negamax with board-update pushes, TT lookup/store cutoffs, targeted TT move ordering, static-evaluator leaves, and qsearch captures/promotions after nominal depth. Search state is stored per thread for lifecycle status, scheduler phase, board/move/eval pipeline wait counters, board/move/eval/TT in-flight flags, TT response pending records, boards, move stacks, alpha/beta values, TT metadata, repetition line state, return values, current best moves, completed results, completed depths, and node counters. Search board-update, move-generation, and static-evaluation requests carry controller-local thread tag shift registers so completion writes are routed by the tagged thread, and TT requests carry `thread_id` in the request/response records. The concurrent `ST_SEARCH_RUN` scheduler keeps active-thread count, root dispatch cursor, child-return dispatch cursor, TT-response dispatch cursor, and per-pipeline dispatch cursors for board update, move generation, static evaluation, TT lookup, and TT store issue paths; it can issue independent ready threads into different shared pipelines in the same wall-clock interval, continuously shifts tagged completion queues, captures TT lookup responses by thread, folds child returns by dispatcher selection, and retries deferred `STORE_WAIT` TT stores after higher-priority progress work. Controller-level perft tests cover start position depth 0, 1, and 2 plus direct-setup positions for kings-only, castling, en passant, promotion, stalemate, and checkmate, and search tests cover White and Black POV capture scoring, 50-move draw, stalemate draw, checkmate losing-mate terminal scores, node limit, fixed-time stop, clock-budget stop, oversized-depth errors, TT reuse, all-thread root scheduling, overlapping move-generator requests, and overlap between different tagged pipelines. At the start of each root iteration, the controller initializes every `THREAD_COUNT` thread context as active and ready at the root position, applies deterministic per-thread root move hints, shares TT, and selects the best same-depth result with a stable same-score move tie-break. It also handles kill during active work, bounds requested depth to the local stack, clears undo and repetition history on direct setup writes, cancels search pipeline wait/tag/in-flight state on Kill/New Game/search start, returns only fully completed iteration depth for node and time stops, and scores 50-move, repetition, bare-king, one-minor, and same-color-bishop insufficient-material draws plus checkmate/stalemate when no legal moves remain. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
 
 The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
 
@@ -35,7 +35,7 @@ The search controller owns hardware search threads, the active board state visib
 | Input | `node_limit` | `NODE_COUNT_BITS` | Maximum number of nodes to search. |
 | Input | `time_limit` | `TIME_BITS` | Maximum fixed search duration. |
 | Input | `kill` | 1 | Stops the current operation. |
-| Output | `ready` | 1 | Indicates ready for another operation. Score and move outputs are valid for the previous completed search when asserted. |
+| Output | `ready` | 1 | Indicates the current request was captured. Completion is reported separately with the response-valid signal. |
 | Output | `board_rd_data` | 4 | Data read from direct board access. |
 | Output | `score` | `EvalScore` | Best score from the most recent search, root side-to-move point-of-view. |
 | Output | `move_out` | `Move` | Best move from the most recent search. |
@@ -99,12 +99,13 @@ flowchart LR
 | `beta[THREAD_COUNT][MAX_PLY_COUNT]` | `EvalScore` | Beta stack values per thread. |
 | `node_count[THREAD_COUNT]` | `NODE_COUNT_BITS` | Node count per thread. |
 | `thread_state[THREAD_COUNT]` | Struct | Per-thread search state, current ply, wait state, and active board snapshot. |
+| `search_thread_phase[THREAD_COUNT]` | Enum | Per-thread scheduler phase: ready, TT wait, eval wait, move wait, board wait, store wait, done, or idle. |
+| `search_*_inflight[THREAD_COUNT]` | Bit arrays | Per-thread flags indicating accepted or pending board, move, eval, TT lookup, and TT store pipeline work. |
+| `search_active_thread_count` | Count | Number of root-thread contexts still active in the current iterative-deepening pass. |
+| `search_dispatch_cursor` | `ThreadID` | Round-robin cursor used to choose the next active ready thread context. |
+| `search_return_dispatch_cursor` | `ThreadID` | Round-robin cursor used to choose the next thread with a pending child return to fold into its parent node. |
+| `search_tt_response_dispatch_cursor` | `ThreadID` | Round-robin cursor used to choose the next thread with a captured TT lookup response to apply. |
+| `search_*_dispatch_cursor` | `ThreadID` | Per-pipeline round-robin cursors for board update, move generation, static evaluation, TT lookup, and TT store issue paths. |
+| `search_*_tag_pipe` | `ThreadID` arrays | Controller-local fixed-latency tags for board-update, move-generation, and static-evaluation completions. |
 | `game_repetition_history` | Hash array | Active-game reversible-position hashes since the last irreversible move. |
 | `thread_repetition_history[THREAD_COUNT][MAX_PLY_COUNT]` | Hash array | Search-line hashes used to detect repetition inside each thread's current line. |
-
-## Open Design Items
-
-- Exact per-thread FSM and root move assignment policy.
-- Ready-thread arbitration between pipelines.
-- Exact storage shape for active-game and per-thread repetition hash histories.
-- Exact perft implementation strategy.

@@ -191,7 +191,7 @@ Material values are available in two forms:
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `ZOBRIST_KEY_BITS` | `64` default                  | Width of the live Zobrist key. Keep parameterized for experiments, but use 64 bits for the main design. |
 | `ZobristKey`       | `ZOBRIST_KEY_BITS` bits       | Zobrist-style position key.                                                                             |
-| `THREAD_COUNT`     | Parameter                     | Number of hardware search threads. Default of 8 threads.                                                |
+| `THREAD_COUNT`     | Parameter                     | Number of hardware search threads. Current RTL default is 8. |
 | `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |
 | `ThreadID`         | `THREAD_ID_BITS` bits         | Hardware search thread identifier.                                                                      |
 
