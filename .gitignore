@@ -26,3 +26,5 @@ transcript
 *.ver
 *.qws
 .obsidian/
+__pycache__/
+*.pyc

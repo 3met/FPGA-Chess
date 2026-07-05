@@ -13,7 +13,7 @@ FPGA Chess is an experimental chess engine project targeting FPGA hardware. The 
 | `hardware/data/` | Generated lookup data such as piece-square tables. |
 | `hardware/build/` | Build manifests for source sets, tests, generated data, and synthesis targets. |
 | `tools/fpga_chess.py` | Unified Python build, test, data-generation, and synthesis CLI. |
-| `software/` | Python host-side helpers. |
+| `software/` | Python host-side UCI engine, FPGA protocol encoder/decoder, serial transport, and helper scripts. |
 
 ## Build, Test, and Synthesis
 
@@ -30,3 +30,7 @@ Use `python tools/fpga_chess.py synth --target quartus-de1-soc` for the current 
 The CLI is pure Python standard library and writes generated projects, simulator libraries, transcripts, and reports under ignored `work/build/`.
 
 Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, and `vsim` for `compile` and `test`; Quartus provides `quartus_map`, `quartus_fit`, and `quartus_sta` for `quartus-de1-soc`; Vivado provides `vivado` for `vivado-generic`.
+
+## Host UCI Engine
+
+Run `python software/fpga_engine.py` to expose the FPGA as a UCI chess engine. The host defaults to `FPGA_CHESS_PORT` when set, otherwise it auto-detects a single or clearly identifiable USB UART port; pass `--port <serial-port>` on headless systems with multiple adapters. The host requires `python-chess` for legal UCI position validation and `pyserial` for UART communication; it serializes commands using the protocol in `docs/protocols/`.
