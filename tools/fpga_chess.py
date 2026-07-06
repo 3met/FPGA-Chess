@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -360,6 +361,17 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path) -> Path
     qpf = project.with_suffix(".qpf")
     qsf = project.with_suffix(".qsf")
     sources = expand_source_set(manifest, target["source_set"])
+    generated_outputs = [
+        repo_path(output)
+        for item in manifest.get("generated_data", {}).values()
+        for output in item["outputs"]
+    ]
+    ensure_existing(generated_outputs)
+
+    for source in generated_outputs:
+        dest = build_dir / rel(source)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
 
     qpf.write_text(
         'QUARTUS_VERSION = "23.1"\nPROJECT_REVISION = "fpga_chess"\n',
@@ -370,6 +382,7 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path) -> Path
         f'set_global_assignment -name FAMILY "{target["family"]}"',
         f'set_global_assignment -name DEVICE {target["device"]}',
         f'set_global_assignment -name TOP_LEVEL_ENTITY {target["top"]}',
+        f"set_global_assignment -name NUM_PARALLEL_PROCESSORS {os.cpu_count() or 1}",
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
     lines.extend(qsf_assignment_for_source(source) for source in sources)

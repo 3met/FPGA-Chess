@@ -1,6 +1,6 @@
 # TT Store Pipeline (`tt_store`)
 
-Status: implemented first portable load/store slice; external-memory wrapper, BRAM cache, and 128-bit profile remain planned extension points.
+Status: implemented portable load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
 
 The TT store pipeline writes completed search results into the shared transposition table. Stores are less latency-sensitive than lookups and may be buffered or stalled when lookups need memory bandwidth.
 
@@ -21,7 +21,7 @@ Each store request includes:
 
 ## Behavior
 
-The first RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable inferred RAM backend with one compact 96-bit logical entry per word. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
+The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable inferred RAM backend with one logical entry per word. The default compact profile stores 96-bit entries, and `USE_FULL_KEY = 1` selects the 128-bit full-key profile. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
 
 Stores use `store_req_valid` and `store_req_ready`. Accepted stores enter a depth-4 FIFO by default. Stores are not dropped; when the FIFO is full, `store_req_ready` deasserts until queued stores drain.
 
@@ -33,7 +33,7 @@ Scores stored in the TT use the search controller's side-to-move point-of-view c
 
 ## Logical Entry Format
 
-The store pipeline writes the parameterized logical entry described in [tt-lookup.md](tt-lookup.md). The recommended default is the compact 96-bit entry with a 48-bit verification key. A 128-bit full-key profile is valid when the external-memory interface makes that alignment preferable.
+The store pipeline writes the parameterized logical entry described in [tt-lookup.md](tt-lookup.md). The recommended default is the compact 96-bit entry with a 48-bit verification key. The implemented 128-bit full-key profile is valid when the external-memory interface makes that alignment preferable.
 
 ## Replacement Policy
 

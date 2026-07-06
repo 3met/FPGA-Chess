@@ -1,6 +1,6 @@
 # TT Lookup Pipeline (`tt_lookup`)
 
-Status: implemented first portable load/store slice; external-memory wrapper, BRAM cache, and 128-bit profile remain planned extension points.
+Status: implemented portable load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
 
 The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response returns.
 
@@ -35,7 +35,7 @@ Each lookup returns a response to the requesting thread.
 
 ## Behavior
 
-The first RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable inferred RAM backend with one compact 96-bit logical TT entry per memory word. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
+The RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable inferred RAM backend with one logical TT entry per memory word. The default compact profile stores 96-bit entries, and the optional full-key profile stores 128-bit entries. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
 
 The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, and `lookup_resp_valid`. Lookup requests are accepted whenever `clear` is not active. A lookup response is produced for each accepted request, with `hit` deasserted on empty, invalid, or verification-key mismatch entries.
 
@@ -60,7 +60,7 @@ The recommended default is a compact 96-bit entry:
 | `87:86` | Bound type | Invalid, exact, lower-bound, or upper-bound. |
 | `95:88` | Age/generation | Replacement-policy generation. |
 
-A 128-bit full-key profile is also valid when external memory naturally moves 128-bit records or when debugging TT correctness:
+The 128-bit full-key profile is enabled with `USE_FULL_KEY = 1` when external memory naturally moves 128-bit records or when debugging TT correctness:
 
 | Bits | Field | Meaning |
 | ---- | ----- | ------- |
@@ -98,4 +98,4 @@ The generation counter should advance on `ucinewgame` and may also advance once 
 
 ## Current RTL Notes
 
-The shared TT constants, request/response structs, bound enum, and compact entry codec live in `hardware/rtl/tt/tt_defs.sv`. The first implementation stores mate scores node-relative on store and restores them with lookup `ply`; non-mate scores are unchanged.
+The shared TT constants, request/response structs, bound enum, compact entry codec, and full-key entry codec live in `hardware/rtl/tt/tt_defs.sv`. The implementation stores mate scores node-relative on store and restores them with lookup `ply`; non-mate scores are unchanged. The compact profile verifies the high 48 hash bits after indexing with low hash bits, while the full-key profile verifies all 64 hash bits.

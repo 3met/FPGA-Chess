@@ -29,6 +29,17 @@ module tb_tt_load_store;
     logic store_req_ready;
     TTStoreRequest store_req;
 
+    logic full_clear;
+    logic full_clear_busy;
+    logic full_lookup_req_valid;
+    logic full_lookup_req_ready;
+    TTLookupRequest full_lookup_req;
+    logic full_lookup_resp_valid;
+    TTLookupResponse full_lookup_resp;
+    logic full_store_req_valid;
+    logic full_store_req_ready;
+    TTStoreRequest full_store_req;
+
     int pass_count = 0;
     int error_count = 0;
 
@@ -48,6 +59,25 @@ module tb_tt_load_store;
         .store_req_valid(store_req_valid),
         .store_req_ready(store_req_ready),
         .store_req(store_req)
+    );
+
+    tt_load_store #(
+        .TT_INDEX_BITS(TEST_TT_INDEX_BITS),
+        .STORE_FIFO_DEPTH(TEST_STORE_FIFO_DEPTH),
+        .USE_FULL_KEY(1'b1)
+    ) full_key_dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(full_clear),
+        .clear_busy(full_clear_busy),
+        .lookup_req_valid(full_lookup_req_valid),
+        .lookup_req_ready(full_lookup_req_ready),
+        .lookup_req(full_lookup_req),
+        .lookup_resp_valid(full_lookup_resp_valid),
+        .lookup_resp(full_lookup_resp),
+        .store_req_valid(full_store_req_valid),
+        .store_req_ready(full_store_req_ready),
+        .store_req(full_store_req)
     );
 
     task automatic do_clock(input int cnt = 1);
@@ -127,6 +157,11 @@ module tb_tt_load_store;
         lookup_req = TTLookupRequest'('0);
         store_req_valid = 1'b0;
         store_req = TTStoreRequest'('0);
+        full_clear = 1'b0;
+        full_lookup_req_valid = 1'b0;
+        full_lookup_req = TTLookupRequest'('0);
+        full_store_req_valid = 1'b0;
+        full_store_req = TTStoreRequest'('0);
         rst_n = 1'b0;
         do_clock(2);
         rst_n = 1'b1;
@@ -145,6 +180,19 @@ module tb_tt_load_store;
         end
         do_clock(1);
         expect_equal(lookup_req_ready && store_req_ready, "requests are ready after clear");
+    endtask
+
+    task automatic full_clear_table();
+        full_clear = 1'b1;
+        #1;
+        expect_equal(!full_lookup_req_ready && !full_store_req_ready && full_clear_busy, "full-key requests are stalled when clear is asserted");
+        do_clock(1);
+        full_clear = 1'b0;
+        while (full_clear_busy) begin
+            do_clock(1);
+        end
+        do_clock(1);
+        expect_equal(full_lookup_req_ready && full_store_req_ready, "full-key requests are ready after clear");
     endtask
 
     task automatic clear_table_held_high();
@@ -169,7 +217,20 @@ module tb_tt_load_store;
         store_req = TTStoreRequest'('0);
     endtask
 
+    task automatic full_issue_store(input TTStoreRequest req);
+        expect_equal(full_store_req_ready, "full-key store request accepted when expected");
+        full_store_req = req;
+        full_store_req_valid = 1'b1;
+        do_clock(1);
+        full_store_req_valid = 1'b0;
+        full_store_req = TTStoreRequest'('0);
+    endtask
+
     task automatic drain_stores(input int cycles = 3);
+        do_clock(cycles);
+    endtask
+
+    task automatic full_drain_stores(input int cycles = 3);
         do_clock(cycles);
     endtask
 
@@ -186,6 +247,22 @@ module tb_tt_load_store;
         valid = lookup_resp_valid;
         lookup_req_valid = 1'b0;
         lookup_req = TTLookupRequest'('0);
+        do_clock(1);
+    endtask
+
+    task automatic full_issue_lookup(
+        input TTLookupRequest req,
+        output TTLookupResponse resp,
+        output logic valid
+    );
+        expect_equal(full_lookup_req_ready, "full-key lookup request accepted when expected");
+        full_lookup_req = req;
+        full_lookup_req_valid = 1'b1;
+        do_clock(1);
+        resp = full_lookup_resp;
+        valid = full_lookup_resp_valid;
+        full_lookup_req_valid = 1'b0;
+        full_lookup_req = TTLookupRequest'('0);
         do_clock(1);
     endtask
 
@@ -220,17 +297,55 @@ module tb_tt_load_store;
         expect_equal(resp.bound_type == TT_BOUND_INVALID, {test_name, " invalid bound"});
     endtask
 
+    task automatic full_expect_lookup_hit(
+        input ZobristKey key,
+        input PlyIndex ply,
+        input EvalScore expected_score,
+        input TTDepth expected_depth,
+        input TTBoundType expected_bound,
+        input Move expected_move,
+        input string test_name
+    );
+        automatic TTLookupResponse resp;
+        automatic logic valid;
+
+        full_issue_lookup(make_lookup_req(key, ply), resp, valid);
+        expect_equal(valid, {test_name, " response valid"});
+        expect_equal(resp.hit, {test_name, " hit"});
+        expect_equal(resp.score === expected_score, {test_name, " score"});
+        expect_equal(resp.depth == expected_depth, {test_name, " depth"});
+        expect_equal(resp.bound_type == expected_bound, {test_name, " bound"});
+        expect_equal(resp.best_move === expected_move, {test_name, " best move"});
+    endtask
+
+    task automatic full_expect_lookup_miss(input ZobristKey key, input string test_name);
+        automatic TTLookupResponse resp;
+        automatic logic valid;
+
+        full_issue_lookup(make_lookup_req(key, PlyIndex'(0)), resp, valid);
+        expect_equal(valid, {test_name, " response valid"});
+        expect_equal(!resp.hit, {test_name, " miss"});
+        expect_equal(resp.bound_type == TT_BOUND_INVALID, {test_name, " invalid bound"});
+    endtask
+
     task automatic store_and_drain(input TTStoreRequest req);
         issue_store(req);
         drain_stores();
+    endtask
+
+    task automatic full_store_and_drain(input TTStoreRequest req);
+        full_issue_store(req);
+        full_drain_stores();
     endtask
 
     task automatic test_codec_layout();
         automatic Move move = make_move(Position'('d12), Position'('d28), PROMO_ROOK);
         automatic ZobristKey key = make_key(48'h1234_5678_9abc, 16'h0003);
         automatic TTEntry entry = tt_make_entry(key, move, EvalScore'(-123), TTDepth'(17), TT_BOUND_UPPER, TTAge'(8'h5a));
+        automatic TTFullEntry full_entry = tt_make_full_entry(key, move, EvalScore'(-321), TTDepth'(18), TT_BOUND_LOWER, TTAge'(8'ha5), TTAux'(16'h55aa));
 
         expect_equal($bits(TTEntry) == TT_ENTRY_BITS, "TTEntry is 96 bits");
+        expect_equal($bits(TTFullEntry) == TT_FULL_ENTRY_BITS, "TTFullEntry is 128 bits");
         expect_equal(entry.verify_key == 48'h1234_5678_9abc, "entry stores high 48 key bits");
         expect_equal(entry.best_move_bits[15:14] == 2'b00, "entry move reserved bits are zero");
         expect_equal(tt_decode_move(entry.best_move_bits) === move, "entry move decodes from low bits");
@@ -238,6 +353,13 @@ module tb_tt_load_store;
         expect_equal(entry.depth == TTDepth'(17), "entry stores depth field");
         expect_equal(entry.bound_type == TT_BOUND_UPPER, "entry stores bound field");
         expect_equal(entry.age == TTAge'(8'h5a), "entry stores age field");
+        expect_equal(full_entry.zobrist_key == key, "full entry stores complete key");
+        expect_equal(tt_decode_move(full_entry.best_move_bits) === move, "full entry move decodes from low bits");
+        expect_equal(full_entry.score === EvalScore'(-321), "full entry stores score field");
+        expect_equal(full_entry.depth == TTDepth'(18), "full entry stores depth field");
+        expect_equal(full_entry.bound_type == TT_BOUND_LOWER, "full entry stores bound field");
+        expect_equal(full_entry.age == TTAge'(8'ha5), "full entry stores age field");
+        expect_equal(full_entry.aux == TTAux'(16'h55aa), "full entry stores aux field");
     endtask
 
     task automatic test_empty_miss();
@@ -378,6 +500,23 @@ module tb_tt_load_store;
         expect_lookup_hit(key, PlyIndex'(0), EvalScore'(55), TTDepth'(5), TT_BOUND_LOWER, move, "new store works after clear");
     endtask
 
+    task automatic test_full_key_profile();
+        automatic Move move_a = make_move(Position'('d7), Position'('d15), PROMO_QUEEN);
+        automatic Move move_b = make_move(Position'('d8), Position'('d16), PROMO_ROOK);
+        automatic ZobristKey key_a = 64'h1234_5678_9abc_0011;
+        automatic ZobristKey key_b = 64'h1234_5678_9abc_1011;
+        automatic ZobristKey key_c = 64'h1234_5678_9abc_2011;
+
+        full_clear_table();
+        full_store_and_drain(make_store_req(key_a, TTDepth'(7), EvalScore'(77), TT_BOUND_EXACT, move_a, TTAge'(3), PlyIndex'(0)));
+        full_expect_lookup_hit(key_a, PlyIndex'(0), EvalScore'(77), TTDepth'(7), TT_BOUND_EXACT, move_a, "full-key stored entry");
+        full_expect_lookup_miss(key_b, "full-key distinguishes middle hash bits");
+        full_store_and_drain(make_store_req(key_b, TTDepth'(8), EvalScore'(88), TT_BOUND_LOWER, move_b, TTAge'(3), PlyIndex'(0)));
+        full_expect_lookup_miss(key_a, "full-key same-index replacement removes old full key");
+        full_expect_lookup_hit(key_b, PlyIndex'(0), EvalScore'(88), TTDepth'(8), TT_BOUND_LOWER, move_b, "full-key replacement hit");
+        full_expect_lookup_miss(key_c, "full-key miss on third same-index key");
+    endtask
+
     initial begin
         $display("=== TT load/store testbench ===");
         reset_dut();
@@ -389,6 +528,7 @@ module tb_tt_load_store;
         test_arbitration_and_backpressure();
         test_mate_scores();
         test_clear_behavior();
+        test_full_key_profile();
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", error_count);

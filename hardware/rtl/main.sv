@@ -32,6 +32,13 @@ module main(input CLOCK_50,
 	assign LEDR[9] = ~pll_locked_status;
 	assign uart_clk = CLOCK_50;
 
+	assign HEX0 = 7'h7f;
+	assign HEX1 = 7'h7f;
+	assign HEX2 = 7'h7f;
+	assign HEX3 = 7'h7f;
+	assign HEX4 = 7'h7f;
+	assign HEX5 = 7'h7f;
+
 
 
 	// --- UART Input Decoding ---

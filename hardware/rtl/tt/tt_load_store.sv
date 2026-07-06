@@ -5,7 +5,8 @@ import tt_defs::*;
 
 module tt_load_store #(
     parameter int TT_INDEX_BITS = 10,
-    parameter int STORE_FIFO_DEPTH = 4
+    parameter int STORE_FIFO_DEPTH = 4,
+    parameter bit USE_FULL_KEY = 1'b0
 ) (
     input logic clk,
     input logic rst_n,
@@ -25,10 +26,12 @@ module tt_load_store #(
 );
 
     localparam int TT_ENTRY_COUNT = 1 << TT_INDEX_BITS;
+    localparam int STORAGE_ENTRY_BITS = USE_FULL_KEY ? TT_FULL_ENTRY_BITS : TT_ENTRY_BITS;
     localparam int FIFO_COUNT_BITS = $clog2(STORE_FIFO_DEPTH + 1);
     localparam int FIFO_PTR_BITS = (STORE_FIFO_DEPTH > 1) ? $clog2(STORE_FIFO_DEPTH) : 1;
 
     typedef logic [TT_INDEX_BITS-1:0] TTIndex;
+    typedef logic [STORAGE_ENTRY_BITS-1:0] TTStorageEntry;
     typedef logic [FIFO_COUNT_BITS-1:0] StoreFifoCount;
     typedef logic [FIFO_PTR_BITS-1:0] StoreFifoPtr;
 
@@ -37,12 +40,12 @@ module tt_load_store #(
         STORE_WRITE
     } StoreState;
 
-    TTEntry mem[0:TT_ENTRY_COUNT-1];
+    TTStorageEntry mem[0:TT_ENTRY_COUNT-1];
 
     TTLookupResponse lookup_resp_reg;
     StoreState store_state;
     TTStoreRequest active_store_req;
-    TTEntry active_store_old_entry;
+    TTStorageEntry active_store_old_entry;
     TTIndex active_store_index;
 
     TTStoreRequest store_fifo[0:STORE_FIFO_DEPTH-1];
@@ -70,7 +73,7 @@ module tt_load_store #(
 
     initial begin
         for (int idx = 0; idx < TT_ENTRY_COUNT; idx++) begin
-            mem[idx] = tt_invalid_entry();
+            mem[idx] = invalid_storage_entry();
         end
     end
 
@@ -118,47 +121,163 @@ module tt_load_store #(
         return score;
     endfunction : restore_mate_for_lookup
 
-    function automatic TTLookupResponse make_lookup_response(input TTLookupRequest req, input TTEntry entry);
-        automatic TTLookupResponse resp;
-        automatic logic entry_hit;
+    function automatic TTStorageEntry invalid_storage_entry();
+        if (USE_FULL_KEY) begin
+            return TTStorageEntry'(tt_invalid_full_entry());
+        end
 
-        entry_hit = (entry.bound_type != TT_BOUND_INVALID) && (entry.verify_key == tt_verify_key(req.zobrist_key));
+        return TTStorageEntry'(tt_invalid_entry());
+    endfunction : invalid_storage_entry
 
-        resp.thread_id = req.thread_id;
-        resp.hit = entry_hit;
-        resp.score = entry_hit ? restore_mate_for_lookup(entry.score, req.ply) : UNKNOWN_EVAL_SCORE;
-        resp.bound_type = entry_hit ? entry.bound_type : TT_BOUND_INVALID;
-        resp.depth = entry_hit ? entry.depth : TTDepth'(0);
-        resp.best_move = entry_hit ? tt_decode_move(entry.best_move_bits) : NULL_MOVE;
-        resp.age = entry_hit ? entry.age : TTAge'(0);
-        return resp;
-    endfunction : make_lookup_response
+    function automatic TTStorageEntry make_storage_entry(input TTStoreRequest req);
+        if (USE_FULL_KEY) begin
+            return TTStorageEntry'(tt_make_full_entry(
+                req.zobrist_key,
+                req.best_move,
+                normalize_mate_for_store(req.score, req.ply),
+                req.depth,
+                req.bound_type,
+                req.age,
+                TTAux'(0)
+            ));
+        end
 
-    function automatic TTEntry make_store_entry(input TTStoreRequest req);
-        return tt_make_entry(
+        return TTStorageEntry'(tt_make_entry(
             req.zobrist_key,
             req.best_move,
             normalize_mate_for_store(req.score, req.ply),
             req.depth,
             req.bound_type,
             req.age
-        );
-    endfunction : make_store_entry
+        ));
+    endfunction : make_storage_entry
 
-    function automatic logic should_replace(input TTEntry old_entry, input TTStoreRequest req);
+    function automatic TTBoundType storage_bound_type(input TTStorageEntry entry);
+        if (USE_FULL_KEY) begin
+            automatic TTFullEntry full_entry;
+
+            full_entry = TTFullEntry'(entry);
+            return full_entry.bound_type;
+        end
+
+        begin
+            automatic TTEntry compact_entry;
+
+            compact_entry = TTEntry'(entry);
+            return compact_entry.bound_type;
+        end
+    endfunction : storage_bound_type
+
+    function automatic TTDepth storage_depth(input TTStorageEntry entry);
+        if (USE_FULL_KEY) begin
+            automatic TTFullEntry full_entry;
+
+            full_entry = TTFullEntry'(entry);
+            return full_entry.depth;
+        end
+
+        begin
+            automatic TTEntry compact_entry;
+
+            compact_entry = TTEntry'(entry);
+            return compact_entry.depth;
+        end
+    endfunction : storage_depth
+
+    function automatic TTAge storage_age(input TTStorageEntry entry);
+        if (USE_FULL_KEY) begin
+            automatic TTFullEntry full_entry;
+
+            full_entry = TTFullEntry'(entry);
+            return full_entry.age;
+        end
+
+        begin
+            automatic TTEntry compact_entry;
+
+            compact_entry = TTEntry'(entry);
+            return compact_entry.age;
+        end
+    endfunction : storage_age
+
+    function automatic EvalScore storage_score(input TTStorageEntry entry);
+        if (USE_FULL_KEY) begin
+            automatic TTFullEntry full_entry;
+
+            full_entry = TTFullEntry'(entry);
+            return full_entry.score;
+        end
+
+        begin
+            automatic TTEntry compact_entry;
+
+            compact_entry = TTEntry'(entry);
+            return compact_entry.score;
+        end
+    endfunction : storage_score
+
+    function automatic Move storage_best_move(input TTStorageEntry entry);
+        if (USE_FULL_KEY) begin
+            automatic TTFullEntry full_entry;
+
+            full_entry = TTFullEntry'(entry);
+            return tt_decode_move(full_entry.best_move_bits);
+        end
+
+        begin
+            automatic TTEntry compact_entry;
+
+            compact_entry = TTEntry'(entry);
+            return tt_decode_move(compact_entry.best_move_bits);
+        end
+    endfunction : storage_best_move
+
+    function automatic logic storage_key_matches(input TTStorageEntry entry, input ZobristKey zobrist_key);
+        if (USE_FULL_KEY) begin
+            automatic TTFullEntry full_entry;
+
+            full_entry = TTFullEntry'(entry);
+            return full_entry.zobrist_key == zobrist_key;
+        end
+
+        begin
+            automatic TTEntry compact_entry;
+
+            compact_entry = TTEntry'(entry);
+            return compact_entry.verify_key == tt_verify_key(zobrist_key);
+        end
+    endfunction : storage_key_matches
+
+    function automatic TTLookupResponse make_lookup_response(input TTLookupRequest req, input TTStorageEntry entry);
+        automatic TTLookupResponse resp;
+        automatic logic entry_hit;
+
+        entry_hit = (storage_bound_type(entry) != TT_BOUND_INVALID) && storage_key_matches(entry, req.zobrist_key);
+
+        resp.thread_id = req.thread_id;
+        resp.hit = entry_hit;
+        resp.score = entry_hit ? restore_mate_for_lookup(storage_score(entry), req.ply) : UNKNOWN_EVAL_SCORE;
+        resp.bound_type = entry_hit ? storage_bound_type(entry) : TT_BOUND_INVALID;
+        resp.depth = entry_hit ? storage_depth(entry) : TTDepth'(0);
+        resp.best_move = entry_hit ? storage_best_move(entry) : NULL_MOVE;
+        resp.age = entry_hit ? storage_age(entry) : TTAge'(0);
+        return resp;
+    endfunction : make_lookup_response
+
+    function automatic logic should_replace(input TTStorageEntry old_entry, input TTStoreRequest req);
         automatic logic old_invalid;
         automatic logic key_mismatch;
         automatic logic stale_with_depth_window;
         automatic logic new_deeper_or_equal;
         automatic logic exact_over_non_exact;
 
-        old_invalid = old_entry.bound_type == TT_BOUND_INVALID;
-        key_mismatch = old_entry.verify_key != tt_verify_key(req.zobrist_key);
-        stale_with_depth_window = (old_entry.age != req.age) && ((int'(req.depth) + 4) >= int'(old_entry.depth));
-        new_deeper_or_equal = req.depth >= old_entry.depth;
+        old_invalid = storage_bound_type(old_entry) == TT_BOUND_INVALID;
+        key_mismatch = !storage_key_matches(old_entry, req.zobrist_key);
+        stale_with_depth_window = (storage_age(old_entry) != req.age) && ((int'(req.depth) + 4) >= int'(storage_depth(old_entry)));
+        new_deeper_or_equal = req.depth >= storage_depth(old_entry);
         exact_over_non_exact = (req.bound_type == TT_BOUND_EXACT)
-            && (old_entry.bound_type != TT_BOUND_EXACT)
-            && (req.depth == old_entry.depth);
+            && (storage_bound_type(old_entry) != TT_BOUND_EXACT)
+            && (req.depth == storage_depth(old_entry));
 
         return old_invalid || key_mismatch || stale_with_depth_window || new_deeper_or_equal || exact_over_non_exact;
     endfunction : should_replace
@@ -169,7 +288,7 @@ module tt_load_store #(
             lookup_resp_valid <= 1'b0;
             store_state <= STORE_IDLE;
             active_store_req <= TTStoreRequest'('0);
-            active_store_old_entry <= tt_invalid_entry();
+            active_store_old_entry <= invalid_storage_entry();
             active_store_index <= TTIndex'(0);
             store_fifo_count <= StoreFifoCount'(0);
             store_fifo_head <= StoreFifoPtr'(0);
@@ -189,7 +308,7 @@ module tt_load_store #(
                 clear_index <= TTIndex'(0);
                 store_state <= STORE_IDLE;
                 active_store_req <= TTStoreRequest'('0);
-                active_store_old_entry <= tt_invalid_entry();
+                active_store_old_entry <= invalid_storage_entry();
                 active_store_index <= TTIndex'(0);
                 store_fifo_count <= StoreFifoCount'(0);
                 store_fifo_head <= StoreFifoPtr'(0);
@@ -198,7 +317,7 @@ module tt_load_store #(
                     store_fifo[idx] <= TTStoreRequest'('0);
                 end
             end else if (clear_active) begin
-                mem[clear_index] <= tt_invalid_entry();
+                mem[clear_index] <= invalid_storage_entry();
                 if (clear_index == TTIndex'(TT_ENTRY_COUNT - 1)) begin
                     clear_active <= 1'b0;
                 end else begin
@@ -243,7 +362,7 @@ module tt_load_store #(
 
                         STORE_WRITE: begin
                             if (should_replace(active_store_old_entry, active_store_req)) begin
-                                mem[active_store_index] <= make_store_entry(active_store_req);
+                                mem[active_store_index] <= make_storage_entry(active_store_req);
                             end
                             store_state <= STORE_IDLE;
 

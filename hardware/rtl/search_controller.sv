@@ -486,7 +486,7 @@ module search_controller #(
 
     function automatic EvalScore terminal_no_move_score(input FullBoard board, input PlyIndex ply);
         if (side_in_check(board)) begin
-            return EvalScore'(-int'(MATE_SCORE) + int'(ply));
+            return EvalScore'(int'(ply) - int'(MATE_SCORE));
         end
         return DRAW_EVAL_SCORE;
     endfunction : terminal_no_move_score
