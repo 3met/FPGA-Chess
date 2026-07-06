@@ -152,6 +152,8 @@
       "source_set": "quartus-de1-soc",
       "family": "Cyclone V",
       "device": "5CSEMA5F31C6",
+      "map_effort": "fast",
+      "fit_effort": "fast",
       "sdc": "hardware/constraints/engine.sdc",
       "qsf_template": "hardware/constraints/DE1_SoC.qsf",
       "qip_files": [

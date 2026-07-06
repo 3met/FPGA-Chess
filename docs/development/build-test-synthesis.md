@@ -28,6 +28,10 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python tools/fpga_chess.py synth --target quartus-de1-soc` generates a Quartus project under `work/build/quartus-de1-soc/`, uses `main` as the current top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, and timing analysis.
 
+Quartus synthesis automatically detects the number of processors available to the current process, records that value in `NUM_PARALLEL_PROCESSORS`, and passes it explicitly to `quartus_map`, `quartus_fit`, and `quartus_sta` with `--parallel=<processors>`.
+
+Targets may define `map_effort` and `fit_effort` in the manifest; the DE1-SoC smoke target uses fast map and fitter effort to keep first-pass synthesis runtime bounded at the possible cost of lower Fmax or higher resource use.
+
 `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
 
 ## Adding Tests or Targets

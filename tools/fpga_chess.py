@@ -47,6 +47,15 @@ def require_tool(name: str) -> str:
     return found
 
 
+def host_parallel_processors() -> int:
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return max(1, len(os.sched_getaffinity(0)))
+        except OSError:
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
 def run_command(cmd: list[str], cwd: Path, log_path: Path | None = None) -> tuple[int, str, float]:
     start = time.monotonic()
     proc = subprocess.run(
@@ -355,7 +364,7 @@ def qsf_relevant_pin_line(line: str) -> bool:
     )
 
 
-def write_quartus_project(manifest: dict, target: dict, build_dir: Path) -> Path:
+def write_quartus_project(manifest: dict, target: dict, build_dir: Path, parallel_processors: int) -> Path:
     build_dir.mkdir(parents=True, exist_ok=True)
     project = build_dir / "fpga_chess"
     qpf = project.with_suffix(".qpf")
@@ -382,7 +391,7 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path) -> Path
         f'set_global_assignment -name FAMILY "{target["family"]}"',
         f'set_global_assignment -name DEVICE {target["device"]}',
         f'set_global_assignment -name TOP_LEVEL_ENTITY {target["top"]}',
-        f"set_global_assignment -name NUM_PARALLEL_PROCESSORS {os.cpu_count() or 1}",
+        f"set_global_assignment -name NUM_PARALLEL_PROCESSORS {parallel_processors}",
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
     lines.extend(qsf_assignment_for_source(source) for source in sources)
@@ -430,14 +439,19 @@ def synth_quartus(manifest: dict, target_name: str, target: dict) -> int:
     require_tool("quartus_sta")
     build_dir = BUILD_ROOT / target_name
     clean_dir(build_dir)
-    project = write_quartus_project(manifest, target, build_dir)
+    parallel_processors = host_parallel_processors()
+    project = write_quartus_project(manifest, target, build_dir, parallel_processors)
     project_name = project.name
+    parallel_arg = f"--parallel={parallel_processors}"
+    map_args = [f"--effort={target['map_effort']}"] if "map_effort" in target else []
+    fit_args = [f"--effort={target['fit_effort']}"] if "fit_effort" in target else []
     commands = [
-        ["quartus_map", project_name],
-        ["quartus_fit", project_name],
-        ["quartus_sta", project_name],
+        ["quartus_map", project_name, parallel_arg, *map_args],
+        ["quartus_fit", project_name, parallel_arg, *fit_args],
+        ["quartus_sta", project_name, parallel_arg],
     ]
     failed = False
+    print(f"Quartus parallel processors: {parallel_processors}")
     for cmd in commands:
         log = build_dir / f"{cmd[0]}.log"
         print(f"Running {' '.join(cmd)}...")
