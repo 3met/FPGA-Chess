@@ -227,6 +227,10 @@ module tb_engine;
         expect_error_response(ENGINE_ERR_UNKNOWN_OPCODE);
         clear_error_with_new_game();
 
+        send_byte(8'h03);
+        expect_error_response(ENGINE_ERR_UNKNOWN_OPCODE);
+        clear_error_with_new_game();
+
         send_byte(ENGINE_CMD_MAKE_MOVE);
         do_clock(2);
         send_byte(8'h00);
@@ -316,11 +320,6 @@ module tb_engine;
         send_mock_response(NULL_MOVE, EvalScore'(0), NodeCountType'(0), 8'd0, ENGINE_END_NORMAL);
         expect_ack(8'h01);
 
-        send_byte(ENGINE_CMD_UNDO_MOVE);
-        accept_request(captured);
-        check(captured.operation == ENGINE_CTRL_DIRECT_BOARD, "undo move direct op");
-        check(captured.direct_board_op == BOARD_REVERSE_MOVE_OP, "undo move reverse board op");
-        expect_ack(8'h01);
     endtask : test_set_board_and_moves
 
     task automatic test_search_and_perft();

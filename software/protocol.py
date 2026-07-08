@@ -27,7 +27,6 @@ class Command(IntEnum):
     GET_STATUS = 0x00
     SET_BOARD = 0x01
     MAKE_MOVE = 0x02
-    UNDO_MOVE = 0x03
     NEW_GAME = 0x04
     SEARCH_DEPTH = 0x10
     SEARCH_FIXED_TIME = 0x11
@@ -333,10 +332,6 @@ def cmd_set_board(fen: str) -> bytes:
 
 def cmd_make_move(uci_move: str) -> bytes:
     return command(Command.MAKE_MOVE, encode_uci_move(uci_move))
-
-
-def cmd_undo_move() -> bytes:
-    return command(Command.UNDO_MOVE)
 
 
 def cmd_new_game() -> bytes:

@@ -4,7 +4,9 @@ import general_chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 
-module engine (
+module engine #(
+    parameter bit ENABLE_PERFT = 1'b1
+) (
     input wire clk,
     input wire rst_n,
     input logic [7:0] data_in,
@@ -89,15 +91,14 @@ module engine (
             ENGINE_CMD_GET_STATUS,
             ENGINE_CMD_SET_BOARD,
             ENGINE_CMD_MAKE_MOVE,
-            ENGINE_CMD_UNDO_MOVE,
             ENGINE_CMD_NEW_GAME,
             ENGINE_CMD_SEARCH_DEPTH,
             ENGINE_CMD_SEARCH_FIXED_TIME,
             ENGINE_CMD_SEARCH_ON_CLOCK,
             ENGINE_CMD_SEARCH_NODES,
-            ENGINE_CMD_PERFT,
             ENGINE_CMD_KILL,
             ENGINE_CMD_GET_SEARCH_RESULT: return 1'b1;
+            ENGINE_CMD_PERFT: return ENABLE_PERFT;
             default: return 1'b0;
         endcase
     endfunction : command_known
@@ -110,7 +111,7 @@ module engine (
             ENGINE_CMD_SEARCH_FIXED_TIME: return 6'd3;
             ENGINE_CMD_SEARCH_ON_CLOCK:   return 6'd12;
             ENGINE_CMD_SEARCH_NODES:      return 6'd5;
-            ENGINE_CMD_PERFT:             return 6'd1;
+            ENGINE_CMD_PERFT:             return ENABLE_PERFT ? 6'd1 : 6'd0;
             default:                      return 6'd0;
         endcase
     endfunction : payload_len
@@ -354,13 +355,6 @@ module engine (
         case (opcode)
             ENGINE_CMD_GET_STATUS: begin
                 start_response(RESP_STATUS, error_code, 1'b1, search_active);
-            end
-
-            ENGINE_CMD_UNDO_MOVE: begin
-                active_operation <= ENGINE_CMD_UNDO_MOVE;
-                req.operation = ENGINE_CTRL_DIRECT_BOARD;
-                req.direct_board_op = BOARD_REVERSE_MOVE_OP;
-                issue_single_request(req, RESP_ACK, 1'b0, 1'b0);
             end
 
             ENGINE_CMD_NEW_GAME: begin

@@ -40,7 +40,7 @@ V1 validates protocol shape only: unknown opcodes, reserved move bits, reserved 
 | ----- | ----------- |
 | Idle | Engine is awaiting a command byte. |
 | Receive Payload | Engine is collecting the fixed-size payload for the current command. |
-| Direct Board | Engine is applying setup, make-move, or undo-move operations through the search controller direct-board path. |
+| Direct Board | Engine is applying setup or make-move operations through the search controller direct-board path. |
 | New Game | Engine is clearing game/search state and resetting the active board to the normal starting position. |
 | Search | Engine has started a search and waits for completion, kill, or error. |
 | Perft | Engine has started a perft operation and waits for completion, kill, or error. |
@@ -99,9 +99,9 @@ The New Game command follows UCI `ucinewgame` semantics. It clears active search
 
 ## Current RTL Notes
 
-`Set board` is decomposed into 68 direct-board requests: 64 tile writes followed by castling permissions, en passant state, side to move, and halfmove clock. `Make move` and `Undo move` emit single direct-board requests. The engine keeps only one direct-board request in flight, advances the Set Board sequence only after `search_resp_valid`, and sends an ACK only after the final direct-board response completes.
+`Set board` is decomposed into 68 direct-board requests: 64 tile writes followed by castling permissions, en passant state, side to move, and halfmove clock. `Make move` emits one direct-board request. The engine keeps only one direct-board request in flight, advances the Set Board sequence only after `search_resp_valid`, and sends an ACK only after the final direct-board response completes.
 
-Search and perft commands wait for a controller response, latch the result, and stream the documented response format. While waiting for search/perft, the engine accepts only in-band Kill (`0x1f`) as a command byte. Any other byte is rejected as malformed protocol input.
+Search and perft commands wait for a controller response, latch the result, and stream the documented response format. Perft is controlled by the `ENABLE_PERFT` parameter. While waiting for search/perft, the engine accepts only in-band Kill (`0x1f`) as a command byte. Any other byte is rejected as malformed protocol input.
 
 ## Child Modules
 

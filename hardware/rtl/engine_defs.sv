@@ -8,7 +8,6 @@ package engine_defs;
     localparam logic [7:0] ENGINE_CMD_GET_STATUS        = 8'h00;
     localparam logic [7:0] ENGINE_CMD_SET_BOARD         = 8'h01;
     localparam logic [7:0] ENGINE_CMD_MAKE_MOVE         = 8'h02;
-    localparam logic [7:0] ENGINE_CMD_UNDO_MOVE         = 8'h03;
     localparam logic [7:0] ENGINE_CMD_NEW_GAME          = 8'h04;
     localparam logic [7:0] ENGINE_CMD_SEARCH_DEPTH      = 8'h10;
     localparam logic [7:0] ENGINE_CMD_SEARCH_FIXED_TIME = 8'h11;

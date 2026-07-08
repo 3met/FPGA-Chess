@@ -54,7 +54,6 @@ sequenceDiagram
 | `0x00` | Get status | None | Status response. |
 | `0x01` | Set board | `FullBoard` payload, 36 bytes | Ack/status response. |
 | `0x02` | Make move | `Move`, 2 bytes | Ack/status response. |
-| `0x03` | Undo move | None | Ack/status response. |
 | `0x04` | New game | None | Ack/status response. |
 | `0x10` | Search depth | Depth, 1 byte | Search result when complete. |
 | `0x11` | Search fixed time | `TimeType`, 3 bytes | Search result when complete. |
@@ -66,11 +65,13 @@ sequenceDiagram
 
 The command payload encodings are defined in [binary-encoding.md](binary-encoding.md).
 
+Perft is an optional hardware command controlled by the engine/controller `ENABLE_PERFT` parameter. The generic RTL/test configuration enables it, and the current DE1-SoC synthesis target enables it through the real search controller.
+
 `Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
 
 `New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
 
-Ack responses for Set Board, Make Move, Undo Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
+Ack responses for Set Board, Make Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
 
 UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads. In the current board wrapper, BREAK clears the RX FIFO and resets the engine-side command, search-controller, and TX path state.
 
