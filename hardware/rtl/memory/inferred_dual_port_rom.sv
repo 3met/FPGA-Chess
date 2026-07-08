@@ -22,7 +22,7 @@ module inferred_dual_port_rom #(
         end
     end
 
-    assign q_a = rden_a ? mem[address_a] : 'x;
-    assign q_b = rden_b ? mem[address_b] : 'x;
+    assign q_a = rden_a ? mem[address_a] : '0;
+    assign q_b = rden_b ? mem[address_b] : '0;
 
 endmodule : inferred_dual_port_rom

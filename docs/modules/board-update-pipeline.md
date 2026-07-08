@@ -26,7 +26,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Operation | Inputs Required | Description |
 | --------- | --------------- | ----------- |
 | Push Move | `move_in` | Makes a reversible search move and writes a move-history record. |
-| Commit Move | `move_in` | Makes an irreversible active-game move without writing a search undo record. |
+| Commit Move | `move_in` | Makes an irreversible active-game move without writing a search move-history record. |
 | Set Tile | `move_in.to_pos`, `set_data` tile | Places a piece or `NULL_PIECE` on one square. |
 | Set Turn | `set_data[0]` | Updates the side to move without changing tiles. |
 | Set Castle Perms | `set_data[3:0]` | Updates castling permissions without changing tiles. |
@@ -49,7 +49,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ```mermaid
 flowchart LR
-    S0["Stage 0: register inputs and read undo record"]
+    S0["Stage 0: register inputs and read move-history record"]
     S1["Stage 1: side-data preparation"]
     S2["Stage 2: alignment"]
     S3["Stage 3: primary tile update and table reads"]
@@ -75,11 +75,15 @@ The final engine should set up a board by issuing explicit Set Tile, Set Turn, S
 
 Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations. The halfmove clock is part of `FullBoard` state but is not included in the Zobrist key.
 
-The Zobrist constants are stored in a read-only table loaded from `hardware/data/zobrist/zobrist_values.hex` with `$readmemh`. Regenerate this file with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
+The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. The board-update RTL uses the generated SystemVerilog lookup package so Quartus does not infer a large `$readmemh` table during frontend elaboration. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
+
+`ENABLE_ZOBRIST` defaults to enabled. With the parameter disabled, `zobrist_key_out` remains unchanged by hash-table lookups and the search controller must also disable TT traffic and repetition-draw detection.
+
+`ENABLE_PST` defaults to enabled. With the parameter disabled, PST lookup values are zero and the pipeline still updates material deltas through `PIECE_VALS_128`.
 
 ## PST Tables
 
-Piece-square-table constants are stored in `hardware/data/pst_values/pst_values.hex` and loaded with `$readmemh` by the inferred ROMs used in RTL and test benches. Regenerate this file from `hardware/data/pst_values/pst_values.json` with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
+Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. The board-update RTL uses the generated SystemVerilog lookup package for synthesis and test benches still use the `.hex` reference data where useful. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
 
 ## Move History
 

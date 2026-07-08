@@ -4,8 +4,15 @@ import general_chess_defs::*;
 import chess_helper_funcs::*;
 import board_update_pipeline_defs::*;
 import zobrist_defs::*;
+import zobrist_values_pkg::*;
+import pst_values_pkg::*;
 
-module board_update_pipeline (
+module board_update_pipeline #(
+    parameter int MOVE_RECORD_THREAD_COUNT = THREAD_COUNT,
+    parameter int MOVE_RECORD_PLY_COUNT = MAX_PLY_COUNT,
+    parameter bit ENABLE_ZOBRIST = 1'b1,
+    parameter bit ENABLE_PST = 1'b1
+) (
     input wire clk,
     input BoardOp board_op,
     input FullBoard board_in,
@@ -24,7 +31,8 @@ module board_update_pipeline (
     typedef logic [8:0] PstAddr;
     typedef logic [2:0] PstPieceIndex;
 
-    localparam MOVE_RECORD_ADDR_BITS = $clog2(THREAD_COUNT * MAX_PLY_COUNT);
+    localparam MOVE_RECORD_COUNT = MOVE_RECORD_THREAD_COUNT * MOVE_RECORD_PLY_COUNT;
+    localparam MOVE_RECORD_ADDR_BITS = (MOVE_RECORD_COUNT <= 1) ? 1 : $clog2(MOVE_RECORD_COUNT);
     typedef logic [MOVE_RECORD_ADDR_BITS-1:0] MoveRecordAddr;
 
     BoardUpdatePipelineCtx ctx_pipe[7];
@@ -35,7 +43,7 @@ module board_update_pipeline (
     logic move_record_rd_en, move_record_wr_en;
 
     simple_dual_port_ram #(
-        .NUM_WORDS(THREAD_COUNT * MAX_PLY_COUNT),
+        .NUM_WORDS(MOVE_RECORD_COUNT),
         .WORD_SIZE($bits(MoveRecord))
     ) move_hist_mem (
         .clock(clk),
@@ -51,46 +59,26 @@ module board_update_pipeline (
     logic pst_start_rd_en, pst_end_rd_en, pst_killed_rd_en, pst_castle_rook_rd_en;
     EvalScore pst_start_out, pst_end_out, pst_killed_out, pst_castle_out;
 
-    inferred_dual_port_rom #(
-        .NUM_WORDS(6 * 64),
-        .WORD_SIZE($bits(EvalScore)),
-        .MEM_INIT_FILE("hardware/data/pst_values/pst_values.hex")
-    ) pst_rom_0 (
-        .address_a(pst_start_addr),
-        .address_b(pst_end_addr),
-        .clock(clk),
-        .rden_a(pst_start_rd_en),
-        .rden_b(pst_end_rd_en),
-        .q_a(pst_start_out),
-        .q_b(pst_end_out)
-    );
-
-    inferred_dual_port_rom #(
-        .NUM_WORDS(6 * 64),
-        .WORD_SIZE($bits(EvalScore)),
-        .MEM_INIT_FILE("hardware/data/pst_values/pst_values.hex")
-    ) pst_rom_1 (
-        .address_a(pst_killed_addr),
-        .address_b(pst_castle_rook_addr),
-        .clock(clk),
-        .rden_a(pst_killed_rd_en),
-        .rden_b(pst_castle_rook_rd_en),
-        .q_a(pst_killed_out),
-        .q_b(pst_castle_out)
-    );
-
-    ZobristKey zobrist_mem[0:ZOBRIST_ENTRY_CNT-1];
-
-    initial begin
-        $readmemh(ZOBRIST_MEM_INIT_FILE, zobrist_mem);
-    end
+    generate
+        if (ENABLE_PST) begin : gen_pst
+            assign pst_start_out = pst_start_rd_en ? pst_value(pst_start_addr) : EvalScore'(0);
+            assign pst_end_out = pst_end_rd_en ? pst_value(pst_end_addr) : EvalScore'(0);
+            assign pst_killed_out = pst_killed_rd_en ? pst_value(pst_killed_addr) : EvalScore'(0);
+            assign pst_castle_out = pst_castle_rook_rd_en ? pst_value(pst_castle_rook_addr) : EvalScore'(0);
+        end else begin : gen_no_pst
+            assign pst_start_out = EvalScore'(0);
+            assign pst_end_out = EvalScore'(0);
+            assign pst_killed_out = EvalScore'(0);
+            assign pst_castle_out = EvalScore'(0);
+        end
+    endgenerate
 
     assign board_out = ctx_pipe[6].board;
     assign zobrist_key_out = ctx_pipe[6].zobrist_key;
     assign pst_eval_out = ctx_pipe[6].pst_eval;
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
-        return MoveRecordAddr'((int'(tid) * MAX_PLY_COUNT) + int'(ply));
+        return MoveRecordAddr'((int'(tid) * MOVE_RECORD_PLY_COUNT) + int'(ply));
     endfunction : move_hist_addr
 
     function automatic Tile normalize_tile(input Tile tile);
@@ -155,7 +143,14 @@ module board_update_pipeline (
     endfunction : signed_piece_score
 
     function automatic ZobristKey zobrist_lookup(input ZobristAddr addr);
-        return zobrist_mem[addr];
+        automatic ZobristKey key = ZobristKey'(0);
+
+        if (!ENABLE_ZOBRIST) begin
+            return key;
+        end
+
+        key = zobrist_value(addr);
+        return key;
     endfunction : zobrist_lookup
 
     function automatic ZobristKey zobrist_tile_key(input Tile tile, input Position pos);

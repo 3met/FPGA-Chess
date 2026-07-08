@@ -36,6 +36,8 @@
     "board-update-pipeline": [
       "@common",
       "hardware/rtl/zobrist_defs.sv",
+      "hardware/rtl/generated/zobrist_values_pkg.sv",
+      "hardware/rtl/generated/pst_values_pkg.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
       "hardware/rtl/memory/simple_dual_port_ram.sv",
       "hardware/rtl/memory/inferred_dual_port_rom.sv",
@@ -138,11 +140,17 @@
   "generated_data": {
     "pst-values": {
       "script": "hardware/scripts/generate_pst_values.py",
-      "outputs": ["hardware/data/pst_values/pst_values.hex"]
+      "outputs": [
+        "hardware/data/pst_values/pst_values.hex",
+        "hardware/rtl/generated/pst_values_pkg.sv"
+      ]
     },
     "zobrist-values": {
       "script": "hardware/scripts/generate_zobrist_values.py",
-      "outputs": ["hardware/data/zobrist/zobrist_values.hex"]
+      "outputs": [
+        "hardware/data/zobrist/zobrist_values.hex",
+        "hardware/rtl/generated/zobrist_values_pkg.sv"
+      ]
     }
   },
   "synthesis_targets": {
