@@ -6,7 +6,7 @@ The FPGA maintains the active game/search state between commands and performs th
 
 The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
-The design has a parameterized number of search threads, with `THREAD_COUNT = 8` in the current tested RTL. Current search-controller RTL runs Lazy SMP root contexts concurrently through shared tagged board-update, move-generation, static-evaluation, TT lookup, and TT store paths; threads cooperate using the shared transposition table as the only shared search knowledge.
+The design has a parameterized number of search threads, a parameterized search stack depth, optional perft command path, and optional Zobrist/TT/PST paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests. Current search-controller RTL runs Lazy SMP root contexts concurrently through shared tagged board-update, move-generation, static-evaluation, TT lookup, and TT store paths when more than one context is configured; threads cooperate using the shared transposition table as the only shared search knowledge when TT is enabled. Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
 
 ## Major Blocks
 
@@ -66,9 +66,9 @@ The main pipelines are designed for throughput and can accept a new request each
 
 ## State Ownership
 
-The FPGA maintains active game state between commands. The host can send setup, make-move, undo-move, and search commands; the Python host is responsible for parsing and validating UCI inputs before encoding those commands.
+The FPGA maintains active game state between commands. The host can send setup, make-move, new-game, perft, and search commands; the Python host is responsible for parsing and validating UCI inputs before encoding those commands.
 
-Search owns per-thread state. Each thread keeps an active search stack and stack records for undo rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but should not be treated as the long-term owner of the engine position.
+Search owns per-thread state. Each thread keeps an active search stack and move records for reverse traversal rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but should not be treated as the long-term owner of the engine position.
 
 Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. The remainder of the static evaluation is fully computed by the static evaluation pipeline on dispatch.
 

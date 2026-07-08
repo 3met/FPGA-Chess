@@ -206,24 +206,6 @@ module tb_search_controller;
         check(!resp.error, {label, " response has no error"});
     endtask : make_direct_move
 
-    task automatic undo_direct_move(input string label);
-        automatic EngineControllerRequest request = zero_request();
-
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_REVERSE_MOVE_OP;
-        hold_request_until_ready(request, label);
-        check(!resp.error, {label, " response has no error"});
-    endtask : undo_direct_move
-
-    task automatic undo_direct_move_error(input string label);
-        automatic EngineControllerRequest request = zero_request();
-
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_REVERSE_MOVE_OP;
-        hold_request_until_ready(request, label);
-        check(resp.error, {label, " response reports error"});
-    endtask : undo_direct_move_error
-
     task automatic run_perft(input logic [7:0] depth, input NodeCountType expected_nodes, input string label);
         automatic EngineControllerRequest request = zero_request();
 
@@ -899,17 +881,6 @@ module tb_search_controller;
         new_game();
         make_direct_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4");
         run_perft(8'd1, NodeCountType'(20), "after e2e4 perft depth 1");
-        undo_direct_move("undo e2e4");
-        run_perft(8'd1, NodeCountType'(20), "after undo perft depth 1");
-
-        make_direct_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4 before board replace");
-        set_tile(EMPTY_TILE, Position'(0), "replace board clears history");
-        undo_direct_move_error("undo after board replace");
-
-        new_game();
-        make_direct_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4 before setup write");
-        set_turn(WHITE, "setup turn clears history");
-        undo_direct_move_error("undo after setup turn write");
 
         new_game();
         kill_active_perft("kill active perft");
@@ -977,7 +948,7 @@ module tb_search_controller;
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                 if (root_stack_capture_pending[idx]) begin
                     root_stack_seen[idx] = 1'b1;
-                    root_first_stack_move[idx] = dut.search_move_stack[idx][1];
+                    root_first_stack_move[idx] = dut.search_move_stack[dut.search_stack_addr(idx, 1)];
                     root_stack_capture_pending[idx] = 1'b0;
                 end
                 if (dut.search_board_wait_count[idx] != 0) begin
@@ -1181,10 +1152,10 @@ module tb_search_controller;
             end
             if (dut.search_board_result_valid
                     && !root_stack_seen[int'(dut.search_board_result_thread_id)]
-                    && !is_null_move(dut.search_move_stack[dut.search_board_result_thread_id][1])) begin
+                    && !is_null_move(dut.search_move_stack[dut.search_stack_addr(dut.search_board_result_thread_id, 1)])) begin
                 if (!root_stack_seen[int'(dut.search_board_result_thread_id)]) begin
                     root_stack_seen[int'(dut.search_board_result_thread_id)] = 1'b1;
-                    root_first_stack_move[int'(dut.search_board_result_thread_id)] = dut.search_move_stack[dut.search_board_result_thread_id][1];
+                    root_first_stack_move[int'(dut.search_board_result_thread_id)] = dut.search_move_stack[dut.search_stack_addr(dut.search_board_result_thread_id, 1)];
                 end
             end
         end

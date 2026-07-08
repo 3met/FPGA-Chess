@@ -191,7 +191,13 @@ Material values are available in two forms:
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `ZOBRIST_KEY_BITS` | `64` default                  | Width of the live Zobrist key. Keep parameterized for experiments, but use 64 bits for the main design. |
 | `ZobristKey`       | `ZOBRIST_KEY_BITS` bits       | Zobrist-style position key.                                                                             |
-| `THREAD_COUNT`     | Parameter                     | Number of hardware search threads. Current RTL default is 8. |
+| `THREAD_COUNT`     | Package parameter             | Maximum/default hardware search-thread count. Current RTL test default is 8. |
+| `SEARCH_THREAD_COUNT` | Controller parameter       | Number of active search contexts configured for a `search_controller` instance. Defaults to `THREAD_COUNT`. |
+| `SEARCH_STACK_DEPTH` | Controller parameter       | Number of plies allocated in a `search_controller` instance. Defaults to `MAX_PLY_COUNT`. |
+| `ENABLE_PERFT` | Engine/controller parameter | Enables the external perft command path. Defaults to enabled for RTL tests. |
+| `ENABLE_ZOBRIST` | Board-update/search-controller parameter | Enables incremental Zobrist hash-table updates and repetition hashing. Defaults to enabled for RTL tests. |
+| `ENABLE_TT` | Search-controller parameter | Enables TT lookup/store traffic. Defaults to enabled for RTL tests and must also be disabled when Zobrist hashing is disabled. |
+| `ENABLE_PST` | Board-update/search-controller parameter | Enables board-update PST lookups for incremental PST/material scoring. Defaults to enabled for RTL tests; disabling it still preserves material deltas. |
 | `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |
 | `ThreadID`         | `THREAD_ID_BITS` bits         | Hardware search thread identifier.                                                                      |
 
