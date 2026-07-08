@@ -56,23 +56,63 @@ def host_parallel_processors() -> int:
     return max(1, os.cpu_count() or 1)
 
 
-def run_command(cmd: list[str], cwd: Path, log_path: Path | None = None) -> tuple[int, str, float]:
+def run_command(
+    cmd: list[str],
+    cwd: Path,
+    log_path: Path | None = None,
+    live_log: bool = False,
+) -> tuple[int, str, float]:
     start = time.monotonic()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    if not live_log:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        elapsed = time.monotonic() - start
+        output = proc.stdout
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        return proc.returncode, output, elapsed
+
+    if log_path is None:
+        raise BuildError("live_log requires a log path")
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    chunks: list[str] = []
+    with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                chunks.append(line)
+                log_file.write(line)
+                log_file.flush()
+            code = proc.wait()
+        except BaseException:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            raise
     elapsed = time.monotonic() - start
-    output = proc.stdout
-    if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(output, encoding="utf-8")
-    return proc.returncode, output, elapsed
+    return code, "".join(chunks), elapsed
 
 
 def restore_outputs(before: dict[Path, bytes | None]) -> None:
@@ -383,7 +423,7 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
         shutil.copy2(source, dest)
 
     qpf.write_text(
-        'QUARTUS_VERSION = "23.1"\nPROJECT_REVISION = "fpga_chess"\n',
+        'QUARTUS_VERSION = "20.1"\nPROJECT_REVISION = "fpga_chess"\n',
         encoding="utf-8",
     )
 
@@ -392,9 +432,12 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
         f'set_global_assignment -name DEVICE {target["device"]}',
         f'set_global_assignment -name TOP_LEVEL_ENTITY {target["top"]}',
         f"set_global_assignment -name NUM_PARALLEL_PROCESSORS {parallel_processors}",
+        f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(REPO_ROOT)}"',
+        f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(build_dir)}"',
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
     lines.extend(qsf_assignment_for_source(source) for source in sources)
+    lines.extend(qsf_assignment_for_source(output) for output in generated_outputs)
     for qip in target.get("qip_files", []):
         lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(repo_path(qip))}"')
 
@@ -436,6 +479,7 @@ def collect_quartus_summary(build_dir: Path) -> list[str]:
 def synth_quartus(manifest: dict, target_name: str, target: dict) -> int:
     require_tool("quartus_map")
     require_tool("quartus_fit")
+    require_tool("quartus_asm")
     require_tool("quartus_sta")
     build_dir = BUILD_ROOT / target_name
     clean_dir(build_dir)
@@ -448,6 +492,7 @@ def synth_quartus(manifest: dict, target_name: str, target: dict) -> int:
     commands = [
         ["quartus_map", project_name, parallel_arg, *map_args],
         ["quartus_fit", project_name, parallel_arg, *fit_args],
+        ["quartus_asm", project_name],
         ["quartus_sta", project_name, parallel_arg],
     ]
     failed = False
@@ -455,7 +500,7 @@ def synth_quartus(manifest: dict, target_name: str, target: dict) -> int:
     for cmd in commands:
         log = build_dir / f"{cmd[0]}.log"
         print(f"Running {' '.join(cmd)}...")
-        code, output, elapsed = run_command(cmd, build_dir, log)
+        code, output, elapsed = run_command(cmd, build_dir, log, live_log=True)
         ok = code == 0 and not re.search(r"\bError \([0-9]+\):", output)
         status = "PASS" if ok else "FAIL"
         print(f"[{status}] {cmd[0]} ({elapsed:.2f}s)")

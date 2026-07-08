@@ -91,7 +91,9 @@ module main(input CLOCK_50,
 	
 
 	// --- Engine Command Layer ---
-	engine engine (
+	engine #(
+		.ENABLE_PERFT(1'b1)
+	) engine (
 		.clk(clk),
 		.rst_n(engine_rst_n),
 		.data_in(rx_stream),
@@ -110,7 +112,13 @@ module main(input CLOCK_50,
 	);
 
 	search_controller #(
-		.CLOCK_FREQ(ENGINE_CLOCK_FREQ)
+		.CLOCK_FREQ(ENGINE_CLOCK_FREQ),
+		.SEARCH_THREAD_COUNT(1),
+		.SEARCH_STACK_DEPTH(8),
+		.ENABLE_PERFT(1'b1),
+		.ENABLE_ZOBRIST(1'b1),
+		.ENABLE_TT(1'b1),
+		.ENABLE_PST(1'b1)
 	) search_controller (
 		.clk(clk),
 		.rst_n(engine_rst_n),
@@ -140,4 +148,3 @@ module main(input CLOCK_50,
 
 
 endmodule : main
-

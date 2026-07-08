@@ -18,7 +18,7 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python tools/fpga_chess.py list` prints the known source sets, tests, generated data, and synthesis targets.
 
-`python tools/fpga_chess.py gen-data` runs the deterministic data generators and fails if tracked outputs would change; without `--update`, changed outputs are restored so the command is safe as a check.
+`python tools/fpga_chess.py gen-data` runs the deterministic data generators and fails if tracked outputs would change; without `--update`, changed outputs are restored so the command is safe as a check. The PST and Zobrist generators emit both `.hex` reference data and generated SystemVerilog lookup packages used by the portable RTL.
 
 `python tools/fpga_chess.py gen-data --update` leaves regenerated `.hex` files in place when an intentional data update is being made.
 
@@ -26,11 +26,17 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python tools/fpga_chess.py test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa and reports pass/fail counts when the transcript prints them.
 
-`python tools/fpga_chess.py synth --target quartus-de1-soc` generates a Quartus project under `work/build/quartus-de1-soc/`, uses `main` as the current top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, and timing analysis.
+`python tools/fpga_chess.py synth --target quartus-de1-soc` generates a Quartus project under `work/build/quartus-de1-soc/`, uses `main` as the current top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis.
 
 Quartus synthesis automatically detects the number of processors available to the current process, records that value in `NUM_PARALLEL_PROCESSORS`, and passes it explicitly to `quartus_map`, `quartus_fit`, and `quartus_sta` with `--parallel=<processors>`.
 
-Targets may define `map_effort` and `fit_effort` in the manifest; the DE1-SoC smoke target uses fast map and fitter effort to keep first-pass synthesis runtime bounded at the possible cost of lower Fmax or higher resource use.
+The generated Quartus project adds the repo root and target build directory as `SEARCH_PATH` entries and includes generated data outputs as project files so memory/table assets are visible to Quartus from the build directory.
+
+Targets may define `map_effort` and `fit_effort` in the manifest; the DE1-SoC target uses fast map and fitter effort to keep first-pass synthesis runtime bounded at the possible cost of lower Fmax or higher resource use.
+
+The DE1-SoC synthesis source set uses the same portable RTL path as generic synthesis plus the board-level `main.sv` wrapper. The board target configures one search context and eight allocated plies in `main.sv` to keep area bounded, but it still instantiates the real search controller, board-update pipeline, move generator, static evaluator, transposition-table path, and UART command layer.
+
+Current synthesis note: Quartus 20.1 gets past the real board-update pipeline after the generated PST/Zobrist lookup-package change, then stalls during frontend elaboration of the current exhaustive combinational `move_generator`. No simplified wrapper or stub is used for this result.
 
 `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
 
