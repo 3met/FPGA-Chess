@@ -30,55 +30,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     output logic move_is_legal
 );
 
-    // Move Config Pipeline
-    MoveGenOp move_gen_op_pipe[11];
-    logic start_node_pipe[11];
-    ThreadID thread_id_pipe[11];
-    PlyIndex ply_pipe[11];
-    Move target_move_pipe[9];
-    logic is_target_move_knight, is_target_move_knight_wire;
-    Direction target_move_direction, target_move_direction_wire;
-
-    // Piece Propagation Pipeline Registers
-    Tile board_pipe[7][64];        // Indexed like [layer][position]
-    Tile adj_piece_in[7][64][8];     // Indexed like [layer][position][direction]
-    reg [2:0] adj_dist_in[7][64][8]; // Indexed like [layer][position][direction]
-    KnightBusData knight_data_in[64][8]; // Indexed like [layer][position][direction];
-
-    // Board State Pipeline
-    Color       turn_pipe[8];
-    CastlePerms castle_perms_pipe[8];
-    reg         has_ep_pipe[8];
-    BoardFile   ep_file_pipe[8];
-
-    // Move Generation State
-    PlyIndex prev_ply[THREAD_COUNT];
-
-    // Board Mask Pipeline
-    reg NS_cardinal_mask[4][8][7];    // Indexed like [layer][file][rank]
-    reg EW_cardinal_mask[4][7][8];    // Indexed like [layer][file][rank]
-    reg pos_diag_mask[4][7][7];       // Indexed like [layer][file][rank]
-    reg neg_diag_mask[4][7][7];       // Indexed like [layer][file][rank]
-    reg NNE_SSW_knight_mask[4][7][6]; // Indexed like [layer][file][rank]
-    reg NEE_SWW_knight_mask[4][6][7]; // Indexed like [layer][file][rank]
-    reg SEE_NWW_knight_mask[4][6][7]; // Indexed like [layer][file][rank]
-    reg SSE_NNW_knight_mask[4][7][6]; // Indexed like [layer][file][rank]
-
-    // Result Pipeline
-    MovePriority tile_move_priority[64]; // The best score a given tile can produce
-    Direction tile_move_dir[64]; // Direction of origin from the destination tile
-    logic [2:0] tile_move_dist[64]; // Distance of best move
-    MovePriority selected_move_priority;  // The best score for the entire board
-    Position selected_to_pos;
-    Direction selected_move_dir;  // The direction of origin from the best destination tile
-    logic [2:0] selected_move_dist;  // The distance of the best move
-    logic selected_move_is_knight;
-    Move selected_move;
-    logic selected_move_is_legal;
-
-    logic is_candidate_move_knight, is_candidate_move_knight_wire;
-    Direction candidate_move_direction, candidate_move_direction_wire;
-
     Move candidate_move_pipe[MOVE_GEN_STAGE_CNT];
     logic candidate_move_legal_pipe[MOVE_GEN_STAGE_CNT];
     Move selected_move_in;
@@ -88,26 +39,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     MoveMask next_consumed_mask;
     MoveMaskIndex selected_move_index;
     logic selected_move_valid;
-
-    // Depth of memory to allocate
-    // TODO: Round up to BRAM size?
-    // localparam MEM_DEPTH = $ceil(MAX_PLY_COUNT * 0.8);
-
-    // Valid Mask Chunk BRAM
-    // simple_dual_port_ram valid_mask_chunk_mem #(NUM_WORDS=(THREAD_COUNT * MAX_PLY_COUNT), WORD_SIZE=(378)) (
-    //     .clock(),
-    //     .data(),
-    //     .rdaddress(),
-    //     .rden(),
-    //     .wraddress(),
-    //     .wren(),
-    //     .q()
-    // );
-
-    wire [378-1:0] combined_mask[4]; // Indexed like [layer]
-    wire [378-1:0] loaded_mask;
-    logic adj_mask[64][8]; // Indexed like [pos][dir]
-    logic knight_mask[64][8]; // Indexed like [pos][dir]
 
     typedef struct packed {
         logic [1:0] count;
@@ -1049,15 +980,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             for (int stage=0; stage<MOVE_GEN_STAGE_CNT; stage++) begin
-                move_gen_op_pipe[stage] <= MOVE_GEN_IDLE_OP;
-                start_node_pipe[stage] <= 1'b0;
-                thread_id_pipe[stage] <= ThreadID'(0);
-                ply_pipe[stage] <= PlyIndex'(0);
-            end
-            for (int stage=0; stage<9; stage++) begin
-                target_move_pipe[stage] <= NULL_MOVE;
-            end
-            for (int stage=0; stage<MOVE_GEN_STAGE_CNT; stage++) begin
                 candidate_move_pipe[stage] <= NULL_MOVE;
                 candidate_move_legal_pipe[stage] <= 1'b0;
             end
@@ -1068,25 +990,12 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 consumed_masks[move_mask_addr(thread_id, ply)] <= next_consumed_mask;
             end
 
-            move_gen_op_pipe[0] <= move_gen_op;
-            start_node_pipe[0] <= start_node;
-            thread_id_pipe[0] <= thread_id;
-            ply_pipe[0] <= ply;
-            target_move_pipe[0] <= target_move;
             candidate_move_pipe[0] <= selected_move_in;
             candidate_move_legal_pipe[0] <= selected_move_valid && selected_move_legal_in;
 
             for (int stage=1; stage<MOVE_GEN_STAGE_CNT; stage++) begin
-                move_gen_op_pipe[stage] <= move_gen_op_pipe[stage-1];
-                start_node_pipe[stage] <= start_node_pipe[stage-1];
-                thread_id_pipe[stage] <= thread_id_pipe[stage-1];
-                ply_pipe[stage] <= ply_pipe[stage-1];
                 candidate_move_pipe[stage] <= candidate_move_pipe[stage-1];
                 candidate_move_legal_pipe[stage] <= candidate_move_legal_pipe[stage-1];
-            end
-
-            for (int stage=1; stage<9; stage++) begin
-                target_move_pipe[stage] <= target_move_pipe[stage-1];
             end
 
             candidate_move <= candidate_move_pipe[MOVE_GEN_STAGE_CNT-1];

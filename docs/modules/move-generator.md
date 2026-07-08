@@ -37,22 +37,20 @@ The move generator accepts a legal input position and emits one ordered candidat
 | Pipeline Stage | Description |
 | -------------- | ----------- |
 | 0 | Select the best remaining pseudo-legal candidate for the request, check strict legality, and update the consumed-candidate mask for the node. |
-| 1-10 | Pipeline the selected candidate, legality flag, and request metadata to the output stage. |
+| 1-10 | Pipeline the selected candidate and legality flag to the output stage. |
 
 ```mermaid
 flowchart LR
     Input["Legal board input"]
     MaskLoad["Load searched-move mask"]
-    Propagate["Propagate nearest pieces and valid chunks"]
-    TileScore["Score best candidate per tile"]
-    TargetBoost["Apply target-move priority"]
-    BoardSelect["Select best board-wide candidate"]
+    Enumerate["Enumerate pseudo-legal candidates"]
+    Score["Score ordering priority"]
     LegalCheck["Strict legality filter"]
     Output["candidate_move and move_is_legal"]
     MaskSave["Mark candidate consumed"]
     MaskMemory["Per-thread per-ply mask memory"]
 
-    Input --> MaskLoad --> Propagate --> TileScore --> TargetBoost --> BoardSelect --> LegalCheck --> Output
+    Input --> MaskLoad --> Enumerate --> Score --> LegalCheck --> Output
     MaskMemory --> MaskLoad
     LegalCheck -->|"Legal or illegal candidate"| MaskSave
     MaskSave --> MaskMemory
@@ -98,3 +96,5 @@ The board update pipeline should not select replacement moves after an illegal c
 The current RTL lives under `hardware/rtl/move_generator/`.
 
 The current RTL uses the 558-bit compressed per-node consumed-candidate mask and supports normal, targeted, and qsearch generation, including en passant, castling, and all promotion variants. Strict legality is checked for the selected candidate without adding pipeline stages: non-king moves use king/check/pin constraints and only fall back to a virtual attack check for en passant x-rays, while king moves and castling transit squares still use virtual attack checks.
+
+Current synthesis note: the current RTL selects each candidate through a large combinational enumeration over all from-squares, to-squares, and promotion variants, then runs pseudo-legal and strict-legal filters on that selected candidate. Quartus 20.1 stalls during frontend elaboration of this real move generator in the DE1-SoC target; making it synthesize is expected to require a sequential or restored tiled/pipelined move-generation datapath rather than a small style-only cleanup.
