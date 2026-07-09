@@ -722,54 +722,145 @@ def matching_report_rows(lines: list[str], patterns: tuple[str, ...]) -> list[st
     return rows
 
 
-def print_report_section(title: str, rows: list[str], limit: int | None = None) -> None:
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {remainder:04.1f}s"
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours}h {minutes}m {remainder:04.1f}s"
+
+
+def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
     if not rows:
         return
     print(f"\n{title}:")
-    selected = rows if limit is None else rows[:limit]
-    for row in selected:
-        print(f"  {row}")
-    if limit is not None and len(rows) > limit:
-        print(f"  ... {len(rows) - limit} more rows (see vendor report)")
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], len(value))
+    print("  " + "  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)).rstrip())
+    print("  " + "  ".join("-" * width for width in widths))
+    for row in rows:
+        print("  " + "  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip())
 
 
-def quartus_synth_report(build_dir: Path) -> bool:
-    summary_paths = sorted(build_dir.glob("*.map.summary")) + sorted(build_dir.glob("*.fit.summary"))
-    timing_paths = sorted(build_dir.glob("*.sta.summary")) + sorted(build_dir.glob("*.sta.rpt"))
-    hierarchy_paths = sorted(build_dir.glob("*.map.rpt")) + sorted(build_dir.glob("*.fit.rpt"))
-    summary = report_lines(summary_paths)
-    timing = report_lines(timing_paths)
-    hierarchy = report_lines(hierarchy_paths)
-    resources = matching_report_rows(
-        summary,
-        (
-            r"Total logic elements",
-            r"Logic utilization",
-            r"Total ALMs",
-            r"Total combinational functions",
-            r"Total registers",
-            r"Total pins",
-            r"Total block memory bits",
-            r"Total (?:RAM|memory) blocks",
-            r"Total DSP",
-        ),
+def print_unavailable(title: str, reason: str) -> None:
+    print(f"\n{title}:")
+    print(f"  Unavailable ({reason})")
+
+
+def parse_quartus_summary(lines: list[str]) -> list[list[str]]:
+    resources: list[list[str]] = []
+    wanted = (
+        "Logic utilization",
+        "Total ALMs",
+        "Total combinational functions",
+        "Total registers",
+        "Total pins",
+        "Total block memory bits",
+        "Total RAM Blocks",
+        "Total memory blocks",
+        "Total DSP",
     )
+    for raw in lines:
+        match = re.match(r"\s*([^:]+?)\s*:\s*(.+?)\s*$", raw)
+        if not match or not match.group(1).startswith(wanted):
+            continue
+        value = match.group(2)
+        amount_match = re.match(r"(.+?)\s*/\s*(.+?)\s*\(\s*(\d+)\s*%\s*\)$", value)
+        if amount_match:
+            resources.append([match.group(1), amount_match.group(1).strip(), amount_match.group(2).strip(), f"{amount_match.group(3)}%"])
+        else:
+            resources.append([match.group(1), value, "", ""])
+    return resources
+
+
+def quartus_table(lines: list[str], title: str) -> tuple[list[str], list[list[str]]]:
+    for index, raw in enumerate(lines):
+        if title not in raw:
+            continue
+        for header_index in range(index + 1, min(index + 8, len(lines))):
+            header = lines[header_index].strip()
+            if not header.startswith(";") or "Compilation Hierarchy Node" not in header:
+                continue
+            headers = [cell.strip() for cell in header.strip(";").split(";")]
+            rows: list[list[str]] = []
+            for row_line in lines[header_index + 1 :]:
+                stripped = row_line.strip()
+                if stripped.startswith("+") and rows:
+                    break
+                if not stripped.startswith(";") or "|" not in stripped:
+                    continue
+                cells = stripped.strip(";").split(";")
+                cells = [cells[0].rstrip(), *[cell.strip() for cell in cells[1:]]]
+                if len(cells) == len(headers):
+                    rows.append(cells)
+            return headers, rows
+    return [], []
+
+
+def hierarchy_depth(name: str) -> int:
+    return (len(name) - len(name.lstrip())) // 3
+
+
+def quartus_hierarchy(lines: list[str], fitter: bool, verbose: bool) -> list[list[str]]:
+    title = "Fitter Resource Utilization by Entity" if fitter else "Analysis & Synthesis Resource Utilization by Entity"
+    headers, raw_rows = quartus_table(lines, title)
+    if not headers:
+        return []
+    indices = {header: index for index, header in enumerate(headers)}
+    name_index = indices["Compilation Hierarchy Node"]
+    library_index = indices.get("Library Name")
+    logic_header = "ALMs needed [=A-B+C]" if fitter else "Combinational ALUTs"
+    selected: list[list[str]] = []
+    for row in raw_rows:
+        name = row[name_index]
+        depth = hierarchy_depth(name)
+        generated = any(marker in name for marker in ("auto_generated", "altsyncram:", "altera_pll:"))
+        if not verbose and (depth > 3 or generated or (library_index is not None and row[library_index] != "work")):
+            continue
+        display_name = name.lstrip().lstrip("|").rstrip("|")
+        selected.append(
+            [
+                f"{'  ' * depth}{display_name}",
+                row[indices[logic_header]],
+                row[indices["Dedicated Logic Registers"]],
+                row[indices["Block Memory Bits"]],
+                row[indices["DSP Blocks"]],
+            ]
+        )
+    return selected
+
+
+def quartus_synth_report(build_dir: Path, verbose: bool = False) -> bool:
+    timing_paths = sorted(build_dir.glob("*.sta.summary")) + sorted(build_dir.glob("*.sta.rpt"))
+    fit_paths = sorted(build_dir.glob("*.fit.rpt"))
+    map_paths = sorted(build_dir.glob("*.map.rpt"))
+    fit_summary_paths = sorted(build_dir.glob("*.fit.summary"))
+    map_summary_paths = sorted(build_dir.glob("*.map.summary"))
+    summary = report_lines(fit_summary_paths) or report_lines(map_summary_paths)
+    timing = report_lines(timing_paths)
+    resources = parse_quartus_summary(summary)
     clocks = matching_report_rows(
         timing,
         (r"Fmax", r"Restricted Fmax", r"Slack", r"Timing requirements", r"\bMHz\b"),
     )
-    components = matching_report_rows(
-        hierarchy,
-        (
-            r"Entity Name.*(?:ALUT|Logic|Register|Memory|DSP)",
-            r"^\s*;\s*(?:\|--)*[A-Za-z_][^;]*;\s*[\d,]+",
-            r"^\s*\|\s*(?:\|--)*[A-Za-z_][^|]*\|\s*[\d,]+",
-        ),
-    )
-    print_report_section("Device utilization", resources)
-    print_report_section("Clock and timing", clocks, 20)
-    print_report_section("Utilization by component", components, 80)
-    return bool(resources or clocks or components)
+    fit_lines = report_lines(fit_paths)
+    components = quartus_hierarchy(fit_lines, True, verbose)
+    if not components:
+        components = quartus_hierarchy(report_lines(map_paths), False, verbose)
+    found = bool(resources or clocks or components)
+    if not found:
+        return False
+    print_table("Device utilization", ["Resource", "Used", "Available", "Use"], resources)
+    if clocks:
+        print_table("Clock and timing", ["Result"], [[row] for row in clocks[:20]])
+    else:
+        print_unavailable("Clock and timing", "timing report not generated")
+    print_table("Utilization by component", ["Component", "Logic", "Registers", "Memory bits", "DSP"], components)
+    return True
 
 
 def quartus_partial_report(build_dir: Path) -> bool:
@@ -802,7 +893,7 @@ def quartus_partial_report(build_dir: Path) -> bool:
         try:
             started = datetime.strptime(started_match.group(1).strip(), "%a %b %d %H:%M:%S %Y").astimezone()
             ended = max(path.stat().st_mtime for path in log_paths)
-            elapsed_text = f"{max(0.0, ended - started.timestamp()):.2f}s"
+            elapsed_text = format_duration(max(0.0, ended - started.timestamp()))
         except ValueError:
             pass
 
@@ -824,7 +915,54 @@ def quartus_partial_report(build_dir: Path) -> bool:
     return True
 
 
-def vivado_synth_report(build_dir: Path) -> bool:
+def vivado_hierarchy(lines: list[str], verbose: bool) -> list[list[str]]:
+    headers: list[str] = []
+    raw_rows: list[list[str]] = []
+    for index, raw in enumerate(lines):
+        if re.match(r"\s*\|\s*Instance\s*\|\s*Module\s*\|", raw):
+            headers = [cell.strip() for cell in raw.strip().strip("|").split("|")]
+            for row_line in lines[index + 1 :]:
+                if row_line.lstrip().startswith("+") and raw_rows:
+                    break
+                if not row_line.lstrip().startswith("|"):
+                    continue
+                inner = row_line.strip("\r\n").lstrip().strip("|")
+                cells = inner.split("|")
+                cells = [cells[0].rstrip(), *[cell.strip() for cell in cells[1:]]]
+                if len(cells) == len(headers):
+                    raw_rows.append(cells)
+            break
+    if not headers:
+        return []
+    indices = {header: index for index, header in enumerate(headers)}
+
+    def value(row: list[str], *names: str) -> str:
+        for name in names:
+            if name in indices:
+                return row[indices[name]]
+        return ""
+
+    rows = []
+    for row in raw_rows:
+        instance = row[indices["Instance"]]
+        depth = (len(instance) - len(instance.lstrip())) // 2
+        if not verbose and depth > 3:
+            continue
+        bram = "/".join(filter(None, [value(row, "RAMB36"), value(row, "RAMB18")]))
+        rows.append(
+            [
+                f"{'  ' * depth}{instance.strip()}",
+                value(row, "Module"),
+                value(row, "Total LUTs", "LUTs"),
+                value(row, "FFs", "Registers"),
+                bram,
+                value(row, "DSP Blocks", "DSPs"),
+            ]
+        )
+    return rows
+
+
+def vivado_synth_report(build_dir: Path, verbose: bool = False) -> bool:
     utilization = report_lines([build_dir / "utilization.rpt"])
     timing = report_lines([build_dir / "timing_summary.rpt"])
     resources = matching_report_rows(
@@ -833,13 +971,7 @@ def vivado_synth_report(build_dir: Path) -> bool:
             r"^\|\s*(?:Slice LUTs|LUT as Logic|LUT as Memory|Slice Registers|Block RAM Tile|RAMB\d+|DSPs?)\s*\|",
         ),
     )
-    components = matching_report_rows(
-        utilization,
-        (
-            r"^\|\s*Instance\s*\|\s*Module.*(?:LUT|Register|BRAM|DSP)",
-            r"^\|\s*[A-Za-z_][^|]*\|\s*\([^)]+\)\s*\|\s*\d+",
-        ),
-    )
+    component_rows = vivado_hierarchy(utilization, verbose)
     clocks = matching_report_rows(
         timing,
         (r"WNS\(ns\)", r"^\s*\w+\s+\{[^}]+\}\s+[-\d.]+\s+[-\d.]+", r"Clock Summary", r"Requirement"),
@@ -857,10 +989,20 @@ def vivado_synth_report(build_dir: Path) -> bool:
         minimum_period = period - slack
         if minimum_period > 0:
             clocks.append(f"Estimated maximum clock: {1000.0 / minimum_period:.3f} MHz (period - WNS)")
-    print_report_section("Device utilization", resources)
-    print_report_section("Clock and timing", clocks, 20)
-    print_report_section("Utilization by component", components, 80)
-    return bool(resources or clocks or components)
+    found = bool(resources or clocks or component_rows)
+    if not found:
+        return False
+    resource_rows = []
+    for row in resources:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        resource_rows.append((cells + ["", "", ""])[:4])
+    print_table("Device utilization", ["Resource", "Used", "Available", "Use"], resource_rows)
+    if clocks:
+        print_table("Clock and timing", ["Result"], [[row] for row in clocks[:20]])
+    else:
+        print_unavailable("Clock and timing", "timing report not generated")
+    print_table("Utilization by component", ["Component", "Module", "LUTs", "Registers", "BRAM", "DSP"], component_rows)
+    return True
 
 
 def command_synth_report(args: argparse.Namespace) -> int:
@@ -886,21 +1028,37 @@ def command_synth_report(args: argparse.Namespace) -> int:
         raise BuildError(f"No synthesis results found for target '{target_name}'")
     metadata = load_synth_metadata(build_dir)
     print(f"Synthesis report: {target_name}")
-    print(f"  Tool: {target['tool']}")
-    print(f"  Top: {target['top']}")
-    print(f"  Device: {target.get('device', metadata.get('part') if metadata else 'unspecified')}")
-    print(f"  Started: {report_timestamp(build_dir, metadata)}")
+    details = [
+        ["Tool", target["tool"]],
+        ["Top", target["top"]],
+        ["Device", target.get("device", metadata.get("part") if metadata else "unspecified")],
+        ["Started", report_timestamp(build_dir, metadata)],
+    ]
     if metadata:
-        print(f"  Status: {metadata.get('status', 'unknown')}")
+        details.append(["Status", str(metadata.get("status", "unknown")).upper()])
         if "elapsed_seconds" in metadata:
-            print(f"  Total tool time: {metadata['elapsed_seconds']:.2f}s")
+            details.append(["Tool time", format_duration(metadata["elapsed_seconds"])])
+        print_table("Run", ["Field", "Value"], details)
+        stage_rows = []
         for stage in metadata.get("stages", []):
-            return_code = f", return code {stage['return_code']}" if "return_code" in stage else ""
-            print(f"    {stage['name']}: {stage['status']} ({stage['elapsed_seconds']:.2f}s{return_code})")
+            stage_rows.append(
+                [
+                    stage["name"],
+                    str(stage["status"]).upper(),
+                    format_duration(stage["elapsed_seconds"]),
+                    str(stage.get("return_code", "")),
+                ]
+            )
+        print_table("Stages", ["Stage", "Status", "Time", "Return code"], stage_rows)
     else:
-        print("  Status/time: unavailable (run predates synthesis metadata)")
+        details.append(["Status/time", "unavailable (run predates synthesis metadata)"])
+        print_table("Run", ["Field", "Value"], details)
 
-    found = quartus_synth_report(build_dir) if target["tool"] == "quartus" else vivado_synth_report(build_dir)
+    found = (
+        quartus_synth_report(build_dir, args.verbose)
+        if target["tool"] == "quartus"
+        else vivado_synth_report(build_dir, args.verbose)
+    )
     partial = False
     if not found and target["tool"] == "quartus":
         partial = quartus_partial_report(build_dir)
@@ -1099,6 +1257,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     report_parser = subparsers.add_parser("synth-report", help="Print results from the previous synthesis run")
     report_parser.add_argument("--target", help="Synthesis target; defaults to the most recently modified result")
+    report_parser.add_argument("--verbose", action="store_true", help="Show the complete component utilization hierarchy")
     report_parser.set_defaults(func=command_synth_report)
 
     return parser
