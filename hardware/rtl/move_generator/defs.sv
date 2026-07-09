@@ -5,7 +5,9 @@ package move_generator_defs;
 
     import general_chess_defs::*;
 
-    localparam MOVE_GEN_STAGE_CNT = 11;
+    localparam int PROP_STAGE_CNT = 7;
+    localparam int REDUCE_STAGE_CNT = 3;
+    localparam int MOVE_GEN_STAGE_CNT = PROP_STAGE_CNT + 1 + REDUCE_STAGE_CNT + 1;
 
     // -- Define Move Generator Operations --
     typedef enum {
@@ -44,5 +46,27 @@ package move_generator_defs;
     localparam MovePriority NULL_MOVE_PRIORITY = MovePriority'('d0);
     localparam MovePriority UNKNOWN_MOVE_PRIORITY = MovePriority'('dx);
     localparam MovePriority MAX_MOVE_PRIORITY = MovePriority'(4'd15);
+
+    typedef struct packed {
+        Tile tile;
+        logic [2:0] distance;
+    } RayRecord;
+
+    typedef logic [7:0] MoveScore;
+
+    typedef struct packed {
+        logic valid;
+        Move move;
+        MoveMaskIndex mask_index;
+        MoveScore score;
+    } CandidateProposal;
+
+    localparam RayRecord NULL_RAY = RayRecord'({EMPTY_TILE, 3'd0});
+    localparam CandidateProposal NULL_PROPOSAL = CandidateProposal'({
+        1'b0,
+        NULL_MOVE,
+        MoveMaskIndex'(0),
+        MoveScore'(0)
+    });
 
 endpackage : move_generator_defs

@@ -1,6 +1,6 @@
 # Move Generator (`move_generator`)
 
-Status: implemented and integrated with `search_controller`.
+Status: tiled pipeline implementation in progress; standalone move-generation coverage passes, while same-ply node-mask reuse in `search_controller` integration remains under correction.
 
 The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is strictly legal. A candidate is consumed for the current node whether or not it is legal.
 
@@ -36,21 +36,27 @@ The move generator accepts a legal input position and emits one ordered candidat
 
 | Pipeline Stage | Description |
 | -------------- | ----------- |
-| 0 | Select the best remaining pseudo-legal candidate for the request, check strict legality, and update the consumed-candidate mask for the node. |
-| 1-10 | Pipeline the selected candidate and legality flag to the output stage. |
+| 0 | Capture the request, board, and consumed-candidate mask. Each destination receives the tile broadcast by its immediate neighbor in each on-board direction; off-board inputs are constant NULL rays. |
+| 1-6 | Empty tiles forward adjacent ray messages and increment their distance, while occupied tiles block messages behind them, until every destination has its nearest source tile in all eight directions. |
+| 7 | Sixty-four destination-local processing elements register one proposal each using the propagated rays, statically connected knight sources, old attacker/defender exchange scoring, promotion variants, targeted priority, qsearch filtering, and only the consumed-mask bits belonging to that tile. A small dedicated proposal handles castling. |
+| 8 | First registered comparator level reduces 64 tile proposals plus castling to 16 proposals. |
+| 9 | Second registered comparator level reduces 16 proposals to four. |
+| 10 | Final registered comparator level reduces four proposals to one. |
+| 11 | Check strict legality on the selected proposal using a virtual-board king attack test, update the consumed mask, and register the result before the external output boundary. |
 
 ```mermaid
 flowchart LR
     Input["Legal board input"]
     MaskLoad["Load searched-move mask"]
-    Enumerate["Enumerate pseudo-legal candidates"]
-    Score["Score ordering priority"]
+    Nearest["Find nearest tile sources"]
+    Specials["Add promotion and castling candidates"]
+    Score["Score destination-tile proposals"]
     LegalCheck["Strict legality filter"]
     Output["candidate_move and move_is_legal"]
     MaskSave["Mark candidate consumed"]
     MaskMemory["Per-thread per-ply mask memory"]
 
-    Input --> MaskLoad --> Enumerate --> Score --> LegalCheck --> Output
+    Input --> MaskLoad --> Nearest --> Specials --> Score --> LegalCheck --> Output
     MaskMemory --> MaskLoad
     LegalCheck -->|"Legal or illegal candidate"| MaskSave
     MaskSave --> MaskMemory
@@ -58,7 +64,7 @@ flowchart LR
 
 ## Ordered Move Generation
 
-The current ordering scores all remaining pseudo-legal candidate identities for the requested node and selects the highest score. Captures, en passant, promotions, castling, and targeted moves receive ordering bonuses; exact ordering is an implementation detail as long as candidates are emitted once and target moves outrank other candidates when legal and unsearched.
+The current ordering scores destination-tile proposals for the requested node and selects the highest score. Each destination considers the nearest piece on each ray, legal knight sources, pawn forward/capture lanes, promotion variants, and castling candidates. Captures, en passant, promotions, castling, moving-piece type, and targeted moves receive ordering bonuses; exact ordering is an implementation detail as long as candidates are emitted once and target moves outrank other candidates when legal and unsearched.
 
 Targeted Generation supports TT move ordering and root move forcing. If the target move is legal and unsearched, it must outrank all other candidates for that dispatch.
 
@@ -95,6 +101,8 @@ The board update pipeline should not select replacement moves after an illegal c
 
 The current RTL lives under `hardware/rtl/move_generator/`.
 
-The current RTL uses the 558-bit compressed per-node consumed-candidate mask and supports normal, targeted, and qsearch generation, including en passant, castling, and all promotion variants. Strict legality is checked for the selected candidate without adding pipeline stages: non-king moves use king/check/pin constraints and only fall back to a virtual attack check for en passant x-rays, while king moves and castling transit squares still use virtual attack checks.
+The current RTL uses the 558-bit compressed per-node consumed-candidate mask and supports normal, targeted, and qsearch generation, including en passant, castling, and all promotion variants. A ray message contains only the nearest source `Tile` and its three-bit distance; a NULL piece type represents an empty ray, and the source position is reconstructed from destination, direction, and distance. Seven registered propagation stages carry these messages between adjacent tiles. Sixty-four `move_generator_tile_PE` instances each consume only local ray data, statically connected knight sources, request controls, and the relevant consumed-mask bits, then emit one packed proposal. A three-level registered comparator tree selects one proposal, and a dedicated low-area path contributes castling. Strict legality is checked only for the selected candidate by applying the move virtually and testing the moving side's king for attack; castling additionally checks the origin and transit squares.
 
-Current synthesis note: the current RTL selects each candidate through a large combinational enumeration over all from-squares, to-squares, and promotion variants, then runs pseudo-legal and strict-legal filters on that selected candidate. Quartus 20.1 stalls during frontend elaboration of this real move generator in the DE1-SoC target; making it synthesize is expected to require a sequential or restored tiled/pipelined move-generation datapath rather than a small style-only cleanup.
+Current synthesis note: the previous RTL selected candidates through board-wide combinational tasks that accepted complete unpacked board and ray arrays. The current RTL restores explicit destination-local processing elements, compact ray records, localized mask inputs, and a registered reduction tree so synthesis tools elaborate repeated bounded modules instead of duplicating board-wide enumeration.
+
+Current integration note: standalone generation exhausts each tested node without duplicate mask identities, but the search-controller perft test currently re-emits candidates when recycling a ply across sibling nodes. The remaining work is in the pipelined `start_node` and consumed-mask state handoff, not pseudo-legal generation or strict legality.

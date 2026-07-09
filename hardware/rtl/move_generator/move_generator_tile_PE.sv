@@ -1,395 +1,225 @@
-
 // By Emet Behrendt
 
 import general_chess_defs::*;
 import chess_helper_funcs::*;
 import move_generator_defs::*;
 
-module move_generator_tile_PE #(parameter POS) (
-    input logic clk,
-
-    // Tile 
-    input Tile adj_piece_in[8],
-    input wire [2:0] adj_dist_in[8],
-    input KnightBusData knight_data_in[8],
-    input wire adj_mask[8],
-    input wire knight_mask[8],
-
-    // Selecting target move
-    input wire is_target_move_destination,
-    input wire is_target_move_knight,
-    input Direction target_move_dir, 
-
-    // Board Data
-    input Tile             tile_data,
-    input Color            turn,
-    input CastlePerms      castle_perms,
-    input logic            has_ep,
-    input BoardFile        ep_file,
-    // input reg [6:0]   halfmove_clock, // Unused?
-
-    // Generated Output
-    output logic [2:0] best_move_dist, // Distance the best move travels (0 for knight)
-    output Direction best_move_dir, // Direction the best move originates from
-    output MovePriority local_move_score
+module move_generator_tile_PE #(parameter int POS = 0) (
+    input Tile tile_data,
+    input RayRecord ray_in[8],
+    input Tile knight_tile_in[8],
+    input Color turn,
+    input MoveGenOp move_gen_op,
+    input Move target_move,
+    input logic has_ep,
+    input BoardFile ep_file,
+    input logic ray_consumed[8],
+    input logic knight_consumed[8],
+    input logic promotion_consumed[8][4],
+    input MoveMaskIndex ray_mask_index[8],
+    input MoveMaskIndex knight_mask_index[8],
+    input MoveMaskIndex promotion_mask_index[8][4],
+    output CandidateProposal proposal
 );
 
-    localparam BoardRank RANK = getRank(POS);
-    localparam BoardFile FILE = getFile(POS);
+    localparam Position DEST_POS = Position'(POS);
+    localparam BoardRank DEST_RANK = BoardRank'(POS / 8);
+    localparam BoardFile DEST_FILE = BoardFile'(POS % 8);
 
+    function automatic Tile clean_tile(input Tile tile);
+        if (tile.piece_type == NULL_PIECE) return EMPTY_TILE;
+        return tile;
+    endfunction
 
-    // ========== Intra-Tile Signals ==========
-    logic good_knight_target;
-    logic good_cardinal_target;
-    logic good_diag_target;
-    PieceType weakest_attacker;
-    PieceType weakest_defender;
+    function automatic Position ray_source(input Direction dir, input logic [2:0] distance);
+        return shiftPos(DEST_POS, dir, distance);
+    endfunction
 
-    logic [2:0] attacker_count;
-    logic [2:0] defender_count;
+    function automatic logic is_ep_candidate(input Tile source, input Move move);
+        if (!has_ep || source.piece_type != PAWN || tile_data.piece_type != NULL_PIECE) return 1'b0;
+        if (getFile(move.to_pos) != ep_file) return 1'b0;
+        if (turn == WHITE) return getRank(move.from_pos) == 3'd4 && getRank(move.to_pos) == 3'd5;
+        return getRank(move.from_pos) == 3'd3 && getRank(move.to_pos) == 3'd2;
+    endfunction
 
-    logic has_attacker[7];     // Refers to unmasked attackers; indexed like [piece_type]; index 0 is unused
-    Direction attacker_dir[7]; // Refers to unmasked attackers; indexed like [piece_type]; index 0 is unused
+    function automatic logic ray_can_move(
+        input Tile source,
+        input Direction dir,
+        input logic [2:0] distance,
+        input logic ep_move
+    );
+        case (source.piece_type)
+            PAWN: begin
+                if (turn == WHITE) begin
+                    if (dir == SOUTH && tile_data.piece_type == NULL_PIECE)
+                        return distance == 1 || (distance == 2 && getRank(ray_source(dir, distance)) == 1);
+                    return distance == 1 && (dir == SOUTH_WEST || dir == SOUTH_EAST)
+                        && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == BLACK) || ep_move);
+                end
+                if (dir == NORTH && tile_data.piece_type == NULL_PIECE)
+                    return distance == 1 || (distance == 2 && getRank(ray_source(dir, distance)) == 6);
+                return distance == 1 && (dir == NORTH_WEST || dir == NORTH_EAST)
+                    && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == WHITE) || ep_move);
+            end
+            BISHOP: return isDirDiag(dir);
+            ROOK: return isDirCardinal(dir);
+            QUEEN: return 1'b1;
+            KING: return distance == 1;
+            default: return 1'b0;
+        endcase
+    endfunction
 
-    Direction tile_move_dir; // Distance of best move
-    logic [2:0] tile_move_dist; // Direction of best move
+    function automatic MoveScore exchange_score(
+        input Tile source,
+        input logic [3:0] attacker_count,
+        input logic [3:0] defender_count,
+        input PieceType weakest_defender
+    );
+        automatic logic signed [8:0] score;
 
+        score = 9'sd32;
+        if (tile_data.piece_type != NULL_PIECE) begin
+            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source.piece_type]) score += 9'sd8;
+            else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[source.piece_type]
+                && attacker_count > defender_count) score += 9'sd4;
+            else if (attacker_count > defender_count) begin
+                if (defender_count == 0) score += 9'sd3;
+                else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type]
+                    < PIECE_VALS_1[source.piece_type]) score -= 9'sd2;
+            end else score -= 9'sd6;
+        end
 
-    // ========== Compute Tile Priority (local_move_score) ==========
+        // Preserve the old preference for the weakest usable attacker.
+        score += 9'sd7 - $signed({1'b0, source.piece_type});
+        if (score < 1) return MoveScore'(1);
+        return MoveScore'(score);
+    endfunction
+
+    task automatic consider(
+        input Move move,
+        input Tile source,
+        input logic is_ep,
+        input logic is_promotion,
+        input PromoType promo,
+        input logic consumed,
+        input MoveMaskIndex index,
+        input logic [3:0] attacker_count,
+        input logic [3:0] defender_count,
+        input PieceType weakest_defender,
+        inout CandidateProposal best
+    );
+        automatic Move candidate;
+        automatic MoveScore score;
+        automatic logic tactical;
+
+        candidate = move;
+        candidate.promo_piece = promo;
+        if (consumed) return;
+
+        tactical = is_promotion || is_ep
+            || (tile_data.piece_type != NULL_PIECE && tile_data.piece_color != turn);
+        if (move_gen_op == MOVE_GEN_QSEARCH_OP && !tactical) return;
+
+        score = exchange_score(source, attacker_count, defender_count, weakest_defender);
+        if (is_promotion) score = MoveScore'(8'd220 + (3 - int'(promo)));
+        if (move_gen_op == MOVE_GEN_TARGETED_OP
+            && candidate.from_pos == target_move.from_pos
+            && candidate.to_pos == target_move.to_pos
+            && (!is_promotion || candidate.promo_piece == target_move.promo_piece))
+            score = MoveScore'(8'hff);
+
+        if (!best.valid || score > best.score) begin
+            best.valid = 1'b1;
+            best.move = candidate;
+            best.mask_index = index;
+            best.score = score;
+        end
+    endtask
+
     always_comb begin
-        local_move_score = NULL_MOVE_PRIORITY;
-        tile_move_dir = Direction'('dx);
-        tile_move_dist = 3'dx;
+        automatic CandidateProposal best;
+        automatic logic [3:0] attacker_count;
+        automatic logic [3:0] defender_count;
+        automatic PieceType weakest_defender;
+        automatic Move move;
+        automatic Tile source;
+        automatic logic ep_move;
+        automatic logic promotion;
+        automatic logic control_sensitivity;
 
-        // Assert a Pawn is never on the first or last rank
-        if (RANK == 0 || RANK == 7) begin
-            assert(tile_data.piece_type !== PAWN) else $fatal("Pawn on first/last rank!");
-
-            if (tile_data.piece_type == PAWN) begin
-                local_move_score = UNKNOWN_MOVE_PRIORITY;
-            end
+        best = NULL_PROPOSAL;
+        // Keep older synthesis/simulation tools sensitive to controls read by helper tasks.
+        control_sensitivity = ^{turn, move_gen_op, target_move, has_ep, ep_file, tile_data};
+        for (int sensitivity_idx=0; sensitivity_idx<8; sensitivity_idx++) begin
+            control_sensitivity ^= ray_consumed[sensitivity_idx];
+            control_sensitivity ^= knight_consumed[sensitivity_idx];
+            for (int promo_idx=0; promo_idx<4; promo_idx++)
+                control_sensitivity ^= promotion_consumed[sensitivity_idx][promo_idx];
         end
-
-        // Assert that Kings never touch
-        if (tile_data.piece_type == KING) begin
-            for (int dir_idx=0; dir_idx < 8; dir_idx++) begin
-                automatic Direction dir = Direction'(dir_idx);
-                if (adj_piece_in[dir].piece_type==KING && adj_dist_in[dir]==3'd0) begin
-                    $fatal("King Attacking King!");
-                    local_move_score = UNKNOWN_MOVE_PRIORITY;
-                end
-            end
-        end
-
-        // Assert that SPARE_PIECE type is not used
-        if (tile_data.piece_type == SPARE_PIECE) begin
-            $fatal("Unknown \"SPARE_PIECE\" found...");
-            local_move_score = UNKNOWN_MOVE_PRIORITY;
-        end
-
-        // NULL score if occupied by a friendly piece
-        if (tile_data.piece_color==turn && tile_data.piece_type!=NULL_PIECE) begin
-            local_move_score = NULL_MOVE_PRIORITY;
-            tile_move_dir = Direction'('dx);
-            tile_move_dist = 3'dx;
-
-        // Return target move if applicable
-        end else if (is_target_move_destination
-            && (    ( is_target_move_knight && knight_mask[target_move_dir])
-                 || (~is_target_move_knight && adj_mask[target_move_dir]))) begin
-            
-            local_move_score = MAX_MOVE_PRIORITY;
-            tile_move_dir = target_move_dir;
-            tile_move_dist = (is_target_move_knight ? 3'd0 : adj_dist_in[target_move_dir] + 3'd1);
-
-        // NULL score for no attackers and pawn moves
-        end else if (   ~has_attacker[PAWN] && ~has_attacker[KNIGHT] && ~has_attacker[BISHOP]
-                     && ~has_attacker[ROOK] && ~has_attacker[QUEEN] && ~has_attacker[KING]) begin
-            local_move_score = NULL_MOVE_PRIORITY;
-            tile_move_dir = Direction'('dx);
-            tile_move_dist = 3'dx;
-
-        // Normal move
-        end else begin
-            // Initial score set such that final scores is >0 (non-null)
-            // and will never overflow given its size
-            local_move_score = MovePriority'(4'd3);
-
-            // - Score based on possible material trades -
-            // Bonus for killing a more valuable piece
-            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[weakest_attacker]) begin
-                local_move_score += 4'd2;
-
-            // Bonus for killing a piece of equal value when you have
-            // attacker count advantage
-            end else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[weakest_attacker]) begin
-                if (attacker_count > defender_count) begin
-                    local_move_score += 4'd1;
-                end
-
-            // No kill or kill less valuable than attacker
-            end else begin
-                // Attacker advantage
-                if (attacker_count > defender_count) begin
-                    if (defender_count == 3'd0) begin
-                        local_move_score += 3'd1;
-
-                    end else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type] < PIECE_VALS_1[weakest_attacker]) begin
-                        local_move_score -= 4'd1;
-                    end
-
-                // And defender has advantage
-                end else begin
-                    local_move_score -= 4'd2;
-                end
-            end
-
-            // - Apply flags and choose attacker -
-            // Go by flags if there are no defenders
-            if (defender_count == 0) begin
-                if (good_knight_target && has_attacker[KNIGHT]) begin
-                    tile_move_dir = attacker_dir[KNIGHT];
-                    tile_move_dist = 3'd0; // Distance is zero for knights
-                    local_move_score += 2;
-
-                end else if (good_diag_target && has_attacker[BISHOP]) begin
-                    tile_move_dir = attacker_dir[BISHOP];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-                    local_move_score += 2;
-
-                end else if (good_cardinal_target && has_attacker[ROOK]) begin
-                    tile_move_dir = attacker_dir[ROOK];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-                    local_move_score += 2;
-
-                end else if (good_cardinal_target && has_attacker[QUEEN]) begin
-                    tile_move_dir = attacker_dir[QUEEN];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-                    local_move_score += 1;
-
-                end else if (good_diag_target && has_attacker[QUEEN]) begin
-                    tile_move_dir = attacker_dir[QUEEN];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-                    local_move_score += 1;
-
-                end else if (has_attacker[PAWN]) begin
-                    tile_move_dir = attacker_dir[PAWN];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-
-                end else if (has_attacker[KNIGHT]) begin
-                    tile_move_dir = attacker_dir[KNIGHT];
-                    tile_move_dist = 3'd0; // Distance is zero for knights
-
-                end else if (has_attacker[BISHOP]) begin
-                    tile_move_dir = attacker_dir[BISHOP];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-
-                end else if (has_attacker[ROOK]) begin
-                    tile_move_dir = attacker_dir[ROOK];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-
-                end else if (has_attacker[QUEEN]) begin
-                    tile_move_dir = attacker_dir[QUEEN];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-
-                end else if (has_attacker[KING]) begin
-                    tile_move_dir = attacker_dir[KING];
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-
-                // Should never reach here
-                end else begin
-                    tile_move_dir = Direction'('dx);
-                    tile_move_dist = 3'dx;
-                    local_move_score = MovePriority'('dx);
-                end
-
-            // If there are defenders, use weakest attacker
-            end else begin
-                // Special case to deal with pawn forward moves
-                if (has_attacker[PAWN]) begin
-                    tile_move_dir = attacker_dir[PAWN];
-                end else begin
-                    tile_move_dir = attacker_dir[weakest_attacker];
-                end
-
-                if (weakest_attacker == KNIGHT) begin
-                    tile_move_dist = 3'd0; // Distance is zero for knights
-                end else begin
-                    tile_move_dist = adj_dist_in[tile_move_dir] + 3'd1;
-                end
-
-                if (weakest_attacker == QUEEN && (good_diag_target || good_cardinal_target)) begin
-                    local_move_score += 1;
-                end else if (weakest_attacker == KNIGHT && good_knight_target) begin
-                    local_move_score += 2;
-                end else if (weakest_attacker == ROOK && good_cardinal_target) begin
-                    local_move_score += 2;
-                end else if (weakest_attacker == BISHOP && good_diag_target) begin
-                    local_move_score += 2;
-                end
-
-                // Should never happen
-                if (weakest_attacker == SPARE_PIECE || weakest_attacker == NULL_PIECE) begin
-                    tile_move_dir = Direction'('dx);
-                    tile_move_dist = 3'dx;
-                    local_move_score = MovePriority'('dx);
-                end
-            end
-        end
-
-        best_move_dir = tile_move_dir;
-        best_move_dist = tile_move_dist;
-    end
-
-
-    // ========== Compute Tile Flags (good_knight_target, good_cardinal_target, good_diag_target) ==========
-	always_comb begin
-        good_knight_target = 1'b0;
-        for (int dir_idx=0; dir_idx<8; dir_idx++) begin
-            automatic Direction dir = Direction'(dir_idx);
-            good_knight_target |= (   knight_data_in[dir].has_king_or_major
-                                   && knight_data_in[dir].piece_color == ~turn);
-        end
-        
-        good_cardinal_target = 1'b0;
-        good_diag_target = 1'b0;
-        for (int i=0; i<4; i+=1) begin
-            good_cardinal_target |= (adj_piece_in[CARDINAL_DIR[i]] == Tile'({~turn, KING}));
-            good_cardinal_target |= (adj_piece_in[CARDINAL_DIR[i]] == Tile'({~turn, QUEEN}));
-
-            good_diag_target |= (adj_piece_in[DIAG_DIR[i]] == Tile'({~turn, KING}));
-            good_diag_target |= (adj_piece_in[DIAG_DIR[i]] == Tile'({~turn, QUEEN}));
-            good_diag_target |= (adj_piece_in[DIAG_DIR[i]] == Tile'({~turn, ROOK}));
-        end
-	end
-
-
-    // --- Compute weakest_attacker and weakest_defender --- 
-	// --- Compute attacker_count and defender_count --- 
-	// --- Compute has_attacker and attacker_dir --- 
-	localparam Direction b_pawn_dir[2] = '{NORTH_WEST, NORTH_EAST};
-	localparam Direction w_pawn_dir[2] = '{SOUTH_WEST, SOUTH_EAST};
-	always_comb begin
-        automatic BoardRank RANK = getRank(POS);
-        automatic BoardFile FILE = getFile(POS);
-
-        // Set default values
-        weakest_attacker = KING;
+        attacker_count = 0;
+        defender_count = 0;
         weakest_defender = KING;
-        attacker_count = 'd0;
-        defender_count = 'd0;
-        for (int p=PAWN; p<=KING; p+=1) begin
-            has_attacker[p] = 1'd0;
-            attacker_dir[p] = Direction'('dx);
-        end
 
-        // - Update king, queen, rook, and bishop influences -
         for (int dir_idx=0; dir_idx<8; dir_idx++) begin
-            automatic Direction dir = Direction'(dir_idx);
-            if (   (adj_piece_in[dir].piece_type==QUEEN)
-                || (adj_piece_in[dir].piece_type==ROOK && isDirCardinal(dir))
-                || (adj_piece_in[dir].piece_type==BISHOP && isDirDiag(dir))
-                || (adj_piece_in[dir].piece_type==KING && adj_dist_in[dir]==3'd1)) begin
-                
-                // Attackers
-                if (adj_piece_in[dir].piece_color==turn) begin
-                    attacker_count += 'd1;
-
-                    if (weakest_attacker > adj_piece_in[dir].piece_type) begin
-                        weakest_attacker = adj_piece_in[dir].piece_type;
-                    end
-
-                    if (adj_mask[dir]) begin
-                        has_attacker[adj_piece_in[dir].piece_type] = 1'b1;
-                        attacker_dir[adj_piece_in[dir].piece_type] = Direction'(dir);
-                    end
-
-                // Defenders
-                end else begin
-                    defender_count += 'd1;
-
-                    if (weakest_defender > adj_piece_in[dir].piece_type) begin
-                        weakest_defender = adj_piece_in[dir].piece_type;
-                    end
+            source = clean_tile(ray_in[dir_idx].tile);
+            if (source.piece_type != NULL_PIECE) begin
+                if (source.piece_color == turn) attacker_count++;
+                else begin
+                    defender_count++;
+                    if (source.piece_type < weakest_defender) weakest_defender = source.piece_type;
+                end
+            end
+            source = clean_tile(knight_tile_in[dir_idx]);
+            if (source.piece_type == KNIGHT) begin
+                if (source.piece_color == turn) attacker_count++;
+                else begin
+                    defender_count++;
+                    if (KNIGHT < weakest_defender) weakest_defender = KNIGHT;
                 end
             end
         end
 
-
-        // - Pawn Influences -
-        // White pawn normal moves
-        if (turn == WHITE && adj_piece_in[SOUTH] == Tile'({WHITE, PAWN}) && adj_mask[SOUTH]) begin
-            if (adj_dist_in[SOUTH] == 3'd0 || adj_dist_in[SOUTH] == 3'd1) begin
-                has_attacker[PAWN] = 1'd1;
-                attacker_dir[PAWN] = SOUTH;
-            end
-        end
-        // Black pawn normal moves
-        if (turn == BLACK && adj_piece_in[NORTH] == Tile'({BLACK, PAWN}) && adj_mask[NORTH]) begin
-            if (adj_dist_in[NORTH] == 3'd0 || adj_dist_in[NORTH] == 3'd1) begin
-                has_attacker[PAWN] = 1'd1;
-                attacker_dir[PAWN] = NORTH;
-            end
-        end
-        for (int i=0; i<=1; i+=1) begin
-            // White pawn diag attacks
-            if (RANK>1 && adj_piece_in[w_pawn_dir[i]] == Tile'({WHITE, PAWN})
-                && adj_dist_in[w_pawn_dir[i]] == 3'd1) begin
-
-                if (turn==WHITE) begin
-                    attacker_count += 'd1;
-                    weakest_attacker = PAWN;
-
-                    if (adj_mask[w_pawn_dir[i]] && tile_data.piece_type!=NULL_PIECE) begin
-                        has_attacker[PAWN] = 1'b1;
-                        attacker_dir[PAWN] = Direction'(w_pawn_dir[i]);
+        if (move_gen_op != MOVE_GEN_IDLE_OP
+            && !(tile_data.piece_type != NULL_PIECE && tile_data.piece_color == turn)) begin
+            for (int dir_idx=0; dir_idx<8; dir_idx++) begin
+                source = clean_tile(ray_in[dir_idx].tile);
+                move.from_pos = ray_source(Direction'(dir_idx), ray_in[dir_idx].distance);
+                move.to_pos = DEST_POS;
+                move.promo_piece = PROMO_QUEEN;
+                ep_move = is_ep_candidate(source, move);
+                if (source.piece_type != NULL_PIECE && source.piece_color == turn
+                    && ray_can_move(source, Direction'(dir_idx), ray_in[dir_idx].distance, ep_move)) begin
+                    promotion = source.piece_type == PAWN && (DEST_RANK == 0 || DEST_RANK == 7);
+                    if (promotion) begin
+                        for (int promo_idx=0; promo_idx<4; promo_idx++)
+                            consider(move, source, ep_move, 1'b1, PromoType'(promo_idx),
+                                promotion_consumed[dir_idx][promo_idx],
+                                promotion_mask_index[dir_idx][promo_idx],
+                                attacker_count, defender_count, weakest_defender, best);
+                    end else begin
+                        consider(move, source, ep_move, 1'b0, PROMO_QUEEN,
+                            ray_consumed[dir_idx],
+                            ray_mask_index[dir_idx],
+                            attacker_count, defender_count, weakest_defender, best);
                     end
-                end else begin
-                    defender_count += 'd1;
-                    weakest_defender = PAWN;
                 end
             end
 
-            // Black pawn diag attacks
-            if (RANK<6 && adj_piece_in[b_pawn_dir[i]] == Tile'({BLACK, PAWN})
-                && adj_dist_in[b_pawn_dir[i]] == 3'd1) begin
-
-                if (turn==BLACK) begin
-                    attacker_count += 'd1;
-                    weakest_attacker = PAWN;
-
-                    if (adj_mask[b_pawn_dir[i]] && tile_data.piece_type!=NULL_PIECE) begin
-                        has_attacker[PAWN] = 1'b1;
-                        attacker_dir[PAWN] = Direction'(b_pawn_dir[i]);
-                    end
-                end else begin
-                    defender_count += 'd1;
-                    weakest_defender = PAWN;
+            for (int knight_dir=0; knight_dir<8; knight_dir++) begin
+                source = clean_tile(knight_tile_in[knight_dir]);
+                if (source == Tile'({turn, KNIGHT})) begin
+                    move.from_pos = shiftKnightPos(DEST_POS, KnightDirection'(knight_dir));
+                    move.to_pos = DEST_POS;
+                    move.promo_piece = PROMO_QUEEN;
+                    consider(move, source, 1'b0, 1'b0, PROMO_QUEEN,
+                        knight_consumed[knight_dir],
+                        knight_mask_index[knight_dir],
+                        attacker_count, defender_count, weakest_defender, best);
                 end
             end
         end
 
-
-        // - Knight Directions -
-        for (int dir_idx=0; dir_idx<8; dir_idx++) begin
-            automatic Direction dir = Direction'(dir_idx);
-            if (knight_data_in[dir].has_knight) begin
-                if (knight_data_in[dir].piece_color == turn) begin
-                    weakest_attacker = (weakest_attacker > KNIGHT) ? KNIGHT : weakest_attacker;
-                    attacker_count += 'd1;
-
-                    if (knight_mask[dir]) begin
-                        has_attacker[KNIGHT] = 1'b1;
-                        attacker_dir[KNIGHT] = Direction'(dir);
-                    end
-
-                end else begin
-                    weakest_defender = (weakest_defender > KNIGHT) ? KNIGHT : weakest_defender;
-                    defender_count += 'd1;
-                end
-            end
-        end
-	end
-
+        proposal = control_sensitivity ? best : best;
+    end
 
 endmodule : move_generator_tile_PE
