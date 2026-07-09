@@ -8,7 +8,7 @@ package board_update_pipeline_defs;
     localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 7;
 
     // Enum for all board update pipeline operations
-    typedef enum {
+    typedef enum logic [3:0] {
         BOARD_PUSH_MOVE_OP,   // A move made during a search
         BOARD_COMMIT_MOVE_OP, // A move made to simply update the board
         BOARD_SET_TILE_OP,
@@ -21,7 +21,7 @@ package board_update_pipeline_defs;
     } BoardOp;
 
     // Data Type to Identify Special Moves
-    typedef enum {
+    typedef enum logic [1:0] {
 		NORM_MOVE,   // Move is a normal move
 		PROMO_MOVE,  // Move is promotion
 		EP_MOVE,     // Move is an en passant kill

@@ -164,7 +164,7 @@ module board_update_pipeline #(
             PROMO_KNIGHT: return KNIGHT;
             PROMO_ROOK:   return ROOK;
             PROMO_BISHOP: return BISHOP;
-            default:      return QUEEN;
+            default:      return PieceType'('x);
         endcase
     endfunction : promo_to_piece
 

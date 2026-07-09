@@ -10,7 +10,7 @@ package move_generator_defs;
     localparam int MOVE_GEN_STAGE_CNT = PROP_STAGE_CNT + 1 + REDUCE_STAGE_CNT + 1;
 
     // -- Define Move Generator Operations --
-    typedef enum {
+    typedef enum logic [1:0] {
         MOVE_GEN_IDLE_OP,
         MOVE_GEN_NORMAL_OP,
         MOVE_GEN_TARGETED_OP,

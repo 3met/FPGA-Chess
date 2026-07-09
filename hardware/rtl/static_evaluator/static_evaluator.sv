@@ -34,12 +34,12 @@ module static_evaluator (
         return (normalized.piece_type == piece && normalized.piece_color == color);
     endfunction : same_piece
 
-    function automatic EvalScore color_signed(input Color color, input EvalScore magnitude);
+    function automatic PositionalScore color_signed(input Color color, input PositionalScore magnitude);
         return (color == WHITE) ? magnitude : -magnitude;
     endfunction : color_signed
 
-    function automatic EvalScore mobility_signed(input Color color, input logic [2:0] mobility);
-        return color_signed(color, EvalScore'(mobility));
+    function automatic PositionalScore mobility_signed(input Color color, input logic [2:0] mobility);
+        return color_signed(color, PositionalScore'(mobility));
     endfunction : mobility_signed
 
     function automatic logic is_legal_pawn_rank(input Position pos);
@@ -67,7 +67,7 @@ module static_evaluator (
     end
 
     always_comb begin
-        automatic EvalScore positional_delta;
+        automatic PositionalScore positional_delta;
 
         for (int stage = 0; stage < STATIC_EVAL_PIPELINE_STAGE_CNT; stage++) begin
             next_base_eval_pipe[stage] = base_eval_pipe[stage];
@@ -121,7 +121,7 @@ module static_evaluator (
             end
         end
 
-        positional_delta = DRAW_EVAL_SCORE;
+        positional_delta = PositionalScore'(0);
 
         for (int pos = 0; pos < 64; pos++) begin
             automatic Tile occupant = next_board_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos];
@@ -188,7 +188,8 @@ module static_evaluator (
             end
         end
 
-        next_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] = next_base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] + positional_delta;
+        next_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] =
+            next_base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] + EvalScore'(positional_delta);
     end
 
 endmodule : static_evaluator

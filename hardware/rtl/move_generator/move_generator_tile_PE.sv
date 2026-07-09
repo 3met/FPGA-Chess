@@ -71,26 +71,26 @@ module move_generator_tile_PE #(parameter int POS = 0) (
 
     function automatic MoveScore exchange_score(
         input Tile source,
-        input logic [3:0] attacker_count,
-        input logic [3:0] defender_count,
+        input logic [2:0] attacker_count,
+        input logic [2:0] defender_count,
         input PieceType weakest_defender
     );
-        automatic logic signed [8:0] score;
+        automatic logic signed [6:0] score;
 
-        score = 9'sd32;
+        score = 7'sd32;
         if (tile_data.piece_type != NULL_PIECE) begin
-            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source.piece_type]) score += 9'sd8;
+            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source.piece_type]) score += 7'sd8;
             else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[source.piece_type]
-                && attacker_count > defender_count) score += 9'sd4;
+                && attacker_count > defender_count) score += 7'sd4;
             else if (attacker_count > defender_count) begin
-                if (defender_count == 0) score += 9'sd3;
+                if (defender_count == 0) score += 7'sd3;
                 else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type]
-                    < PIECE_VALS_1[source.piece_type]) score -= 9'sd2;
-            end else score -= 9'sd6;
+                    < PIECE_VALS_1[source.piece_type]) score -= 7'sd2;
+            end else score -= 7'sd6;
         end
 
         // Preserve the old preference for the weakest usable attacker.
-        score += 9'sd7 - $signed({1'b0, source.piece_type});
+        score += 7'sd7 - $signed({1'b0, source.piece_type});
         if (score < 1) return MoveScore'(1);
         return MoveScore'(score);
     endfunction
@@ -103,8 +103,8 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         input PromoType promo,
         input logic consumed,
         input MoveMaskIndex index,
-        input logic [3:0] attacker_count,
-        input logic [3:0] defender_count,
+        input logic [2:0] attacker_count,
+        input logic [2:0] defender_count,
         input PieceType weakest_defender,
         inout CandidateProposal best
     );
@@ -138,8 +138,8 @@ module move_generator_tile_PE #(parameter int POS = 0) (
 
     always_comb begin
         automatic CandidateProposal best;
-        automatic logic [3:0] attacker_count;
-        automatic logic [3:0] defender_count;
+        automatic logic [2:0] attacker_count;
+        automatic logic [2:0] defender_count;
         automatic PieceType weakest_defender;
         automatic Move move;
         automatic Tile source;

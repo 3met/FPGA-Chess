@@ -10,6 +10,7 @@ package static_evaluator_defs;
     localparam EvalScore DOUBLED_PAWN_PENALTY = EvalScore'('d6);
 
     typedef logic [2:0] RayDistance;
+    typedef logic signed [11:0] PositionalScore;
 
     typedef struct packed {
         Tile piece;
