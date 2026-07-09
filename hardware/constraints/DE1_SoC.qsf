@@ -4,7 +4,7 @@
 
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEMA5F31C6
-set_global_assignment -name TOP_LEVEL_ENTITY "DE1_SoC"
+set_global_assignment -name TOP_LEVEL_ENTITY "de1_soc"
 set_global_assignment -name DEVICE_FILTER_PACKAGE FBGA
 set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name SDC_FILE DE1_SoC.sdc

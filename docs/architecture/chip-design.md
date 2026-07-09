@@ -17,7 +17,7 @@ Current RTL note: when more than one search context is configured, the current `
 | Host Python process        | Implements UCI, validates/parses positions and moves, logs activity, and communicates with the FPGA.                                        |
 | RX decode                  | Converts UART input into command/data bytes, buffers them across the UART/engine clock boundary, and detects UART BREAK remote reset.       |
 | TX encode                  | Converts FPGA output bytes into UART output and reports backpressure.                                                                       |
-| Engine command layer       | Receives host commands, maintains engine-level state, and starts/stops searches.                                                            |
+| Engine                     | Contains the command layer and search controller, receives host commands, maintains engine/search state, and returns results.               |
 | Search controller          | Owns search threads, search stacks, alpha/beta state, pipeline dispatch, and result routing.                                                |
 | Board update pipeline      | Applies push move, commit move, reverse move, and board setup operations.                                                                   |
 | Move generation pipeline   | Produces one ordered candidate move per dispatch and reports whether that candidate is legal.                                               |
@@ -35,11 +35,11 @@ flowchart LR
 
     subgraph IO["Byte-stream boundary"]
         RX["RX decode"]
-        Engine["Engine command layer"]
+        Engine["Engine"]
         TX["TX encode"]
     end
 
-    subgraph SearchCore["Search core"]
+    subgraph SearchCore["Inside engine"]
         Search["Search controller"]
         BoardUpdate["Board update pipeline"]
         MoveGen["Move generation pipeline"]

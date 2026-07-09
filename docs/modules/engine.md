@@ -1,10 +1,10 @@
 # Engine (`engine`)
 
-Status: implemented V1 protocol FSM; board builds use the real search-controller boundary.
+Status: implemented V1 protocol FSM with an internal real search controller.
 
-The engine module is the byte-command layer between RX/TX stream wrappers and the search controller. It parses fixed-size command payloads, owns engine-level protocol state, maintains active board state through the search controller direct-board path, and streams fixed-size responses.
+The engine module is the complete vendor-neutral chess core between the RX/TX stream wrappers. It contains an `engine_command_layer` that parses fixed-size command payloads and streams responses, plus the `search_controller` that owns board and search state.
 
-The current RTL implements the protocol FSM and emits typed controller requests. Board-level builds connect this boundary to the real `search_controller`; the lightweight `search_controller_stub` remains available only as a protocol mock.
+The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is internal to `engine`. Board wrappers therefore do not know about controller operations. The lightweight `search_controller_stub` remains available for focused command-layer tests only.
 
 ## Ports
 
@@ -20,11 +20,8 @@ The current RTL implements the protocol FSM and emits typed controller requests.
 | Output | `ready` | 1 | Indicates the engine can accept the next command or payload byte for its current input state. |
 | Output | `data_out` | 8 | Response byte. |
 | Output | `data_out_valid` | 1 | Indicates `data_out` is valid. |
-| Output | `search_req_valid` | 1 | Indicates `search_req` contains a valid direct-board, search, perft, new-game, or kill request. |
-| Input | `search_req_ready` | 1 | Indicates the downstream controller captured the current request. |
-| Output | `search_req` | `EngineControllerRequest` | Typed controller request defined in `engine_defs`. |
-| Input | `search_resp_valid` | 1 | Indicates `search_resp` contains a completed direct-board, new-game, search, perft, kill, or controller-error result. |
-| Input | `search_resp` | `EngineControllerResponse` | Typed controller response defined in `engine_defs`. |
+
+The engine parameters configure the internal controller clock frequency, thread count, stack depth, perft support, Zobrist hashing, transposition table, and piece-square tables.
 
 ## Commands
 
@@ -111,4 +108,5 @@ Search and perft commands wait for a controller response, latch the result, and 
 
 ## Child Modules
 
+- `engine_command_layer`
 - [`search_controller`](search-controller.md).

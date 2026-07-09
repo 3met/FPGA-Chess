@@ -26,7 +26,7 @@ These docs describe the intended RTL architecture unless a section explicitly sa
 | 9 | [modules/static-evaluator.md](modules/static-evaluator.md) | Static-evaluation interface and latency. |
 | 10 | [modules/tt-lookup.md](modules/tt-lookup.md) and [modules/tt-store.md](modules/tt-store.md) | Transposition-table lookup and store pipelines. |
 | 11 | [modules/search-controller.md](modules/search-controller.md) | Search orchestration and shared-pipeline scheduling. |
-| 12 | [modules/engine.md](modules/engine.md), [modules/rx-decode.md](modules/rx-decode.md), [modules/tx-encode.md](modules/tx-encode.md), [modules/timer.md](modules/timer.md), and [modules/main.md](modules/main.md) | Top-level command, byte-stream, timing, and board-wrapper interfaces. |
+| 12 | [modules/engine.md](modules/engine.md), [modules/rx-decode.md](modules/rx-decode.md), [modules/tx-encode.md](modules/tx-encode.md), [modules/timer.md](modules/timer.md), and [modules/de1-soc.md](modules/de1-soc.md) | Top-level command, byte-stream, timing, and board-wrapper interfaces. |
 
 ## Directories
 

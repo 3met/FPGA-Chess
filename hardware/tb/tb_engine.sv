@@ -26,7 +26,7 @@ module tb_engine;
     int pass_count = 0;
     int fail_count = 0;
 
-    engine dut (
+    engine_command_layer dut (
         .clk(clk),
         .rst_n(rst_n),
         .data_in(data_in),
