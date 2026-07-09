@@ -28,6 +28,7 @@
     ],
     "move-generator": [
       "@common",
+      "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
       "hardware/rtl/move_generator/defs.sv",
       "hardware/rtl/move_generator/get_move_dir.sv",
       "hardware/rtl/move_generator/move_generator_tile_PE.sv",

@@ -30,10 +30,20 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     output logic move_is_legal
 );
 
+    localparam int MASK_ENTRY_COUNT = THREAD_COUNT * MAX_PLY_COUNT;
+    localparam int MASK_ADDR_BITS = $clog2(MASK_ENTRY_COUNT);
+
+    typedef logic [MASK_ADDR_BITS-1:0] MoveMaskAddr;
+
     Move candidate_move_pipe[MOVE_GEN_STAGE_CNT];
     logic candidate_move_legal_pipe[MOVE_GEN_STAGE_CNT];
-    MoveMask consumed_masks[THREAD_COUNT * MAX_PLY_COUNT];
+    MoveMaskAddr mask_rd_addr;
+    MoveMaskAddr mask_wr_addr;
+    logic mask_rd_en;
+    logic mask_wr_en;
+    MoveMask mask_rd_data;
     MoveMask request_consumed_mask;
+    MoveMask proposal_consumed_mask_pipe[REDUCE_STAGE_CNT + 1];
     MoveMask next_consumed_mask;
 
     typedef struct packed {
@@ -55,6 +65,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     localparam int LEGAL_STAGE = REDUCE_1_STAGE + 1;
 
     logic request_valid_pipe[MOVE_GEN_STAGE_CNT];
+    logic start_node_pipe[MOVE_GEN_STAGE_CNT];
     MoveGenOp op_pipe[MOVE_GEN_STAGE_CNT];
     ThreadID thread_id_pipe[MOVE_GEN_STAGE_CNT];
     PlyIndex ply_pipe[MOVE_GEN_STAGE_CNT];
@@ -64,7 +75,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     logic has_ep_pipe[MOVE_GEN_STAGE_CNT];
     BoardFile ep_file_pipe[MOVE_GEN_STAGE_CNT];
     Tile board_pipe[MOVE_GEN_STAGE_CNT][64];
-    MoveMask consumed_mask_pipe[MOVE_GEN_STAGE_CNT];
     RayRecord ray_pipe[PROP_STAGE_CNT][64][8];
     Tile knight_tile[64][8];
     logic ray_consumed[64][8];
@@ -884,7 +894,25 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         return left;
     endfunction
 
-    always_comb request_consumed_mask = consumed_mask_pipe[PROP_STAGE_CNT - 1];
+    assign mask_rd_addr = MoveMaskAddr'(move_mask_addr(thread_id_pipe[PROP_STAGE_CNT - 2], ply_pipe[PROP_STAGE_CNT - 2]));
+    assign mask_rd_en = request_valid_pipe[PROP_STAGE_CNT - 2] && !start_node_pipe[PROP_STAGE_CNT - 2];
+    assign mask_wr_addr = MoveMaskAddr'(move_mask_addr(thread_id_pipe[REDUCE_1_STAGE], ply_pipe[REDUCE_1_STAGE]));
+    assign mask_wr_en = request_valid_pipe[REDUCE_1_STAGE] && reduced_proposal.valid;
+
+    synchronous_simple_dual_port_ram #(
+        .NUM_WORDS(MASK_ENTRY_COUNT),
+        .WORD_SIZE(MOVE_MASK_BITS)
+    ) consumed_mask_memory (
+        .clock(clk),
+        .data(next_consumed_mask),
+        .rdaddress(mask_rd_addr),
+        .rden(mask_rd_en),
+        .wraddress(mask_wr_addr),
+        .wren(mask_wr_en),
+        .q(mask_rd_data)
+    );
+
+    always_comb request_consumed_mask = start_node_pipe[PROP_STAGE_CNT - 1] ? MoveMask'(0) : mask_rd_data;
 
     genvar tile_idx;
     genvar knight_idx;
@@ -1014,7 +1042,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
                 turn_pipe[REDUCE_1_STAGE], castle_perms_pipe[REDUCE_1_STAGE],
                 has_ep_pipe[REDUCE_1_STAGE], ep_file_pipe[REDUCE_1_STAGE]);
-        next_consumed_mask = consumed_mask_pipe[REDUCE_1_STAGE];
+        next_consumed_mask = proposal_consumed_mask_pipe[REDUCE_STAGE_CNT];
         if (reduced_proposal.valid)
             next_consumed_mask[reduced_proposal.mask_index] = 1'b1;
     end
@@ -1025,6 +1053,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         if (!rst_n) begin
             for (int stage=0; stage<MOVE_GEN_STAGE_CNT; stage++) begin
                 request_valid_pipe[stage] <= 1'b0;
+                start_node_pipe[stage] <= 1'b0;
                 op_pipe[stage] <= MOVE_GEN_IDLE_OP;
                 thread_id_pipe[stage] <= ThreadID'(0);
                 ply_pipe[stage] <= PlyIndex'(0);
@@ -1033,11 +1062,12 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 castle_perms_pipe[stage] <= CastlePerms'(0);
                 has_ep_pipe[stage] <= 1'b0;
                 ep_file_pipe[stage] <= BoardFile'(0);
-                consumed_mask_pipe[stage] <= MoveMask'(0);
                 candidate_move_pipe[stage] <= NULL_MOVE;
                 candidate_move_legal_pipe[stage] <= 1'b0;
                 for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= EMPTY_TILE;
             end
+            for (int idx=0; idx<=REDUCE_STAGE_CNT; idx++)
+                proposal_consumed_mask_pipe[idx] <= MoveMask'(0);
             for (int stage=0; stage<PROP_STAGE_CNT; stage++)
                 for (int pos=0; pos<64; pos++)
                     for (int dir_idx=0; dir_idx<8; dir_idx++)
@@ -1051,6 +1081,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             move_is_legal <= 1'b0;
         end else begin
             request_valid_pipe[0] <= (move_gen_op != MOVE_GEN_IDLE_OP);
+            start_node_pipe[0] <= start_node;
             op_pipe[0] <= move_gen_op;
             thread_id_pipe[0] <= thread_id;
             ply_pipe[0] <= ply;
@@ -1059,7 +1090,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             castle_perms_pipe[0] <= castle_perms;
             has_ep_pipe[0] <= has_ep;
             ep_file_pipe[0] <= ep_file;
-            consumed_mask_pipe[0] <= start_node ? MoveMask'(0) : consumed_masks[move_mask_addr(thread_id, ply)];
             for (int pos=0; pos<64; pos++) begin
                 board_pipe[0][pos] <= board_tiles[pos];
                 for (int dir_idx=0; dir_idx<8; dir_idx++) begin
@@ -1090,6 +1120,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
             for (int stage=1; stage<MOVE_GEN_STAGE_CNT; stage++) begin
                 request_valid_pipe[stage] <= request_valid_pipe[stage-1];
+                start_node_pipe[stage] <= start_node_pipe[stage-1];
                 op_pipe[stage] <= op_pipe[stage-1];
                 thread_id_pipe[stage] <= thread_id_pipe[stage-1];
                 ply_pipe[stage] <= ply_pipe[stage-1];
@@ -1098,12 +1129,12 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 castle_perms_pipe[stage] <= castle_perms_pipe[stage-1];
                 has_ep_pipe[stage] <= has_ep_pipe[stage-1];
                 ep_file_pipe[stage] <= ep_file_pipe[stage-1];
-                consumed_mask_pipe[stage] <= consumed_mask_pipe[stage-1];
                 for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= board_pipe[stage-1][pos];
             end
 
             for (int pos=0; pos<64; pos++) tile_proposal_pipe[pos] <= tile_proposal_in[pos];
             castle_proposal_pipe <= castle_proposal_in;
+            proposal_consumed_mask_pipe[0] <= request_consumed_mask;
 
             for (int group=0; group<16; group++) begin
                 automatic CandidateProposal winner = (group == 0)
@@ -1113,6 +1144,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     winner = better_proposal(winner, tile_proposal_pipe[group*4+lane]);
                 reduce_16_pipe[group] <= winner;
             end
+            proposal_consumed_mask_pipe[1] <= proposal_consumed_mask_pipe[0];
 
             for (int group=0; group<4; group++) begin
                 automatic CandidateProposal winner = reduce_16_pipe[group*4];
@@ -1120,6 +1152,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     winner = better_proposal(winner, reduce_16_pipe[group*4+lane]);
                 reduce_4_pipe[group] <= winner;
             end
+            proposal_consumed_mask_pipe[2] <= proposal_consumed_mask_pipe[1];
 
             begin
                 automatic CandidateProposal winner = reduce_4_pipe[0];
@@ -1127,9 +1160,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     winner = better_proposal(winner, reduce_4_pipe[lane]);
                 reduce_1_pipe <= winner;
             end
-
-            if (request_valid_pipe[REDUCE_1_STAGE] && reduced_proposal.valid)
-                consumed_masks[move_mask_addr(thread_id_pipe[REDUCE_1_STAGE], ply_pipe[REDUCE_1_STAGE])] <= next_consumed_mask;
+            proposal_consumed_mask_pipe[3] <= proposal_consumed_mask_pipe[2];
 
             if (request_valid_pipe[REDUCE_1_STAGE] && reduced_proposal.valid) begin
                 candidate_move_pipe[LEGAL_STAGE] <= reduced_proposal.move;
