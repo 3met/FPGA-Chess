@@ -6,7 +6,9 @@ The FPGA maintains the active game/search state between commands and performs th
 
 The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
-The design has a parameterized number of search threads, a parameterized search stack depth, optional perft command path, and optional Zobrist/TT/PST paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests. Current search-controller RTL runs Lazy SMP root contexts concurrently through shared tagged board-update, move-generation, static-evaluation, TT lookup, and TT store paths when more than one context is configured; threads cooperate using the shared transposition table as the only shared search knowledge when TT is enabled. Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
+The design has a parameterized number of search threads, a parameterized search stack depth, an optional perft command path, and optional Zobrist, TT, and PST paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests.
+
+Current RTL note: when more than one search context is configured, the current `search_controller` runs Lazy SMP root contexts concurrently through shared tagged board-update, move-generation, static-evaluation, TT lookup, and TT store pipelines. Threads share no search knowledge except the transposition table when TT is enabled. The `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
 
 ## Major Blocks
 
@@ -27,28 +29,45 @@ The design has a parameterized number of search threads, a parameterized search 
 
 ```mermaid
 flowchart LR
-    Host["Host Python process"]
-    RX["RX decode"]
-    Engine["Engine command layer"]
-    Search["Search controller"]
-    BoardUpdate["Board update pipeline"]
-    MoveGen["Move generation pipeline"]
-    StaticEval["Static evaluation pipeline"]
-    TTLookup["TT lookup pipeline"]
-    TTStore["TT store pipeline"]
+    subgraph HostSide["Host side"]
+        Host["Host Python process"]
+    end
+
+    subgraph IO["Byte-stream boundary"]
+        RX["RX decode"]
+        Engine["Engine command layer"]
+        TX["TX encode"]
+    end
+
+    subgraph SearchCore["Search core"]
+        Search["Search controller"]
+        BoardUpdate["Board update pipeline"]
+        MoveGen["Move generation pipeline"]
+        StaticEval["Static evaluation pipeline"]
+        TTLookup["TT lookup pipeline"]
+        TTStore["TT store pipeline"]
+    end
+
     RAM["External RAM interface"]
-    TX["TX encode"]
 
     Host -->|"Command bytes"| RX
-    RX -->|"Command stream, remote reset"| Engine
+    RX -->|"Decoded command stream\nand remote reset"| Engine
     Engine -->|"Operations and limits"| Search
-    Search -->|"Board operations"| BoardUpdate
+
+    Search -->|"Board transforms"| BoardUpdate
     Search -->|"Candidate requests"| MoveGen
-    Search -->|"Leaf eval requests"| StaticEval
-    Search -->|"Lookup requests"| TTLookup
-    Search -->|"Store requests"| TTStore
+    Search -->|"Leaf evaluation requests"| StaticEval
+    Search -->|"Probe requests"| TTLookup
+    Search -->|"Publish requests"| TTStore
+
+    BoardUpdate -->|"Updated board state\nand side data"| Search
+    MoveGen -->|"Candidate move\nand legality"| Search
+    StaticEval -->|"White-relative score"| Search
+    TTLookup -->|"Hit, bound,\nand best move"| Search
+
     TTLookup -->|"Prioritized reads"| RAM
     TTStore -->|"Delayed writes"| RAM
+
     Search -->|"Search result"| Engine
     Engine -->|"Response bytes"| TX
     TX -->|"UART output"| Host

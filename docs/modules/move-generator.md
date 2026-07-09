@@ -1,6 +1,6 @@
 # Move Generator (`move_generator`)
 
-Status: tiled pipeline implementation in progress; standalone move-generation coverage passes, while same-ply node-mask reuse in `search_controller` integration remains under correction.
+Status: tiled pipeline implementation in progress. Standalone move-generation coverage passes, while same-ply node-mask reuse in `search_controller` integration is still being corrected.
 
 The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is strictly legal. A candidate is consumed for the current node whether or not it is legal.
 
@@ -46,20 +46,23 @@ The move generator accepts a legal input position and emits one ordered candidat
 
 ```mermaid
 flowchart LR
-    Input["Legal board input"]
-    MaskLoad["Load searched-move mask"]
-    Nearest["Find nearest tile sources"]
-    Specials["Add promotion and castling candidates"]
-    Score["Score destination-tile proposals"]
-    LegalCheck["Strict legality filter"]
-    Output["candidate_move and move_is_legal"]
-    MaskSave["Mark candidate consumed"]
-    MaskMemory["Per-thread per-ply mask memory"]
+    Input["Legal board input\nplus generation mode"]
+    Output["Outputs:\ncandidate_move, move_is_legal"]
+    MaskMemory["Per-thread, per-ply\nconsumed-candidate mask memory"]
 
-    Input --> MaskLoad --> Nearest --> Specials --> Score --> LegalCheck --> Output
+    subgraph Gen["Candidate-generation pipeline"]
+        MaskLoad["Load current node mask"]
+        Nearest["Propagate nearest sources\nalong rays"]
+        Specials["Add promotions,\ncastling, and target priority"]
+        Score["Score one proposal\nper destination tile"]
+        Reduce["Comparator tree selects\nbest proposal"]
+        LegalCheck["Strict legality check\non selected proposal"]
+        MaskSave["Mark candidate consumed"]
+    end
+
+    Input --> MaskLoad --> Nearest --> Specials --> Score --> Reduce --> LegalCheck --> Output
     MaskMemory --> MaskLoad
-    LegalCheck -->|"Legal or illegal candidate"| MaskSave
-    MaskSave --> MaskMemory
+    LegalCheck -->|"Legal or illegal candidate"| MaskSave --> MaskMemory
 ```
 
 ## Ordered Move Generation

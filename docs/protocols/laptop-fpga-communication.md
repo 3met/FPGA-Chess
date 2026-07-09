@@ -1,8 +1,8 @@
 # Laptop-FPGA Communication
 
-The host communicates with the FPGA as a single in-order byte stream. The host is responsible for UCI parsing, chess legality of incoming position/move commands, command serialization, and avoiding FIFO overflow.
+The host communicates with the FPGA as a single in-order byte stream. The host is responsible for UCI parsing, chess legality of incoming position and move commands, command serialization, and avoiding FIFO overflow.
 
-The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command is complete or explicitly killed.
+The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command is complete or is explicitly killed.
 
 ## UART Configuration
 
@@ -35,7 +35,7 @@ sequenceDiagram
     Host->>RX: Opcode and fixed-size payload
     RX->>Engine: data_in, data_in_valid
     Engine->>Search: Start operation
-    Search-->>Engine: Search active
+    Search-->>Engine: Request captured / search active
     Note over Host,Engine: Host sends no normal command while search is active
     opt Stop or reset
         Host->>RX: Kill opcode or UART BREAK
@@ -43,7 +43,8 @@ sequenceDiagram
         Engine->>Search: Kill request
     end
     Search-->>Engine: Result and end reason
-    Engine->>TX: Response bytes when ready_for_result is asserted
+    Engine->>TX: Response bytes
+    Note over Engine,TX: Stream advances only when ready_for_result is asserted
     TX-->>Host: UART response stream
 ```
 

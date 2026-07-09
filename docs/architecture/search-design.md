@@ -4,7 +4,9 @@
 
 Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP and share only the transposition table.
 
-The number of threads, allocated stack depth, external perft support, Zobrist hashing, TT traffic, and board-update PST ROM use are parameterized at build time. The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, currently 8 threads and 32 plies for simulation and generic RTL testing. Shared pipelines have explicit multi-thread isolation tests, and the search controller initializes all configured root thread contexts as active and ready each iterative-deepening pass, then runs a concurrent search scheduler with active-thread count, root round-robin cursor, child-return round-robin cursor, TT-response round-robin cursor, and per-pipeline dispatch cursors for board update, move generation, static evaluation, TT lookup, and TT store issue. The scheduler can have different configured threads in different tagged pipelines at the same time, applies deterministic per-thread root move hints, and uses a stable score/move tie-break for reproducible best-result selection. Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
+The number of threads, allocated stack depth, external perft support, Zobrist hashing, TT traffic, and board-update PST ROM use are parameterized at build time. The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, currently 8 threads and 32 plies for simulation and generic RTL testing.
+
+Current RTL note: shared pipelines have explicit multi-thread isolation tests, and the search controller initializes all configured root thread contexts as active and ready for each iterative-deepening pass. It then runs a concurrent scheduler with active-thread count, root round-robin cursor, child-return round-robin cursor, TT-response round-robin cursor, and per-pipeline dispatch cursors for board update, move generation, static evaluation, TT lookup, and TT store issue. Different configured threads can occupy different tagged pipelines at the same time. The controller also applies deterministic per-thread root move hints and a stable score-plus-move tie-break for reproducible best-result selection. The `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
 
 Search uses side-to-move point-of-view scores internally. Raw evaluation inputs are White-relative, so the search controller normalizes leaf/static scores by negating them when Black is to move.
 
@@ -36,7 +38,7 @@ Host-supplied game-position commands are assumed valid because the Python host v
 
 ## Transposition Table Use
 
-The TT required by the Lazy SMP communication between threads. The primary TT is stored in external memory behind a vendor-neutral wrapper, with a BRAM cache when the target FPGA has enough block memory to make caching useful.
+The TT is required for Lazy SMP communication between threads. The primary TT is stored in external memory behind a vendor-neutral wrapper, with a BRAM cache when the target FPGA has enough block memory to make caching useful.
 
 Scores stored in the TT should use the same side-to-move point-of-view convention as the search controller. The TT replacement policy is single-entry depth/age replacement. Store into an invalid entry, a stale entry that is not much deeper than the new result, a shallower entry, or a same-depth non-exact entry when the new result is exact.
 

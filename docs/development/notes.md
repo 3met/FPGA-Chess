@@ -1,6 +1,6 @@
 # Miscellaneous Notes
 
-These notes contain open questions, speculative ideas, and implementation reminders. They are not final RTL requirements unless promoted into architecture, protocol, or module docs.
+These notes contain open questions, speculative ideas, and implementation reminders. They are not final RTL requirements unless they are promoted into the architecture, protocol, or module docs.
 
 ## Open Questions
 

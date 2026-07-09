@@ -2,7 +2,21 @@
 
 Status: implemented current RTL contract.
 
-Current RTL note: full RTL tests instantiate the real `search_controller`. It owns active board state, applies direct-board operations through `board_update_pipeline`, stores active-game repetition keys for draw detection when Zobrist hashing is enabled, clears the compact TT on New Game when TT is enabled, initializes the normal starting position through board-update setup operations, optionally runs generic stack-based perft through the real move generator with current-board push/reverse state, and runs iterative-deepening Lazy SMP negamax with board-update pushes and reverse moves, optional TT lookup/store cutoffs, targeted TT move ordering, static-evaluator leaves, and qsearch captures/promotions after nominal depth. Search state is stored per configured thread for lifecycle status, scheduler phase, current board/zobrist/PST state, board/move/eval pipeline wait counters, board/move/eval/TT in-flight flags, TT response pending records, move stacks, alpha/beta values, TT metadata, repetition line state, return values, current best moves, completed results, completed depths, and node counters; full board states are not stored per search ply, and per-thread/per-ply search stacks are represented as flat `SEARCH_THREAD_COUNT * SEARCH_STACK_DEPTH` arrays addressed by `search_stack_addr` so Quartus does not elaborate unpacked multidimensional stack arrays. Search board-update requests carry controller-local thread, operation, and ply tag shift registers so push and reverse completions restore or descend the tagged thread correctly, move-generation and static-evaluation requests carry controller-local thread tag shift registers, and TT requests carry `thread_id` in the request/response records. The concurrent `ST_SEARCH_RUN` scheduler keeps active-thread count, root dispatch cursor, child-return dispatch cursor, TT-response dispatch cursor, and per-pipeline dispatch cursors for board update, move generation, static evaluation, TT lookup, and TT store issue paths; it can issue independent ready threads into different shared pipelines in the same wall-clock interval when more than one thread is configured, continuously shifts tagged completion queues, captures TT lookup responses by thread, folds child returns by dispatcher selection after reverse-board completion, and retries deferred `STORE_WAIT` TT stores after higher-priority progress work. Controller-level perft tests cover start position depth 0, 1, and 2 plus direct-setup positions for kings-only, castling, en passant, promotion, stalemate, and checkmate, and search tests cover White and Black POV capture scoring, 50-move draw, stalemate draw, checkmate losing-mate terminal scores, node limit, fixed-time stop, clock-budget stop, oversized-depth errors, TT reuse, all-thread root scheduling, overlapping move-generator requests, and overlap between different tagged pipelines. At the start of each root iteration, the controller initializes every `SEARCH_THREAD_COUNT` thread context as active and ready at the root position, applies deterministic per-thread root move hints, shares TT when enabled, and selects the best same-depth result with a stable same-score move tie-break. It also handles kill during active work, bounds requested depth to the local stack, clears active repetition history on direct setup writes, cancels search pipeline wait/tag/in-flight state on Kill/New Game/search start, returns only fully completed iteration depth for node and time stops, and scores 50-move, repetition when Zobrist hashing is enabled, bare-king, one-minor, and same-color-bishop insufficient-material draws plus checkmate/stalemate when no legal moves remain. The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ACTIVE_REPETITION_DEPTH = 256`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`. Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
+## Current RTL Summary
+
+Full RTL tests instantiate the real `search_controller`. It owns active board state, applies direct-board operations through `board_update_pipeline`, stores active-game repetition keys for draw detection when Zobrist hashing is enabled, clears the compact TT on New Game when TT is enabled, initializes the normal starting position through board-update setup operations, optionally runs generic stack-based perft through the real move generator with current-board push/reverse state, and runs iterative-deepening Lazy SMP negamax with board-update pushes and reverse moves, optional TT lookup/store cutoffs, targeted TT move ordering, static-evaluator leaves, and qsearch captures and promotions after nominal depth.
+
+Search state is stored per configured thread for lifecycle status, scheduler phase, current board, Zobrist key, PST state, board, move, eval, and TT wait counters, in-flight flags, TT response pending records, move stacks, alpha/beta values, repetition line state, return values, current best moves, completed results, completed depths, and node counters. Full board states are not stored per ply. Instead, per-thread and per-ply stack records are flattened into `SEARCH_THREAD_COUNT * SEARCH_STACK_DEPTH` storage addressed by `search_stack_addr` so Quartus does not elaborate unpacked multidimensional stack arrays.
+
+Board-update requests carry controller-local thread, operation, and ply tag shift registers so push and reverse completions restore or descend the tagged thread correctly. Move-generation and static-evaluation requests carry controller-local thread tags. TT requests carry `thread_id` in the request and response records. The concurrent `ST_SEARCH_RUN` scheduler keeps root, child-return, TT-response, and per-pipeline dispatch cursors so independent ready threads can be issued into different shared pipelines when more than one thread is configured. Accepted TT lookup responses are captured per thread, child returns are folded only after reverse-board completion, and deferred `STORE_WAIT` TT stores are retried after higher-priority progress work.
+
+Controller-level perft tests cover start-position depths 0, 1, and 2 plus direct-setup positions for kings-only, castling, en passant, promotion, stalemate, and checkmate. Search tests cover White and Black POV capture scoring, 50-move draw, stalemate draw, checkmate losing-mate terminal scores, node limit, fixed-time stop, clock-budget stop, oversized-depth errors, TT reuse, all-thread root scheduling, overlapping move-generator requests, and overlap between different tagged pipelines.
+
+At the start of each root iteration, the controller initializes every `SEARCH_THREAD_COUNT` thread context as active and ready at the root position, applies deterministic per-thread root move hints, shares TT when enabled, and selects the best same-depth result with a stable same-score move tie-break. It also handles kill during active work, bounds requested depth to the local stack, clears active repetition history on direct setup writes, cancels search pipeline wait, tag, and in-flight state on Kill, New Game, or search start, returns only fully completed iteration depth for node and time stops, and scores 50-move, repetition when Zobrist hashing is enabled, bare-king, one-minor, and same-color-bishop insufficient-material draws plus checkmate and stalemate when no legal moves remain.
+
+The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ACTIVE_REPETITION_DEPTH = 256`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`.
+
+Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
 
 The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
 
@@ -61,30 +75,40 @@ TT scores use the same side-to-move point-of-view convention as search. Mate sco
 ```mermaid
 flowchart LR
     Engine["Engine command layer"]
-    Scheduler["Search scheduler and arbitration"]
-    Threads["Thread state array"]
-    BoardUpdate["Board update pipeline"]
-    MoveGen["Move generator"]
-    StaticEval["Static evaluator"]
-    TTLookup["TT lookup"]
-    TTStore["TT store"]
     Timer["Timer"]
     Result["Best result registers"]
 
-    Engine -->|"Operation, limits, direct-board ops"| Scheduler
-    Scheduler <--> Threads
-    Scheduler -->|"Push, commit, reverse, setup"| BoardUpdate
-    BoardUpdate -->|"Updated board state"| Threads
-    Scheduler -->|"Next candidate request"| MoveGen
+    subgraph Control["Search controller internals"]
+        Scheduler["Scheduler and arbitration"]
+        Threads["Per-thread state\nand search stacks"]
+    end
+
+    subgraph Pipelines["Shared pipelines"]
+        BoardUpdate["Board update"]
+        MoveGen["Move generator"]
+        StaticEval["Static evaluator"]
+        TTLookup["TT lookup"]
+        TTStore["TT store"]
+    end
+
+    Engine -->|"Operation, limits,\nand direct-board ops"| Scheduler
+    Scheduler <-->|"Dispatch state,\nalpha/beta, counters"| Threads
+
+    Scheduler -->|"Push, commit,\nreverse, setup"| BoardUpdate
+    BoardUpdate -->|"Updated board,\nZobrist, PST state"| Threads
+
+    Scheduler -->|"Candidate request"| MoveGen
     MoveGen -->|"Candidate and legality"| Scheduler
-    Scheduler -->|"Leaf board state"| StaticEval
+
+    Scheduler -->|"Leaf board state\nplus base eval"| StaticEval
     StaticEval -->|"White-relative score"| Scheduler
+
     Scheduler -->|"Probe current node"| TTLookup
-    TTLookup -->|"Hit, bound, best move"| Scheduler
+    TTLookup -->|"Hit, bound,\nbest move"| Scheduler
+
     Scheduler -->|"Publish searched node"| TTStore
     Timer -->|"Elapsed milliseconds"| Scheduler
-    Scheduler --> Result
-    Result --> Engine
+    Scheduler --> Result --> Engine
 ```
 
 ## Registers

@@ -27,7 +27,7 @@ Unless otherwise stated, multi-bit scalar values are unsigned. Numeric enum valu
 | `4`   | `ROOK`        | Rook. |
 | `5`   | `QUEEN`       | Queen. |
 | `6`   | `KING`        | King. |
-| `7`   | `SPARE_PIECE` | Reserved. Do not emit in normal board state. |
+| `7`   | `SPARE_PIECE` | Reserved. Do not emit in normal board states. |
 | `x`   | `UNKNOWN_PIECE` | Unknown or don't-care piece type. |
 
 ### `PromoType`

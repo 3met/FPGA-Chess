@@ -1,6 +1,6 @@
 # Engine Testing Metrics
 
-These metrics measure correctness, search quality, and hardware utilization.
+These metrics are useful for validating correctness, comparing search quality, and tracking hardware utilization over time.
 
 | Metric                         | Purpose                                                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |

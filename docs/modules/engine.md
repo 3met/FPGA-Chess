@@ -36,42 +36,48 @@ V1 validates protocol shape only: unknown opcodes, reserved move bits, reserved 
 
 ## States
 
-| State | Description |
-| ----- | ----------- |
-| Idle | Engine is awaiting a command byte. |
-| Receive Payload | Engine is collecting the fixed-size payload for the current command. |
-| Direct Board | Engine is applying setup or make-move operations through the search controller direct-board path. |
-| New Game | Engine is clearing game/search state and resetting the active board to the normal starting position. |
-| Search | Engine has started a search and waits for completion, kill, or error. |
-| Perft | Engine has started a perft operation and waits for completion, kill, or error. |
-| Output Result | Engine is streaming a response one byte at a time. |
-| Output Paused | Engine has response bytes pending but `ready_for_result` is deasserted. |
-| Error | Engine detected a malformed command, unsupported opcode, or internal error and will emit an error response. |
+| State           | Description                                                                                                 |
+| --------------- | ----------------------------------------------------------------------------------------------------------- |
+| Idle            | Engine is awaiting a command byte.                                                                          |
+| Receive Payload | Engine is collecting the fixed-size payload for the current command.                                        |
+| Direct Board    | Engine is applying setup or make-move operations through the search controller direct-board path.           |
+| New Game        | Engine is clearing game/search state and resetting the active board to the normal starting position.        |
+| Search          | Engine has started a search and waits for completion, kill, or error.                                       |
+| Perft           | Engine has started a perft operation and waits for completion, kill, or error.                              |
+| Output Result   | Engine is streaming a response one byte at a time.                                                          |
+| Output Paused   | Engine has response bytes pending but `ready_for_result` is deasserted.                                     |
+| Error           | Engine detected a malformed command, unsupported opcode, or internal error and will emit an error response. |
+|                 |                                                                                                             |
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> ReceivePayload: command with payload
+    Idle --> ReceivePayload: opcode with payload
     Idle --> DirectBoard: board command without extra payload
-    Idle --> NewGame: new game
-    Idle --> Search: search command
-    Idle --> Perft: perft command
-    Idle --> OutputResult: status or cached result command
+    Idle --> NewGame: new-game opcode
+    Idle --> Search: search opcode without extra payload
+    Idle --> Perft: perft opcode without extra payload
+    Idle --> OutputResult: status or cached-result opcode
     Idle --> Error: unknown opcode
+
     ReceivePayload --> DirectBoard: setup or move payload complete
     ReceivePayload --> Search: search payload complete
     ReceivePayload --> Perft: perft payload complete
     ReceivePayload --> Error: malformed payload
-    DirectBoard --> OutputResult: direct operation complete
-    NewGame --> OutputResult: reset complete
-    Search --> OutputResult: search complete or killed
-    Search --> Error: internal error
-    Perft --> OutputResult: perft complete or killed
-    Perft --> Error: internal error
-    OutputResult --> OutputPaused: output backpressure
-    OutputPaused --> OutputResult: ready_for_result
+
+    state "Controller-backed work" as Active {
+        DirectBoard --> OutputResult: controller response
+        NewGame --> OutputResult: controller response
+        Search --> OutputResult: result or kill complete
+        Search --> Error: controller error
+        Perft --> OutputResult: result or kill complete
+        Perft --> Error: controller error
+    }
+
+    OutputResult --> OutputPaused: ready_for_result low
+    OutputPaused --> OutputResult: ready_for_result high
     OutputResult --> Idle: response complete
-    Error --> OutputResult: error response queued
+    Error --> OutputResult: queue error response
 ```
 
 ## Registers

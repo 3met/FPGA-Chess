@@ -41,7 +41,7 @@ The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, an
 
 Lookups have priority over stores when memory bandwidth conflicts. The synchronous RAM read and registered request metadata produce a response during the cycle immediately after request acceptance. If a store is queued or ready to write and a lookup arrives, the lookup runs first and the store remains delayed. When a lookup interrupts the write phase of a store read-modify-write operation, the old store entry is retained in a small register so the replacement decision and possible write can resume after the lookup. This preserves lookup correctness for same-index conflicts by preventing a store write in the same cycle as a lookup.
 
-The first implementation includes a `clear` input for `ucinewgame` and reset-style invalidation. A rising edge on `clear` starts one sequential table clear. While `clear_busy` is asserted, lookup and store request readiness are deasserted and the table is filled with invalid entries.
+The first implementation includes a `clear` input for `ucinewgame` and reset-style invalidation. A rising edge on `clear` starts one sequential table clear. While `clear_busy` is asserted, lookup and store request readiness are deasserted, and the table is filled with invalid entries.
 
 The pipeline verifies a 48-bit high-hash verification key before reporting a hit. The low `TT_INDEX_BITS` of the Zobrist key index the table, so compact mode leaves any middle hash bits outside the selected index and verification fields unchecked.
 

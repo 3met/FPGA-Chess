@@ -1,7 +1,5 @@
 # Board Update Pipeline (`board_update_pipeline`)
 
-Status: partially implemented; this document describes the final target contract.
-
 The board update pipeline is a pipelined board-state transformer. It accepts a complete `FullBoard`, side data, and an operation, then outputs the transformed board and updated side data after fixed latency. It does not own long-term active board state.
 
 ## Ports
@@ -49,22 +47,27 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ```mermaid
 flowchart LR
-    S0["Stage 0: register inputs and read move-history record"]
-    S1["Stage 1: side-data preparation"]
-    S2["Stage 2: alignment"]
-    S3["Stage 3: primary tile update and table reads"]
-    S4["Stage 4: en passant or castling extra tile"]
-    S5["Stage 5: second extra tile and captured material"]
-    S6["Stage 6: board, Zobrist, and PST outputs"]
+    In["Request inputs:\nboard, side data, op, move, thread, ply"]
+    Out["Outputs:\nboard_out, zobrist_key_out, pst_eval_out"]
     History["Per-thread move history"]
     Tables["Zobrist and PST tables"]
 
-    S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6
+    subgraph Pipe["Seven-stage fixed-latency pipeline"]
+        S0["0. Register inputs\nand read reverse context"]
+        S1["1. Prepare side-data updates"]
+        S2["2. Alignment"]
+        S3["3. Primary tile update\nand table reads"]
+        S4["4. First extra tile\nor history write"]
+        S5["5. Second extra tile\nand captured-material accounting"]
+        S6["6. Register outputs"]
+    end
+
+    In --> S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> Out
     History -->|"Reverse Move read"| S0
     S4 -->|"Push Move write"| History
-    Tables -->|"Hash and PST deltas"| S3
+    Tables -->|"Primary-square deltas"| S3
     Tables -->|"Extra-square deltas"| S4
-    Tables -->|"Capture and castle deltas"| S5
+    Tables -->|"Capture/castle deltas"| S5
 ```
 
 ## Board Setup
@@ -73,7 +76,7 @@ The final engine should set up a board by issuing explicit Set Tile, Set Turn, S
 
 ## Hashing
 
-Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations. The halfmove clock is part of `FullBoard` state but is not included in the Zobrist key.
+Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations.
 
 The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. The board-update RTL reads the `.hex` data through four replicated synchronous true-dual-port ROMs, providing the eight simultaneous reads needed by the worst-case incremental hash update while preserving the existing seven-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints; Quartus infers the DE1-SoC copies as M10K-backed ROMs. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
 
@@ -83,7 +86,7 @@ The Zobrist constants are generated from the same deterministic source into `har
 
 ## PST Tables
 
-Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. The board-update RTL uses the generated SystemVerilog lookup package for synthesis and test benches still use the `.hex` reference data where useful. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
+Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
 
 ## Move History
 
@@ -91,6 +94,3 @@ Push Move writes enough data to reverse the move later, including origin, destin
 
 Each thread may have one reversible move per ply. Search must reverse all pushed moves before reusing that ply record for a different line.
 
-## Current RTL Notes
-
-The current RTL maintains `pst_eval` as White-relative incremental material plus piece-square-table state. Positive scores favor White and negative scores favor Black.
