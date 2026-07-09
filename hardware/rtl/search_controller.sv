@@ -11,7 +11,7 @@ import tt_defs::*;
 module search_controller #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int TT_INDEX_BITS = 10,
-    parameter int ACTIVE_REPETITION_DEPTH = 256,
+    parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter bit ENABLE_PERFT = 1'b1,
@@ -46,6 +46,7 @@ module search_controller #(
     typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
     typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
     typedef logic [EVAL_WAIT_BITS-1:0] EvalWaitCount;
+    typedef logic [31:0] RepetitionSignature;
     typedef logic [ACTIVE_REPETITION_PTR_BITS-1:0] ActiveRepetitionCount;
     typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
     typedef logic [SEARCH_STACK_INDEX_BITS-1:0] SearchStackIndex;
@@ -107,7 +108,7 @@ module search_controller #(
     ZobristKey active_zobrist_key;
     EvalScore active_pst_eval;
 
-    ZobristKey active_repetition_keys[0:ACTIVE_REPETITION_DEPTH-1];
+    RepetitionSignature active_repetition_keys[0:ACTIVE_REPETITION_DEPTH-1];
     ActiveRepetitionCount active_repetition_key_count;
     ActiveRepetitionCount active_repetition_start;
 
@@ -463,6 +464,10 @@ module search_controller #(
             || before_board.castle_perms != after_board.castle_perms;
     endfunction : committed_move_is_irreversible
 
+    function automatic RepetitionSignature repetition_signature(input ZobristKey zobrist_key);
+        return RepetitionSignature'(zobrist_key[31:0] ^ zobrist_key[63:32]);
+    endfunction : repetition_signature
+
     function automatic logic repetition_draw(
         input ThreadID thread,
         input ZobristKey zobrist_key,
@@ -478,7 +483,7 @@ module search_controller #(
         if (search_repetition_start_stack[search_stack_addr(thread, ply)] == PlyIndex'(0)) begin
             for (int idx = 0; idx < ACTIVE_REPETITION_DEPTH; idx++) begin
                 if (idx >= int'(active_repetition_start) && idx < int'(active_repetition_key_count)) begin
-                    if (active_repetition_keys[idx] == zobrist_key) begin
+                    if (active_repetition_keys[idx] == repetition_signature(zobrist_key)) begin
                         occurrence_count += 1;
                     end
                 end
@@ -1211,7 +1216,7 @@ module search_controller #(
                 search_eval_tag_valid_pipe[idx] <= 1'b0;
             end
             for (int idx = 0; idx < ACTIVE_REPETITION_DEPTH; idx++) begin
-                active_repetition_keys[idx] <= ZobristKey'(0);
+                active_repetition_keys[idx] <= RepetitionSignature'(0);
             end
         end else begin
             resp_valid <= 1'b0;
@@ -1269,20 +1274,8 @@ module search_controller #(
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
                                     state <= ST_DIRECT_DONE;
                                 end else begin
-                                    if (req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
-                                        if (active_repetition_key_count < ActiveRepetitionCount'(ACTIVE_REPETITION_DEPTH)) begin
-                                            board_dest <= BOARD_DEST_ACTIVE;
-                                            state <= ST_BOARD_ISSUE;
-                                        end else begin
-                                            resp_reg <= EngineControllerResponse'('0);
-                                            resp_reg.error <= 1'b1;
-                                            resp_reg.end_reason <= ENGINE_END_ERROR;
-                                            state <= ST_DIRECT_DONE;
-                                        end
-                                    end else begin
-                                        board_dest <= BOARD_DEST_ACTIVE;
-                                        state <= ST_BOARD_ISSUE;
-                                    end
+                                    board_dest <= BOARD_DEST_ACTIVE;
+                                    state <= ST_BOARD_ISSUE;
                                 end
                             end
 
@@ -1502,13 +1495,16 @@ module search_controller #(
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         if (active_req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
-                            active_repetition_keys[active_repetition_key_count] <= board_update_zobrist_out;
-                            active_repetition_key_count <= active_repetition_key_count + ActiveRepetitionCount'(1);
                             if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
-                                active_repetition_start <= active_repetition_key_count;
+                                active_repetition_keys[0] <= repetition_signature(board_update_zobrist_out);
+                                active_repetition_key_count <= ActiveRepetitionCount'(1);
+                                active_repetition_start <= ActiveRepetitionCount'(0);
+                            end else if (active_repetition_key_count < ActiveRepetitionCount'(ACTIVE_REPETITION_DEPTH)) begin
+                                active_repetition_keys[active_repetition_key_count] <= repetition_signature(board_update_zobrist_out);
+                                active_repetition_key_count <= active_repetition_key_count + ActiveRepetitionCount'(1);
                             end
                         end else if (is_direct_setup_op(active_req.direct_board_op)) begin
-                            active_repetition_keys[0] <= board_update_zobrist_out;
+                            active_repetition_keys[0] <= repetition_signature(board_update_zobrist_out);
                             active_repetition_key_count <= ActiveRepetitionCount'(1);
                             active_repetition_start <= ActiveRepetitionCount'(0);
                         end
@@ -1547,7 +1543,7 @@ module search_controller #(
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         if (new_setup_index == 7'd67) begin
-                            active_repetition_keys[0] <= board_update_zobrist_out;
+                            active_repetition_keys[0] <= repetition_signature(board_update_zobrist_out);
                             active_repetition_key_count <= ActiveRepetitionCount'(1);
                             active_repetition_start <= ActiveRepetitionCount'(0);
                             resp_reg <= EngineControllerResponse'('0);

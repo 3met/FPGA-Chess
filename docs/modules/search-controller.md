@@ -14,7 +14,7 @@ Controller-level perft tests cover start-position depths 0, 1, and 2 plus direct
 
 At the start of each root iteration, the controller initializes every `SEARCH_THREAD_COUNT` thread context as active and ready at the root position, applies deterministic per-thread root move hints, shares TT when enabled, and selects the best same-depth result with a stable same-score move tie-break. It also handles kill during active work, bounds requested depth to the local stack, clears active repetition history on direct setup writes, cancels search pipeline wait, tag, and in-flight state on Kill, New Game, or search start, returns only fully completed iteration depth for node and time stops, and scores 50-move, repetition when Zobrist hashing is enabled, bare-king, one-minor, and same-color-bishop insufficient-material draws plus checkmate and stalemate when no legal moves remain.
 
-The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ACTIVE_REPETITION_DEPTH = 256`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`.
+The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ACTIVE_REPETITION_DEPTH = 100`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`.
 
 Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
 
@@ -131,5 +131,5 @@ flowchart LR
 | `search_tt_response_dispatch_cursor` | `ThreadID` | Round-robin cursor used to choose the next thread with a captured TT lookup response to apply. |
 | `search_*_dispatch_cursor` | `ThreadID` | Per-pipeline round-robin cursors for board update, move generation, static evaluation, TT lookup, and TT store issue paths. |
 | `search_*_tag_pipe` | Thread, operation, and ply tag arrays | Controller-local fixed-latency tags for board-update, move-generation, and static-evaluation completions. |
-| `game_repetition_history` | Hash array | Active-game reversible-position hashes since the last irreversible move. |
+| `game_repetition_history` | 100-entry 32-bit signature array | Active-game reversible-position signatures since the last irreversible move. The 100-position capacity covers every position that can remain relevant before the 50-move draw applies, and each signature folds both halves of the full 64-bit Zobrist key. |
 | `thread_repetition_history[THREAD_COUNT][MAX_PLY_COUNT]` | Hash array | Search-line hashes used to detect repetition inside each thread's current line. |
