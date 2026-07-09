@@ -24,9 +24,9 @@ package move_generator_defs;
     } KnightBusData;
 
     localparam int NORMAL_MOVE_MASK_BITS = 378;
-    localparam int PROMOTION_EDGE_COUNT = 44;
+    localparam int PROMOTION_EDGE_COUNT = 22;
     localparam int PROMOTION_MASK_BITS = PROMOTION_EDGE_COUNT * 4;
-    localparam int CASTLING_MASK_BITS = 4;
+    localparam int CASTLING_MASK_BITS = 2;
     localparam int MOVE_MASK_BITS = NORMAL_MOVE_MASK_BITS + PROMOTION_MASK_BITS + CASTLING_MASK_BITS;
     localparam int NS_MASK_OFFSET = 0;
     localparam int EW_MASK_OFFSET = 56;

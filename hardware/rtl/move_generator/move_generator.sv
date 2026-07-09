@@ -747,7 +747,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             edge_idx = 15 + from_file;
         end
 
-        return (moving_color == WHITE) ? edge_idx : (22 + edge_idx);
+        return edge_idx;
     endfunction : promotion_edge_index
 
     function automatic int normal_edge_mask_index(input Move move);
@@ -803,7 +803,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d6)) ? 0 : 1);
         end
 
-        return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d62)) ? 2 : 3);
+        return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d62)) ? 0 : 1);
     endfunction : castling_mask_index
 
     function automatic MoveMaskIndex candidate_mask_index_from_flags(

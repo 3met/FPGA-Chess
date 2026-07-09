@@ -228,7 +228,7 @@ module tb_move_generator;
             edge_idx = 15 + from_file;
         end
 
-        return (moving_color == WHITE) ? edge_idx : (22 + edge_idx);
+        return edge_idx;
     endfunction
 
     function automatic int ref_normal_edge_mask_index(input Move move);
@@ -277,7 +277,7 @@ module tb_move_generator;
             return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d6)) ? 0 : 1);
         end
 
-        return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d62)) ? 2 : 3);
+        return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d62)) ? 0 : 1);
     endfunction
 
     function automatic MoveMaskIndex ref_candidate_index(input FullBoard board, input Move move);
