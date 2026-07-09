@@ -1,6 +1,6 @@
 # TT Store Pipeline (`tt_store`)
 
-Status: implemented portable load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
+Status: implemented portable block-RAM-backed load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
 
 The TT store pipeline writes completed search results into the shared transposition table. Stores are less latency-sensitive than lookups and may be buffered or stalled when lookups need memory bandwidth.
 
@@ -21,7 +21,7 @@ Each store request includes:
 
 ## Behavior
 
-The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable inferred RAM backend with one logical entry per word. The default compact profile stores 96-bit entries, and `USE_FULL_KEY = 1` selects the 128-bit full-key profile. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
+The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable synchronous-read simple-dual-port RAM backend with one logical entry per word. The RAM template carries Intel and Xilinx block-RAM inference hints. The default compact profile stores 96-bit entries, and `USE_FULL_KEY = 1` selects the 128-bit full-key profile. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
 
 Stores use `store_req_valid` and `store_req_ready`. Accepted stores enter a depth-4 FIFO by default. Stores are not dropped; when the FIFO is full, `store_req_ready` deasserts until queued stores drain.
 

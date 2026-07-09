@@ -45,6 +45,7 @@
     ],
     "tt-load-store": [
       "@common",
+      "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
       "hardware/rtl/tt/tt_defs.sv",
       "hardware/rtl/tt/tt_load_store.sv"
     ],

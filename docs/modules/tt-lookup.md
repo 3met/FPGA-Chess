@@ -1,6 +1,6 @@
 # TT Lookup Pipeline (`tt_lookup`)
 
-Status: implemented portable load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
+Status: implemented portable block-RAM-backed load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
 
 The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response returns.
 
@@ -35,11 +35,11 @@ Each lookup returns a response to the requesting thread.
 
 ## Behavior
 
-The RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable inferred RAM backend with one logical TT entry per memory word. The default compact profile stores 96-bit entries, and the optional full-key profile stores 128-bit entries. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
+The RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable synchronous-read simple-dual-port RAM template with Intel and Xilinx block-RAM inference hints and one logical TT entry per memory word. The default compact profile stores 96-bit entries, and the optional full-key profile stores 128-bit entries. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
 
 The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, and `lookup_resp_valid`. Lookup requests are accepted whenever `clear` is not active. A lookup response is produced for each accepted request, with `hit` deasserted on empty, invalid, or verification-key mismatch entries.
 
-Lookups have priority over stores when memory bandwidth conflicts. If a store is queued or ready to write and a lookup arrives, the lookup runs first and the store remains delayed. This preserves lookup correctness for same-index conflicts by preventing a store write in the same cycle as a lookup.
+Lookups have priority over stores when memory bandwidth conflicts. The synchronous RAM read and registered request metadata produce a response during the cycle immediately after request acceptance. If a store is queued or ready to write and a lookup arrives, the lookup runs first and the store remains delayed. When a lookup interrupts the write phase of a store read-modify-write operation, the old store entry is retained in a small register so the replacement decision and possible write can resume after the lookup. This preserves lookup correctness for same-index conflicts by preventing a store write in the same cycle as a lookup.
 
 The first implementation includes a `clear` input for `ucinewgame` and reset-style invalidation. A rising edge on `clear` starts one sequential table clear. While `clear_busy` is asserted, lookup and store request readiness are deasserted and the table is filled with invalid entries.
 

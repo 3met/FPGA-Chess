@@ -36,7 +36,7 @@ Targets may define `map_effort` and `fit_effort` in the manifest; the DE1-SoC ta
 
 The DE1-SoC synthesis source set uses the same portable RTL path as generic synthesis plus the board-level `main.sv` wrapper. The board target configures one search context and eight allocated plies in `main.sv` to keep area bounded, but it still instantiates the real search controller, board-update pipeline, move generator, static evaluator, transposition-table path, and UART command layer.
 
-Current synthesis note: Quartus 20.1 gets past the real board-update pipeline after the generated PST/Zobrist lookup-package change, then stalls during frontend elaboration of the current exhaustive combinational `move_generator`. No simplified wrapper or stub is used for this result.
+Current synthesis note: Quartus 20.1 completes analysis and synthesis of the real DE1-SoC design, including the current exhaustive combinational `move_generator`. The July 2026 result infers the 1024-entry compact TT as a 96,256-bit M10K-backed `altsyncram`; the TT hierarchy uses 469 combinational ALUTs and 685 registers instead of the earlier register-array result's 147,929 ALUTs and 96,925 registers. The full design still fails fitting at an estimated 104,507 ALMs, or 326% of the 5CSEMA5 device, but this is down from 219,568 ALMs, or 685%, before the TT RAM-inference fix. No simplified wrapper or stub is used for this result.
 
 `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
 
