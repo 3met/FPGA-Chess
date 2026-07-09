@@ -20,6 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "hardware" / "build" / "manifest.json"
 BUILD_ROOT = REPO_ROOT / "work" / "build"
 SYNTH_METADATA = "synthesis.json"
+QUARTUS_ERROR_RE = re.compile(
+    r"^\s*(?:internal\s+error|fatal|error(?:\s+\(\d+\))?):",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
 
 
 class BuildError(RuntimeError):
@@ -141,6 +145,7 @@ def run_command(
     cwd: Path,
     log_path: Path | None = None,
     live_log: bool = False,
+    tee_stdout: bool = False,
 ) -> tuple[int, str, float]:
     start = time.monotonic()
     if not live_log:
@@ -182,6 +187,8 @@ def run_command(
                 chunks.append(line)
                 log_file.write(line)
                 log_file.flush()
+                if tee_stdout:
+                    print(line, end="", flush=True)
             code = proc.wait()
         except BaseException:
             proc.terminate()
@@ -211,6 +218,16 @@ def print_failure_excerpt(output: str) -> None:
         print("  error summary:")
         for line in excerpt:
             print(f"    {line}")
+
+
+def print_quartus_failure_excerpt(output: str) -> None:
+    excerpt = [line.strip() for line in output.splitlines() if QUARTUS_ERROR_RE.search(line)]
+    if not excerpt:
+        print_failure_excerpt(output)
+        return
+    print("  error summary:")
+    for line in excerpt[-8:]:
+        print(f"    {line}")
 
 
 def write_synth_metadata(build_dir: Path, metadata: dict) -> None:
@@ -576,8 +593,14 @@ def qsf_assignment_for_source(path: Path) -> str:
     ext = path.suffix.lower()
     if ext == ".sv":
         assignment = "SYSTEMVERILOG_FILE"
-    elif ext in {".v", ".vh"}:
+    elif ext == ".v":
         assignment = "VERILOG_FILE"
+    elif ext in {".vh", ".svh"}:
+        assignment = "MISC_FILE"
+    elif ext == ".mif":
+        assignment = "MIF_FILE"
+    elif ext == ".hex":
+        assignment = "HEX_FILE"
     else:
         assignment = "MISC_FILE"
     return f'set_global_assignment -name {assignment} "{quote_tcl_path(path)}"'
@@ -609,10 +632,12 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
     ]
     ensure_existing(generated_outputs)
 
+    copied_generated_outputs: dict[Path, Path] = {}
     for source in generated_outputs:
         dest = build_dir / rel(source)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
+        copied_generated_outputs[source] = dest
 
     qpf.write_text(
         'QUARTUS_VERSION = "20.1"\nPROJECT_REVISION = "fpga_chess"\n',
@@ -630,7 +655,11 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
     ]
     assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
-    lines.extend(qsf_assignment_for_source(output) for output in generated_outputs if output not in assigned_sources)
+    lines.extend(
+        qsf_assignment_for_source(copied_generated_outputs[output])
+        for output in generated_outputs
+        if output not in assigned_sources
+    )
     for qip in target.get("qip_files", []):
         lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(repo_path(qip))}"')
 
@@ -871,7 +900,7 @@ def quartus_partial_report(build_dir: Path) -> bool:
     if not lines:
         return False
 
-    errors = matching_report_rows(lines, (r"^Error(?:\s+\(\d+\))?:", r"\bfatal\b"))
+    errors = [line.strip() for line in lines if QUARTUS_ERROR_RE.search(line)]
     warnings = sum(1 for line in lines if re.match(r"\s*Warning(?:\s+\(\d+\))?:", line))
     entities = {
         match.group(1)
@@ -1072,7 +1101,13 @@ def command_synth_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | None) -> int:
+def synth_quartus(
+    manifest: dict,
+    target_name: str,
+    target: dict,
+    jobs: int | None,
+    clean: bool = False,
+) -> int:
     parallel_processors = host_parallel_processors() if jobs is None else jobs
     if parallel_processors < 1:
         raise BuildError("--jobs must be at least 1")
@@ -1081,7 +1116,10 @@ def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | No
     require_tool("quartus_asm")
     require_tool("quartus_sta")
     build_dir = BUILD_ROOT / target_name
-    clean_dir(build_dir)
+    if clean:
+        clean_dir(build_dir)
+    else:
+        build_dir.mkdir(parents=True, exist_ok=True)
     project = write_quartus_project(manifest, target, build_dir, parallel_processors)
     metadata = begin_synth_metadata(build_dir, target_name, target)
     metadata["parallel_processors"] = parallel_processors
@@ -1100,8 +1138,8 @@ def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | No
     for cmd in commands:
         log = build_dir / f"{cmd[0]}.log"
         print(f"Running {' '.join(cmd)}...")
-        code, output, elapsed = run_command(cmd, build_dir, log, live_log=True)
-        ok = code == 0 and not re.search(r"\bError \([0-9]+\):", output)
+        code, output, elapsed = run_command(cmd, build_dir, log, live_log=True, tee_stdout=True)
+        ok = code == 0 and not QUARTUS_ERROR_RE.search(output)
         metadata["stages"].append(
             {
                 "name": cmd[0],
@@ -1115,7 +1153,7 @@ def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | No
         print(f"[{status}] {cmd[0]} ({elapsed:.2f}s)")
         print(f"  log: {rel(log)}")
         if not ok:
-            print_failure_excerpt(output)
+            print_quartus_failure_excerpt(output)
         failed = failed or not ok
         if not ok:
             break
@@ -1214,9 +1252,13 @@ def command_synth(args: argparse.Namespace) -> int:
     targets = manifest["synthesis_targets"]
     if args.target not in targets:
         raise BuildError(f"Unknown synthesis target '{args.target}'")
+    print("== Generated data ==")
+    if command_gen_data(argparse.Namespace(update=args.update_generated_data)) != 0:
+        return 1
+    print("\n== Synthesis ==")
     target = targets[args.target]
     if target["tool"] == "quartus":
-        return synth_quartus(manifest, args.target, target, args.jobs)
+        return synth_quartus(manifest, args.target, target, args.jobs, args.clean)
     if target["tool"] == "vivado":
         return synth_vivado(manifest, args.target, target, args.part)
     raise BuildError(f"Unsupported synthesis tool '{target['tool']}'")
@@ -1252,7 +1294,13 @@ def build_parser() -> argparse.ArgumentParser:
     synth_parser = subparsers.add_parser("synth", help="Run a synthesis target")
     synth_parser.add_argument("--target", required=True, help="Synthesis target name")
     synth_parser.add_argument("--part", help="Xilinx part for vivado-generic")
-    synth_parser.add_argument("--jobs", type=int, help="Quartus parallel processor limit; defaults to detected CPUs")
+    synth_parser.add_argument("--jobs", type=int, help="Quartus parallel processor limit; overrides automatic detection")
+    synth_parser.add_argument("--clean", action="store_true", help="Delete the Quartus build directory before synthesis")
+    synth_parser.add_argument(
+        "--update-generated-data",
+        action="store_true",
+        help="Regenerate and keep changed generated data before synthesis",
+    )
     synth_parser.set_defaults(func=command_synth)
 
     report_parser = subparsers.add_parser("synth-report", help="Print results from the previous synthesis run")

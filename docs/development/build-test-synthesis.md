@@ -30,7 +30,7 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python tools/fpga_chess.py check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts `--jobs <count>` concurrency control for RTL tests.
 
-`python tools/fpga_chess.py synth --target quartus-de1-soc` generates a Quartus project under `work/build/quartus-de1-soc/`, uses `de1_soc` as the top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis. Pass `--jobs <count>` to override the automatic Quartus processor count.
+`python tools/fpga_chess.py synth --target quartus-de1-soc` verifies generated data, refreshes the Quartus project and copied generated data under `work/build/quartus-de1-soc/`, preserves Quartus compilation databases for reuse, uses `de1_soc` as the top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis with live console output. Pass `--clean` to discard the existing Quartus build directory, `--update-generated-data` to regenerate and keep changed generated data instead of failing on drift, or `--jobs <count>` to override the automatic Quartus processor count.
 
 The generated Quartus project adds the repo root and target build directory as `SEARCH_PATH` entries and includes generated data outputs as project files so memory/table assets are visible to Quartus from the build directory.
 
