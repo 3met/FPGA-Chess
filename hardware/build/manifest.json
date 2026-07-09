@@ -41,6 +41,7 @@
       "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
       "hardware/rtl/memory/simple_dual_port_ram.sv",
       "hardware/rtl/memory/inferred_dual_port_rom.sv",
+      "hardware/rtl/memory/synchronous_dual_port_rom.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline.sv"
     ],
     "tt-load-store": [
