@@ -12,12 +12,14 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "hardware" / "build" / "manifest.json"
 BUILD_ROOT = REPO_ROOT / "work" / "build"
+SYNTH_METADATA = "synthesis.json"
 
 
 class BuildError(RuntimeError):
@@ -209,6 +211,30 @@ def print_failure_excerpt(output: str) -> None:
         print("  error summary:")
         for line in excerpt:
             print(f"    {line}")
+
+
+def write_synth_metadata(build_dir: Path, metadata: dict) -> None:
+    (build_dir / SYNTH_METADATA).write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def begin_synth_metadata(build_dir: Path, target_name: str, target: dict) -> dict:
+    metadata = {
+        "target": target_name,
+        "tool": target["tool"],
+        "top": target["top"],
+        "started": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "status": "running",
+        "stages": [],
+    }
+    write_synth_metadata(build_dir, metadata)
+    return metadata
+
+
+def finish_synth_metadata(build_dir: Path, metadata: dict, failed: bool) -> None:
+    metadata["finished"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    metadata["status"] = "failed" if failed else "complete"
+    metadata["elapsed_seconds"] = round(sum(stage["elapsed_seconds"] for stage in metadata["stages"]), 2)
+    write_synth_metadata(build_dir, metadata)
 
 
 def restore_outputs(before: dict[Path, bytes | None]) -> None:
@@ -643,6 +669,251 @@ def collect_quartus_summary(build_dir: Path) -> list[str]:
     return summaries
 
 
+def report_timestamp(build_dir: Path, metadata: dict | None) -> str:
+    if metadata and metadata.get("started"):
+        return str(metadata["started"])
+    logs = sorted(build_dir.glob("quartus_*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in logs:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"Processing started:\s+(.+)$", text, re.MULTILINE)
+        if match:
+            try:
+                return datetime.strptime(match.group(1).strip(), "%a %b %d %H:%M:%S %Y").astimezone().isoformat(
+                    timespec="seconds"
+                )
+            except ValueError:
+                pass
+    files = [path for path in build_dir.rglob("*") if path.is_file()]
+    if not files:
+        return "unknown"
+    timestamp = min(path.stat().st_mtime for path in files)
+    return datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="seconds")
+
+
+def load_synth_metadata(build_dir: Path) -> dict | None:
+    path = build_dir / SYNTH_METADATA
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def report_lines(paths: list[Path]) -> list[str]:
+    lines: list[str] = []
+    for path in paths:
+        if path.exists():
+            lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines())
+    return lines
+
+
+def matching_report_rows(lines: list[str], patterns: tuple[str, ...]) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped in seen:
+            continue
+        if any(re.search(pattern, stripped, re.IGNORECASE) for pattern in patterns):
+            rows.append(stripped)
+            seen.add(stripped)
+    return rows
+
+
+def print_report_section(title: str, rows: list[str], limit: int | None = None) -> None:
+    if not rows:
+        return
+    print(f"\n{title}:")
+    selected = rows if limit is None else rows[:limit]
+    for row in selected:
+        print(f"  {row}")
+    if limit is not None and len(rows) > limit:
+        print(f"  ... {len(rows) - limit} more rows (see vendor report)")
+
+
+def quartus_synth_report(build_dir: Path) -> bool:
+    summary_paths = sorted(build_dir.glob("*.map.summary")) + sorted(build_dir.glob("*.fit.summary"))
+    timing_paths = sorted(build_dir.glob("*.sta.summary")) + sorted(build_dir.glob("*.sta.rpt"))
+    hierarchy_paths = sorted(build_dir.glob("*.map.rpt")) + sorted(build_dir.glob("*.fit.rpt"))
+    summary = report_lines(summary_paths)
+    timing = report_lines(timing_paths)
+    hierarchy = report_lines(hierarchy_paths)
+    resources = matching_report_rows(
+        summary,
+        (
+            r"Total logic elements",
+            r"Logic utilization",
+            r"Total ALMs",
+            r"Total combinational functions",
+            r"Total registers",
+            r"Total pins",
+            r"Total block memory bits",
+            r"Total (?:RAM|memory) blocks",
+            r"Total DSP",
+        ),
+    )
+    clocks = matching_report_rows(
+        timing,
+        (r"Fmax", r"Restricted Fmax", r"Slack", r"Timing requirements", r"\bMHz\b"),
+    )
+    components = matching_report_rows(
+        hierarchy,
+        (
+            r"Entity Name.*(?:ALUT|Logic|Register|Memory|DSP)",
+            r"^\s*;\s*(?:\|--)*[A-Za-z_][^;]*;\s*[\d,]+",
+            r"^\s*\|\s*(?:\|--)*[A-Za-z_][^|]*\|\s*[\d,]+",
+        ),
+    )
+    print_report_section("Device utilization", resources)
+    print_report_section("Clock and timing", clocks, 20)
+    print_report_section("Utilization by component", components, 80)
+    return bool(resources or clocks or components)
+
+
+def quartus_partial_report(build_dir: Path) -> bool:
+    log_paths = sorted(build_dir.glob("quartus_*.log"))
+    if not log_paths:
+        return False
+    lines = report_lines(log_paths)
+    if not lines:
+        return False
+
+    errors = matching_report_rows(lines, (r"^Error(?:\s+\(\d+\))?:", r"\bfatal\b"))
+    warnings = sum(1 for line in lines if re.match(r"\s*Warning(?:\s+\(\d+\))?:", line))
+    entities = {
+        match.group(1)
+        for line in lines
+        if (match := re.search(r"Found entity \d+:\s+([A-Za-z_][A-Za-z0-9_$]*)", line))
+    }
+    elaborated = [
+        match.group(1)
+        for line in lines
+        if (match := re.search(r'Elaborating entity "([^"]+)"', line))
+    ]
+    completed = any("Processing ended:" in line or "successful. 0 errors" in line.lower() for line in lines)
+    started_match = next(
+        (re.search(r"Processing started:\s+(.+)$", line) for line in lines if "Processing started:" in line),
+        None,
+    )
+    elapsed_text = "unknown"
+    if started_match:
+        try:
+            started = datetime.strptime(started_match.group(1).strip(), "%a %b %d %H:%M:%S %Y").astimezone()
+            ended = max(path.stat().st_mtime for path in log_paths)
+            elapsed_text = f"{max(0.0, ended - started.timestamp()):.2f}s"
+        except ValueError:
+            pass
+
+    print("\nPartial synthesis progress:")
+    print(f"  Analysis & Synthesis: {'complete' if completed else 'incomplete'}")
+    print(f"  Approximate logged runtime: {elapsed_text}")
+    print(f"  Parsed entities: {len(entities)}")
+    print(f"  Elaborated hierarchy entries: {len(elaborated)}")
+    print(f"  Warnings: {warnings}")
+    if elaborated:
+        print(f"  Last elaborated entity: {elaborated[-1]}")
+    if errors:
+        print("  Quartus errors:")
+        for error in errors[-8:]:
+            print(f"    {error}")
+    elif not completed:
+        print("  Termination: cause unknown; the log ends without a Quartus error or completion record")
+    print("  Resource utilization and Fmax are unavailable because mapping did not reach report generation.")
+    return True
+
+
+def vivado_synth_report(build_dir: Path) -> bool:
+    utilization = report_lines([build_dir / "utilization.rpt"])
+    timing = report_lines([build_dir / "timing_summary.rpt"])
+    resources = matching_report_rows(
+        utilization,
+        (
+            r"^\|\s*(?:Slice LUTs|LUT as Logic|LUT as Memory|Slice Registers|Block RAM Tile|RAMB\d+|DSPs?)\s*\|",
+        ),
+    )
+    components = matching_report_rows(
+        utilization,
+        (
+            r"^\|\s*Instance\s*\|\s*Module.*(?:LUT|Register|BRAM|DSP)",
+            r"^\|\s*[A-Za-z_][^|]*\|\s*\([^)]+\)\s*\|\s*\d+",
+        ),
+    )
+    clocks = matching_report_rows(
+        timing,
+        (r"WNS\(ns\)", r"^\s*\w+\s+\{[^}]+\}\s+[-\d.]+\s+[-\d.]+", r"Clock Summary", r"Requirement"),
+    )
+    joined_timing = "\n".join(timing)
+    slack_match = re.search(
+        r"WNS\(ns\).*?\n[-+\s]*\n?\s*([-+]?\d+(?:\.\d+)?)\s+[-+]?\d",
+        joined_timing,
+        re.IGNORECASE,
+    )
+    period_match = re.search(r"Requirement:\s*([0-9]+(?:\.[0-9]+)?)ns", joined_timing, re.IGNORECASE)
+    if slack_match and period_match:
+        slack = float(slack_match.group(1))
+        period = float(period_match.group(1))
+        minimum_period = period - slack
+        if minimum_period > 0:
+            clocks.append(f"Estimated maximum clock: {1000.0 / minimum_period:.3f} MHz (period - WNS)")
+    print_report_section("Device utilization", resources)
+    print_report_section("Clock and timing", clocks, 20)
+    print_report_section("Utilization by component", components, 80)
+    return bool(resources or clocks or components)
+
+
+def command_synth_report(args: argparse.Namespace) -> int:
+    manifest = load_manifest()
+    targets = manifest["synthesis_targets"]
+    if args.target:
+        if args.target not in targets:
+            raise BuildError(f"Unknown synthesis target '{args.target}'")
+        target_name = args.target
+    else:
+        candidates = [
+            (path.stat().st_mtime, name)
+            for name in targets
+            if (path := BUILD_ROOT / name).is_dir()
+        ]
+        if not candidates:
+            raise BuildError("No previous synthesis results found")
+        target_name = max(candidates)[1]
+
+    target = targets[target_name]
+    build_dir = BUILD_ROOT / target_name
+    if not build_dir.is_dir():
+        raise BuildError(f"No synthesis results found for target '{target_name}'")
+    metadata = load_synth_metadata(build_dir)
+    print(f"Synthesis report: {target_name}")
+    print(f"  Tool: {target['tool']}")
+    print(f"  Top: {target['top']}")
+    print(f"  Device: {target.get('device', metadata.get('part') if metadata else 'unspecified')}")
+    print(f"  Started: {report_timestamp(build_dir, metadata)}")
+    if metadata:
+        print(f"  Status: {metadata.get('status', 'unknown')}")
+        if "elapsed_seconds" in metadata:
+            print(f"  Total tool time: {metadata['elapsed_seconds']:.2f}s")
+        for stage in metadata.get("stages", []):
+            return_code = f", return code {stage['return_code']}" if "return_code" in stage else ""
+            print(f"    {stage['name']}: {stage['status']} ({stage['elapsed_seconds']:.2f}s{return_code})")
+    else:
+        print("  Status/time: unavailable (run predates synthesis metadata)")
+
+    found = quartus_synth_report(build_dir) if target["tool"] == "quartus" else vivado_synth_report(build_dir)
+    partial = False
+    if not found and target["tool"] == "quartus":
+        partial = quartus_partial_report(build_dir)
+    if not found:
+        if partial:
+            print(f"\n  Build directory: {rel(build_dir)}")
+            return 0
+        print("\nNo synthesis reports or partial logs were found.")
+        print(f"  Build directory: {rel(build_dir)}")
+        return 1
+    return 0
+
+
 def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | None) -> int:
     parallel_processors = host_parallel_processors() if jobs is None else jobs
     if parallel_processors < 1:
@@ -654,6 +925,8 @@ def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | No
     build_dir = BUILD_ROOT / target_name
     clean_dir(build_dir)
     project = write_quartus_project(manifest, target, build_dir, parallel_processors)
+    metadata = begin_synth_metadata(build_dir, target_name, target)
+    metadata["parallel_processors"] = parallel_processors
     project_name = project.name
     parallel_arg = f"--parallel={parallel_processors}"
     map_args = [f"--effort={target['map_effort']}"] if "map_effort" in target else []
@@ -671,6 +944,15 @@ def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | No
         print(f"Running {' '.join(cmd)}...")
         code, output, elapsed = run_command(cmd, build_dir, log, live_log=True)
         ok = code == 0 and not re.search(r"\bError \([0-9]+\):", output)
+        metadata["stages"].append(
+            {
+                "name": cmd[0],
+                "status": "pass" if ok else "fail",
+                "return_code": code,
+                "elapsed_seconds": round(elapsed, 2),
+            }
+        )
+        write_synth_metadata(build_dir, metadata)
         status = "PASS" if ok else "FAIL"
         print(f"[{status}] {cmd[0]} ({elapsed:.2f}s)")
         print(f"  log: {rel(log)}")
@@ -680,6 +962,7 @@ def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | No
         if not ok:
             break
 
+    finish_synth_metadata(build_dir, metadata, failed)
     for line in collect_quartus_summary(build_dir):
         print(f"  {line}")
     return 1 if failed else 0
@@ -706,7 +989,7 @@ def write_vivado_project(manifest: dict, target_name: str, target: dict, part: s
         [
             f"read_xdc {{{quote_tcl_path(xdc)}}}",
             f"synth_design -top {target['top']} -part {{{part}}}",
-            f"report_utilization -file {{{quote_tcl_path(build_dir / 'utilization.rpt')}}}",
+            f"report_utilization -hierarchical -hierarchical_depth 10 -file {{{quote_tcl_path(build_dir / 'utilization.rpt')}}}",
             f"report_timing_summary -file {{{quote_tcl_path(build_dir / 'timing_summary.rpt')}}}",
             f"write_checkpoint -force {{{quote_tcl_path(build_dir / 'post_synth.dcp')}}}",
         ]
@@ -742,11 +1025,22 @@ def synth_vivado(manifest: dict, target_name: str, target: dict, part: str | Non
     require_tool("vivado")
     tcl = write_vivado_project(manifest, target_name, target, part)
     build_dir = tcl.parent
+    metadata = begin_synth_metadata(build_dir, target_name, target)
+    metadata["part"] = part
     log = build_dir / "vivado.log"
     cmd = ["vivado", "-mode", "batch", "-source", str(tcl)]
     print(f"Running Vivado synthesis for part {part}...")
     code, output, elapsed = run_command(cmd, REPO_ROOT, log)
     ok = code == 0 and not re.search(r"\bERROR:", output)
+    metadata["stages"].append(
+        {
+            "name": "vivado",
+            "status": "pass" if ok else "fail",
+            "return_code": code,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    )
+    finish_synth_metadata(build_dir, metadata, not ok)
     status = "PASS" if ok else "FAIL"
     print(f"[{status}] vivado synth ({elapsed:.2f}s)")
     print(f"  log: {rel(log)}")
@@ -802,6 +1096,10 @@ def build_parser() -> argparse.ArgumentParser:
     synth_parser.add_argument("--part", help="Xilinx part for vivado-generic")
     synth_parser.add_argument("--jobs", type=int, help="Quartus parallel processor limit; defaults to detected CPUs")
     synth_parser.set_defaults(func=command_synth)
+
+    report_parser = subparsers.add_parser("synth-report", help="Print results from the previous synthesis run")
+    report_parser.add_argument("--target", help="Synthesis target; defaults to the most recently modified result")
+    report_parser.set_defaults(func=command_synth_report)
 
     return parser
 

@@ -40,6 +40,10 @@ The DE1-SoC synthesis source set uses the same portable RTL path as generic synt
 
 `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
 
+`python tools/fpga_chess.py synth-report` prints the results of the most recently modified synthesis target without running an EDA tool. Pass `--target <name>` to select a specific result. The report includes the target, device, timestamp, total and per-stage tool time, run status, device resource usage and percentages reported by the vendor, clock/timing results, and hierarchical per-component utilization when the vendor generated those reports. A failed or interrupted synthesis is identified and any partial reports remain available; if Quartus stops before generating resource reports, the command instead summarizes its log progress, runtime, parsed/elaborated entity counts, warnings, errors, and termination state while clearly marking utilization and Fmax unavailable.
+
+Each new synthesis run writes `synthesis.json` beside its vendor reports so timestamps, status, and measured stage durations do not depend on vendor-specific log formatting. Quartus hierarchy data is read from its map/fit reports, while the generated Vivado flow requests hierarchical utilization explicitly. Runs created before this metadata was added can still be inspected, but their exact status and duration are reported as unavailable.
+
 ## Adding Tests or Targets
 
 To add a new RTL test, add or reuse a source set, add the testbench file and top module under `tests`, then run `python tools/fpga_chess.py test --name <test-name>`.
