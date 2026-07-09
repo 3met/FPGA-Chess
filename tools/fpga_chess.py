@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -28,12 +29,89 @@ def rel(path: Path) -> str:
 
 
 def load_manifest() -> dict:
-    with MANIFEST_PATH.open(encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with MANIFEST_PATH.open(encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildError(f"Could not load {rel(MANIFEST_PATH)}: {exc}") from exc
+    validate_manifest(manifest)
+    return manifest
 
 
 def repo_path(value: str) -> Path:
     return (REPO_ROOT / value).resolve()
+
+
+def manifest_object(manifest: dict, key: str) -> dict:
+    value = manifest.get(key)
+    if not isinstance(value, dict):
+        raise BuildError(f"Manifest field '{key}' must be an object")
+    return value
+
+
+def require_fields(item: dict, context: str, fields: set[str]) -> None:
+    missing = sorted(fields - item.keys())
+    if missing:
+        raise BuildError(f"{context} is missing field(s): {', '.join(missing)}")
+
+
+def validate_manifest(manifest: object) -> None:
+    if not isinstance(manifest, dict):
+        raise BuildError("Manifest root must be an object")
+    if manifest.get("schema_version") != 1:
+        raise BuildError("Manifest schema_version must be 1")
+
+    source_sets = manifest_object(manifest, "source_sets")
+    tests = manifest_object(manifest, "tests")
+    generated_data = manifest_object(manifest, "generated_data")
+    targets = manifest_object(manifest, "synthesis_targets")
+    simulator = manifest_object(manifest, "simulator")
+    modelsim = simulator.get("modelsim")
+    if not isinstance(modelsim, dict):
+        raise BuildError("Manifest field 'simulator.modelsim' must be an object")
+
+    for name, items in source_sets.items():
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            raise BuildError(f"Source set '{name}' must be a list of paths or @references")
+        expand_source_set(manifest, name)
+
+    for name, test in tests.items():
+        if not isinstance(test, dict):
+            raise BuildError(f"Test '{name}' must be an object")
+        require_fields(test, f"Test '{name}'", {"source_set", "testbench", "top"})
+        if test["source_set"] not in source_sets:
+            raise BuildError(f"Test '{name}' uses unknown source set '{test['source_set']}'")
+        ensure_existing([repo_path(test["testbench"])])
+
+    for name, item in generated_data.items():
+        if not isinstance(item, dict):
+            raise BuildError(f"Generated data '{name}' must be an object")
+        require_fields(item, f"Generated data '{name}'", {"script", "outputs"})
+        if not isinstance(item["outputs"], list) or not item["outputs"]:
+            raise BuildError(f"Generated data '{name}' outputs must be a non-empty list")
+        ensure_existing([repo_path(item["script"])])
+
+    for name, target in targets.items():
+        if not isinstance(target, dict):
+            raise BuildError(f"Synthesis target '{name}' must be an object")
+        require_fields(target, f"Synthesis target '{name}'", {"tool", "top", "source_set"})
+        if target["source_set"] not in source_sets:
+            raise BuildError(f"Synthesis target '{name}' uses unknown source set '{target['source_set']}'")
+        tool_fields = {
+            "quartus": {"family", "device", "sdc", "qsf_template"},
+            "vivado": {"clock_port", "clock_period_ns"},
+        }
+        if target["tool"] not in tool_fields:
+            raise BuildError(f"Synthesis target '{name}' uses unsupported tool '{target['tool']}'")
+        require_fields(target, f"Synthesis target '{name}'", tool_fields[target["tool"]])
+        if target["tool"] == "quartus":
+            ensure_existing(
+                [
+                    repo_path(target["sdc"]),
+                    repo_path(target["qsf_template"]),
+                    *[repo_path(path) for path in target.get("qip_files", [])],
+                ]
+            )
 
 
 def quote_tcl_path(path: Path) -> str:
@@ -115,6 +193,24 @@ def run_command(
     return code, "".join(chunks), elapsed
 
 
+def error_excerpt(output: str, limit: int = 8) -> list[str]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    interesting = [
+        line
+        for line in lines
+        if re.search(r"\b(error|fatal|failed|failure)\b", line, flags=re.IGNORECASE)
+    ]
+    return (interesting or lines)[-limit:]
+
+
+def print_failure_excerpt(output: str) -> None:
+    excerpt = error_excerpt(output)
+    if excerpt:
+        print("  error summary:")
+        for line in excerpt:
+            print(f"    {line}")
+
+
 def restore_outputs(before: dict[Path, bytes | None]) -> None:
     for path, old in before.items():
         if old is None:
@@ -186,6 +282,17 @@ def command_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validate(args: argparse.Namespace) -> int:
+    manifest = load_manifest()
+    print(
+        "Manifest is valid: "
+        f"{len(manifest['source_sets'])} source sets, "
+        f"{len(manifest['tests'])} tests, "
+        f"{len(manifest['synthesis_targets'])} synthesis targets."
+    )
+    return 0
+
+
 def command_gen_data(args: argparse.Namespace) -> int:
     manifest = load_manifest()
     changed: list[str] = []
@@ -228,6 +335,27 @@ def command_gen_data(args: argparse.Namespace) -> int:
     else:
         print("Generated data is up to date.")
     return 0
+
+
+def command_check(args: argparse.Namespace) -> int:
+    if args.jobs is not None and args.jobs < 1:
+        raise BuildError("--jobs must be at least 1")
+    print("== Generated data ==")
+    if command_gen_data(argparse.Namespace(update=False)) != 0:
+        return 1
+
+    print("\n== Python tests ==")
+    cmd = [sys.executable, "-m", "unittest", "discover", "-s", "software", "-p", "test_*.py"]
+    code, output, elapsed = run_command(cmd, REPO_ROOT)
+    if output.strip():
+        print(output.rstrip())
+    print(f"[{'PASS' if code == 0 else 'FAIL'}] Python tests ({elapsed:.2f}s)")
+    if code != 0:
+        print_failure_excerpt(output)
+        return 1
+
+    print("\n== RTL tests ==")
+    return command_test(argparse.Namespace(names=None, jobs=args.jobs))
 
 
 def clean_dir(path: Path) -> None:
@@ -280,8 +408,9 @@ def compile_modelsim(name: str, sources: list[Path], run_dir: Path, sim_config: 
             "name": name,
             "ok": False,
             "elapsed": elapsed,
-            "log": compile_log,
+            "log": run_dir / "vlib.log",
             "message": "vlib failed",
+            "output": output,
         }
 
     cmd = [tools["vlog"], *sim_config.get("vlog_args", ["-sv"]), "-work", str(lib_dir)] + [str(path) for path in sources]
@@ -294,6 +423,7 @@ def compile_modelsim(name: str, sources: list[Path], run_dir: Path, sim_config: 
         "log": compile_log,
         "message": "compiled" if ok else "vlog failed",
         "lib_dir": lib_dir,
+        "output": output,
     }
 
 
@@ -315,15 +445,17 @@ def run_modelsim_top(name: str, top: str, lib_dir: Path, run_dir: Path, sim_conf
     transcript = run_log.read_text(encoding="utf-8", errors="replace") if run_log.exists() else output
     fail_count = parse_fail_count(transcript)
     pass_count = parse_pass_count(transcript)
-    ok = code == 0 and not has_sim_errors(transcript) and (fail_count is None or fail_count == 0)
+    has_completion_counts = pass_count is not None and fail_count is not None
+    ok = code == 0 and not has_sim_errors(transcript) and has_completion_counts and fail_count == 0
     return {
         "name": name,
         "ok": ok,
         "elapsed": elapsed,
         "log": run_log if run_log.exists() else run_dir / "vsim.stdout.log",
-        "message": "passed" if ok else "failed",
+        "message": "passed" if ok else ("missing completion counts" if not has_completion_counts else "failed"),
         "pass_count": pass_count,
         "fail_count": fail_count,
+        "output": transcript,
     }
 
 
@@ -339,43 +471,77 @@ def command_compile(args: argparse.Namespace) -> int:
         status = "PASS" if result["ok"] else "FAIL"
         print(f"[{status}] compile {set_name}: {result['message']} ({result['elapsed']:.2f}s)")
         print(f"  log: {rel(result['log'])}")
+        if not result["ok"]:
+            print_failure_excerpt(result["output"])
         failures += 0 if result["ok"] else 1
 
     return 1 if failures else 0
 
 
+def run_test(manifest: dict, name: str) -> tuple[dict, dict | None]:
+    test = manifest["tests"][name]
+    sources = expand_source_set(manifest, test["source_set"]) + [repo_path(test["testbench"])]
+    run_dir = BUILD_ROOT / "sim" / name
+    compile_result = compile_modelsim(name, sources, run_dir, manifest["simulator"]["modelsim"])
+    if not compile_result["ok"]:
+        return compile_result, None
+    return (
+        compile_result,
+        run_modelsim_top(
+            name,
+            test["top"],
+            compile_result["lib_dir"],
+            run_dir,
+            manifest["simulator"]["modelsim"],
+        ),
+    )
+
+
+def print_test_result(name: str, results: tuple[dict, dict | None]) -> bool:
+    compile_result, run_result = results
+    compile_status = "PASS" if compile_result["ok"] else "FAIL"
+    print(f"[{compile_status}] compile {name}: {compile_result['message']} ({compile_result['elapsed']:.2f}s)")
+    print(f"  compile log: {rel(compile_result['log'])}")
+    if not compile_result["ok"]:
+        print_failure_excerpt(compile_result["output"])
+        return False
+
+    assert run_result is not None
+    run_status = "PASS" if run_result["ok"] else "FAIL"
+    counts = []
+    if run_result["pass_count"] is not None:
+        counts.append(f"pass={run_result['pass_count']}")
+    if run_result["fail_count"] is not None:
+        counts.append(f"fail={run_result['fail_count']}")
+    count_text = f" ({', '.join(counts)})" if counts else ""
+    print(f"[{run_status}] run {name}: {run_result['message']}{count_text} ({run_result['elapsed']:.2f}s)")
+    print(f"  transcript: {rel(run_result['log'])}")
+    if not run_result["ok"]:
+        print_failure_excerpt(run_result["output"])
+    return run_result["ok"]
+
+
 def command_test(args: argparse.Namespace) -> int:
     manifest = load_manifest()
-    sim_config = manifest["simulator"]["modelsim"]
     test_names = args.names or sorted(manifest["tests"])
     unknown = [name for name in test_names if name not in manifest["tests"]]
     if unknown:
         raise BuildError("Unknown test(s): " + ", ".join(unknown))
 
+    jobs = 1 if args.jobs is None else args.jobs
+    if jobs < 1:
+        raise BuildError("--jobs must be at least 1")
+    if jobs == 1:
+        results = {name: run_test(manifest, name) for name in test_names}
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+            futures = {name: executor.submit(run_test, manifest, name) for name in test_names}
+            results = {name: futures[name].result() for name in test_names}
+
     failures = 0
     for name in test_names:
-        test = manifest["tests"][name]
-        sources = expand_source_set(manifest, test["source_set"]) + [repo_path(test["testbench"])]
-        run_dir = BUILD_ROOT / "sim" / name
-        compile_result = compile_modelsim(name, sources, run_dir, sim_config)
-        compile_status = "PASS" if compile_result["ok"] else "FAIL"
-        print(f"[{compile_status}] compile {name}: {compile_result['message']} ({compile_result['elapsed']:.2f}s)")
-        print(f"  compile log: {rel(compile_result['log'])}")
-        if not compile_result["ok"]:
+        if not print_test_result(name, results[name]):
             failures += 1
-            continue
-
-        run_result = run_modelsim_top(name, test["top"], compile_result["lib_dir"], run_dir, sim_config)
-        run_status = "PASS" if run_result["ok"] else "FAIL"
-        counts = []
-        if run_result["pass_count"] is not None:
-            counts.append(f"pass={run_result['pass_count']}")
-        if run_result["fail_count"] is not None:
-            counts.append(f"fail={run_result['fail_count']}")
-        count_text = f" ({', '.join(counts)})" if counts else ""
-        print(f"[{run_status}] run {name}: {run_result['message']}{count_text} ({run_result['elapsed']:.2f}s)")
-        print(f"  transcript: {rel(run_result['log'])}")
-        failures += 0 if run_result["ok"] else 1
 
     return 1 if failures else 0
 
@@ -436,8 +602,9 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
         f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(build_dir)}"',
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
+    assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
-    lines.extend(qsf_assignment_for_source(output) for output in generated_outputs)
+    lines.extend(qsf_assignment_for_source(output) for output in generated_outputs if output not in assigned_sources)
     for qip in target.get("qip_files", []):
         lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(repo_path(qip))}"')
 
@@ -476,14 +643,16 @@ def collect_quartus_summary(build_dir: Path) -> list[str]:
     return summaries
 
 
-def synth_quartus(manifest: dict, target_name: str, target: dict) -> int:
+def synth_quartus(manifest: dict, target_name: str, target: dict, jobs: int | None) -> int:
+    parallel_processors = host_parallel_processors() if jobs is None else jobs
+    if parallel_processors < 1:
+        raise BuildError("--jobs must be at least 1")
     require_tool("quartus_map")
     require_tool("quartus_fit")
     require_tool("quartus_asm")
     require_tool("quartus_sta")
     build_dir = BUILD_ROOT / target_name
     clean_dir(build_dir)
-    parallel_processors = host_parallel_processors()
     project = write_quartus_project(manifest, target, build_dir, parallel_processors)
     project_name = project.name
     parallel_arg = f"--parallel={parallel_processors}"
@@ -505,6 +674,8 @@ def synth_quartus(manifest: dict, target_name: str, target: dict) -> int:
         status = "PASS" if ok else "FAIL"
         print(f"[{status}] {cmd[0]} ({elapsed:.2f}s)")
         print(f"  log: {rel(log)}")
+        if not ok:
+            print_failure_excerpt(output)
         failed = failed or not ok
         if not ok:
             break
@@ -579,6 +750,8 @@ def synth_vivado(manifest: dict, target_name: str, target: dict, part: str | Non
     status = "PASS" if ok else "FAIL"
     print(f"[{status}] vivado synth ({elapsed:.2f}s)")
     print(f"  log: {rel(log)}")
+    if not ok:
+        print_failure_excerpt(output)
     for line in collect_vivado_summary(build_dir):
         print(f"  {line}")
     return 0 if ok else 1
@@ -591,7 +764,7 @@ def command_synth(args: argparse.Namespace) -> int:
         raise BuildError(f"Unknown synthesis target '{args.target}'")
     target = targets[args.target]
     if target["tool"] == "quartus":
-        return synth_quartus(manifest, args.target, target)
+        return synth_quartus(manifest, args.target, target, args.jobs)
     if target["tool"] == "vivado":
         return synth_vivado(manifest, args.target, target, args.part)
     raise BuildError(f"Unsupported synthesis tool '{target['tool']}'")
@@ -604,6 +777,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="List source sets, tests, synthesis targets, and generated data")
     list_parser.set_defaults(func=command_list)
 
+    validate_parser = subparsers.add_parser("validate", help="Validate the build manifest and referenced files")
+    validate_parser.set_defaults(func=command_validate)
+
     gen_parser = subparsers.add_parser("gen-data", help="Regenerate deterministic RTL data files")
     gen_parser.add_argument("--update", action="store_true", help="Keep regenerated outputs when they differ")
     gen_parser.set_defaults(func=command_gen_data)
@@ -614,11 +790,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     test_parser = subparsers.add_parser("test", help="Run SystemVerilog testbenches with ModelSim/Questa")
     test_parser.add_argument("--name", dest="names", action="append", help="Test name to run; defaults to all tests")
+    test_parser.add_argument("--jobs", type=int, help="Number of tests to run concurrently; defaults to 1")
     test_parser.set_defaults(func=command_test)
+
+    check_parser = subparsers.add_parser("check", help="Check generated data and run Python and RTL tests")
+    check_parser.add_argument("--jobs", type=int, help="Number of RTL tests to run concurrently; defaults to 1")
+    check_parser.set_defaults(func=command_check)
 
     synth_parser = subparsers.add_parser("synth", help="Run a synthesis target")
     synth_parser.add_argument("--target", required=True, help="Synthesis target name")
     synth_parser.add_argument("--part", help="Xilinx part for vivado-generic")
+    synth_parser.add_argument("--jobs", type=int, help="Quartus parallel processor limit; defaults to detected CPUs")
     synth_parser.set_defaults(func=command_synth)
 
     return parser

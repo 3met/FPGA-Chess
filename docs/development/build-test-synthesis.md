@@ -18,17 +18,23 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python tools/fpga_chess.py list` prints the known source sets, tests, generated data, and synthesis targets.
 
+`python tools/fpga_chess.py validate` validates the manifest structure, source-set graph, and required input files.
+
 `python tools/fpga_chess.py gen-data` runs the deterministic data generators and fails if tracked outputs would change; without `--update`, changed outputs are restored so the command is safe as a check. The PST and Zobrist generators emit both `.hex` reference data and generated SystemVerilog lookup packages used by the portable RTL.
 
 `python tools/fpga_chess.py gen-data --update` leaves regenerated `.hex` files in place when an intentional data update is being made.
 
 `python tools/fpga_chess.py compile --set portable-rtl` compiles an RTL source set with ModelSim/Questa into a clean simulator library under `work/build/compile/`.
 
-`python tools/fpga_chess.py test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa and reports pass/fail counts when the transcript prints them.
+`python tools/fpga_chess.py test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa. A test passes only when its transcript contains both pass and fail counts, the fail count is zero, and no simulator error or fatal message is present. Use repeated `--name <test>` options to select tests and `--jobs <count>` to run independent tests concurrently.
+
+`python tools/fpga_chess.py check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts the same `--jobs <count>` concurrency control for RTL tests.
 
 `python tools/fpga_chess.py synth --target quartus-de1-soc` generates a Quartus project under `work/build/quartus-de1-soc/`, uses `main` as the current top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis.
 
 Quartus synthesis automatically detects the number of processors available to the current process, records that value in `NUM_PARALLEL_PROCESSORS`, and passes it explicitly to `quartus_map`, `quartus_fit`, and `quartus_sta` with `--parallel=<processors>`.
+
+Pass `--jobs <count>` to override the detected Quartus processor count when CPU or memory use must be capped.
 
 The generated Quartus project adds the repo root and target build directory as `SEARCH_PATH` entries and includes generated data outputs as project files so memory/table assets are visible to Quartus from the build directory.
 

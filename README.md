@@ -19,17 +19,21 @@ FPGA Chess is an experimental chess engine project targeting FPGA hardware. The 
 
 Use `python tools/fpga_chess.py list` to show known source sets, SystemVerilog tests, generated data, and synthesis targets.
 
+Use `python tools/fpga_chess.py validate` to validate the manifest, its source-set references, and required input files.
+
 Use `python tools/fpga_chess.py gen-data` to verify deterministic generated data is current; use `--update` only when intentionally accepting regenerated `.hex` output.
 
 Use `python tools/fpga_chess.py compile --set portable-rtl` for a fast ModelSim/Questa compile-order check.
 
-Use `python tools/fpga_chess.py test` to compile and run the current SystemVerilog testbenches.
+Use `python tools/fpga_chess.py test` to compile and run the current SystemVerilog testbenches. Pass `--name <test>` more than once to select tests or `--jobs <count>` to run independent tests concurrently.
 
-Use `python tools/fpga_chess.py synth --target quartus-de1-soc` for the current Quartus DE1-SoC synthesis smoke path, and `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` for generic Vivado synthesis.
+Use `python tools/fpga_chess.py check` for the usual comprehensive check: generated data, host-side Python unit tests, and all RTL tests. It also accepts `--jobs <count>` for the RTL tests.
+
+Use `python tools/fpga_chess.py synth --target quartus-de1-soc` for the current Quartus DE1-SoC synthesis smoke path, and `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` for generic Vivado synthesis. Pass `--jobs <count>` to cap Quartus parallel processor use.
 
 The CLI is pure Python standard library and writes generated projects, simulator libraries, transcripts, and reports under ignored `work/build/`.
 
-Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, and `vsim` for `compile` and `test`; Quartus provides `quartus_map`, `quartus_fit`, and `quartus_sta` for `quartus-de1-soc`; Vivado provides `vivado` for `vivado-generic`.
+Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, and `vsim` for `compile`, `test`, and `check`; Quartus provides `quartus_map`, `quartus_fit`, `quartus_asm`, and `quartus_sta` for `quartus-de1-soc`; Vivado provides `vivado` for `vivado-generic`.
 
 ## Host UCI Engine
 
