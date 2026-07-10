@@ -34,6 +34,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     localparam int MASK_ADDR_BITS = $clog2(MASK_ENTRY_COUNT);
 
     typedef logic [MASK_ADDR_BITS-1:0] MoveMaskAddr;
+    typedef logic [2:0] RayDistance;
 
     Move candidate_move_pipe[MOVE_GEN_STAGE_CNT];
     logic candidate_move_legal_pipe[MOVE_GEN_STAGE_CNT];
@@ -100,6 +101,23 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
         return tile;
     endfunction : normalize_tile
+
+    function automatic int ray_max_distance(input Position pos, input Direction dir);
+        automatic int rank = int'(getRank(pos));
+        automatic int file = int'(getFile(pos));
+
+        case (dir)
+            NORTH:      return 7 - rank;
+            NORTH_EAST: return ((7 - rank) < (7 - file)) ? (7 - rank) : (7 - file);
+            EAST:       return 7 - file;
+            SOUTH_EAST: return (rank < (7 - file)) ? rank : (7 - file);
+            SOUTH:      return rank;
+            SOUTH_WEST: return (rank < file) ? rank : file;
+            WEST:       return file;
+            NORTH_WEST: return ((7 - rank) < file) ? (7 - rank) : file;
+            default:    return 0;
+        endcase
+    endfunction : ray_max_distance
 
     function automatic logic tile_is_empty(input Tile board[64], input Position pos);
         automatic Tile tile;
@@ -1090,13 +1108,18 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             castle_perms_pipe[0] <= castle_perms;
             has_ep_pipe[0] <= has_ep;
             ep_file_pipe[0] <= ep_file;
+            for (int pos=0; pos<64; pos++) board_pipe[0][pos] <= board_tiles[pos];
+
+            // Start each ray only early enough to inspect its geometrically reachable squares by stage 6.
             for (int pos=0; pos<64; pos++) begin
-                board_pipe[0][pos] <= board_tiles[pos];
                 for (int dir_idx=0; dir_idx<8; dir_idx++) begin
                     automatic Direction dir = Direction'(dir_idx);
-                    if (isShiftOnBoard(Position'(pos), dir, 3'd1)) begin
-                        automatic Position adj_pos = shiftPos(Position'(pos), dir, 3'd1);
-                        ray_pipe[0][pos][dir_idx].tile <= normalize_tile(board_tiles[adj_pos]);
+                    automatic int max_distance = ray_max_distance(Position'(pos), dir);
+                    automatic int start_stage = PROP_STAGE_CNT - max_distance;
+
+                    if (start_stage == 0) begin
+                        automatic Position scan_pos = shiftPos(Position'(pos), dir, 3'd1);
+                        ray_pipe[0][pos][dir_idx].tile <= normalize_tile(board_tiles[scan_pos]);
                         ray_pipe[0][pos][dir_idx].distance <= 3'd1;
                     end else ray_pipe[0][pos][dir_idx] <= NULL_RAY;
                 end
@@ -1106,14 +1129,24 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 for (int pos=0; pos<64; pos++) begin
                     for (int dir_idx=0; dir_idx<8; dir_idx++) begin
                         automatic Direction dir = Direction'(dir_idx);
-                        if (ray_pipe[stage-1][pos][dir_idx].tile.piece_type != NULL_PIECE)
+                        automatic int max_distance = ray_max_distance(Position'(pos), dir);
+                        automatic int start_stage = PROP_STAGE_CNT - max_distance;
+
+                        if (stage < start_stage) begin
+                            ray_pipe[stage][pos][dir_idx] <= NULL_RAY;
+                        end else if (stage == start_stage) begin
+                            automatic Position scan_pos = shiftPos(Position'(pos), dir, 3'd1);
+                            ray_pipe[stage][pos][dir_idx].tile <= normalize_tile(board_pipe[stage-1][scan_pos]);
+                            ray_pipe[stage][pos][dir_idx].distance <= 3'd1;
+                        end else if (ray_pipe[stage-1][pos][dir_idx].tile.piece_type != NULL_PIECE) begin
                             ray_pipe[stage][pos][dir_idx] <= ray_pipe[stage-1][pos][dir_idx];
-                        else if (isShiftOnBoard(Position'(pos), dir, 3'd1)) begin
-                            automatic Position adj_pos = shiftPos(Position'(pos), dir, 3'd1);
-                            ray_pipe[stage][pos][dir_idx] <= ray_pipe[stage-1][adj_pos][dir_idx];
-                            if (ray_pipe[stage-1][adj_pos][dir_idx].tile.piece_type != NULL_PIECE)
-                                ray_pipe[stage][pos][dir_idx].distance <= ray_pipe[stage-1][adj_pos][dir_idx].distance + 3'd1;
-                        end else ray_pipe[stage][pos][dir_idx] <= NULL_RAY;
+                        end else begin
+                            automatic int scan_distance = stage - start_stage + 1;
+                            automatic Position scan_pos = shiftPos(
+                                Position'(pos), dir, RayDistance'(scan_distance));
+                            ray_pipe[stage][pos][dir_idx].tile <= normalize_tile(board_pipe[stage-1][scan_pos]);
+                            ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_distance);
+                        end
                     end
                 end
             end

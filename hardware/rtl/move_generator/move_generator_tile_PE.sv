@@ -26,20 +26,15 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     localparam BoardRank DEST_RANK = BoardRank'(POS / 8);
     localparam BoardFile DEST_FILE = BoardFile'(POS % 8);
 
-    function automatic Tile clean_tile(input Tile tile);
-        if (tile.piece_type == NULL_PIECE) return EMPTY_TILE;
-        return tile;
-    endfunction
-
     function automatic Position ray_source(input Direction dir, input logic [2:0] distance);
         return shiftPos(DEST_POS, dir, distance);
     endfunction
 
     function automatic logic is_ep_candidate(input Tile source, input Move move);
         if (!has_ep || source.piece_type != PAWN || tile_data.piece_type != NULL_PIECE) return 1'b0;
-        if (getFile(move.to_pos) != ep_file) return 1'b0;
-        if (turn == WHITE) return getRank(move.from_pos) == 3'd4 && getRank(move.to_pos) == 3'd5;
-        return getRank(move.from_pos) == 3'd3 && getRank(move.to_pos) == 3'd2;
+        if (DEST_FILE != ep_file) return 1'b0;
+        if (turn == WHITE) return getRank(move.from_pos) == 3'd4 && DEST_RANK == 3'd5;
+        return getRank(move.from_pos) == 3'd3 && DEST_RANK == 3'd2;
     endfunction
 
     function automatic logic ray_can_move(
@@ -52,12 +47,12 @@ module move_generator_tile_PE #(parameter int POS = 0) (
             PAWN: begin
                 if (turn == WHITE) begin
                     if (dir == SOUTH && tile_data.piece_type == NULL_PIECE)
-                        return distance == 1 || (distance == 2 && getRank(ray_source(dir, distance)) == 1);
+                        return distance == 1 || (distance == 2 && DEST_RANK == 3);
                     return distance == 1 && (dir == SOUTH_WEST || dir == SOUTH_EAST)
                         && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == BLACK) || ep_move);
                 end
                 if (dir == NORTH && tile_data.piece_type == NULL_PIECE)
-                    return distance == 1 || (distance == 2 && getRank(ray_source(dir, distance)) == 6);
+                    return distance == 1 || (distance == 2 && DEST_RANK == 4);
                 return distance == 1 && (dir == NORTH_WEST || dir == NORTH_EAST)
                     && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == WHITE) || ep_move);
             end
@@ -70,7 +65,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     endfunction
 
     function automatic MoveScore exchange_score(
-        input Tile source,
+        input PieceType source_piece,
         input logic [2:0] attacker_count,
         input logic [2:0] defender_count,
         input PieceType weakest_defender
@@ -79,33 +74,31 @@ module move_generator_tile_PE #(parameter int POS = 0) (
 
         score = 7'sd32;
         if (tile_data.piece_type != NULL_PIECE) begin
-            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source.piece_type]) score += 7'sd8;
-            else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[source.piece_type]
+            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source_piece]) score += 7'sd8;
+            else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[source_piece]
                 && attacker_count > defender_count) score += 7'sd4;
             else if (attacker_count > defender_count) begin
                 if (defender_count == 0) score += 7'sd3;
                 else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type]
-                    < PIECE_VALS_1[source.piece_type]) score -= 7'sd2;
+                    < PIECE_VALS_1[source_piece]) score -= 7'sd2;
             end else score -= 7'sd6;
         end
 
         // Preserve the old preference for the weakest usable attacker.
-        score += 7'sd7 - $signed({1'b0, source.piece_type});
+        score += 7'sd7 - $signed({1'b0, source_piece});
         if (score < 1) return MoveScore'(1);
         return MoveScore'(score);
     endfunction
 
     task automatic consider(
         input Move move,
-        input Tile source,
         input logic is_ep,
         input logic is_promotion,
         input PromoType promo,
         input logic consumed,
         input MoveMaskIndex index,
-        input logic [2:0] attacker_count,
-        input logic [2:0] defender_count,
-        input PieceType weakest_defender,
+        input MoveScore base_score,
+        input logic target_destination,
         inout CandidateProposal best
     );
         automatic Move candidate;
@@ -120,11 +113,10 @@ module move_generator_tile_PE #(parameter int POS = 0) (
             || (tile_data.piece_type != NULL_PIECE && tile_data.piece_color != turn);
         if (move_gen_op == MOVE_GEN_QSEARCH_OP && !tactical) return;
 
-        score = exchange_score(source, attacker_count, defender_count, weakest_defender);
+        score = base_score;
         if (is_promotion) score = MoveScore'(8'd220 + (3 - int'(promo)));
-        if (move_gen_op == MOVE_GEN_TARGETED_OP
+        if (target_destination
             && candidate.from_pos == target_move.from_pos
-            && candidate.to_pos == target_move.to_pos
             && (!is_promotion || candidate.promo_piece == target_move.promo_piece))
             score = MoveScore'(8'hff);
 
@@ -141,10 +133,11 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         automatic logic [2:0] attacker_count;
         automatic logic [2:0] defender_count;
         automatic PieceType weakest_defender;
+        automatic MoveScore piece_score[7];
         automatic Move move;
         automatic Tile source;
         automatic logic ep_move;
-        automatic logic promotion;
+        automatic logic target_destination;
         automatic logic control_sensitivity;
 
         best = NULL_PROPOSAL;
@@ -161,60 +154,77 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         weakest_defender = KING;
 
         for (int dir_idx=0; dir_idx<8; dir_idx++) begin
-            source = clean_tile(ray_in[dir_idx].tile);
-            if (source.piece_type != NULL_PIECE) begin
-                if (source.piece_color == turn) attacker_count++;
-                else begin
-                    defender_count++;
-                    if (source.piece_type < weakest_defender) weakest_defender = source.piece_type;
+            if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
+                source = ray_in[dir_idx].tile;
+                if (source.piece_type != NULL_PIECE) begin
+                    if (source.piece_color == turn) attacker_count++;
+                    else begin
+                        defender_count++;
+                        if (source.piece_type < weakest_defender) weakest_defender = source.piece_type;
+                    end
                 end
             end
-            source = clean_tile(knight_tile_in[dir_idx]);
-            if (source.piece_type == KNIGHT) begin
-                if (source.piece_color == turn) attacker_count++;
-                else begin
-                    defender_count++;
-                    if (KNIGHT < weakest_defender) weakest_defender = KNIGHT;
+            if (isKnightShiftOnBoard(DEST_POS, KnightDirection'(dir_idx))) begin
+                source = knight_tile_in[dir_idx];
+                if (source.piece_type == KNIGHT) begin
+                    if (source.piece_color == turn) attacker_count++;
+                    else begin
+                        defender_count++;
+                        if (KNIGHT < weakest_defender) weakest_defender = KNIGHT;
+                    end
                 end
             end
         end
 
+        // Exchange context is destination-local, so compute it once per source piece class.
+        piece_score[NULL_PIECE] = MoveScore'(0);
+        piece_score[PAWN] = exchange_score(PAWN, attacker_count, defender_count, weakest_defender);
+        piece_score[KNIGHT] = exchange_score(KNIGHT, attacker_count, defender_count, weakest_defender);
+        piece_score[BISHOP] = exchange_score(BISHOP, attacker_count, defender_count, weakest_defender);
+        piece_score[ROOK] = exchange_score(ROOK, attacker_count, defender_count, weakest_defender);
+        piece_score[QUEEN] = exchange_score(QUEEN, attacker_count, defender_count, weakest_defender);
+        piece_score[KING] = exchange_score(KING, attacker_count, defender_count, weakest_defender);
+        target_destination = move_gen_op == MOVE_GEN_TARGETED_OP && target_move.to_pos == DEST_POS;
+
         if (move_gen_op != MOVE_GEN_IDLE_OP
             && !(tile_data.piece_type != NULL_PIECE && tile_data.piece_color == turn)) begin
             for (int dir_idx=0; dir_idx<8; dir_idx++) begin
-                source = clean_tile(ray_in[dir_idx].tile);
-                move.from_pos = ray_source(Direction'(dir_idx), ray_in[dir_idx].distance);
-                move.to_pos = DEST_POS;
-                move.promo_piece = PROMO_QUEEN;
-                ep_move = is_ep_candidate(source, move);
-                if (source.piece_type != NULL_PIECE && source.piece_color == turn
-                    && ray_can_move(source, Direction'(dir_idx), ray_in[dir_idx].distance, ep_move)) begin
-                    promotion = source.piece_type == PAWN && (DEST_RANK == 0 || DEST_RANK == 7);
-                    if (promotion) begin
-                        for (int promo_idx=0; promo_idx<4; promo_idx++)
-                            consider(move, source, ep_move, 1'b1, PromoType'(promo_idx),
-                                promotion_consumed[dir_idx][promo_idx],
-                                promotion_mask_index[dir_idx][promo_idx],
-                                attacker_count, defender_count, weakest_defender, best);
-                    end else begin
-                        consider(move, source, ep_move, 1'b0, PROMO_QUEEN,
-                            ray_consumed[dir_idx],
-                            ray_mask_index[dir_idx],
-                            attacker_count, defender_count, weakest_defender, best);
+                if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
+                    source = ray_in[dir_idx].tile;
+                    move.from_pos = ray_source(Direction'(dir_idx), ray_in[dir_idx].distance);
+                    move.to_pos = DEST_POS;
+                    move.promo_piece = PROMO_QUEEN;
+                    ep_move = is_ep_candidate(source, move);
+                    if (source.piece_type != NULL_PIECE && source.piece_color == turn
+                        && ray_can_move(source, Direction'(dir_idx), ray_in[dir_idx].distance, ep_move)) begin
+                        if (source.piece_type == PAWN && (DEST_RANK == 0 || DEST_RANK == 7)) begin
+                            for (int promo_idx=0; promo_idx<4; promo_idx++)
+                                consider(move, ep_move, 1'b1, PromoType'(promo_idx),
+                                    promotion_consumed[dir_idx][promo_idx],
+                                    promotion_mask_index[dir_idx][promo_idx],
+                                    MoveScore'(0), target_destination, best);
+                        end else begin
+                            consider(move, ep_move, 1'b0, PROMO_QUEEN,
+                                ray_consumed[dir_idx],
+                                ray_mask_index[dir_idx],
+                                piece_score[source.piece_type], target_destination, best);
+                        end
                     end
                 end
             end
 
             for (int knight_dir=0; knight_dir<8; knight_dir++) begin
-                source = clean_tile(knight_tile_in[knight_dir]);
-                if (source == Tile'({turn, KNIGHT})) begin
-                    move.from_pos = shiftKnightPos(DEST_POS, KnightDirection'(knight_dir));
-                    move.to_pos = DEST_POS;
-                    move.promo_piece = PROMO_QUEEN;
-                    consider(move, source, 1'b0, 1'b0, PROMO_QUEEN,
-                        knight_consumed[knight_dir],
-                        knight_mask_index[knight_dir],
-                        attacker_count, defender_count, weakest_defender, best);
+                if (isKnightShiftOnBoard(DEST_POS, KnightDirection'(knight_dir))) begin
+                    source = knight_tile_in[knight_dir];
+                    if (source.piece_type == KNIGHT && source.piece_color == turn) begin
+                        move.from_pos = shiftKnightPos(DEST_POS, KnightDirection'(knight_dir));
+                        move.to_pos = DEST_POS;
+                        move.promo_piece = PROMO_QUEEN;
+                        consider(move, 1'b0, 1'b0, PROMO_QUEEN,
+                            knight_consumed[knight_dir],
+                            knight_mask_index[knight_dir],
+                            piece_score[KNIGHT], target_destination, best);
+                    end
                 end
             end
         end
