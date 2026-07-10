@@ -58,13 +58,15 @@ package move_generator_defs;
         logic valid;
         Move move;
         MoveScore score;
+        logic king_safe;
     } CandidateProposal;
 
     localparam RayRecord NULL_RAY = RayRecord'({EMPTY_TILE, 3'd0});
     localparam CandidateProposal NULL_PROPOSAL = CandidateProposal'({
         1'b0,
         Move'('x),
-        MoveScore'('x)
+        MoveScore'('x),
+        1'bx
     });
 
 endpackage : move_generator_defs

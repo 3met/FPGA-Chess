@@ -7,6 +7,7 @@ import move_generator_defs::*;
 module move_generator_tile_PE #(parameter int POS = 0) (
     input Tile tile_data,
     input RayRecord ray_in[8],
+    input RayRecord king_vacated_ray_in[8],
     input Tile knight_tile_in[8],
     input Color turn,
     input MoveGenOp move_gen_op,
@@ -16,7 +17,9 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     input logic ray_consumed[8],
     input logic knight_consumed[8],
     input logic promotion_consumed[8][4],
-    output CandidateProposal proposal
+    output CandidateProposal proposal,
+    output logic enemy_attacked,
+    output logic king_move_attacked
 );
 
     localparam Position DEST_POS = Position'(POS);
@@ -65,6 +68,35 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         endcase
     endfunction
 
+    // Test whether a nearest ray source attacks this destination.
+    function automatic logic ray_source_attacks(input Tile source, input Direction dir, input logic [2:0] distance);
+        if (source.piece_type == SPARE_PIECE) return 1'bx;
+        if (source.piece_type == NULL_PIECE || source.piece_color == turn) return 1'b0;
+
+        case (source.piece_type)
+            PAWN: begin
+                if (source.piece_color == WHITE)
+                    return distance == 1 && (dir == SOUTH_WEST || dir == SOUTH_EAST);
+                return distance == 1 && (dir == NORTH_WEST || dir == NORTH_EAST);
+            end
+            KNIGHT: return 1'b0;
+            BISHOP: return isDirDiag(dir);
+            ROOK: return isDirCardinal(dir);
+            QUEEN: return 1'b1;
+            KING: return distance == 1;
+            default: return 1'bx;
+        endcase
+    endfunction
+
+    function automatic logic ray_slider_attacks(input Tile source, input Direction dir);
+        if (source.piece_type == SPARE_PIECE) return 1'bx;
+        return source.piece_type != NULL_PIECE
+            && source.piece_color != turn
+            && (source.piece_type == QUEEN
+                || (source.piece_type == ROOK && isDirCardinal(dir))
+                || (source.piece_type == BISHOP && isDirDiag(dir)));
+    endfunction
+
     function automatic MoveScore exchange_score(
         input PieceType source_piece,
         input logic [2:0] attacker_count,
@@ -101,6 +133,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         input logic consumed,
         input MoveScore base_score,
         input logic target_destination,
+        input logic candidate_king_safe,
         inout CandidateProposal best
     );
         automatic Move candidate;
@@ -126,6 +159,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
             best.valid = 1'b1;
             best.move = candidate;
             best.score = score;
+            best.king_safe = candidate_king_safe;
         end
     endtask
 
@@ -153,10 +187,22 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         attacker_count = 0;
         defender_count = 0;
         weakest_defender = KING;
+        enemy_attacked = 1'b0;
+        king_move_attacked = 1'b0;
 
         for (int dir_idx=0; dir_idx<8; dir_idx++) begin
             if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
                 source = ray_in[dir_idx].tile;
+                if (ray_source_attacks(source, Direction'(dir_idx), ray_in[dir_idx].distance)) begin
+                    enemy_attacked = 1'b1;
+                    king_move_attacked = 1'b1;
+                end
+                if (source == Tile'({turn, KING}) && ray_in[dir_idx].distance == 3'd1
+                    && ray_slider_attacks(
+                        king_vacated_ray_in[dir_idx].tile,
+                        Direction'(dir_idx))) begin
+                    king_move_attacked = 1'b1;
+                end
                 if (source.piece_type != NULL_PIECE) begin
                     if (source.piece_color == turn) attacker_count++;
                     else begin
@@ -168,6 +214,10 @@ module move_generator_tile_PE #(parameter int POS = 0) (
             if (isKnightShiftOnBoard(DEST_POS, KnightDirection'(dir_idx))) begin
                 source = knight_tile_in[dir_idx];
                 if (source.piece_type == KNIGHT) begin
+                    if (source.piece_color != turn) begin
+                        enemy_attacked = 1'b1;
+                        king_move_attacked = 1'b1;
+                    end
                     if (source.piece_color == turn) attacker_count++;
                     else begin
                         defender_count++;
@@ -202,11 +252,12 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                             for (int promo_idx=0; promo_idx<4; promo_idx++)
                                 consider(move, ep_move, 1'b1, PromoType'(promo_idx),
                                     promotion_consumed[dir_idx][promo_idx],
-                                    MoveScore'(0), target_destination, best);
+                                    MoveScore'(0), target_destination, 1'bx, best);
                         end else begin
                             consider(move, ep_move, 1'b0, PROMO_QUEEN,
                                 ray_consumed[dir_idx],
-                                piece_score[source.piece_type], target_destination, best);
+                                piece_score[source.piece_type], target_destination,
+                                (source.piece_type == KING) ? !king_move_attacked : 1'bx, best);
                         end
                     end
                 end
@@ -221,7 +272,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                         move.promo_piece = PROMO_QUEEN;
                         consider(move, 1'b0, 1'b0, PROMO_QUEEN,
                             knight_consumed[knight_dir],
-                            piece_score[KNIGHT], target_destination, best);
+                            piece_score[KNIGHT], target_destination, 1'bx, best);
                     end
                 end
             end

@@ -76,6 +76,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     BoardFile ep_file_pipe[MOVE_GEN_STAGE_CNT];
     Tile board_pipe[MOVE_GEN_STAGE_CNT][64];
     RayRecord ray_pipe[PROP_STAGE_CNT][64][8];
+    RayRecord king_vacated_ray[64][8];
     Tile knight_tile[64][8];
     logic ray_consumed[64][8];
     logic knight_consumed[64][8];
@@ -88,6 +89,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     CandidateProposal castle_proposal_pipe;
     CandidateProposal reduced_proposal;
     logic reduced_proposal_legal;
+    logic tile_enemy_attacked[64];
+    logic tile_king_move_attacked[64];
 
     function automatic Tile normalize_tile(input Tile tile);
         if (tile.piece_type == NULL_PIECE) begin
@@ -206,28 +209,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         end
     endfunction : move_dir
 
-    function automatic logic path_clear(input Tile board[64], input Position from_pos, input Position to_pos);
-        automatic Direction dir;
-        automatic Position pos;
-
-        if (!(is_cardinal_move(from_pos, to_pos) || is_diagonal_move(from_pos, to_pos))) begin
-            return 1'b0;
-        end
-
-        dir = move_dir(from_pos, to_pos);
-        for (int distance=1; distance<8; distance++) begin
-            pos = shiftPos(from_pos, dir, dist_to_shift(distance));
-            if (pos == to_pos) begin
-                return 1'b1;
-            end
-
-            if (!tile_is_empty(board, pos)) begin
-                return 1'b0;
-            end
-        end
-
-        return 1'b0;
-    endfunction : path_clear
 
     function automatic Position find_king(input Tile board[64], input Color king_color);
         automatic Tile tile;
@@ -407,6 +388,42 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 || (moving_color == BLACK && move.from_pos == Position'('d60) && (move.to_pos == Position'('d58) || move.to_pos == Position'('d62)))));
     endfunction : is_castle_move
 
+    // Castling candidates need only fixed-square permission and occupancy checks.
+    function automatic logic castle_is_pseudo_legal(
+        input Tile board[64],
+        input Position king_to,
+        input Color moving_color,
+        input CastlePerms curr_castle_perms
+    );
+        if (moving_color == WHITE) begin
+            if (king_to == Position'('d6)) begin
+                return castle_perm(curr_castle_perms, 3)
+                    && tile_is_empty(board, Position'('d5))
+                    && tile_is_empty(board, Position'('d6))
+                    && normalize_tile(board[Position'('d7)]) == WHITE_ROOK;
+            end
+
+            return castle_perm(curr_castle_perms, 2)
+                && tile_is_empty(board, Position'('d1))
+                && tile_is_empty(board, Position'('d2))
+                && tile_is_empty(board, Position'('d3))
+                && normalize_tile(board[Position'('d0)]) == WHITE_ROOK;
+        end
+
+        if (king_to == Position'('d62)) begin
+            return castle_perm(curr_castle_perms, 1)
+                && tile_is_empty(board, Position'('d61))
+                && tile_is_empty(board, Position'('d62))
+                && normalize_tile(board[Position'('d63)]) == BLACK_ROOK;
+        end
+
+        return castle_perm(curr_castle_perms, 0)
+            && tile_is_empty(board, Position'('d57))
+            && tile_is_empty(board, Position'('d58))
+            && tile_is_empty(board, Position'('d59))
+            && normalize_tile(board[Position'('d56)]) == BLACK_ROOK;
+    endfunction : castle_is_pseudo_legal
+
     function automatic logic is_ep_move(input Tile board[64], input Move move, input Color moving_color, input logic ep_valid, input BoardFile ep_target_file);
         automatic Tile start_tile;
         automatic Tile end_tile;
@@ -560,111 +577,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         return 1'b0;
     endfunction : square_attacked_after_move
 
-    function automatic logic is_pseudo_legal_move(
-        input Tile board[64],
-        input Move move,
-        input Color moving_color,
-        input CastlePerms curr_castle_perms,
-        input logic ep_valid,
-        input BoardFile ep_target_file
-    );
-        automatic Tile start_tile;
-        automatic Tile end_tile;
-        automatic int rank_delta;
-        automatic int file_delta;
-        automatic Position between_pos;
-
-        if (isNullMove(move)) begin
-            return 1'b0;
-        end
-
-        start_tile = normalize_tile(board[move.from_pos]);
-        end_tile = normalize_tile(board[move.to_pos]);
-        rank_delta = int'(getRank(move.to_pos)) - int'(getRank(move.from_pos));
-        file_delta = int'(getFile(move.to_pos)) - int'(getFile(move.from_pos));
-
-        if (start_tile.piece_type == NULL_PIECE || start_tile.piece_color != moving_color) begin
-            return 1'b0;
-        end
-
-        if (end_tile.piece_type != NULL_PIECE && end_tile.piece_color == moving_color) begin
-            return 1'b0;
-        end
-
-        case (start_tile.piece_type)
-            PAWN: begin
-                if (moving_color == WHITE) begin
-                    if (file_delta == 0 && rank_delta == 1 && end_tile.piece_type == NULL_PIECE) return 1'b1;
-                    if (file_delta == 0 && rank_delta == 2 && getRank(move.from_pos) == BoardRank'('d1) && end_tile.piece_type == NULL_PIECE) begin
-                        between_pos = getPosition(BoardRank'(getRank(move.from_pos) + 3'd1), getFile(move.from_pos));
-                        return tile_is_empty(board, between_pos);
-                    end
-                    if ((file_delta == 1 || file_delta == -1) && rank_delta == 1) begin
-                        return ((end_tile.piece_type != NULL_PIECE && end_tile.piece_color == BLACK) || is_ep_move(board, move, moving_color, ep_valid, ep_target_file));
-                    end
-                end else begin
-                    if (file_delta == 0 && rank_delta == -1 && end_tile.piece_type == NULL_PIECE) return 1'b1;
-                    if (file_delta == 0 && rank_delta == -2 && getRank(move.from_pos) == BoardRank'('d6) && end_tile.piece_type == NULL_PIECE) begin
-                        between_pos = getPosition(BoardRank'(getRank(move.from_pos) - 3'd1), getFile(move.from_pos));
-                        return tile_is_empty(board, between_pos);
-                    end
-                    if ((file_delta == 1 || file_delta == -1) && rank_delta == -1) begin
-                        return ((end_tile.piece_type != NULL_PIECE && end_tile.piece_color == WHITE) || is_ep_move(board, move, moving_color, ep_valid, ep_target_file));
-                    end
-                end
-                return 1'b0;
-            end
-
-            KNIGHT: begin
-                if (rank_delta < 0) rank_delta = -rank_delta;
-                if (file_delta < 0) file_delta = -file_delta;
-                return ((rank_delta == 2 && file_delta == 1) || (rank_delta == 1 && file_delta == 2));
-            end
-
-            BISHOP: return (is_diagonal_move(move.from_pos, move.to_pos) && path_clear(board, move.from_pos, move.to_pos));
-            ROOK:   return (is_cardinal_move(move.from_pos, move.to_pos) && path_clear(board, move.from_pos, move.to_pos));
-            QUEEN:  return ((is_cardinal_move(move.from_pos, move.to_pos) || is_diagonal_move(move.from_pos, move.to_pos)) && path_clear(board, move.from_pos, move.to_pos));
-
-            KING: begin
-                if (rank_delta < 0) rank_delta = -rank_delta;
-                if (file_delta < 0) file_delta = -file_delta;
-                if (rank_delta <= 1 && file_delta <= 1 && (rank_delta != 0 || file_delta != 0)) return 1'b1;
-
-                if (is_castle_move(board, move, moving_color)) begin
-                    if (moving_color == WHITE && move.to_pos == Position'('d6)) begin
-                        return (castle_perm(curr_castle_perms, 3)
-                            && tile_is_empty(board, Position'('d5))
-                            && tile_is_empty(board, Position'('d6))
-                            && normalize_tile(board[Position'('d7)]) == WHITE_ROOK);
-                    end
-                    if (moving_color == WHITE && move.to_pos == Position'('d2)) begin
-                        return (castle_perm(curr_castle_perms, 2)
-                            && tile_is_empty(board, Position'('d1))
-                            && tile_is_empty(board, Position'('d2))
-                            && tile_is_empty(board, Position'('d3))
-                            && normalize_tile(board[Position'('d0)]) == WHITE_ROOK);
-                    end
-                    if (moving_color == BLACK && move.to_pos == Position'('d62)) begin
-                        return (castle_perm(curr_castle_perms, 1)
-                            && tile_is_empty(board, Position'('d61))
-                            && tile_is_empty(board, Position'('d62))
-                            && normalize_tile(board[Position'('d63)]) == BLACK_ROOK);
-                    end
-                    if (moving_color == BLACK && move.to_pos == Position'('d58)) begin
-                        return (castle_perm(curr_castle_perms, 0)
-                            && tile_is_empty(board, Position'('d57))
-                            && tile_is_empty(board, Position'('d58))
-                            && tile_is_empty(board, Position'('d59))
-                            && normalize_tile(board[Position'('d56)]) == BLACK_ROOK);
-                    end
-                end
-
-                return 1'b0;
-            end
-
-            default: return 1'b0;
-        endcase
-    endfunction : is_pseudo_legal_move
 
     function automatic Position king_pos_after_move(
         input Tile board[64],
@@ -709,7 +621,9 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         ep_move = is_ep_move(board, move, moving_color, ep_valid, ep_target_file);
         castle_move = is_castle_move(board, move, moving_color);
 
-        if (!is_pseudo_legal_move(board, move, moving_color, curr_castle_perms, ep_valid, ep_target_file)) begin
+        // The PE array already guarantees ordinary pseudo-legality.
+        if (castle_move
+            && !castle_is_pseudo_legal(board, move.to_pos, moving_color, curr_castle_perms)) begin
             return 1'b0;
         end
 
@@ -738,6 +652,23 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         own_king_pos = find_king(board, moving_color);
         return !square_attacked_after_move(board, own_king_pos, enemy_color, move, moving_color, ep_move, 1'b0);
     endfunction : is_strictly_legal_move
+
+    // Ordinary proposals are pseudo-legal, so only the resulting king square is tested.
+    function automatic logic nonking_move_is_legal(
+        input Tile board[64],
+        input Move move,
+        input Color moving_color,
+        input logic ep_valid,
+        input BoardFile ep_target_file
+    );
+        automatic logic ep_move;
+        automatic Position own_king_pos;
+
+        ep_move = is_ep_move(board, move, moving_color, ep_valid, ep_target_file);
+        own_king_pos = find_king(board, moving_color);
+        return !square_attacked_after_move(
+            board, own_king_pos, Color'(~moving_color), move, moving_color, ep_move, 1'b0);
+    endfunction : nonking_move_is_legal
 
     function automatic int move_mask_addr(input ThreadID tid, input PlyIndex search_ply);
         return (int'(tid) * MAX_PLY_COUNT) + int'(search_ply);
@@ -951,6 +882,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     localparam MoveMaskIndex RAY_INDEX = MoveMaskIndex'(normal_edge_mask_index(RAY_MOVE));
                     localparam int WHITE_PROMO_EDGE = promotion_edge_index(RAY_MOVE, WHITE);
                     localparam int BLACK_PROMO_EDGE = promotion_edge_index(RAY_MOVE, BLACK);
+                    always_comb king_vacated_ray[tile_idx][ray_idx] =
+                        ray_pipe[PROP_STAGE_CNT-1][RAY_POS][ray_idx];
                     always_comb ray_consumed[tile_idx][ray_idx] = request_consumed_mask[RAY_INDEX];
                     for (promo_valid_idx=0; promo_valid_idx<4; promo_valid_idx=promo_valid_idx+1) begin : gen_promo_mask
                         localparam MoveMaskIndex WHITE_PROMO_INDEX = MoveMaskIndex'(
@@ -965,6 +898,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                         end
                     end
                 end else begin
+                    always_comb king_vacated_ray[tile_idx][ray_idx] = NULL_RAY;
                     always_comb ray_consumed[tile_idx][ray_idx] = 1'b1;
                     for (promo_invalid_idx=0; promo_invalid_idx<4; promo_invalid_idx=promo_invalid_idx+1) begin : gen_no_promo_mask
                         always_comb promotion_consumed[tile_idx][ray_idx][promo_invalid_idx] = 1'b1;
@@ -975,6 +909,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             move_generator_tile_PE #(.POS(tile_idx)) tile_pe (
                 .tile_data(board_pipe[PROP_STAGE_CNT-1][tile_idx]),
                 .ray_in(ray_pipe[PROP_STAGE_CNT-1][tile_idx]),
+                .king_vacated_ray_in(king_vacated_ray[tile_idx]),
                 .knight_tile_in(knight_tile[tile_idx]),
                 .turn(turn_pipe[PROP_STAGE_CNT-1]),
                 .move_gen_op(op_pipe[PROP_STAGE_CNT-1]),
@@ -984,7 +919,9 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 .ray_consumed(ray_consumed[tile_idx]),
                 .knight_consumed(knight_consumed[tile_idx]),
                 .promotion_consumed(promotion_consumed[tile_idx]),
-                .proposal(tile_proposal_in[tile_idx])
+                .proposal(tile_proposal_in[tile_idx]),
+                .enemy_attacked(tile_enemy_attacked[tile_idx]),
+                .king_move_attacked(tile_king_move_attacked[tile_idx])
             );
         end
     endgenerate
@@ -999,10 +936,9 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         move.from_pos = (turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? Position'(4) : Position'(60);
         move.to_pos = (turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? Position'(6) : Position'(62);
         index = MoveMaskIndex'(castling_mask_index(move, turn_pipe[PROP_STAGE_CNT-1]));
-        pseudo_legal = is_pseudo_legal_move(
-            board_pipe[PROP_STAGE_CNT-1], move, turn_pipe[PROP_STAGE_CNT-1],
-            castle_perms_pipe[PROP_STAGE_CNT-1], has_ep_pipe[PROP_STAGE_CNT-1],
-            ep_file_pipe[PROP_STAGE_CNT-1]);
+        pseudo_legal = castle_is_pseudo_legal(
+            board_pipe[PROP_STAGE_CNT-1], move.to_pos, turn_pipe[PROP_STAGE_CNT-1],
+            castle_perms_pipe[PROP_STAGE_CNT-1]);
         if (op_pipe[PROP_STAGE_CNT-1] != MOVE_GEN_IDLE_OP
             && op_pipe[PROP_STAGE_CNT-1] != MOVE_GEN_QSEARCH_OP
             && pseudo_legal && !request_consumed_mask[index]) begin
@@ -1011,14 +947,17 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             castle_proposal_in.score = (op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
                 && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos
                 && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(6'h3f) : MoveScore'(6'd24);
+            castle_proposal_in.king_safe =
+                !tile_enemy_attacked[move.from_pos]
+                && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 5 : 61)]
+                && !tile_king_move_attacked[move.to_pos];
         end
 
         move.to_pos = (turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? Position'(2) : Position'(58);
         index = MoveMaskIndex'(castling_mask_index(move, turn_pipe[PROP_STAGE_CNT-1]));
-        pseudo_legal = is_pseudo_legal_move(
-            board_pipe[PROP_STAGE_CNT-1], move, turn_pipe[PROP_STAGE_CNT-1],
-            castle_perms_pipe[PROP_STAGE_CNT-1], has_ep_pipe[PROP_STAGE_CNT-1],
-            ep_file_pipe[PROP_STAGE_CNT-1]);
+        pseudo_legal = castle_is_pseudo_legal(
+            board_pipe[PROP_STAGE_CNT-1], move.to_pos, turn_pipe[PROP_STAGE_CNT-1],
+            castle_perms_pipe[PROP_STAGE_CNT-1]);
         if (op_pipe[PROP_STAGE_CNT-1] != MOVE_GEN_IDLE_OP
             && op_pipe[PROP_STAGE_CNT-1] != MOVE_GEN_QSEARCH_OP
             && pseudo_legal && !request_consumed_mask[index]) begin
@@ -1029,17 +968,31 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             queenside.score = (op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
                 && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos
                 && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(6'h3f) : MoveScore'(6'd24);
+            queenside.king_safe =
+                !tile_enemy_attacked[move.from_pos]
+                && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 3 : 59)]
+                && !tile_king_move_attacked[move.to_pos];
             castle_proposal_in = better_proposal(castle_proposal_in, queenside);
         end
     end
 
     always_comb begin
+        automatic Tile start_tile;
         reduced_proposal = reduce_1_pipe;
-        reduced_proposal_legal = reduced_proposal.valid
-            && is_strictly_legal_move(
-                board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
-                turn_pipe[REDUCE_1_STAGE], castle_perms_pipe[REDUCE_1_STAGE],
-                has_ep_pipe[REDUCE_1_STAGE], ep_file_pipe[REDUCE_1_STAGE]);
+        reduced_proposal_legal = 1'b0;
+        start_tile = normalize_tile(board_pipe[REDUCE_1_STAGE][reduced_proposal.move.from_pos]);
+
+        if (reduced_proposal.valid) begin
+            if (start_tile.piece_type == KING) begin
+                reduced_proposal_legal = reduced_proposal.king_safe;
+            end else begin
+                reduced_proposal_legal = nonking_move_is_legal(
+                    board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
+                    turn_pipe[REDUCE_1_STAGE], has_ep_pipe[REDUCE_1_STAGE],
+                    ep_file_pipe[REDUCE_1_STAGE]);
+            end
+        end
+
         next_consumed_mask = proposal_consumed_mask_pipe[REDUCE_STAGE_CNT];
         if (reduced_proposal.valid)
             next_consumed_mask[candidate_mask_index(
