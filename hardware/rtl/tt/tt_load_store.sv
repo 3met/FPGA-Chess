@@ -26,7 +26,7 @@ module tt_load_store #(
 );
 
     localparam int TT_ENTRY_COUNT = 1 << TT_INDEX_BITS;
-    localparam int STORAGE_ENTRY_BITS = USE_FULL_KEY ? TT_FULL_ENTRY_BITS : TT_ENTRY_BITS;
+    localparam int STORAGE_ENTRY_BITS = USE_FULL_KEY ? $bits(TTFullEntry) : $bits(TTEntry);
     localparam int FIFO_COUNT_BITS = $clog2(STORE_FIFO_DEPTH + 1);
     localparam int FIFO_PTR_BITS = (STORE_FIFO_DEPTH > 1) ? $clog2(STORE_FIFO_DEPTH) : 1;
 

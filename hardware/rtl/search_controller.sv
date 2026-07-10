@@ -110,7 +110,6 @@ module search_controller #(
 
     RepetitionSignature active_repetition_keys[0:ACTIVE_REPETITION_DEPTH-1];
     ActiveRepetitionCount active_repetition_key_count;
-    ActiveRepetitionCount active_repetition_start;
 
     logic [6:0] new_setup_index;
 
@@ -154,7 +153,7 @@ module search_controller #(
     FullBoard search_board[0:SEARCH_THREAD_COUNT-1];
     ZobristKey search_zobrist_key[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_pst_eval[0:SEARCH_THREAD_COUNT-1];
-    ZobristKey search_zobrist_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
+    RepetitionSignature search_zobrist_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
     Move search_move_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
     Move search_best_move_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
     EvalScore search_best_score_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
@@ -466,8 +465,7 @@ module search_controller #(
         input ZobristKey zobrist_key,
         input PlyIndex ply
     );
-        automatic int occurrence_count = 0;
-        automatic int current_occurrence_count;
+        automatic logic [1:0] occurrence_count = 2'd0;
 
         if (!ENABLE_ZOBRIST) begin
             return 1'b0;
@@ -475,9 +473,9 @@ module search_controller #(
 
         if (search_repetition_start_stack[search_stack_addr(thread, ply)] == PlyIndex'(0)) begin
             for (int idx = 0; idx < ACTIVE_REPETITION_DEPTH; idx++) begin
-                if (idx >= int'(active_repetition_start) && idx < int'(active_repetition_key_count)) begin
-                    if (active_repetition_keys[idx] == repetition_signature(zobrist_key)) begin
-                        occurrence_count += 1;
+                if (idx < int'(active_repetition_key_count)) begin
+                    if (active_repetition_keys[idx] == repetition_signature(zobrist_key) && occurrence_count != 2'd3) begin
+                        occurrence_count += 2'd1;
                     end
                 end
             end
@@ -485,14 +483,13 @@ module search_controller #(
 
         for (int idx = 1; idx < SEARCH_STACK_DEPTH; idx++) begin
             if (idx >= int'(search_repetition_start_stack[search_stack_addr(thread, ply)]) && idx < int'(ply)) begin
-                if (search_zobrist_stack[search_stack_addr(thread, idx)] == zobrist_key) begin
-                    occurrence_count += 1;
+                if (search_zobrist_stack[search_stack_addr(thread, idx)] == repetition_signature(zobrist_key) && occurrence_count != 2'd3) begin
+                    occurrence_count += 2'd1;
                 end
             end
         end
 
-        current_occurrence_count = occurrence_count + ((ply == PlyIndex'(0)) ? 0 : 1);
-        return current_occurrence_count >= 3;
+        return occurrence_count >= ((ply == PlyIndex'(0)) ? 2'd3 : 2'd2);
     endfunction : repetition_draw
 
     function automatic EvalScore terminal_no_move_score(input FullBoard board, input PlyIndex ply);
@@ -1111,7 +1108,6 @@ module search_controller #(
             active_zobrist_key <= ZobristKey'(0);
             active_pst_eval <= EvalScore'(0);
             active_repetition_key_count <= ActiveRepetitionCount'(0);
-            active_repetition_start <= ActiveRepetitionCount'(0);
             new_setup_index <= 7'd0;
             perft_ply <= PlyIndex'(0);
             perft_target_depth <= 8'd0;
@@ -1178,7 +1174,7 @@ module search_controller #(
                 search_return_valid[tid] <= 1'b0;
                 search_eval_is_stand_pat[tid] <= 1'b0;
                 for (int idx = 0; idx < SEARCH_STACK_DEPTH; idx++) begin
-                    search_zobrist_stack[search_stack_addr(tid, idx)] <= ZobristKey'(0);
+                    search_zobrist_stack[search_stack_addr(tid, idx)] <= RepetitionSignature'(0);
                     search_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
                     search_best_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
                     search_best_score_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
@@ -1207,9 +1203,6 @@ module search_controller #(
             for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
                 search_eval_tag_pipe[idx] <= ThreadID'(0);
                 search_eval_tag_valid_pipe[idx] <= 1'b0;
-            end
-            for (int idx = 0; idx < ACTIVE_REPETITION_DEPTH; idx++) begin
-                active_repetition_keys[idx] <= RepetitionSignature'(0);
             end
         end else begin
             resp_valid <= 1'b0;
@@ -1491,7 +1484,6 @@ module search_controller #(
                             if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
                                 active_repetition_keys[0] <= repetition_signature(board_update_zobrist_out);
                                 active_repetition_key_count <= ActiveRepetitionCount'(1);
-                                active_repetition_start <= ActiveRepetitionCount'(0);
                             end else if (active_repetition_key_count < ActiveRepetitionCount'(ACTIVE_REPETITION_DEPTH)) begin
                                 active_repetition_keys[active_repetition_key_count] <= repetition_signature(board_update_zobrist_out);
                                 active_repetition_key_count <= active_repetition_key_count + ActiveRepetitionCount'(1);
@@ -1499,7 +1491,6 @@ module search_controller #(
                         end else if (is_direct_setup_op(active_req.direct_board_op)) begin
                             active_repetition_keys[0] <= repetition_signature(board_update_zobrist_out);
                             active_repetition_key_count <= ActiveRepetitionCount'(1);
-                            active_repetition_start <= ActiveRepetitionCount'(0);
                         end
                         resp_reg <= EngineControllerResponse'('0);
                         state <= ST_DIRECT_DONE;
@@ -1538,7 +1529,6 @@ module search_controller #(
                         if (new_setup_index == 7'd67) begin
                             active_repetition_keys[0] <= repetition_signature(board_update_zobrist_out);
                             active_repetition_key_count <= ActiveRepetitionCount'(1);
-                            active_repetition_start <= ActiveRepetitionCount'(0);
                             resp_reg <= EngineControllerResponse'('0);
                             state <= ST_NEW_DONE;
                         end else begin
@@ -1633,7 +1623,7 @@ module search_controller #(
                         search_board[tid] <= active_board;
                         search_zobrist_key[tid] <= active_zobrist_key;
                         search_pst_eval[tid] <= active_pst_eval;
-                        search_zobrist_stack[search_stack_addr(tid, 0)] <= active_zobrist_key;
+                        search_zobrist_stack[search_stack_addr(tid, 0)] <= repetition_signature(active_zobrist_key);
                         search_ply[tid] <= PlyIndex'(0);
                         search_best_move[tid] <= NULL_MOVE;
                         search_pending_move[tid] <= NULL_MOVE;
@@ -1766,7 +1756,7 @@ module search_controller #(
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
                             end else begin
-                                search_zobrist_stack[search_stack_addr(board_thread_id, child_ply)] <= board_update_zobrist_out;
+                                search_zobrist_stack[search_stack_addr(board_thread_id, child_ply)] <= repetition_signature(board_update_zobrist_out);
                                 search_move_stack[search_stack_addr(board_thread_id, child_ply)] <= search_pending_move[board_thread_id];
                                 search_best_move_stack[search_stack_addr(board_thread_id, child_ply)] <= NULL_MOVE;
                                 search_best_score_stack[search_stack_addr(board_thread_id, child_ply)] <= -SEARCH_INF;

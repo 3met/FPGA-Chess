@@ -165,8 +165,8 @@ module move_generator_tile_PE #(parameter int POS = 0) (
 
     always_comb begin
         automatic CandidateProposal best;
-        automatic logic [2:0] attacker_count;
-        automatic logic [2:0] defender_count;
+        automatic logic [2:0] attacker_count; // 3 bits will be sufficiently rare to overflow
+        automatic logic [2:0] defender_count; // 3 bits will be sufficiently rare to overflow
         automatic PieceType weakest_defender;
         automatic MoveScore piece_score[7];
         automatic Move move;

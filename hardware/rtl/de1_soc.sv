@@ -8,7 +8,7 @@
 
 module de1_soc(input CLOCK_50,
             input [3:0] KEY, input [9:0] SW,
-            input GPIO_0[36],
+            inout wire [35:0] GPIO_0,
             output logic [6:0] HEX0, output logic [6:0] HEX1,
             output logic [6:0] HEX2, output logic [6:0] HEX3,
             output logic [6:0] HEX4, output logic [6:0] HEX5,

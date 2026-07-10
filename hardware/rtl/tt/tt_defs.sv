@@ -19,7 +19,7 @@ package tt_defs;
     typedef logic [TT_AGE_BITS-1:0] TTAge;
     typedef logic [TT_AUX_BITS-1:0] TTAux;
     typedef logic [TT_VERIFY_BITS-1:0] TTVerifyKey;
-    typedef logic [15:0] TTMoveBits;
+    typedef logic [$bits(Move)-1:0] TTMoveBits;
 
     typedef enum logic [1:0] {
         TT_BOUND_INVALID,
@@ -82,7 +82,7 @@ package tt_defs;
     endfunction : tt_verify_key
 
     function automatic TTMoveBits tt_encode_move(input Move move);
-        return {2'b00, move};
+        return TTMoveBits'(move);
     endfunction : tt_encode_move
 
     function automatic Move tt_decode_move(input TTMoveBits move_bits);
