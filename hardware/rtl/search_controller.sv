@@ -74,12 +74,6 @@ module search_controller #(
     } SearchControllerState;
 
     typedef enum logic [1:0] {
-        BOARD_DEST_ACTIVE,
-        BOARD_DEST_NEW_GAME,
-        BOARD_DEST_PERFT_STACK
-    } BoardDest;
-
-    typedef enum logic [1:0] {
         SEARCH_THREAD_IDLE,
         SEARCH_THREAD_ACTIVE,
         SEARCH_THREAD_DONE
@@ -102,7 +96,6 @@ module search_controller #(
     EngineControllerResponse resp_reg;
     BoardWaitCount board_wait_count;
     MoveWaitCount move_wait_count;
-    BoardDest board_dest;
 
     FullBoard active_board;
     ZobristKey active_zobrist_key;
@@ -143,12 +136,14 @@ module search_controller #(
     logic search_board_tag_valid_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     logic search_move_tag_valid_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
     logic search_eval_tag_valid_pipe[0:SEARCH_EVAL_TAG_PIPE_LEN-1];
+`ifndef SYNTHESIS
     ThreadID search_board_result_thread_id;
     ThreadID search_move_result_thread_id;
     ThreadID search_eval_result_thread_id;
     logic search_board_result_valid;
     logic search_move_result_valid;
     logic search_eval_result_valid;
+`endif
     Move search_pending_move[0:SEARCH_THREAD_COUNT-1];
     FullBoard search_board[0:SEARCH_THREAD_COUNT-1];
     ZobristKey search_zobrist_key[0:SEARCH_THREAD_COUNT-1];
@@ -174,9 +169,10 @@ module search_controller #(
     logic [7:0] search_completed_depth;
     Move search_completed_best_move;
     EvalScore search_completed_score;
+`ifndef SYNTHESIS
     logic [7:0] search_thread_completed_depth[0:SEARCH_THREAD_COUNT-1];
     Move search_thread_completed_best_move[0:SEARCH_THREAD_COUNT-1];
-    EvalScore search_thread_completed_score[0:SEARCH_THREAD_COUNT-1];
+`endif
     ThreadID search_thread_id;
     ThreadID search_dispatch_cursor;
     ThreadID search_board_dispatch_cursor;
@@ -1103,7 +1099,6 @@ module search_controller #(
             resp_valid <= 1'b0;
             board_wait_count <= BoardWaitCount'(0);
             move_wait_count <= MoveWaitCount'(0);
-            board_dest <= BOARD_DEST_ACTIVE;
             active_board <= FullBoard'('0);
             active_zobrist_key <= ZobristKey'(0);
             active_pst_eval <= EvalScore'(0);
@@ -1132,12 +1127,14 @@ module search_controller #(
             search_tt_store_dispatch_cursor <= ThreadID'(0);
             search_return_dispatch_cursor <= ThreadID'(0);
             search_tt_response_dispatch_cursor <= ThreadID'(0);
+`ifndef SYNTHESIS
             search_board_result_thread_id <= ThreadID'(0);
             search_move_result_thread_id <= ThreadID'(0);
             search_eval_result_thread_id <= ThreadID'(0);
             search_board_result_valid <= 1'b0;
             search_move_result_valid <= 1'b0;
             search_eval_result_valid <= 1'b0;
+`endif
             search_active_thread_count <= ThreadCount'(0);
             search_iteration_has_result <= 1'b0;
             search_iteration_best_move <= NULL_MOVE;
@@ -1154,7 +1151,6 @@ module search_controller #(
                 search_thread_nodes[tid] <= NodeCountType'(0);
                 search_thread_completed_depth[tid] <= 8'd0;
                 search_thread_completed_best_move[tid] <= NULL_MOVE;
-                search_thread_completed_score[tid] <= EvalScore'(0);
                 search_board_wait_count[tid] <= BoardWaitCount'(0);
                 search_move_wait_count[tid] <= MoveWaitCount'(0);
                 search_eval_wait_count[tid] <= EvalWaitCount'(0);
@@ -1260,7 +1256,6 @@ module search_controller #(
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
                                     state <= ST_DIRECT_DONE;
                                 end else begin
-                                    board_dest <= BOARD_DEST_ACTIVE;
                                     state <= ST_BOARD_ISSUE;
                                 end
                             end
@@ -1389,7 +1384,6 @@ module search_controller #(
                                         search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                                         search_thread_completed_depth[tid] <= 8'd0;
                                         search_thread_completed_best_move[tid] <= NULL_MOVE;
-                                        search_thread_completed_score[tid] <= EvalScore'(0);
                                         search_board_wait_count[tid] <= BoardWaitCount'(0);
                                         search_move_wait_count[tid] <= MoveWaitCount'(0);
                                         search_eval_wait_count[tid] <= EvalWaitCount'(0);
@@ -1511,7 +1505,6 @@ module search_controller #(
                 ST_NEW_CLEAR_WAIT: begin
                     if (!tt_clear_busy) begin
                         new_setup_index <= 7'd0;
-                        board_dest <= BOARD_DEST_NEW_GAME;
                         state <= ST_NEW_SETUP_ISSUE;
                     end
                 end
@@ -1745,8 +1738,10 @@ module search_controller #(
                             reverse_complete = search_board_op_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1] == BOARD_REVERSE_MOVE_OP;
                             board_ply = search_board_ply_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1];
                             child_ply = board_ply + PlyIndex'(1);
+`ifndef SYNTHESIS
                             search_board_result_thread_id <= board_thread_id;
                             search_board_result_valid <= 1'b1;
+`endif
                             search_board_wait_count[board_thread_id] <= BoardWaitCount'(0);
                             search_board_inflight[board_thread_id] <= 1'b0;
                             search_board[board_thread_id] <= board_update_out;
@@ -1810,7 +1805,6 @@ module search_controller #(
                                     search_thread_phase[move_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[move_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[move_thread_id] <= search_best_move[move_thread_id];
-                                    search_thread_completed_score[move_thread_id] <= node_score;
                                     if (root_result_better(
                                             node_score,
                                             search_best_move[move_thread_id],
@@ -1865,7 +1859,6 @@ module search_controller #(
                                         search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
                                         search_thread_completed_depth[eval_thread_id] <= search_target_depth;
                                         search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
-                                        search_thread_completed_score[eval_thread_id] <= eval_score;
                                         if (root_result_better(
                                                 eval_score,
                                                 NULL_MOVE,
@@ -1891,7 +1884,6 @@ module search_controller #(
                                     search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[eval_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
-                                    search_thread_completed_score[eval_thread_id] <= eval_score;
                                     if (root_result_better(
                                             eval_score,
                                             NULL_MOVE,
@@ -1957,7 +1949,6 @@ module search_controller #(
                                     search_thread_phase[lookup_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[lookup_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[lookup_thread_id] <= lookup_resp.best_move;
-                                    search_thread_completed_score[lookup_thread_id] <= lookup_resp.score;
                                     if (root_result_better(
                                             lookup_resp.score,
                                             lookup_resp.best_move,
@@ -2016,7 +2007,6 @@ module search_controller #(
                                     search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[return_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[return_thread_id] <= root_move;
-                                    search_thread_completed_score[return_thread_id] <= parent_score;
                                     if (root_result_better(
                                             parent_score,
                                             root_move,
@@ -2059,7 +2049,6 @@ module search_controller #(
                                     search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[terminal_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[terminal_thread_id] <= NULL_MOVE;
-                                    search_thread_completed_score[terminal_thread_id] <= DRAW_EVAL_SCORE;
                                     if (root_result_better(
                                             DRAW_EVAL_SCORE,
                                             NULL_MOVE,
@@ -2126,7 +2115,6 @@ module search_controller #(
                                 search_thread_phase[store_thread_id] <= SEARCH_PHASE_DONE;
                                 search_thread_completed_depth[store_thread_id] <= search_target_depth;
                                 search_thread_completed_best_move[store_thread_id] <= search_best_move_stack[search_stack_addr(store_thread_id, 0)];
-                                search_thread_completed_score[store_thread_id] <= search_return_score[store_thread_id];
                                 if (root_result_better(
                                         search_return_score[store_thread_id],
                                         search_best_move_stack[search_stack_addr(store_thread_id, 0)],
