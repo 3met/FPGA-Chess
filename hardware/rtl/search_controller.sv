@@ -344,20 +344,13 @@ module search_controller #(
             || op == BOARD_SET_HALFMOVE_CLOCK_OP;
     endfunction : is_direct_setup_op
 
-    function automatic Tile normalize_tile(input Tile tile);
-        if (tile.piece_type == NULL_PIECE) begin
-            return EMPTY_TILE;
-        end
-        return tile;
-    endfunction : normalize_tile
-
     function automatic logic is_line_attacker(input PieceType piece, input Direction dir);
         return (piece == QUEEN || (piece == ROOK && isDirCardinal(dir)) || (piece == BISHOP && isDirDiag(dir)));
     endfunction : is_line_attacker
 
     function automatic Position find_king(input FullBoard board, input Color king_color);
         for (int pos = 0; pos < 64; pos++) begin
-            if (normalize_tile(board.tiles[pos]) == Tile'({king_color, KING})) begin
+            if (board.tiles[pos] == Tile'({king_color, KING})) begin
                 return Position'(pos);
             end
         end
@@ -370,20 +363,20 @@ module search_controller #(
 
         if (attacker_color == WHITE) begin
             if (isShiftOnBoard(square, SOUTH_WEST, 3'd1)
-                    && normalize_tile(board.tiles[shiftPos(square, SOUTH_WEST, 3'd1)]) == WHITE_PAWN) return 1'b1;
+                    && board.tiles[shiftPos(square, SOUTH_WEST, 3'd1)] == WHITE_PAWN) return 1'b1;
             if (isShiftOnBoard(square, SOUTH_EAST, 3'd1)
-                    && normalize_tile(board.tiles[shiftPos(square, SOUTH_EAST, 3'd1)]) == WHITE_PAWN) return 1'b1;
+                    && board.tiles[shiftPos(square, SOUTH_EAST, 3'd1)] == WHITE_PAWN) return 1'b1;
         end else begin
             if (isShiftOnBoard(square, NORTH_WEST, 3'd1)
-                    && normalize_tile(board.tiles[shiftPos(square, NORTH_WEST, 3'd1)]) == BLACK_PAWN) return 1'b1;
+                    && board.tiles[shiftPos(square, NORTH_WEST, 3'd1)] == BLACK_PAWN) return 1'b1;
             if (isShiftOnBoard(square, NORTH_EAST, 3'd1)
-                    && normalize_tile(board.tiles[shiftPos(square, NORTH_EAST, 3'd1)]) == BLACK_PAWN) return 1'b1;
+                    && board.tiles[shiftPos(square, NORTH_EAST, 3'd1)] == BLACK_PAWN) return 1'b1;
         end
 
         for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
             if (isKnightShiftOnBoard(square, KnightDirection'(knight_dir))) begin
                 test_pos = shiftKnightPos(square, KnightDirection'(knight_dir));
-                if (normalize_tile(board.tiles[test_pos]) == Tile'({attacker_color, KNIGHT})) return 1'b1;
+                if (board.tiles[test_pos] == Tile'({attacker_color, KNIGHT})) return 1'b1;
             end
         end
 
@@ -392,7 +385,7 @@ module search_controller #(
             for (int distance = 1; distance < 8; distance++) begin
                 if (isShiftOnBoard(square, dir, distance[2:0])) begin
                     test_pos = shiftPos(square, dir, distance[2:0]);
-                    test_tile = normalize_tile(board.tiles[test_pos]);
+                    test_tile = board.tiles[test_pos];
                     if (test_tile.piece_type != NULL_PIECE) begin
                         if (test_tile.piece_color == attacker_color) begin
                             if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
@@ -426,7 +419,7 @@ module search_controller #(
         automatic logic bishop_light_color = 1'b0;
 
         for (int pos = 0; pos < 64; pos++) begin
-            automatic Tile tile = normalize_tile(board.tiles[pos]);
+            automatic Tile tile = board.tiles[pos];
             if (tile.piece_type == PAWN || tile.piece_type == ROOK || tile.piece_type == QUEEN) begin
                 return 1'b0;
             end
@@ -457,8 +450,8 @@ module search_controller #(
         automatic Tile start_tile;
         automatic Tile end_tile;
 
-        start_tile = normalize_tile(before_board.tiles[move.from_pos]);
-        end_tile = normalize_tile(before_board.tiles[move.to_pos]);
+        start_tile = before_board.tiles[move.from_pos];
+        end_tile = before_board.tiles[move.to_pos];
         return start_tile.piece_type == PAWN
             || end_tile.piece_type != NULL_PIECE
             || before_board.castle_perms != after_board.castle_perms;

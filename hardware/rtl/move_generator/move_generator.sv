@@ -92,14 +92,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     logic tile_enemy_attacked[64];
     logic tile_king_move_attacked[64];
 
-    function automatic Tile normalize_tile(input Tile tile);
-        if (tile.piece_type == NULL_PIECE) begin
-            return EMPTY_TILE;
-        end
-
-        return tile;
-    endfunction : normalize_tile
-
     function automatic int ray_max_distance(input Position pos, input Direction dir);
         automatic int rank = int'(getRank(pos));
         automatic int file = int'(getFile(pos));
@@ -214,7 +206,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         automatic Tile tile;
 
         for (int pos=0; pos<64; pos++) begin
-            tile = normalize_tile(board[pos]);
+            tile = board[pos];
             if (tile == Tile'({king_color, KING})) begin
                 return Position'(pos);
             end
@@ -272,14 +264,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         if (enemy_color == WHITE) begin
             if (isShiftOnBoard(king_pos, SOUTH_WEST, 3'd1)) begin
                 test_pos = shiftPos(king_pos, SOUTH_WEST, 3'd1);
-                if (normalize_tile(board[test_pos]) == WHITE_PAWN) begin
+                if (board[test_pos] == WHITE_PAWN) begin
                     if (info.count != 2'd3) info.count += 2'd1;
                     if (info.count == 2'd1) info.first_checker = test_pos;
                 end
             end
             if (isShiftOnBoard(king_pos, SOUTH_EAST, 3'd1)) begin
                 test_pos = shiftPos(king_pos, SOUTH_EAST, 3'd1);
-                if (normalize_tile(board[test_pos]) == WHITE_PAWN) begin
+                if (board[test_pos] == WHITE_PAWN) begin
                     if (info.count != 2'd3) info.count += 2'd1;
                     if (info.count == 2'd1) info.first_checker = test_pos;
                 end
@@ -287,14 +279,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         end else begin
             if (isShiftOnBoard(king_pos, NORTH_WEST, 3'd1)) begin
                 test_pos = shiftPos(king_pos, NORTH_WEST, 3'd1);
-                if (normalize_tile(board[test_pos]) == BLACK_PAWN) begin
+                if (board[test_pos] == BLACK_PAWN) begin
                     if (info.count != 2'd3) info.count += 2'd1;
                     if (info.count == 2'd1) info.first_checker = test_pos;
                 end
             end
             if (isShiftOnBoard(king_pos, NORTH_EAST, 3'd1)) begin
                 test_pos = shiftPos(king_pos, NORTH_EAST, 3'd1);
-                if (normalize_tile(board[test_pos]) == BLACK_PAWN) begin
+                if (board[test_pos] == BLACK_PAWN) begin
                     if (info.count != 2'd3) info.count += 2'd1;
                     if (info.count == 2'd1) info.first_checker = test_pos;
                 end
@@ -304,7 +296,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         for (int knight_dir=0; knight_dir<8; knight_dir++) begin
             if (isKnightShiftOnBoard(king_pos, KnightDirection'(knight_dir))) begin
                 test_pos = shiftKnightPos(king_pos, KnightDirection'(knight_dir));
-                if (normalize_tile(board[test_pos]) == Tile'({enemy_color, KNIGHT})) begin
+                if (board[test_pos] == Tile'({enemy_color, KNIGHT})) begin
                     if (info.count != 2'd3) info.count += 2'd1;
                     if (info.count == 2'd1) info.first_checker = test_pos;
                 end
@@ -317,7 +309,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             for (int distance=1; distance<8; distance++) begin
                 if (!ray_blocked && isShiftOnBoard(king_pos, dir, dist_to_shift(distance))) begin
                     test_pos = shiftPos(king_pos, dir, dist_to_shift(distance));
-                    test_tile = normalize_tile(board[test_pos]);
+                    test_tile = board[test_pos];
                     if (test_tile.piece_type != NULL_PIECE) begin
                         if (test_tile.piece_color == enemy_color && is_line_attacker(test_tile.piece_type, dir)) begin
                             if (info.count != 2'd3) info.count += 2'd1;
@@ -355,7 +347,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             for (int distance=1; distance<8; distance++) begin
                 if (!ray_done && isShiftOnBoard(king_pos, dir, dist_to_shift(distance))) begin
                     test_pos = shiftPos(king_pos, dir, dist_to_shift(distance));
-                    test_tile = normalize_tile(board[test_pos]);
+                    test_tile = board[test_pos];
                     if (test_tile.piece_type != NULL_PIECE) begin
                         if (!found_candidate) begin
                             if (test_pos == moving_pos && test_tile.piece_color == moving_color) begin
@@ -381,7 +373,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     function automatic logic is_castle_move(input Tile board[64], input Move move, input Color moving_color);
         automatic Tile start_tile;
 
-        start_tile = normalize_tile(board[move.from_pos]);
+        start_tile = board[move.from_pos];
         return (start_tile.piece_type == KING
             && start_tile.piece_color == moving_color
             && (   (moving_color == WHITE && move.from_pos == Position'('d4)  && (move.to_pos == Position'('d2)  || move.to_pos == Position'('d6)))
@@ -400,36 +392,36 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 return castle_perm(curr_castle_perms, 3)
                     && tile_is_empty(board, Position'('d5))
                     && tile_is_empty(board, Position'('d6))
-                    && normalize_tile(board[Position'('d7)]) == WHITE_ROOK;
+                    && board[Position'('d7)] == WHITE_ROOK;
             end
 
             return castle_perm(curr_castle_perms, 2)
                 && tile_is_empty(board, Position'('d1))
                 && tile_is_empty(board, Position'('d2))
                 && tile_is_empty(board, Position'('d3))
-                && normalize_tile(board[Position'('d0)]) == WHITE_ROOK;
+                && board[Position'('d0)] == WHITE_ROOK;
         end
 
         if (king_to == Position'('d62)) begin
             return castle_perm(curr_castle_perms, 1)
                 && tile_is_empty(board, Position'('d61))
                 && tile_is_empty(board, Position'('d62))
-                && normalize_tile(board[Position'('d63)]) == BLACK_ROOK;
+                && board[Position'('d63)] == BLACK_ROOK;
         end
 
         return castle_perm(curr_castle_perms, 0)
             && tile_is_empty(board, Position'('d57))
             && tile_is_empty(board, Position'('d58))
             && tile_is_empty(board, Position'('d59))
-            && normalize_tile(board[Position'('d56)]) == BLACK_ROOK;
+            && board[Position'('d56)] == BLACK_ROOK;
     endfunction : castle_is_pseudo_legal
 
     function automatic logic is_ep_move(input Tile board[64], input Move move, input Color moving_color, input logic ep_valid, input BoardFile ep_target_file);
         automatic Tile start_tile;
         automatic Tile end_tile;
 
-        start_tile = normalize_tile(board[move.from_pos]);
-        end_tile = normalize_tile(board[move.to_pos]);
+        start_tile = board[move.from_pos];
+        end_tile = board[move.to_pos];
 
         return (start_tile.piece_type == PAWN
             && start_tile.piece_color == moving_color
@@ -471,10 +463,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         automatic Position rook_to;
 
         if (isNullMove(move)) begin
-            return normalize_tile(board[pos]);
+            return board[pos];
         end
 
-        start_tile = normalize_tile(board[move.from_pos]);
+        start_tile = board[move.from_pos];
         ep_capture_pos = getPosition(getRank(move.from_pos), getFile(move.to_pos));
         rook_from = castle_rook_from(move.to_pos);
         rook_to = castle_rook_to(move.to_pos);
@@ -503,7 +495,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             return start_tile;
         end
 
-        return normalize_tile(board[pos]);
+        return board[pos];
     endfunction : tile_after_move
 
     function automatic logic square_attacked_after_move(
@@ -587,7 +579,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     );
         automatic Tile test_tile;
 
-        if (normalize_tile(board[move.from_pos]) == Tile'({moving_color, KING})) begin
+        if (board[move.from_pos] == Tile'({moving_color, KING})) begin
             return move.to_pos;
         end
 
@@ -627,7 +619,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             return 1'b0;
         end
 
-        start_tile = normalize_tile(board[move.from_pos]);
+        start_tile = board[move.from_pos];
 
         if (start_tile.piece_type == KING) begin
             if (castle_move) begin
@@ -677,7 +669,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     function automatic logic move_is_promotion(input Tile board[64], input Move move, input Color moving_color);
         automatic Tile start_tile;
 
-        start_tile = normalize_tile(board[move.from_pos]);
+        start_tile = board[move.from_pos];
         return (start_tile.piece_type == PAWN
             && start_tile.piece_color == moving_color
             && (getRank(move.to_pos) == BoardRank'('d0) || getRank(move.to_pos) == BoardRank'('d7)));
@@ -811,7 +803,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     );
         automatic Tile end_tile;
 
-        end_tile = normalize_tile(board[move.to_pos]);
+        end_tile = board[move.to_pos];
         return move_is_promotion(board, move, moving_color)
             || (end_tile.piece_type != NULL_PIECE && end_tile.piece_color != moving_color)
             || is_ep_move(board, move, moving_color, ep_valid, ep_target_file);
@@ -980,7 +972,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         automatic Tile start_tile;
         reduced_proposal = reduce_1_pipe;
         reduced_proposal_legal = 1'b0;
-        start_tile = normalize_tile(board_pipe[REDUCE_1_STAGE][reduced_proposal.move.from_pos]);
+        start_tile = board_pipe[REDUCE_1_STAGE][reduced_proposal.move.from_pos];
 
         if (reduced_proposal.valid) begin
             if (start_tile.piece_type == KING) begin
@@ -1053,7 +1045,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
                     if (start_stage == 0) begin
                         automatic Position scan_pos = shiftPos(Position'(pos), dir, 3'd1);
-                        ray_pipe[0][pos][dir_idx].tile <= normalize_tile(board_tiles[scan_pos]);
+                        ray_pipe[0][pos][dir_idx].tile <= board_tiles[scan_pos];
                         ray_pipe[0][pos][dir_idx].distance <= 3'd1;
                     end else ray_pipe[0][pos][dir_idx] <= NULL_RAY;
                 end
@@ -1070,7 +1062,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             ray_pipe[stage][pos][dir_idx] <= NULL_RAY;
                         end else if (stage == start_stage) begin
                             automatic Position scan_pos = shiftPos(Position'(pos), dir, 3'd1);
-                            ray_pipe[stage][pos][dir_idx].tile <= normalize_tile(board_pipe[stage-1][scan_pos]);
+                            ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][scan_pos];
                             ray_pipe[stage][pos][dir_idx].distance <= 3'd1;
                         end else if (ray_pipe[stage-1][pos][dir_idx].tile.piece_type != NULL_PIECE) begin
                             ray_pipe[stage][pos][dir_idx] <= ray_pipe[stage-1][pos][dir_idx];
@@ -1078,7 +1070,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             automatic int scan_distance = stage - start_stage + 1;
                             automatic Position scan_pos = shiftPos(
                                 Position'(pos), dir, RayDistance'(scan_distance));
-                            ray_pipe[stage][pos][dir_idx].tile <= normalize_tile(board_pipe[stage-1][scan_pos]);
+                            ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][scan_pos];
                             ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_distance);
                         end
                     end

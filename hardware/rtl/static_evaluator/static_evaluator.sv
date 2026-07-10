@@ -21,17 +21,8 @@ module static_evaluator (
 
     assign static_eval = eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1];
 
-    function automatic Tile normalize_tile(input Tile tile);
-        if (tile.piece_type == NULL_PIECE) begin
-            return EMPTY_TILE;
-        end
-
-        return tile;
-    endfunction : normalize_tile
-
     function automatic logic same_piece(input Tile tile, input Color color, input PieceType piece);
-        automatic Tile normalized = normalize_tile(tile);
-        return (normalized.piece_type == piece && normalized.piece_color == color);
+        return (tile.piece_type == piece && tile.piece_color == color);
     endfunction : same_piece
 
     function automatic PositionalScore color_signed(input Color color, input PositionalScore magnitude);
@@ -81,14 +72,14 @@ module static_evaluator (
         input Tile ray_tile
     );
         automatic DirectionScan scan = prev_scan;
-        automatic Tile normalized = normalize_tile(ray_tile);
+        automatic Tile tile = ray_tile;
 
         if (prev_scan.piece.piece_type == NULL_PIECE) begin
-            if (normalized.piece_type == NULL_PIECE) begin
+            if (tile.piece_type == NULL_PIECE) begin
                 scan.piece = EMPTY_TILE;
                 scan.empty_count = prev_scan.empty_count + 3'd1;
             end else begin
-                scan.piece = normalized;
+                scan.piece = tile;
             end
         end
 
@@ -122,7 +113,7 @@ module static_evaluator (
         next_eval_pipe[0] = UNKNOWN_EVAL_SCORE;
 
         for (int pos = 0; pos < 64; pos++) begin
-            next_board_pipe[0][pos] = normalize_tile(board_tiles[pos]);
+            next_board_pipe[0][pos] = board_tiles[pos];
 
             for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
                 automatic Direction dir = Direction'(dir_idx);

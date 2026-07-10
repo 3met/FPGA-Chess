@@ -138,14 +138,6 @@ module board_update_pipeline #(
         return MoveRecordAddr'((int'(tid) * MOVE_RECORD_PLY_COUNT) + int'(ply));
     endfunction : move_hist_addr
 
-    function automatic Tile normalize_tile(input Tile tile);
-        if (tile.piece_type == NULL_PIECE) begin
-            return EMPTY_TILE;
-        end
-
-        return tile;
-    endfunction : normalize_tile
-
     function automatic Position oriented_pos(input Tile tile, input Position pos);
         return (tile.piece_color == BLACK) ? mirrorPos(pos) : pos;
     endfunction : oriented_pos
@@ -235,10 +227,8 @@ module board_update_pipeline #(
         input Position pos
     );
         automatic ZobristReadPlan plan = plan_in;
-        automatic Tile normalized = normalize_tile(tile);
-
-        if (normalized.piece_type != NULL_PIECE) begin
-            plan = append_zobrist_addr(plan, zobrist_tile_addr(normalized, pos));
+        if (tile.piece_type != NULL_PIECE) begin
+            plan = append_zobrist_addr(plan, zobrist_tile_addr(tile, pos));
         end
         return plan;
     endfunction : append_tile_delta
@@ -275,8 +265,8 @@ module board_update_pipeline #(
         input EvalScore old_pst,
         input EvalScore new_pst
     );
-        automatic Tile old_tile = normalize_tile(board.tiles[pos]);
-        automatic Tile placed_tile = normalize_tile(new_tile);
+        automatic Tile old_tile = board.tiles[pos];
+        automatic Tile placed_tile = new_tile;
 
         pst_eval += signed_piece_score(placed_tile, new_pst) - signed_piece_score(old_tile, old_pst);
         board.tiles[pos] = placed_tile;
@@ -340,8 +330,8 @@ module board_update_pipeline #(
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic Position from_pos = in.move.from_pos;
                 automatic Position to_pos = in.move.to_pos;
-                automatic Tile start_tile = normalize_tile(in.board.tiles[from_pos]);
-                automatic Tile end_tile = normalize_tile(in.board.tiles[to_pos]);
+                automatic Tile start_tile = in.board.tiles[from_pos];
+                automatic Tile end_tile = in.board.tiles[to_pos];
                 automatic Color moved_color = start_tile.piece_color;
                 automatic Color captured_color = Color'(~moved_color);
                 automatic logic is_promo = (start_tile.piece_type == PAWN && (getRank(to_pos) == BoardRank'('d0) || getRank(to_pos) == BoardRank'('d7)));
@@ -380,7 +370,7 @@ module board_update_pipeline #(
                 automatic Position to_pos = rec.to_pos;
                 automatic Color moved_color = Color'(~in.board.turn);
                 automatic Color captured_color = in.board.turn;
-                automatic Tile end_tile = normalize_tile(in.board.tiles[to_pos]);
+                automatic Tile end_tile = in.board.tiles[to_pos];
                 automatic logic is_promo = (rec.move_flag == PROMO_MOVE);
                 automatic logic is_ep = (rec.move_flag == EP_MOVE);
                 automatic logic is_castle = (rec.move_flag == CASTLE_MOVE);
@@ -431,8 +421,8 @@ module board_update_pipeline #(
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic Position from_pos = in.move.from_pos;
                 automatic Position to_pos = in.move.to_pos;
-                automatic Tile start_tile = normalize_tile(in.board.tiles[from_pos]);
-                automatic Tile end_tile = normalize_tile(in.board.tiles[to_pos]);
+                automatic Tile start_tile = in.board.tiles[from_pos];
+                automatic Tile end_tile = in.board.tiles[to_pos];
                 automatic Color moved_color = start_tile.piece_color;
                 automatic Color captured_color = Color'(~moved_color);
                 automatic logic is_promo = (start_tile.piece_type == PAWN && (getRank(to_pos) == BoardRank'('d0) || getRank(to_pos) == BoardRank'('d7)));
@@ -467,7 +457,7 @@ module board_update_pipeline #(
                 automatic Position to_pos = rec.to_pos;
                 automatic Color moved_color = Color'(~in.board.turn);
                 automatic Color captured_color = in.board.turn;
-                automatic Tile end_tile = normalize_tile(in.board.tiles[to_pos]);
+                automatic Tile end_tile = in.board.tiles[to_pos];
                 automatic logic is_promo = (rec.move_flag == PROMO_MOVE);
                 automatic logic is_ep = (rec.move_flag == EP_MOVE);
                 automatic logic is_castle = (rec.move_flag == CASTLE_MOVE);
@@ -500,8 +490,8 @@ module board_update_pipeline #(
 
             BOARD_SET_TILE_OP: begin
                 automatic Position to_pos = in.move.to_pos;
-                automatic Tile old_tile = normalize_tile(in.board.tiles[to_pos]);
-                automatic Tile new_tile = normalize_tile(Tile'(in.set_data[3:0]));
+                automatic Tile old_tile = in.board.tiles[to_pos];
+                automatic Tile new_tile = Tile'(in.set_data[3:0]);
                 plan.address[2] = pst_addr(old_tile.piece_type, oriented_pos(old_tile, to_pos));
                 plan.enable[2] = (old_tile.piece_type != NULL_PIECE);
                 plan.address[1] = pst_addr(new_tile.piece_type, oriented_pos(new_tile, to_pos));
@@ -526,8 +516,8 @@ module board_update_pipeline #(
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic Position from_pos = in.move.from_pos;
                 automatic Position to_pos = in.move.to_pos;
-                automatic Tile start_tile = normalize_tile(in.board.tiles[from_pos]);
-                automatic Tile end_tile = normalize_tile(in.board.tiles[to_pos]);
+                automatic Tile start_tile = in.board.tiles[from_pos];
+                automatic Tile end_tile = in.board.tiles[to_pos];
                 automatic Color moved_color = start_tile.piece_color;
                 automatic logic is_promo = (start_tile.piece_type == PAWN && (getRank(to_pos) == BoardRank'('d0) || getRank(to_pos) == BoardRank'('d7)));
                 automatic logic is_castle = (start_tile.piece_type == KING && getFile(from_pos) == BoardFile'('d4) && (getFile(to_pos) == BoardFile'('d2) || getFile(to_pos) == BoardFile'('d6)));
@@ -583,7 +573,7 @@ module board_update_pipeline #(
                 automatic Position to_pos = rec.to_pos;
                 automatic Color moved_color = Color'(~in.board.turn);
                 automatic Color captured_color = in.board.turn;
-                automatic Tile end_tile = normalize_tile(in.board.tiles[to_pos]);
+                automatic Tile end_tile = in.board.tiles[to_pos];
                 automatic logic is_promo = (rec.move_flag == PROMO_MOVE);
                 automatic logic is_ep = (rec.move_flag == EP_MOVE);
                 automatic logic is_castle = (rec.move_flag == CASTLE_MOVE);
@@ -616,7 +606,7 @@ module board_update_pipeline #(
 
             BOARD_SET_TILE_OP: begin
                 automatic Position to_pos = in.move.to_pos;
-                automatic Tile new_tile = normalize_tile(Tile'(in.set_data[3:0]));
+                automatic Tile new_tile = Tile'(in.set_data[3:0]);
 
                 replace_tile(out.board, out.pst_eval, to_pos, new_tile, pst_killed_out, pst_end_out);
             end
