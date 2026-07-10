@@ -110,6 +110,8 @@ def validate_manifest(manifest: object) -> None:
         if target["tool"] not in tool_fields:
             raise BuildError(f"Synthesis target '{name}' uses unsupported tool '{target['tool']}'")
         require_fields(target, f"Synthesis target '{name}'", tool_fields[target["tool"]])
+        if "seed" in target and (not isinstance(target["seed"], int) or target["seed"] < 1):
+            raise BuildError(f"Synthesis target '{name}' seed must be a positive integer")
         if target["tool"] == "quartus":
             ensure_existing(
                 [
@@ -243,6 +245,8 @@ def begin_synth_metadata(build_dir: Path, target_name: str, target: dict) -> dic
         "status": "running",
         "stages": [],
     }
+    if "seed" in target:
+        metadata["seed"] = target["seed"]
     write_synth_metadata(build_dir, metadata)
     return metadata
 
@@ -653,6 +657,8 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
         f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(build_dir)}"',
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
+    if "seed" in target:
+        lines.append(f"set_global_assignment -name SEED {target['seed']}")
     assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
     lines.extend(
@@ -1064,6 +1070,8 @@ def command_synth_report(args: argparse.Namespace) -> int:
         ["Started", report_timestamp(build_dir, metadata)],
     ]
     if metadata:
+        if "seed" in metadata:
+            details.append(["Seed", str(metadata["seed"])])
         details.append(["Status", str(metadata.get("status", "unknown")).upper()])
         if "elapsed_seconds" in metadata:
             details.append(["Tool time", format_duration(metadata["elapsed_seconds"])])
@@ -1127,6 +1135,8 @@ def synth_quartus(
     parallel_arg = f"--parallel={parallel_processors}"
     map_args = [f"--effort={target['map_effort']}"] if "map_effort" in target else []
     fit_args = [f"--effort={target['fit_effort']}"] if "fit_effort" in target else []
+    if "seed" in target:
+        fit_args.append(f"--seed={target['seed']}")
     commands = [
         ["quartus_map", project_name, parallel_arg, *map_args],
         ["quartus_fit", project_name, parallel_arg, *fit_args],
