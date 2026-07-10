@@ -110,15 +110,12 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             SOUTH_WEST: return (rank < file) ? rank : file;
             WEST:       return file;
             NORTH_WEST: return ((7 - rank) < file) ? (7 - rank) : file;
-            default:    return 0;
+            default:    return 'x;
         endcase
     endfunction : ray_max_distance
 
     function automatic logic tile_is_empty(input Tile board[64], input Position pos);
-        automatic Tile tile;
-
-        tile = normalize_tile(board[pos]);
-        return (tile.piece_type == NULL_PIECE);
+        return (board[pos].piece_type == NULL_PIECE);
     endfunction : tile_is_empty
 
     function automatic logic castle_perm(input CastlePerms perms, input int bit_index);

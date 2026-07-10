@@ -69,8 +69,8 @@
       "hardware/rtl/engine.sv"
     ],
     "engine": [
-      "@engine-rtl",
-      "hardware/rtl/search_controller_stub.sv"
+      "@search-controller",
+      "@engine-rtl"
     ],
     "portable-rtl": [
       "@uart",

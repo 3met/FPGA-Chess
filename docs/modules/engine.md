@@ -4,7 +4,7 @@ Status: implemented V1 protocol FSM with an internal real search controller.
 
 The engine module is the complete vendor-neutral chess core between the RX/TX stream wrappers. It contains an `engine_command_layer` that parses fixed-size command payloads and streams responses, plus the `search_controller` that owns board and search state.
 
-The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is internal to `engine`. Board wrappers therefore do not know about controller operations. The lightweight `search_controller_stub` remains available for focused command-layer tests only.
+The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is internal to `engine`. Board wrappers therefore do not know about controller operations.
 
 ## Ports
 

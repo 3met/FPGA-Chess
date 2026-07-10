@@ -28,6 +28,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     endfunction
 
     function automatic logic is_ep_candidate(input Tile source, input Move move);
+        if (source.piece_type == SPARE_PIECE) return 1'bx;
         if (!has_ep || source.piece_type != PAWN || tile_data.piece_type != NULL_PIECE) return 1'b0;
         if (DEST_FILE != ep_file) return 1'b0;
         if (turn == WHITE) return getRank(move.from_pos) == 3'd4 && DEST_RANK == 3'd5;
@@ -40,6 +41,8 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         input logic [2:0] distance,
         input logic ep_move
     );
+        if (tile_data.piece_type == SPARE_PIECE) return 1'bx;
+
         case (source.piece_type)
             PAWN: begin
                 if (turn == WHITE) begin
@@ -53,11 +56,12 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                 return distance == 1 && (dir == NORTH_WEST || dir == NORTH_EAST)
                     && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == WHITE) || ep_move);
             end
+            KNIGHT: return 1'b0;
             BISHOP: return isDirDiag(dir);
             ROOK: return isDirCardinal(dir);
             QUEEN: return 1'b1;
             KING: return distance == 1;
-            default: return 1'b0;
+            default: return 1'bx;
         endcase
     endfunction
 
@@ -68,6 +72,8 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         input PieceType weakest_defender
     );
         automatic logic signed [6:0] score;
+
+        if (source_piece == SPARE_PIECE || weakest_defender == SPARE_PIECE) return MoveScore'('x);
 
         score = 7'sd32;
         if (tile_data.piece_type != NULL_PIECE) begin

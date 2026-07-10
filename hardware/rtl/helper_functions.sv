@@ -8,6 +8,11 @@ package chess_helper_funcs;
 
     import general_chess_defs::*;
 
+	// Returns true if a given piece type is a real piece (not NULL or SPARE)
+	function logic isRealPiece(PieceType piece_type);
+		return (piece_type != NULL_PIECE && piece_type != SPARE_PIECE);
+	endfunction
+
     // Returns the rank from a given position
 	function BoardRank getRank(input Position pos);
 		return BoardRank'(pos[5:3]);
