@@ -6,7 +6,7 @@ package move_generator_defs;
     import general_chess_defs::*;
 
     localparam int PROP_STAGE_CNT = 7;
-    localparam int REDUCE_STAGE_CNT = 3;
+    localparam int REDUCE_STAGE_CNT = 2;
     localparam int MOVE_GEN_STAGE_CNT = PROP_STAGE_CNT + 1 + REDUCE_STAGE_CNT + 1;
 
     // -- Define Move Generator Operations --
@@ -52,21 +52,19 @@ package move_generator_defs;
         logic [2:0] distance;
     } RayRecord;
 
-    typedef logic [7:0] MoveScore;
+    typedef logic [5:0] MoveScore;
 
     typedef struct packed {
         logic valid;
         Move move;
-        MoveMaskIndex mask_index;
         MoveScore score;
     } CandidateProposal;
 
     localparam RayRecord NULL_RAY = RayRecord'({EMPTY_TILE, 3'd0});
     localparam CandidateProposal NULL_PROPOSAL = CandidateProposal'({
         1'b0,
-        NULL_MOVE,
-        MoveMaskIndex'(0),
-        MoveScore'(0)
+        Move'('x),
+        MoveScore'('x)
     });
 
 endpackage : move_generator_defs

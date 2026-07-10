@@ -16,9 +16,6 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     input logic ray_consumed[8],
     input logic knight_consumed[8],
     input logic promotion_consumed[8][4],
-    input MoveMaskIndex ray_mask_index[8],
-    input MoveMaskIndex knight_mask_index[8],
-    input MoveMaskIndex promotion_mask_index[8][4],
     output CandidateProposal proposal
 );
 
@@ -96,7 +93,6 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         input logic is_promotion,
         input PromoType promo,
         input logic consumed,
-        input MoveMaskIndex index,
         input MoveScore base_score,
         input logic target_destination,
         inout CandidateProposal best
@@ -114,16 +110,15 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         if (move_gen_op == MOVE_GEN_QSEARCH_OP && !tactical) return;
 
         score = base_score;
-        if (is_promotion) score = MoveScore'(8'd220 + (3 - int'(promo)));
+        if (is_promotion) score = MoveScore'(6'd60 - int'(promo));
         if (target_destination
             && candidate.from_pos == target_move.from_pos
             && (!is_promotion || candidate.promo_piece == target_move.promo_piece))
-            score = MoveScore'(8'hff);
+            score = MoveScore'(6'h3f);
 
         if (!best.valid || score > best.score) begin
             best.valid = 1'b1;
             best.move = candidate;
-            best.mask_index = index;
             best.score = score;
         end
     endtask
@@ -201,12 +196,10 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                             for (int promo_idx=0; promo_idx<4; promo_idx++)
                                 consider(move, ep_move, 1'b1, PromoType'(promo_idx),
                                     promotion_consumed[dir_idx][promo_idx],
-                                    promotion_mask_index[dir_idx][promo_idx],
                                     MoveScore'(0), target_destination, best);
                         end else begin
                             consider(move, ep_move, 1'b0, PROMO_QUEEN,
                                 ray_consumed[dir_idx],
-                                ray_mask_index[dir_idx],
                                 piece_score[source.piece_type], target_destination, best);
                         end
                     end
@@ -222,7 +215,6 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                         move.promo_piece = PROMO_QUEEN;
                         consider(move, 1'b0, 1'b0, PROMO_QUEEN,
                             knight_consumed[knight_dir],
-                            knight_mask_index[knight_dir],
                             piece_score[KNIGHT], target_destination, best);
                     end
                 end
