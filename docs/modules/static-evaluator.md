@@ -17,11 +17,13 @@ The static evaluator computes a White-relative score from board-state inputs and
 
 | Pipeline Stage | Description |
 | -------------- | ----------- |
-| 0 | Register input board tiles and `base_eval`; initialize directional scan state. |
-| 1-6 | Propagate nearest-piece and visible-empty-square data one ray distance per stage. |
-| 7 | Propagate the final ray distance, add positional terms to delayed `base_eval`, and set output score. |
+| 0 | Register input board tiles and `base_eval`. Directional scans with maximum distance seven inspect their first statically selected ray square; shorter scans remain constant empty until their geometry-specific start stage. |
+| 1-6 | Each active directional scan inspects one successive square from the matching delayed board copy until it finds the nearest piece, then carries that result forward. Starting short edge and diagonal rays late avoids storing their inactive state in early propagation registers. |
+| 7 | Carry the completed scan results across the existing evaluation boundary, add positional terms to delayed `base_eval`, and set the output score. |
 
 `STATIC_EVAL_PIPELINE_STAGE_CNT` is 8. The pipeline accepts one request per cycle. Outputs are only meaningful after a request has traversed the fixed latency; there are no valid/ready signals in V1.
+
+The seven directional propagation slots are scheduled independently for each square and direction. A ray with maximum distance `d` starts at slot `7-d`, so every ray completes in slot 6. Slot 0 reads the live input board, while slot `s > 0` reads `board_pipe[s-1]`; the registered result therefore remains aligned with `board_pipe[s]` for the same request.
 
 ## V1 Positional Terms
 

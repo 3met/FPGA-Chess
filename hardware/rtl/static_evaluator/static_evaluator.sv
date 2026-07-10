@@ -59,6 +59,42 @@ module static_evaluator (
         return scan;
     endfunction : initial_scan
 
+    function automatic int ray_max_distance(input Position pos, input Direction dir);
+        automatic int rank = int'(getRank(pos));
+        automatic int file = int'(getFile(pos));
+
+        case (dir)
+            NORTH:      return 7 - rank;
+            NORTH_EAST: return ((7 - rank) < (7 - file)) ? (7 - rank) : (7 - file);
+            EAST:       return 7 - file;
+            SOUTH_EAST: return (rank < (7 - file)) ? rank : (7 - file);
+            SOUTH:      return rank;
+            SOUTH_WEST: return (rank < file) ? rank : file;
+            WEST:       return file;
+            NORTH_WEST: return ((7 - rank) < file) ? (7 - rank) : file;
+            default:    return 0;
+        endcase
+    endfunction : ray_max_distance
+
+    function automatic DirectionScan scan_next_square(
+        input DirectionScan prev_scan,
+        input Tile ray_tile
+    );
+        automatic DirectionScan scan = prev_scan;
+        automatic Tile normalized = normalize_tile(ray_tile);
+
+        if (prev_scan.piece.piece_type == NULL_PIECE) begin
+            if (normalized.piece_type == NULL_PIECE) begin
+                scan.piece = EMPTY_TILE;
+                scan.empty_count = prev_scan.empty_count + 3'd1;
+            end else begin
+                scan.piece = normalized;
+            end
+        end
+
+        return scan;
+    endfunction : scan_next_square
+
     always_ff @(posedge clk) begin
         board_pipe <= next_board_pipe;
         base_eval_pipe <= next_base_eval_pipe;
@@ -88,36 +124,60 @@ module static_evaluator (
         for (int pos = 0; pos < 64; pos++) begin
             next_board_pipe[0][pos] = normalize_tile(board_tiles[pos]);
 
-            for (int dir = 0; dir < 8; dir++) begin
-                next_scan_pipe[0][pos][dir] = initial_scan();
+            for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
+                automatic Direction dir = Direction'(dir_idx);
+                automatic int max_distance = ray_max_distance(Position'(pos), dir);
+                automatic int start_stage = STATIC_EVAL_PROP_STAGE_CNT - max_distance;
+
+                if (start_stage == 0) begin
+                    automatic Position scan_pos = shiftPos(Position'(pos), dir, 3'd1);
+                    next_scan_pipe[0][pos][dir_idx] = scan_next_square(initial_scan(), board_tiles[scan_pos]);
+                end else begin
+                    next_scan_pipe[0][pos][dir_idx] = initial_scan();
+                end
             end
         end
 
-        for (int stage = 1; stage < STATIC_EVAL_PIPELINE_STAGE_CNT; stage++) begin
+        for (int stage = 1; stage < STATIC_EVAL_PROP_STAGE_CNT; stage++) begin
             next_base_eval_pipe[stage] = base_eval_pipe[stage-1];
             next_eval_pipe[stage] = UNKNOWN_EVAL_SCORE;
 
             for (int pos = 0; pos < 64; pos++) begin
                 next_board_pipe[stage][pos] = board_pipe[stage-1][pos];
 
-                for (int dir = 0; dir < 8; dir++) begin
-                    automatic DirectionScan prev_scan = scan_pipe[stage-1][pos][dir];
+                for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
+                    automatic Direction dir = Direction'(dir_idx);
+                    automatic int max_distance = ray_max_distance(Position'(pos), dir);
+                    automatic int start_stage = STATIC_EVAL_PROP_STAGE_CNT - max_distance;
 
-                    next_scan_pipe[stage][pos][dir] = prev_scan;
-
-                    if (isShiftOnBoard(Position'(pos), Direction'(dir), RayDistance'(stage))
-                            && prev_scan.piece.piece_type == NULL_PIECE) begin
-                        automatic Tile ray_tile = normalize_tile(board_pipe[stage-1][shiftPos(Position'(pos), Direction'(dir), RayDistance'(stage))]);
-
-                        if (ray_tile.piece_type == NULL_PIECE) begin
-                            next_scan_pipe[stage][pos][dir].piece = EMPTY_TILE;
-                            next_scan_pipe[stage][pos][dir].empty_count = prev_scan.empty_count + 3'd1;
-                        end else begin
-                            next_scan_pipe[stage][pos][dir].piece = ray_tile;
-                            next_scan_pipe[stage][pos][dir].empty_count = prev_scan.empty_count;
-                        end
+                    if (stage < start_stage) begin
+                        next_scan_pipe[stage][pos][dir_idx] = initial_scan();
+                    end else if (stage == start_stage) begin
+                        automatic Position scan_pos = shiftPos(Position'(pos), dir, 3'd1);
+                        next_scan_pipe[stage][pos][dir_idx] = scan_next_square(
+                            initial_scan(), board_pipe[stage-1][scan_pos]);
+                    end else begin
+                        automatic int scan_distance = stage - start_stage + 1;
+                        automatic Position scan_pos = shiftPos(
+                            Position'(pos), dir, RayDistance'(scan_distance));
+                        next_scan_pipe[stage][pos][dir_idx] = scan_next_square(
+                            scan_pipe[stage-1][pos][dir_idx], board_pipe[stage-1][scan_pos]);
                     end
                 end
+            end
+        end
+
+        next_base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] =
+            base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-2];
+        next_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] = UNKNOWN_EVAL_SCORE;
+
+        for (int pos = 0; pos < 64; pos++) begin
+            next_board_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos] =
+                board_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-2][pos];
+
+            for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
+                next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][dir_idx] =
+                    scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-2][pos][dir_idx];
             end
         end
 
