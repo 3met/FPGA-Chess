@@ -188,13 +188,13 @@ package general_chess_defs;
 	localparam Direction DIAG_DIR[4] = '{NORTH_EAST, SOUTH_EAST, SOUTH_WEST, NORTH_WEST};
 
 	// Position shift of one tile given a direction
-	localparam logic[5:0] POS_SHIFT[8] = '{
+	localparam logic signed [5:0] POS_SHIFT[8] = '{
 		6'd8, 6'd9, 6'd1, -6'd7,
 		-6'd8, -6'd9, -6'd1, 6'd7
 	};
 
 	// Position shift for in some direction for some distance [direction][distance]
-	localparam logic[5:0] DIST_SHIFT[8][8] = '{
+	localparam logic signed [5:0] DIST_SHIFT[8][8] = '{
 		'{6'd0,	6'd8,	6'd16,	6'd24,	6'd32,	6'd40,	6'd48,	6'd56},
 		'{6'd0,	6'd9,	6'd18,	6'd27,	6'd36,	6'd45,	6'd54,	6'd63},
 		'{6'd0,	6'd1,	6'd2,	6'd3,	6'd4,	6'd5,	6'd6,	6'd7},
@@ -211,7 +211,7 @@ package general_chess_defs;
 	} KnightDirection;
 
 	// Indicates how much a knight's position changes for a given knight direction
-	localparam logic[5:0] KNIGHT_SHIFT[8] = '{
+	localparam logic signed [5:0] KNIGHT_SHIFT[8] = '{
 		6'd17, 6'd10, -6'd6, -6'd15, -6'd17, -6'd10, 6'd6, 6'd15
 	};
 

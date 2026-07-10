@@ -45,7 +45,14 @@ package chess_helper_funcs;
 
 	// Shift a position in some direction for some distance
 	function Position shiftPos(Position pos, Direction dir, logic [2:0] distance);
-		return Position'(pos + DIST_SHIFT[dir][distance]);
+		logic [6:0] shifted_pos;
+
+		// Positions intentionally wrap modulo 64 here; isShiftOnBoard validates
+		// the direction-specific rank and file movement separately. Widen the
+		// addition before truncating so synthesis does not report the intended
+		// wraparound as a constant overflow.
+		shifted_pos = {1'b0, pos} + {1'b0, DIST_SHIFT[dir][distance]};
+		return Position'(shifted_pos[5:0]);
 	endfunction : shiftPos
 
     // Takes a position, direaction, and distance as input
@@ -63,19 +70,24 @@ package chess_helper_funcs;
 		case (dir)
 			NORTH, NORTH_EAST, NORTH_WEST: if (new_rank <= old_rank) return 1'b0;
 			SOUTH, SOUTH_EAST, SOUTH_WEST: if (new_rank >= old_rank) return 1'b0;
+			default: ;
 		endcase
 
 		case (dir)
 			WEST, SOUTH_WEST, NORTH_WEST:  if (new_file >= old_file) return 1'b0;
 			EAST, SOUTH_EAST, NORTH_EAST:  if (new_file <= old_file) return 1'b0;
+			default: ;
 		endcase
 
 		return 1'b1;
 	endfunction : isShiftOnBoard
 
-    // Shift a position in some KNIGHT direction
+	// Shift a position in some KNIGHT direction
 	function Position shiftKnightPos(Position pos, KnightDirection dir);
-		return Position'(pos + KNIGHT_SHIFT[dir]);
+		logic [6:0] shifted_pos;
+
+		shifted_pos = {1'b0, pos} + {1'b0, KNIGHT_SHIFT[dir]};
+		return Position'(shifted_pos[5:0]);
 	endfunction : shiftKnightPos
 
 	// Check if making a knight move for a given position+direction is possible
