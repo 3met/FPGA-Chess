@@ -28,7 +28,7 @@ module engine_command_layer #(
     localparam int SET_BOARD_PAYLOAD_BYTES = 36;
     localparam int DIRECT_SET_BOARD_OPS = 68;
 
-    typedef enum logic [3:0] {
+    typedef enum logic [2:0] {
         ST_IDLE,
         ST_RECEIVE_PAYLOAD,
         ST_PROCESS_PAYLOAD,

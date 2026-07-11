@@ -111,7 +111,6 @@ module search_controller #(
     EvalScore perft_pst_eval;
     logic perft_first_request[0:SEARCH_STACK_DEPTH-1];
     PlyIndex perft_ply;
-    logic [7:0] perft_target_depth;
     NodeCountType perft_nodes;
     Move perft_pending_move;
 
@@ -164,7 +163,6 @@ module search_controller #(
     logic search_stand_pat_done[0:SEARCH_STACK_ENTRY_COUNT-1];
     PlyIndex search_ply[0:SEARCH_THREAD_COUNT-1];
     logic [7:0] search_target_depth;
-    logic [7:0] search_current_depth;
     logic [7:0] search_max_depth;
     logic [7:0] search_completed_depth;
     Move search_completed_best_move;
@@ -1105,7 +1103,6 @@ module search_controller #(
             active_repetition_key_count <= ActiveRepetitionCount'(0);
             new_setup_index <= 7'd0;
             perft_ply <= PlyIndex'(0);
-            perft_target_depth <= 8'd0;
             perft_nodes <= NodeCountType'(0);
             perft_pending_move <= NULL_MOVE;
             perft_board <= FullBoard'('0);
@@ -1113,7 +1110,6 @@ module search_controller #(
             perft_pst_eval <= EvalScore'(0);
             search_nodes <= NodeCountType'(0);
             search_target_depth <= 8'd0;
-            search_current_depth <= 8'd0;
             search_max_depth <= 8'd0;
             search_completed_depth <= 8'd0;
             search_completed_best_move <= NULL_MOVE;
@@ -1319,7 +1315,6 @@ module search_controller #(
                                         perft_first_request[idx] <= 1'b1;
                                     end
                                     perft_ply <= PlyIndex'(0);
-                                    perft_target_depth <= req.depth_limit;
                                     perft_nodes <= (req.depth_limit == 8'd0) ? NodeCountType'(1) : NodeCountType'(0);
                                     if (req.depth_limit == 8'd0) begin
                                         resp_reg <= EngineControllerResponse'('0);
@@ -1345,7 +1340,6 @@ module search_controller #(
                                 end else begin
                                     search_ply[search_thread_id] <= PlyIndex'(0);
                                     search_max_depth <= requested_search_depth(req);
-                                    search_current_depth <= (requested_search_depth(req) == 8'd0) ? 8'd0 : 8'd1;
                                     search_target_depth <= (requested_search_depth(req) == 8'd0) ? 8'd0 : 8'd1;
                                     search_completed_depth <= 8'd0;
                                     search_completed_best_move <= NULL_MOVE;
@@ -1549,7 +1543,7 @@ module search_controller #(
                             if (perft_ply == PlyIndex'(0)) begin
                                 resp_reg <= EngineControllerResponse'('0);
                                 resp_reg.nodes_count <= perft_nodes;
-                                resp_reg.completed_depth <= perft_target_depth;
+                                resp_reg.completed_depth <= active_req.depth_limit;
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
                                 state <= ST_RESPOND;
                             end else begin
@@ -1558,7 +1552,7 @@ module search_controller #(
                         end else begin
                             perft_first_request[perft_ply] <= 1'b0;
                             if (move_is_legal) begin
-                                if (int'(perft_ply) + 1 >= int'(perft_target_depth)) begin
+                                if (int'(perft_ply) + 1 >= int'(active_req.depth_limit)) begin
                                     perft_nodes <= perft_nodes + NodeCountType'(1);
                                     state <= ST_PERFT_GEN_ISSUE;
                                 end else begin
@@ -1649,7 +1643,6 @@ module search_controller #(
                     search_return_dispatch_cursor <= ThreadID'(0);
                     search_tt_response_dispatch_cursor <= ThreadID'(0);
                     search_active_thread_count <= ThreadCount'(SEARCH_THREAD_COUNT);
-                    search_target_depth <= search_current_depth;
                     state <= ST_SEARCH_RUN;
                 end
 
@@ -2162,7 +2155,7 @@ module search_controller #(
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
                                 state <= ST_RESPOND;
                             end else begin
-                                search_current_depth <= search_target_depth + 8'd1;
+                                search_target_depth <= search_target_depth + 8'd1;
                                 search_thread_id <= ThreadID'(0);
                                 search_dispatch_cursor <= ThreadID'(0);
                                 search_board_dispatch_cursor <= ThreadID'(0);
