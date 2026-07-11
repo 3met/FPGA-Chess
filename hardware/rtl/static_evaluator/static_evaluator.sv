@@ -9,17 +9,19 @@ module static_evaluator (
     output EvalScore static_eval
 );
 
-    Tile board_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1][0:63];
-    EvalScore base_eval_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1];
-    DirectionScan scan_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1][0:63][0:7];
-    EvalScore eval_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1];
+    // Board, base score, and ray state are only consumed through propagation
+    // stage 6. Stage 7 consumes that state directly to register the result.
+    Tile board_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1][0:63];
+    EvalScore base_eval_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1];
+    DirectionScan scan_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1][0:63][0:7];
+    EvalScore static_eval_reg;
 
-    Tile next_board_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1][0:63];
-    EvalScore next_base_eval_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1];
-    DirectionScan next_scan_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1][0:63][0:7];
-    EvalScore next_eval_pipe[0:STATIC_EVAL_PIPELINE_STAGE_CNT-1];
+    Tile next_board_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1][0:63];
+    EvalScore next_base_eval_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1];
+    DirectionScan next_scan_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1][0:63][0:7];
+    EvalScore next_static_eval;
 
-    assign static_eval = eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1];
+    assign static_eval = static_eval_reg;
 
     function automatic logic same_piece(input Tile tile, input Color color, input PieceType piece);
         return (tile.piece_type == piece && tile.piece_color == color);
@@ -90,16 +92,15 @@ module static_evaluator (
         board_pipe <= next_board_pipe;
         base_eval_pipe <= next_base_eval_pipe;
         scan_pipe <= next_scan_pipe;
-        eval_pipe <= next_eval_pipe;
+        static_eval_reg <= next_static_eval;
     end
 
     always_comb begin
         automatic PositionalScore positional_delta;
         automatic TilePositionalScore tile_positional_delta[64];
 
-        for (int stage = 0; stage < STATIC_EVAL_PIPELINE_STAGE_CNT; stage++) begin
+        for (int stage = 0; stage < STATIC_EVAL_PROP_STAGE_CNT; stage++) begin
             next_base_eval_pipe[stage] = base_eval_pipe[stage];
-            next_eval_pipe[stage] = eval_pipe[stage];
 
             for (int pos = 0; pos < 64; pos++) begin
                 next_board_pipe[stage][pos] = board_pipe[stage][pos];
@@ -111,7 +112,6 @@ module static_evaluator (
         end
 
         next_base_eval_pipe[0] = base_eval;
-        next_eval_pipe[0] = UNKNOWN_EVAL_SCORE;
 
         for (int pos = 0; pos < 64; pos++) begin
             next_board_pipe[0][pos] = board_tiles[pos];
@@ -132,7 +132,6 @@ module static_evaluator (
 
         for (int stage = 1; stage < STATIC_EVAL_PROP_STAGE_CNT; stage++) begin
             next_base_eval_pipe[stage] = base_eval_pipe[stage-1];
-            next_eval_pipe[stage] = UNKNOWN_EVAL_SCORE;
 
             for (int pos = 0; pos < 64; pos++) begin
                 next_board_pipe[stage][pos] = board_pipe[stage-1][pos];
@@ -159,20 +158,6 @@ module static_evaluator (
             end
         end
 
-        next_base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] =
-            base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-2];
-        next_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] = UNKNOWN_EVAL_SCORE;
-
-        for (int pos = 0; pos < 64; pos++) begin
-            next_board_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos] =
-                board_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-2][pos];
-
-            for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
-                next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][dir_idx] =
-                    scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-2][pos][dir_idx];
-            end
-        end
-
         positional_delta = PositionalScore'(0);
 
         // Compute each square locally in ten bits, then widen only at the
@@ -182,7 +167,7 @@ module static_evaluator (
         end
 
         for (int pos = 0; pos < 64; pos++) begin
-            automatic Tile occupant = next_board_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos];
+            automatic Tile occupant = board_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos];
 
 `ifndef SYNTHESIS
             if (!is_legal_pawn_rank(Position'(pos)) && occupant.piece_type == PAWN) begin
@@ -197,7 +182,7 @@ module static_evaluator (
             if (occupant.piece_type != NULL_PIECE) begin
                 if (occupant.piece_type == KING) begin
                     for (int dir = 0; dir < 8; dir++) begin
-                        automatic DirectionScan scan = next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][dir];
+                        automatic DirectionScan scan = scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][dir];
 
 `ifndef SYNTHESIS
                         if (scan.piece.piece_type == KING && scan.empty_count == 3'd0) begin
@@ -212,35 +197,35 @@ module static_evaluator (
                 end
 
                 if (occupant.piece_type == BISHOP) begin
-                    if (next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][NORTH_EAST].empty_count == 3'd0
-                            && next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][SOUTH_EAST].empty_count == 3'd0
-                            && next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][SOUTH_WEST].empty_count == 3'd0
-                            && next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][NORTH_WEST].empty_count == 3'd0) begin
+                    if (scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][NORTH_EAST].empty_count == 3'd0
+                            && scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][SOUTH_EAST].empty_count == 3'd0
+                            && scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][SOUTH_WEST].empty_count == 3'd0
+                            && scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][NORTH_WEST].empty_count == 3'd0) begin
                         tile_positional_delta[pos] += color_signed(occupant.piece_color, TilePositionalScore'(-TRAPPED_BISHOP_PENALTY));
                     end
                 end
 
                 if (occupant.piece_type == ROOK
-                        && next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][NORTH].piece.piece_type == NULL_PIECE
-                        && next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][SOUTH].piece.piece_type == NULL_PIECE) begin
+                        && scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][NORTH].piece.piece_type == NULL_PIECE
+                        && scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][SOUTH].piece.piece_type == NULL_PIECE) begin
                     tile_positional_delta[pos] += color_signed(occupant.piece_color, TilePositionalScore'(OPEN_ROOK_FILE_BONUS));
                 end
 
                 if (occupant.piece_type == PAWN
                         && can_have_north_doubled_pawn(Position'(pos))
-                        && same_piece(next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][NORTH].piece, occupant.piece_color, PAWN)) begin
+                        && same_piece(scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][NORTH].piece, occupant.piece_color, PAWN)) begin
                     tile_positional_delta[pos] += color_signed(occupant.piece_color, TilePositionalScore'(-DOUBLED_PAWN_PENALTY));
                 end
 
                 if (occupant.piece_type == ROOK || occupant.piece_type == QUEEN) begin
                     for (int dir = 0; dir < 4; dir++) begin
-                        tile_positional_delta[pos] += mobility_signed(occupant.piece_color, next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][CARDINAL_DIR[dir]].empty_count);
+                        tile_positional_delta[pos] += mobility_signed(occupant.piece_color, scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][CARDINAL_DIR[dir]].empty_count);
                     end
                 end
 
                 if (occupant.piece_type == BISHOP || occupant.piece_type == QUEEN) begin
                     for (int dir = 0; dir < 4; dir++) begin
-                        tile_positional_delta[pos] += mobility_signed(occupant.piece_color, next_scan_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1][pos][DIAG_DIR[dir]].empty_count);
+                        tile_positional_delta[pos] += mobility_signed(occupant.piece_color, scan_pipe[STATIC_EVAL_PROP_STAGE_CNT-1][pos][DIAG_DIR[dir]].empty_count);
                     end
                 end
             end
@@ -248,8 +233,9 @@ module static_evaluator (
             positional_delta += PositionalScore'(tile_positional_delta[pos]);
         end
 
-        next_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] =
-            next_base_eval_pipe[STATIC_EVAL_PIPELINE_STAGE_CNT-1] + EvalScore'(positional_delta);
+        // This is the existing stage-7 register boundary; no further board or
+        // scan state is required once the reduction has been computed.
+        next_static_eval = base_eval_pipe[STATIC_EVAL_PROP_STAGE_CNT-1] + EvalScore'(positional_delta);
     end
 
 endmodule : static_evaluator
