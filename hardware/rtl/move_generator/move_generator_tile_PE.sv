@@ -101,33 +101,14 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                 || (source.piece_type == BISHOP && isDirDiag(dir)));
     endfunction
 
-    // Score a source piece using local exchange context
-    function automatic MoveScore exchange_score(
-        input PieceType source_piece,
-        input logic [2:0] attacker_count,
-        input logic [2:0] defender_count,
-        input PieceType weakest_defender
-    );
-        automatic MoveScore score;
-
-        if (source_piece == SPARE_PIECE || weakest_defender == SPARE_PIECE) return MoveScore'('x);
-
-        score = MoveScore'(5'd13);
-        if (tile_data.piece_type != NULL_PIECE) begin
-            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source_piece]) score += MoveScore'(5'd4);
-            else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[source_piece]
-                && attacker_count > defender_count) score += MoveScore'(5'd2);
-            else if (attacker_count > defender_count) begin
-                if (defender_count == 0) score += MoveScore'(5'd1);
-                else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type]
-                    < PIECE_VALS_1[source_piece]) score -= MoveScore'(5'd1);
-            end else score -= MoveScore'(5'd3);
-        end
-
-        // Preserve the old preference for the weakest usable attacker
-        score += MoveScore'(5'd6 - int'(source_piece));
-        if (score < 1) return MoveScore'(1);
-        return MoveScore'(score);
+    // Compact MVV/LVA-like ordering. This deliberately avoids a static-exchange
+    // calculation in every destination PE; ordering does not affect correctness.
+    function automatic MoveScore move_order_score(input PieceType source_piece);
+        if (source_piece == SPARE_PIECE || tile_data.piece_type == SPARE_PIECE)
+            return MoveScore'('x);
+        if (tile_data.piece_type != NULL_PIECE)
+            return MoveScore'(5'd20 + int'(tile_data.piece_type) - int'(source_piece));
+        return MoveScore'(5'd7 - int'(source_piece));
     endfunction
 
     task automatic consider(
@@ -170,19 +151,12 @@ module move_generator_tile_PE #(parameter int POS = 0) (
 
     always_comb begin
         automatic CandidateProposal best;
-        automatic logic [2:0] attacker_count; // 3 bits will be sufficiently rare to overflow
-        automatic logic [2:0] defender_count; // 3 bits will be sufficiently rare to overflow
-        automatic PieceType weakest_defender;
-        automatic MoveScore piece_score[7];
         automatic Move move;
         automatic Tile source;
         automatic logic ep_move;
         automatic logic target_destination;
 
         best = NULL_PROPOSAL;
-        attacker_count = 0;
-        defender_count = 0;
-        weakest_defender = KING;
         enemy_attacked = 1'b0;
         king_move_attacked = 1'b0;
 
@@ -199,13 +173,6 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                         Direction'(dir_idx))) begin
                     king_move_attacked = 1'b1;
                 end
-                if (source.piece_type != NULL_PIECE) begin
-                    if (source.piece_color == turn) attacker_count++;
-                    else begin
-                        defender_count++;
-                        if (source.piece_type < weakest_defender) weakest_defender = source.piece_type;
-                    end
-                end
             end
             if (isKnightShiftOnBoard(DEST_POS, KnightDirection'(dir_idx))) begin
                 source = knight_tile_in[dir_idx];
@@ -214,23 +181,10 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                         enemy_attacked = 1'b1;
                         king_move_attacked = 1'b1;
                     end
-                    if (source.piece_color == turn) attacker_count++;
-                    else begin
-                        defender_count++;
-                        if (KNIGHT < weakest_defender) weakest_defender = KNIGHT;
-                    end
                 end
             end
         end
 
-        // Exchange context is destination-local, so compute it once per source piece class.
-        piece_score[NULL_PIECE] = MoveScore'(0);
-        piece_score[PAWN] = exchange_score(PAWN, attacker_count, defender_count, weakest_defender);
-        piece_score[KNIGHT] = exchange_score(KNIGHT, attacker_count, defender_count, weakest_defender);
-        piece_score[BISHOP] = exchange_score(BISHOP, attacker_count, defender_count, weakest_defender);
-        piece_score[ROOK] = exchange_score(ROOK, attacker_count, defender_count, weakest_defender);
-        piece_score[QUEEN] = exchange_score(QUEEN, attacker_count, defender_count, weakest_defender);
-        piece_score[KING] = exchange_score(KING, attacker_count, defender_count, weakest_defender);
         target_destination = move_gen_op == MOVE_GEN_TARGETED_OP && target_move.to_pos == DEST_POS;
 
         if (move_gen_op != MOVE_GEN_IDLE_OP
@@ -252,7 +206,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                         end else begin
                             consider(move, ep_move, 1'b0, PROMO_QUEEN,
                                 ray_consumed[dir_idx],
-                                piece_score[source.piece_type], target_destination,
+                                move_order_score(source.piece_type), target_destination,
                                 (source.piece_type == KING) ? !king_move_attacked : 1'bx, best);
                         end
                     end
@@ -268,7 +222,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                         move.promo_piece = PROMO_QUEEN;
                         consider(move, 1'b0, 1'b0, PROMO_QUEEN,
                             knight_consumed[knight_dir],
-                            piece_score[KNIGHT], target_destination, 1'bx, best);
+                            move_order_score(KNIGHT), target_destination, 1'bx, best);
                     end
                 end
             end
