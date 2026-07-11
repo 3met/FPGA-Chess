@@ -26,10 +26,12 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     localparam BoardRank DEST_RANK = BoardRank'(POS / 8);
     localparam BoardFile DEST_FILE = BoardFile'(POS % 8);
 
+    // Reconstruct the nearest source square on a ray
     function automatic Position ray_source(input Direction dir, input logic [2:0] distance);
         return shiftPos(DEST_POS, dir, distance);
     endfunction
 
+    // Identify an en passant move into this destination
     function automatic logic is_ep_candidate(input Tile source, input Move move);
         if (source.piece_type == SPARE_PIECE) return 1'bx;
         if (!has_ep || source.piece_type != PAWN || tile_data.piece_type != NULL_PIECE) return 1'b0;
@@ -38,6 +40,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         return getRank(move.from_pos) == 3'd3 && DEST_RANK == 3'd2;
     endfunction
 
+    // Check pseudo-legal movement from a ray source
     function automatic logic ray_can_move(
         input Tile source,
         input Direction dir,
@@ -68,7 +71,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         endcase
     endfunction
 
-    // Test whether a nearest ray source attacks this destination.
+    // Test whether a nearest ray source attacks this destination
     function automatic logic ray_source_attacks(input Tile source, input Direction dir, input logic [2:0] distance);
         if (source.piece_type == SPARE_PIECE) return 1'bx;
         if (source.piece_type == NULL_PIECE || source.piece_color == turn) return 1'b0;
@@ -88,6 +91,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         endcase
     endfunction
 
+    // Test whether a ray source is an attacking slider
     function automatic logic ray_slider_attacks(input Tile source, input Direction dir);
         if (source.piece_type == SPARE_PIECE) return 1'bx;
         return source.piece_type != NULL_PIECE
@@ -97,30 +101,31 @@ module move_generator_tile_PE #(parameter int POS = 0) (
                 || (source.piece_type == BISHOP && isDirDiag(dir)));
     endfunction
 
+    // Score a source piece using local exchange context
     function automatic MoveScore exchange_score(
         input PieceType source_piece,
         input logic [2:0] attacker_count,
         input logic [2:0] defender_count,
         input PieceType weakest_defender
     );
-        automatic logic signed [6:0] score;
+        automatic MoveScore score;
 
         if (source_piece == SPARE_PIECE || weakest_defender == SPARE_PIECE) return MoveScore'('x);
 
-        score = 7'sd32;
+        score = MoveScore'(5'd13);
         if (tile_data.piece_type != NULL_PIECE) begin
-            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source_piece]) score += 7'sd8;
+            if (PIECE_VALS_1[tile_data.piece_type] > PIECE_VALS_1[source_piece]) score += MoveScore'(5'd4);
             else if (PIECE_VALS_1[tile_data.piece_type] == PIECE_VALS_1[source_piece]
-                && attacker_count > defender_count) score += 7'sd4;
+                && attacker_count > defender_count) score += MoveScore'(5'd2);
             else if (attacker_count > defender_count) begin
-                if (defender_count == 0) score += 7'sd3;
+                if (defender_count == 0) score += MoveScore'(5'd1);
                 else if (PIECE_VALS_1[weakest_defender] + PIECE_VALS_1[tile_data.piece_type]
-                    < PIECE_VALS_1[source_piece]) score -= 7'sd2;
-            end else score -= 7'sd6;
+                    < PIECE_VALS_1[source_piece]) score -= MoveScore'(5'd1);
+            end else score -= MoveScore'(5'd3);
         end
 
-        // Preserve the old preference for the weakest usable attacker.
-        score += 7'sd7 - $signed({1'b0, source_piece});
+        // Preserve the old preference for the weakest usable attacker
+        score += MoveScore'(5'd6 - int'(source_piece));
         if (score < 1) return MoveScore'(1);
         return MoveScore'(score);
     endfunction
@@ -149,11 +154,11 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         if (move_gen_op == MOVE_GEN_QSEARCH_OP && !tactical) return;
 
         score = base_score;
-        if (is_promotion) score = MoveScore'(6'd60 - int'(promo));
+        if (is_promotion) score = MoveScore'(5'd30 - int'(promo));
         if (target_destination
             && candidate.from_pos == target_move.from_pos
             && (!is_promotion || candidate.promo_piece == target_move.promo_piece))
-            score = MoveScore'(6'h3f);
+            score = MoveScore'(5'd31);
 
         if (!best.valid || score > best.score) begin
             best.valid = 1'b1;
@@ -173,17 +178,8 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         automatic Tile source;
         automatic logic ep_move;
         automatic logic target_destination;
-        automatic logic control_sensitivity;
 
         best = NULL_PROPOSAL;
-        // Keep older synthesis/simulation tools sensitive to controls read by helper tasks.
-        control_sensitivity = ^{turn, move_gen_op, target_move, has_ep, ep_file, tile_data};
-        for (int sensitivity_idx=0; sensitivity_idx<8; sensitivity_idx++) begin
-            control_sensitivity ^= ray_consumed[sensitivity_idx];
-            control_sensitivity ^= knight_consumed[sensitivity_idx];
-            for (int promo_idx=0; promo_idx<4; promo_idx++)
-                control_sensitivity ^= promotion_consumed[sensitivity_idx][promo_idx];
-        end
         attacker_count = 0;
         defender_count = 0;
         weakest_defender = KING;
@@ -278,7 +274,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
             end
         end
 
-        proposal = control_sensitivity ? best : best;
+        proposal = best;
     end
 
 endmodule : move_generator_tile_PE

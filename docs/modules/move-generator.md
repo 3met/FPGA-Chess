@@ -66,7 +66,7 @@ flowchart LR
 
 ## Ordered Move Generation
 
-The current ordering uses a six-bit unsigned `MoveScore` to score destination-tile proposals for the requested node and selects the highest score. Each destination considers the nearest piece on each ray, legal knight sources, pawn forward/capture lanes, promotion variants, and castling candidates. Captures, en passant, promotions, castling, moving-piece type, and targeted moves receive ordering bonuses; exact ordering is an implementation detail as long as candidates are emitted once and target moves outrank other candidates when legal and unsearched.
+The current ordering uses a five-bit unsigned `MoveScore` to score destination-tile proposals for the requested node and selects the highest score. Each destination considers the nearest piece on each ray, legal knight sources, pawn forward/capture lanes, promotion variants, and castling candidates. Captures, en passant, promotions, castling, moving-piece type, and targeted moves receive ordering bonuses; exact ordering is an implementation detail as long as candidates are emitted once and target moves outrank other candidates when legal and unsearched.
 
 Targeted Generation supports TT move ordering and root move forcing. If the target move is legal and unsearched, it must outrank all other candidates for that dispatch.
 

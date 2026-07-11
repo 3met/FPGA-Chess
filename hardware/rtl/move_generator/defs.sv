@@ -52,7 +52,7 @@ package move_generator_defs;
         logic [2:0] distance;
     } RayRecord;
 
-    typedef logic [5:0] MoveScore;
+    typedef logic [4:0] MoveScore;
 
     typedef struct packed {
         logic valid;

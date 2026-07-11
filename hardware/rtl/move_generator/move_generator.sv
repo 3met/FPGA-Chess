@@ -938,7 +938,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             castle_proposal_in.move = move;
             castle_proposal_in.score = (op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
                 && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos
-                && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(6'h3f) : MoveScore'(6'd24);
+                && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(5'd31) : MoveScore'(5'd13);
             castle_proposal_in.king_safe =
                 !tile_enemy_attacked[move.from_pos]
                 && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 5 : 61)]
@@ -959,7 +959,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             queenside.move = move;
             queenside.score = (op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
                 && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos
-                && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(6'h3f) : MoveScore'(6'd24);
+                && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(5'd31) : MoveScore'(5'd13);
             queenside.king_safe =
                 !tile_enemy_attacked[move.from_pos]
                 && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 3 : 59)]
