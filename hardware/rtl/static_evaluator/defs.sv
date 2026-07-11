@@ -11,6 +11,9 @@ package static_evaluator_defs;
     localparam EvalScore DOUBLED_PAWN_PENALTY = EvalScore'('d6);
 
     typedef logic [2:0] RayDistance;
+    // Per-square positional contribution. Ten signed bits cover the largest
+    // contribution from any one tile while retaining 1/128-pawn units.
+    typedef logic signed [9:0] TilePositionalScore;
     typedef logic signed [11:0] PositionalScore;
 
     typedef struct packed {

@@ -43,4 +43,4 @@ Positive `static_eval` values favor White. Negative values favor Black. The eval
 
 ## Current RTL Notes
 
-The current RTL uses `base_eval` for material and PST and does not access PST ROMs. Positional terms accumulate in a signed 12-bit value, which covers every position reachable in a standard chess game, before being extended and added to the 16-bit base evaluation. Simulation assertions catch pawns on the first or eighth rank, adjacent kings, and `SPARE_PIECE` inputs.
+The current RTL uses `base_eval` for material and PST and does not access PST ROMs. Each square's positional terms first accumulate in a signed 10-bit `TilePositionalScore` (all score units are 1/128 pawn), then sign-extend into a signed 12-bit board-wide accumulator. The 12-bit accumulator covers every position reachable in a standard chess game before being added to the 16-bit base evaluation. Simulation assertions catch pawns on the first or eighth rank, adjacent kings, and `SPARE_PIECE` inputs.
