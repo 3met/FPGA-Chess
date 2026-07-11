@@ -13,4 +13,6 @@ Relevant docs are under `docs/`. Start with [docs/README.md](docs/README.md), th
 
 ### Code Style
 
+* All added functions or significant blocks of RTL should have a short explanatory comment
 * Paragraphs in Markdown should be written as single lines
+* Keep docs concise without transient or irrelevant details
