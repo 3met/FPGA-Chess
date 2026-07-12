@@ -22,14 +22,13 @@ Each lookup returns a response to the requesting thread.
 
 | Field | Meaning |
 | ----- | ------- |
-| `thread_id` | Requesting thread. |
+| `thread_id` | Routing metadata identifying the requesting thread; the controller uses it to capture the result in that thread's pending slot. |
 | `valid` | Response is valid. |
 | `hit` | TT key matched the requested Zobrist key. |
 | `score` | Stored score, side-to-move point-of-view. |
 | `bound_type` | Exact, lower-bound, upper-bound, or invalid. |
 | `depth` | Stored search depth. |
 | `best_move` | Best move or move-ordering hint. |
-| `replacement_metadata` | Age/generation or other metadata needed by store policy. |
 
 ## Behavior
 

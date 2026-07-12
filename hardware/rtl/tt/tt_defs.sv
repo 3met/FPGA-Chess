@@ -38,13 +38,13 @@ package tt_defs;
     } TTLookupRequest;
 
     typedef struct packed {
+        // Route metadata retained until the controller captures this result.
         ThreadID thread_id;
         logic hit;
         EvalScore score;
         TTBoundType bound_type;
         TTDepth depth;
         Move best_move;
-        TTAge age;
     } TTLookupResponse;
 
     typedef struct packed {

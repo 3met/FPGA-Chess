@@ -258,7 +258,6 @@ module tt_load_store #(
         resp.bound_type = entry_hit ? storage_bound_type(entry) : TT_BOUND_INVALID;
         resp.depth = entry_hit ? storage_depth(entry) : TTDepth'(0);
         resp.best_move = entry_hit ? storage_best_move(entry) : NULL_MOVE;
-        resp.age = entry_hit ? storage_age(entry) : TTAge'(0);
         return resp;
     endfunction : make_lookup_response
 
