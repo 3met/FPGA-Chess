@@ -51,6 +51,12 @@
       "hardware/rtl/tt/tt_defs.sv",
       "hardware/rtl/tt/tt_load_store.sv"
     ],
+    "repetition-checker": [
+      "@common",
+      "hardware/rtl/zobrist_defs.sv",
+      "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
+      "hardware/rtl/repetition_checker.sv"
+    ],
     "search-controller": [
       "@common",
       "@board-update-pipeline",
@@ -58,6 +64,7 @@
       "@static-evaluator",
       "@tt-load-store",
       "hardware/rtl/engine_defs.sv",
+      "hardware/rtl/repetition_checker.sv",
       "hardware/rtl/timer.sv",
       "hardware/rtl/search_controller.sv"
     ],
@@ -90,6 +97,11 @@
     ]
   },
   "tests": {
+    "repetition-checker": {
+      "source_set": "repetition-checker",
+      "testbench": "hardware/tb/repetition_checker/tb_repetition_checker.sv",
+      "top": "tb_repetition_checker"
+    },
     "board-update-pipeline": {
       "source_set": "board-update-pipeline",
       "testbench": "hardware/tb/board_update_pipeline/tb_board_update_pipeline.sv",
