@@ -113,6 +113,11 @@ def validate_manifest(manifest: object) -> None:
         if "seed" in target and (not isinstance(target["seed"], int) or target["seed"] < 1):
             raise BuildError(f"Synthesis target '{name}' seed must be a positive integer")
         if target["tool"] == "quartus":
+            message_disable = target.get("message_disable", [])
+            if not isinstance(message_disable, list) or not all(
+                isinstance(message_id, int) and message_id > 0 for message_id in message_disable
+            ):
+                raise BuildError(f"Synthesis target '{name}' message_disable must contain positive integers")
             ensure_existing(
                 [
                     repo_path(target["sdc"]),
@@ -659,6 +664,8 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
     ]
     if "seed" in target:
         lines.append(f"set_global_assignment -name SEED {target['seed']}")
+    for message_id in target.get("message_disable", []):
+        lines.append(f"set_global_assignment -name MESSAGE_DISABLE {message_id}")
     assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
     lines.extend(
@@ -1115,6 +1122,7 @@ def synth_quartus(
     target: dict,
     jobs: int | None,
     clean: bool = False,
+    stream_logs: bool = False,
 ) -> int:
     parallel_processors = host_parallel_processors() if jobs is None else jobs
     if parallel_processors < 1:
@@ -1148,7 +1156,13 @@ def synth_quartus(
     for cmd in commands:
         log = build_dir / f"{cmd[0]}.log"
         print(f"Running {' '.join(cmd)}...")
-        code, output, elapsed = run_command(cmd, build_dir, log, live_log=True, tee_stdout=True)
+        code, output, elapsed = run_command(
+            cmd,
+            build_dir,
+            log,
+            live_log=True,
+            tee_stdout=stream_logs,
+        )
         ok = code == 0 and not QUARTUS_ERROR_RE.search(output)
         metadata["stages"].append(
             {
@@ -1268,7 +1282,7 @@ def command_synth(args: argparse.Namespace) -> int:
     print("\n== Synthesis ==")
     target = targets[args.target]
     if target["tool"] == "quartus":
-        return synth_quartus(manifest, args.target, target, args.jobs, args.clean)
+        return synth_quartus(manifest, args.target, target, args.jobs, args.clean, args.stream_logs)
     if target["tool"] == "vivado":
         return synth_vivado(manifest, args.target, target, args.part)
     raise BuildError(f"Unsupported synthesis tool '{target['tool']}'")
@@ -1306,6 +1320,11 @@ def build_parser() -> argparse.ArgumentParser:
     synth_parser.add_argument("--part", help="Xilinx part for vivado-generic")
     synth_parser.add_argument("--jobs", type=int, help="Quartus parallel processor limit; overrides automatic detection")
     synth_parser.add_argument("--clean", action="store_true", help="Delete the Quartus build directory before synthesis")
+    synth_parser.add_argument(
+        "--stream-logs",
+        action="store_true",
+        help="Stream vendor tool output to the console while synthesis runs",
+    )
     synth_parser.add_argument(
         "--update-generated-data",
         action="store_true",

@@ -179,6 +179,7 @@
       "seed": 1,
       "map_effort": "fast",
       "fit_effort": "fast",
+      "message_disable": [12021, 12022, 12128, 12134, 169065, 169070, 286033],
       "sdc": "hardware/constraints/engine.sdc",
       "qsf_template": "hardware/constraints/DE1_SoC.qsf",
       "qip_files": [
