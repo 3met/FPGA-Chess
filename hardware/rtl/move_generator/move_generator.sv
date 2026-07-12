@@ -109,6 +109,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         endcase
     endfunction : ray_max_distance
 
+    function automatic int tile_max_distance(input Position pos);
+        automatic int rank = int'(getRank(pos));
+        automatic int file = int'(getFile(pos));
+        automatic int rank_distance = (rank > (7 - rank)) ? rank : (7 - rank);
+        automatic int file_distance = (file > (7 - file)) ? file : (7 - file);
+        return (rank_distance > file_distance) ? rank_distance : file_distance;
+    endfunction : tile_max_distance
+
     function automatic logic tile_is_empty(input Tile board[64], input Position pos);
         return (board[pos].piece_type == NULL_PIECE);
     endfunction : tile_is_empty
@@ -854,6 +862,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     genvar promo_invalid_idx;
     generate
         for (tile_idx=0; tile_idx<64; tile_idx=tile_idx+1) begin : gen_tile_pe
+            localparam int TILE_DISTANCE_BITS = $clog2(tile_max_distance(Position'(tile_idx)));
             for (knight_idx=0; knight_idx<8; knight_idx=knight_idx+1) begin : gen_knight_input
                 if (isKnightShiftOnBoard(Position'(tile_idx), KnightDirection'(knight_idx))) begin
                     localparam Position KNIGHT_POS = shiftKnightPos(Position'(tile_idx), KnightDirection'(knight_idx));
@@ -898,7 +907,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 end
             end
 
-            move_generator_tile_PE #(.POS(tile_idx)) tile_pe (
+            move_generator_tile_PE #(
+                .POS(tile_idx),
+                .DIST_BITS(TILE_DISTANCE_BITS)
+            ) tile_pe (
                 .tile_data(board_pipe[PROP_STAGE_CNT-1][tile_idx]),
                 .ray_in(ray_pipe[PROP_STAGE_CNT-1][tile_idx]),
                 .king_vacated_ray_in(king_vacated_ray[tile_idx]),
@@ -1051,12 +1063,12 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             Position'(pos), dir, RayDistance'(scan_start));
                         if (board_tiles[first_pos].piece_type != NULL_PIECE || scan_start == scan_end) begin
                             ray_pipe[0][pos][dir_idx].tile <= board_tiles[first_pos];
-                            ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_start);
+                            ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_start - 1);
                         end else begin
                             automatic Position second_pos = shiftPos(
                                 Position'(pos), dir, RayDistance'(scan_end));
                             ray_pipe[0][pos][dir_idx].tile <= board_tiles[second_pos];
-                            ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_end);
+                            ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_end - 1);
                         end
                     end else ray_pipe[0][pos][dir_idx] <= NULL_RAY;
                 end
@@ -1083,12 +1095,12 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             if (board_pipe[stage-1][first_pos].piece_type != NULL_PIECE
                                 || scan_start == scan_end) begin
                                 ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][first_pos];
-                                ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_start);
+                                ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_start - 1);
                             end else begin
                                 automatic Position second_pos = shiftPos(
                                     Position'(pos), dir, RayDistance'(scan_end));
                                 ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][second_pos];
-                                ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_end);
+                                ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_end - 1);
                             end
                         end
                     end

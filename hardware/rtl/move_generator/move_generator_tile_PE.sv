@@ -4,7 +4,10 @@ import general_chess_defs::*;
 import chess_helper_funcs::*;
 import move_generator_defs::*;
 
-module move_generator_tile_PE #(parameter int POS = 0) (
+module move_generator_tile_PE #(
+    parameter int POS = 0,
+    parameter int DIST_BITS = 3
+) (
     input Tile tile_data,
     input RayRecord ray_in[8],
     input RayRecord king_vacated_ray_in[8],
@@ -27,8 +30,16 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     localparam BoardFile DEST_FILE = BoardFile'(POS % 8);
 
     // Reconstruct the nearest source square on a ray
-    function automatic Position ray_source(input Direction dir, input logic [2:0] distance);
-        return shiftPos(DEST_POS, dir, distance);
+    typedef logic [DIST_BITS-1:0] EncodedDistance;
+
+    // Ray distances encode the adjacent square as zero, so add one only where
+    // the board-position helper requires the physical number of steps.
+    function automatic logic [2:0] physical_distance(input EncodedDistance distance);
+        return 3'(distance) + 3'd1;
+    endfunction
+
+    function automatic Position ray_source(input Direction dir, input EncodedDistance distance);
+        return shiftPos(DEST_POS, dir, physical_distance(distance));
     endfunction
 
     // Identify an en passant move into this destination
@@ -44,7 +55,7 @@ module move_generator_tile_PE #(parameter int POS = 0) (
     function automatic logic ray_can_move(
         input Tile source,
         input Direction dir,
-        input logic [2:0] distance,
+        input EncodedDistance distance,
         input logic ep_move
     );
         if (tile_data.piece_type == SPARE_PIECE) return 1'bx;
@@ -53,40 +64,40 @@ module move_generator_tile_PE #(parameter int POS = 0) (
             PAWN: begin
                 if (turn == WHITE) begin
                     if (dir == SOUTH && tile_data.piece_type == NULL_PIECE)
-                        return distance == 1 || (distance == 2 && DEST_RANK == 3);
-                    return distance == 1 && (dir == SOUTH_WEST || dir == SOUTH_EAST)
+                        return distance == 0 || (distance == 1 && DEST_RANK == 3);
+                    return distance == 0 && (dir == SOUTH_WEST || dir == SOUTH_EAST)
                         && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == BLACK) || ep_move);
                 end
                 if (dir == NORTH && tile_data.piece_type == NULL_PIECE)
-                    return distance == 1 || (distance == 2 && DEST_RANK == 4);
-                return distance == 1 && (dir == NORTH_WEST || dir == NORTH_EAST)
+                    return distance == 0 || (distance == 1 && DEST_RANK == 4);
+                return distance == 0 && (dir == NORTH_WEST || dir == NORTH_EAST)
                     && ((tile_data.piece_type != NULL_PIECE && tile_data.piece_color == WHITE) || ep_move);
             end
             KNIGHT: return 1'b0;
             BISHOP: return isDirDiag(dir);
             ROOK: return isDirCardinal(dir);
             QUEEN: return 1'b1;
-            KING: return distance == 1;
+            KING: return distance == 0;
             default: return 1'bx;
         endcase
     endfunction
 
     // Test whether a nearest ray source attacks this destination
-    function automatic logic ray_source_attacks(input Tile source, input Direction dir, input logic [2:0] distance);
+    function automatic logic ray_source_attacks(input Tile source, input Direction dir, input EncodedDistance distance);
         if (source.piece_type == SPARE_PIECE) return 1'bx;
         if (source.piece_type == NULL_PIECE || source.piece_color == turn) return 1'b0;
 
         case (source.piece_type)
             PAWN: begin
                 if (source.piece_color == WHITE)
-                    return distance == 1 && (dir == SOUTH_WEST || dir == SOUTH_EAST);
-                return distance == 1 && (dir == NORTH_WEST || dir == NORTH_EAST);
+                    return distance == 0 && (dir == SOUTH_WEST || dir == SOUTH_EAST);
+                return distance == 0 && (dir == NORTH_WEST || dir == NORTH_EAST);
             end
             KNIGHT: return 1'b0;
             BISHOP: return isDirDiag(dir);
             ROOK: return isDirCardinal(dir);
             QUEEN: return 1'b1;
-            KING: return distance == 1;
+            KING: return distance == 0;
             default: return 1'bx;
         endcase
     endfunction
@@ -161,13 +172,14 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         king_move_attacked = 1'b0;
 
         for (int dir_idx=0; dir_idx<8; dir_idx++) begin
+            automatic EncodedDistance ray_distance = EncodedDistance'(ray_in[dir_idx].distance);
             if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
                 source = ray_in[dir_idx].tile;
-                if (ray_source_attacks(source, Direction'(dir_idx), ray_in[dir_idx].distance)) begin
+                if (ray_source_attacks(source, Direction'(dir_idx), ray_distance)) begin
                     enemy_attacked = 1'b1;
                     king_move_attacked = 1'b1;
                 end
-                if (source == Tile'({turn, KING}) && ray_in[dir_idx].distance == 3'd1
+                if (source == Tile'({turn, KING}) && ray_distance == EncodedDistance'(0)
                     && ray_slider_attacks(
                         king_vacated_ray_in[dir_idx].tile,
                         Direction'(dir_idx))) begin
@@ -190,14 +202,15 @@ module move_generator_tile_PE #(parameter int POS = 0) (
         if (move_gen_op != MOVE_GEN_IDLE_OP
             && !(tile_data.piece_type != NULL_PIECE && tile_data.piece_color == turn)) begin
             for (int dir_idx=0; dir_idx<8; dir_idx++) begin
+                automatic EncodedDistance ray_distance = EncodedDistance'(ray_in[dir_idx].distance);
                 if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
                     source = ray_in[dir_idx].tile;
-                    move.from_pos = ray_source(Direction'(dir_idx), ray_in[dir_idx].distance);
+                    move.from_pos = ray_source(Direction'(dir_idx), ray_distance);
                     move.to_pos = DEST_POS;
                     move.promo_piece = PROMO_QUEEN;
                     ep_move = is_ep_candidate(source, move);
                     if (source.piece_type != NULL_PIECE && source.piece_color == turn
-                        && ray_can_move(source, Direction'(dir_idx), ray_in[dir_idx].distance, ep_move)) begin
+                        && ray_can_move(source, Direction'(dir_idx), ray_distance, ep_move)) begin
                         if (source.piece_type == PAWN && (DEST_RANK == 0 || DEST_RANK == 7)) begin
                             for (int promo_idx=0; promo_idx<4; promo_idx++)
                                 consider(move, ep_move, 1'b1, PromoType'(promo_idx),
