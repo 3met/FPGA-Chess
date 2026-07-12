@@ -4,7 +4,7 @@
 
 Full RTL tests instantiate the real `search_controller`. It owns active board state, applies direct-board operations through `board_update_pipeline`, stores active-game repetition keys for draw detection when Zobrist hashing is enabled, clears the compact TT on New Game when TT is enabled, initializes the normal starting position through board-update setup operations, optionally runs generic stack-based perft through the real move generator with current-board push/reverse state, and runs iterative-deepening Lazy SMP negamax with board-update pushes and reverse moves, optional TT lookup/store cutoffs, targeted TT move ordering, static-evaluator leaves, and qsearch captures and promotions after nominal depth.
 
-Search state is stored per configured thread for lifecycle status, scheduler phase, current board, Zobrist key, PST state, board, move, eval, and TT wait counters, in-flight flags, TT response pending records, move stacks, alpha/beta values, repetition line state, return values, current best moves, completed results, completed depths, and node counters. Full board states are not stored per ply. Instead, per-thread and per-ply stack records are flattened into `SEARCH_THREAD_COUNT * SEARCH_STACK_DEPTH` storage addressed by `search_stack_addr` so Quartus does not elaborate unpacked multidimensional stack arrays.
+Search state is stored per configured thread for lifecycle status, scheduler phase, current board, Zobrist key, PST state, board, move, eval, and TT wait counters, in-flight flags, TT response pending records, move stacks, alpha/beta values, repetition line state, return values, current best moves, completed results, completed depths, and node counters. Full board states are not stored per ply. The 116-bit per-node search variables are packed into one synchronous block-RAM stack per thread. Each thread caches its current node in registers, writes that cache through to its current-ply RAM entry, and continuously prefetches the parent entry. Descents construct the child directly in the cache, while the board-reverse pipeline hides the synchronous parent-read latency before ascent completes.
 
 Board-update requests carry controller-local thread, operation, and ply tag shift registers so push and reverse completions restore or descend the tagged thread correctly. Move-generation and static-evaluation requests carry controller-local thread tags. TT requests carry `thread_id` in the request and response records. The concurrent `ST_SEARCH_RUN` scheduler keeps root, child-return, TT-response, and per-pipeline dispatch cursors so independent ready threads can be issued into different shared pipelines when more than one thread is configured. Accepted TT lookup responses are captured per thread, child returns are folded only after reverse-board completion, and deferred `STORE_WAIT` TT stores are retried after higher-priority progress work.
 
@@ -117,8 +117,9 @@ flowchart LR
 | `curr_operation` | Enum | Operation currently running. |
 | `curr_depth` | Depth field | Current iterative-deepening depth. |
 | `target_depth` | Depth field | Search depth limit. |
-| `alpha[THREAD_COUNT][MAX_PLY_COUNT]` | `EvalScore` | Alpha stack values per thread. |
-| `beta[THREAD_COUNT][MAX_PLY_COUNT]` | `EvalScore` | Beta stack values per thread. |
+| `search_stack_ram[THREAD_COUNT][SEARCH_STACK_DEPTH]` | Packed 116-bit records | Synchronous block-RAM search stacks containing moves, scores, bounds, repetition boundary, and node flags. |
+| `search_stack_top[THREAD_COUNT]` | Packed 116-bit records | Register caches for each thread's current node. |
+| `search_stack_parent_q[THREAD_COUNT]` | Packed 116-bit records | Continuously prefetched synchronous-RAM parent values used on ascent. |
 | `node_count[THREAD_COUNT]` | `NODE_COUNT_BITS` | Node count per thread. |
 | `thread_state[THREAD_COUNT]` | Struct | Per-thread search state, current ply, wait state, and active board snapshot. |
 | `search_thread_phase[THREAD_COUNT]` | Enum | Per-thread scheduler phase: ready, TT wait, eval wait, move wait, board wait, store wait, done, or idle. |

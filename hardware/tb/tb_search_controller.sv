@@ -948,7 +948,7 @@ module tb_search_controller;
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                 if (root_stack_capture_pending[idx]) begin
                     root_stack_seen[idx] = 1'b1;
-                    root_first_stack_move[idx] = dut.search_move_stack[dut.search_stack_addr(idx, 1)];
+                root_first_stack_move[idx] = dut.search_stack_top[idx].move;
                     root_stack_capture_pending[idx] = 1'b0;
                 end
                 if (dut.search_board_wait_count[idx] != 0) begin
@@ -1152,10 +1152,10 @@ module tb_search_controller;
             end
             if (dut.search_board_result_valid
                     && !root_stack_seen[int'(dut.search_board_result_thread_id)]
-                    && !is_null_move(dut.search_move_stack[dut.search_stack_addr(dut.search_board_result_thread_id, 1)])) begin
+                    && !is_null_move(dut.search_stack_top[dut.search_board_result_thread_id].move)) begin
                 if (!root_stack_seen[int'(dut.search_board_result_thread_id)]) begin
                     root_stack_seen[int'(dut.search_board_result_thread_id)] = 1'b1;
-                    root_first_stack_move[int'(dut.search_board_result_thread_id)] = dut.search_move_stack[dut.search_stack_addr(dut.search_board_result_thread_id, 1)];
+                    root_first_stack_move[int'(dut.search_board_result_thread_id)] = dut.search_stack_top[dut.search_board_result_thread_id].move;
                 end
             end
         end

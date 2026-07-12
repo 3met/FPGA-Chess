@@ -37,8 +37,7 @@ module search_controller #(
     localparam int SEARCH_MOVE_TAG_PIPE_LEN = (MOVE_WAIT_CYCLES <= 1) ? 1 : MOVE_WAIT_CYCLES;
     localparam int SEARCH_EVAL_TAG_PIPE_LEN = EVAL_WAIT_CYCLES + 1;
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
-    localparam int SEARCH_STACK_ENTRY_COUNT = SEARCH_THREAD_COUNT * SEARCH_STACK_DEPTH;
-    localparam int SEARCH_STACK_INDEX_BITS = (SEARCH_STACK_ENTRY_COUNT <= 1) ? 1 : $clog2(SEARCH_STACK_ENTRY_COUNT);
+    localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int NEW_GAME_OPS = 68;
     localparam EvalScore SEARCH_INF = EvalScore'(32001);
 
@@ -46,7 +45,25 @@ module search_controller #(
     typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
     typedef logic [EVAL_WAIT_BITS-1:0] EvalWaitCount;
     typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
-    typedef logic [SEARCH_STACK_INDEX_BITS-1:0] SearchStackIndex;
+    typedef logic [SEARCH_STACK_ADDR_BITS-1:0] SearchStackRamAddr;
+
+    // A complete node record is packed so each thread's depth stack can infer as
+    // one synchronous FPGA RAM instead of many shallow distributed arrays.
+    typedef struct packed {
+        Move move;
+        Move best_move;
+        EvalScore best_score;
+        EvalScore alpha;
+        EvalScore orig_alpha;
+        EvalScore beta;
+        Move tt_move;
+        PlyIndex repetition_start;
+        logic first_request;
+        logic has_legal;
+        logic tt_checked;
+        logic has_tt_move;
+        logic stand_pat_done;
+    } SearchStackEntry;
 
     typedef enum logic [4:0] {
         ST_IDLE,
@@ -113,6 +130,7 @@ module search_controller #(
     Move perft_pending_move;
 
     Move search_best_move[0:SEARCH_THREAD_COUNT-1];
+    EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
     NodeCountType search_nodes;
     NodeCountType search_thread_nodes[0:SEARCH_THREAD_COUNT-1];
     BoardWaitCount search_board_wait_count[0:SEARCH_THREAD_COUNT-1];
@@ -146,19 +164,12 @@ module search_controller #(
     FullBoard search_board[0:SEARCH_THREAD_COUNT-1];
     ZobristKey search_zobrist_key[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_pst_eval[0:SEARCH_THREAD_COUNT-1];
-    Move search_move_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    Move search_best_move_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    EvalScore search_best_score_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    EvalScore search_alpha_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    EvalScore search_orig_alpha_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    EvalScore search_beta_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    Move search_tt_move_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    PlyIndex search_repetition_start_stack[0:SEARCH_STACK_ENTRY_COUNT-1];
-    logic search_first_request[0:SEARCH_STACK_ENTRY_COUNT-1];
-    logic search_has_legal[0:SEARCH_STACK_ENTRY_COUNT-1];
-    logic search_tt_checked[0:SEARCH_STACK_ENTRY_COUNT-1];
-    logic search_has_tt_move[0:SEARCH_STACK_ENTRY_COUNT-1];
-    logic search_stand_pat_done[0:SEARCH_STACK_ENTRY_COUNT-1];
+    SearchStackEntry search_stack_top[0:SEARCH_THREAD_COUNT-1];
+    SearchStackEntry search_stack_parent_q[0:SEARCH_THREAD_COUNT-1];
+    logic [$bits(SearchStackEntry)-1:0] search_stack_parent_bits[0:SEARCH_THREAD_COUNT-1];
+    SearchStackRamAddr search_stack_read_addr[0:SEARCH_THREAD_COUNT-1];
+    SearchStackRamAddr search_stack_write_addr[0:SEARCH_THREAD_COUNT-1];
+    Move search_return_move[0:SEARCH_THREAD_COUNT-1];
     PlyIndex search_ply[0:SEARCH_THREAD_COUNT-1];
     logic [7:0] search_target_depth;
     logic [7:0] search_max_depth;
@@ -263,6 +274,32 @@ module search_controller #(
     assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
         || (state == ST_IDLE)
         || (state == ST_KILL_DONE);
+
+    // Keep each thread in a separate one-dimensional RAM instance so both
+    // Quartus and Vivado recognize the packed node records as block memory.
+    genvar stack_tid;
+    generate
+        for (stack_tid = 0; stack_tid < SEARCH_THREAD_COUNT; stack_tid = stack_tid + 1) begin : gen_search_stack_ram
+            assign search_stack_write_addr[stack_tid] = SearchStackRamAddr'(search_ply[stack_tid]);
+            assign search_stack_read_addr[stack_tid] = SearchStackRamAddr'(
+                (search_ply[stack_tid] == PlyIndex'(0)) ? PlyIndex'(0) : search_ply[stack_tid] - PlyIndex'(1)
+            );
+            assign search_stack_parent_q[stack_tid] = SearchStackEntry'(search_stack_parent_bits[stack_tid]);
+
+            synchronous_simple_dual_port_ram #(
+                .NUM_WORDS(SEARCH_STACK_DEPTH),
+                .WORD_SIZE($bits(SearchStackEntry))
+            ) stack_memory (
+                .clock(clk),
+                .data(search_stack_top[stack_tid]),
+                .rdaddress(search_stack_read_addr[stack_tid]),
+                .rden(rst_n),
+                .wraddress(search_stack_write_addr[stack_tid]),
+                .wren(rst_n),
+                .q(search_stack_parent_bits[stack_tid])
+            );
+        end
+    endgenerate
 
     board_update_pipeline #(
         .MOVE_RECORD_THREAD_COUNT(SEARCH_THREAD_COUNT),
@@ -568,6 +605,25 @@ module search_controller #(
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
     endfunction : pov_eval
 
+    // Every newly entered node starts from the same empty search record.
+    function automatic SearchStackEntry empty_search_stack_entry();
+        automatic SearchStackEntry entry;
+        entry.move = NULL_MOVE;
+        entry.best_move = NULL_MOVE;
+        entry.best_score = -SEARCH_INF;
+        entry.alpha = -SEARCH_INF;
+        entry.orig_alpha = -SEARCH_INF;
+        entry.beta = SEARCH_INF;
+        entry.tt_move = NULL_MOVE;
+        entry.repetition_start = PlyIndex'(0);
+        entry.first_request = 1'b1;
+        entry.has_legal = 1'b0;
+        entry.tt_checked = 1'b0;
+        entry.has_tt_move = 1'b0;
+        entry.stand_pat_done = 1'b0;
+        return entry;
+    endfunction : empty_search_stack_entry
+
     function automatic logic search_stop_requested();
         if (active_req.operation == ENGINE_CTRL_SEARCH_NODES && search_nodes >= active_req.node_limit) begin
             return 1'b1;
@@ -589,10 +645,6 @@ module search_controller #(
         end
         return index;
     endfunction : search_wrap_thread_index
-
-    function automatic SearchStackIndex search_stack_addr(input int thread, input int ply);
-        return SearchStackIndex'((thread * SEARCH_STACK_DEPTH) + ply);
-    endfunction : search_stack_addr
 
     function automatic ThreadID search_thread_after(input ThreadID thread);
         if (int'(thread) >= SEARCH_THREAD_COUNT - 1) begin
@@ -672,7 +724,7 @@ module search_controller #(
             && search_thread_phase[thread_index] == SEARCH_PHASE_READY
             && !search_thread_terminal_draw_ready(thread_index)
             && !search_in_qsearch(search_ply[thread_index])
-            && !search_tt_checked[search_stack_addr(thread_index, search_ply[thread_index])]
+            && !search_stack_top[thread_index].tt_checked
             && should_probe_search_tt(ThreadID'(thread_index), search_ply[thread_index])
             && !search_tt_lookup_inflight[thread_index];
     endfunction : search_thread_tt_lookup_ready
@@ -684,7 +736,7 @@ module search_controller #(
             && !search_thread_tt_lookup_ready(thread_index)
             && !search_eval_inflight[thread_index]
             && ((search_in_qsearch(search_ply[thread_index])
-                    && !search_stand_pat_done[search_stack_addr(thread_index, search_ply[thread_index])])
+                    && !search_stack_top[thread_index].stand_pat_done)
                 || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1);
     endfunction : search_thread_eval_ready
 
@@ -1007,19 +1059,19 @@ module search_controller #(
             end
         end else if (search_move_issue_valid) begin
             if (!search_in_qsearch(search_ply[search_move_issue_thread])
-                    && search_has_tt_move[search_stack_addr(search_move_issue_thread, search_ply[search_move_issue_thread])]
-                    && search_first_request[search_stack_addr(search_move_issue_thread, search_ply[search_move_issue_thread])]) begin
+                    && search_stack_top[search_move_issue_thread].has_tt_move
+                    && search_stack_top[search_move_issue_thread].first_request) begin
                 move_gen_op = MOVE_GEN_TARGETED_OP;
-                move_gen_target_move = search_tt_move_stack[search_stack_addr(search_move_issue_thread, search_ply[search_move_issue_thread])];
+                move_gen_target_move = search_stack_top[search_move_issue_thread].tt_move;
             end else if (search_ply[search_move_issue_thread] == PlyIndex'(0)
-                    && search_first_request[search_stack_addr(search_move_issue_thread, search_ply[search_move_issue_thread])]
+                    && search_stack_top[search_move_issue_thread].first_request
                     && !search_in_qsearch(search_ply[search_move_issue_thread])) begin
                 move_gen_op = MOVE_GEN_TARGETED_OP;
                 move_gen_target_move = root_hint_for_thread(search_move_issue_thread);
             end else begin
                 move_gen_op = search_in_qsearch(search_ply[search_move_issue_thread]) ? MOVE_GEN_QSEARCH_OP : MOVE_GEN_NORMAL_OP;
             end
-            move_gen_start_node = search_first_request[search_stack_addr(search_move_issue_thread, search_ply[search_move_issue_thread])];
+            move_gen_start_node = search_stack_top[search_move_issue_thread].first_request;
             move_gen_ply = search_ply[search_move_issue_thread];
             move_gen_turn = search_board[search_move_issue_thread].turn;
             move_gen_castle_perms = search_board[search_move_issue_thread].castle_perms;
@@ -1045,8 +1097,8 @@ module search_controller #(
         tt_lookup_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
         tt_lookup_req.zobrist_key = search_zobrist_key[tt_lookup_req.thread_id];
         tt_lookup_req.depth = search_remaining_depth(search_ply[tt_lookup_req.thread_id]);
-        tt_lookup_req.alpha = search_alpha_stack[search_stack_addr(tt_lookup_req.thread_id, search_ply[tt_lookup_req.thread_id])];
-        tt_lookup_req.beta = search_beta_stack[search_stack_addr(tt_lookup_req.thread_id, search_ply[tt_lookup_req.thread_id])];
+        tt_lookup_req.alpha = search_stack_top[tt_lookup_req.thread_id].alpha;
+        tt_lookup_req.beta = search_stack_top[tt_lookup_req.thread_id].beta;
         tt_lookup_req.ply = search_ply[tt_lookup_req.thread_id];
 
         tt_store_req_valid = ENABLE_TT && search_tt_store_issue_valid;
@@ -1057,10 +1109,10 @@ module search_controller #(
         tt_store_req.score = search_return_score[tt_store_req.thread_id];
         tt_store_req.bound_type = tt_bound_for_score(
             search_return_score[tt_store_req.thread_id],
-            search_orig_alpha_stack[search_stack_addr(tt_store_req.thread_id, search_ply[tt_store_req.thread_id])],
-            search_beta_stack[search_stack_addr(tt_store_req.thread_id, search_ply[tt_store_req.thread_id])]
+            search_stack_top[tt_store_req.thread_id].orig_alpha,
+            search_stack_top[tt_store_req.thread_id].beta
         );
-        tt_store_req.best_move = search_best_move_stack[search_stack_addr(tt_store_req.thread_id, search_ply[tt_store_req.thread_id])];
+        tt_store_req.best_move = search_stack_top[tt_store_req.thread_id].best_move;
         tt_store_req.age = tt_age;
         tt_store_req.ply = search_ply[tt_store_req.thread_id];
 
@@ -1142,6 +1194,7 @@ module search_controller #(
             end
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 search_best_move[tid] <= NULL_MOVE;
+                search_root_best_score[tid] <= -SEARCH_INF;
                 search_thread_status[tid] <= SEARCH_THREAD_IDLE;
                 search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                 search_thread_nodes[tid] <= NodeCountType'(0);
@@ -1166,21 +1219,8 @@ module search_controller #(
                 search_return_score[tid] <= EvalScore'(0);
                 search_return_valid[tid] <= 1'b0;
                 search_eval_is_stand_pat[tid] <= 1'b0;
-                for (int idx = 0; idx < SEARCH_STACK_DEPTH; idx++) begin
-                    search_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
-                    search_best_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
-                    search_best_score_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
-                    search_alpha_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
-                    search_orig_alpha_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
-                    search_beta_stack[search_stack_addr(tid, idx)] <= SEARCH_INF;
-                    search_tt_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
-                    search_repetition_start_stack[search_stack_addr(tid, idx)] <= PlyIndex'(0);
-                    search_first_request[search_stack_addr(tid, idx)] <= 1'b1;
-                    search_has_legal[search_stack_addr(tid, idx)] <= 1'b0;
-                    search_tt_checked[search_stack_addr(tid, idx)] <= 1'b0;
-                    search_has_tt_move[search_stack_addr(tid, idx)] <= 1'b0;
-                    search_stand_pat_done[search_stack_addr(tid, idx)] <= 1'b0;
-                end
+                search_stack_top[tid] <= empty_search_stack_entry();
+                search_return_move[tid] <= NULL_MOVE;
             end
             for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
                 search_board_tag_pipe[idx] <= ThreadID'(0);
@@ -1668,25 +1708,13 @@ module search_controller #(
                         search_pst_eval[tid] <= active_pst_eval;
                         search_ply[tid] <= PlyIndex'(0);
                         search_best_move[tid] <= NULL_MOVE;
+                        search_root_best_score[tid] <= -SEARCH_INF;
                         search_pending_move[tid] <= NULL_MOVE;
                         search_return_score[tid] <= EvalScore'(0);
                         search_return_valid[tid] <= 1'b0;
                         search_eval_is_stand_pat[tid] <= 1'b0;
-                        for (int idx = 0; idx < SEARCH_STACK_DEPTH; idx++) begin
-                            search_first_request[search_stack_addr(tid, idx)] <= 1'b1;
-                            search_has_legal[search_stack_addr(tid, idx)] <= 1'b0;
-                            search_best_score_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
-                            search_alpha_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
-                            search_orig_alpha_stack[search_stack_addr(tid, idx)] <= -SEARCH_INF;
-                            search_beta_stack[search_stack_addr(tid, idx)] <= SEARCH_INF;
-                            search_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
-                            search_best_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
-                            search_tt_move_stack[search_stack_addr(tid, idx)] <= NULL_MOVE;
-                            search_repetition_start_stack[search_stack_addr(tid, idx)] <= PlyIndex'(0);
-                            search_tt_checked[search_stack_addr(tid, idx)] <= 1'b0;
-                            search_has_tt_move[search_stack_addr(tid, idx)] <= 1'b0;
-                            search_stand_pat_done[search_stack_addr(tid, idx)] <= 1'b0;
-                        end
+                        search_stack_top[tid] <= empty_search_stack_entry();
+                        search_return_move[tid] <= NULL_MOVE;
                     end
                     search_thread_id <= ThreadID'(0);
                     search_dispatch_cursor <= ThreadID'(0);
@@ -1756,7 +1784,7 @@ module search_controller #(
                         automatic EvalScore stop_score;
 
                         stop_best_move = search_best_move[0];
-                        stop_score = search_best_score_stack[search_stack_addr(0, 0)];
+                        stop_score = search_root_best_score[0];
                         if (search_iteration_has_result) begin
                             stop_best_move = search_iteration_best_move;
                             stop_score = search_iteration_best_score;
@@ -1796,6 +1824,8 @@ module search_controller #(
                             search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                             search_pst_eval[board_thread_id] <= board_update_pst_out;
                             if (reverse_complete) begin
+                                search_return_move[board_thread_id] <= search_stack_top[board_thread_id].move;
+                                search_stack_top[board_thread_id] <= search_stack_parent_q[board_thread_id];
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
                             end else begin
@@ -1808,26 +1838,26 @@ module search_controller #(
                                 repetition_req_ply <= child_ply;
                                 repetition_req_start_ply <= committed_move_is_irreversible(
                                     search_board[board_thread_id], board_update_out, search_pending_move[board_thread_id]
-                                ) ? child_ply : search_repetition_start_stack[search_stack_addr(board_thread_id, board_ply)];
+                                ) ? child_ply : search_stack_top[board_thread_id].repetition_start;
                                 repetition_req_key <= board_update_zobrist_out;
                                 search_repetition_pending[board_thread_id] <= ENABLE_ZOBRIST;
-                                search_move_stack[search_stack_addr(board_thread_id, child_ply)] <= search_pending_move[board_thread_id];
-                                search_best_move_stack[search_stack_addr(board_thread_id, child_ply)] <= NULL_MOVE;
-                                search_best_score_stack[search_stack_addr(board_thread_id, child_ply)] <= -SEARCH_INF;
-                                search_alpha_stack[search_stack_addr(board_thread_id, child_ply)] <= -search_beta_stack[search_stack_addr(board_thread_id, board_ply)];
-                                search_orig_alpha_stack[search_stack_addr(board_thread_id, child_ply)] <= -search_beta_stack[search_stack_addr(board_thread_id, board_ply)];
-                                search_beta_stack[search_stack_addr(board_thread_id, child_ply)] <= -search_alpha_stack[search_stack_addr(board_thread_id, board_ply)];
-                                search_tt_move_stack[search_stack_addr(board_thread_id, child_ply)] <= NULL_MOVE;
-                                search_repetition_start_stack[search_stack_addr(board_thread_id, child_ply)] <= committed_move_is_irreversible(
+                                search_stack_top[board_thread_id].move <= search_pending_move[board_thread_id];
+                                search_stack_top[board_thread_id].best_move <= NULL_MOVE;
+                                search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
+                                search_stack_top[board_thread_id].alpha <= -search_stack_top[board_thread_id].beta;
+                                search_stack_top[board_thread_id].orig_alpha <= -search_stack_top[board_thread_id].beta;
+                                search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
+                                search_stack_top[board_thread_id].tt_move <= NULL_MOVE;
+                                search_stack_top[board_thread_id].repetition_start <= committed_move_is_irreversible(
                                     search_board[board_thread_id],
                                     board_update_out,
                                     search_pending_move[board_thread_id]
-                                ) ? child_ply : search_repetition_start_stack[search_stack_addr(board_thread_id, board_ply)];
-                                search_has_legal[search_stack_addr(board_thread_id, child_ply)] <= 1'b0;
-                                search_first_request[search_stack_addr(board_thread_id, child_ply)] <= 1'b1;
-                                search_tt_checked[search_stack_addr(board_thread_id, child_ply)] <= 1'b0;
-                                search_has_tt_move[search_stack_addr(board_thread_id, child_ply)] <= 1'b0;
-                                search_stand_pat_done[search_stack_addr(board_thread_id, child_ply)] <= 1'b0;
+                                ) ? child_ply : search_stack_top[board_thread_id].repetition_start;
+                                search_stack_top[board_thread_id].has_legal <= 1'b0;
+                                search_stack_top[board_thread_id].first_request <= 1'b1;
+                                search_stack_top[board_thread_id].tt_checked <= 1'b0;
+                                search_stack_top[board_thread_id].has_tt_move <= 1'b0;
+                                search_stack_top[board_thread_id].stand_pat_done <= 1'b0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
@@ -1851,9 +1881,9 @@ module search_controller #(
                                 automatic EvalScore node_score;
 
                                 node_score = search_in_qsearch(move_ply)
-                                    ? search_best_score_stack[search_stack_addr(move_thread_id, move_ply)]
-                                    : search_has_legal[search_stack_addr(move_thread_id, move_ply)]
-                                    ? search_best_score_stack[search_stack_addr(move_thread_id, move_ply)]
+                                    ? search_stack_top[move_thread_id].best_score
+                                    : search_stack_top[move_thread_id].has_legal
+                                    ? search_stack_top[move_thread_id].best_score
                                     : terminal_no_move_score(search_board[move_thread_id], move_ply);
                                 search_return_score[move_thread_id] <= node_score;
                                 search_return_valid[move_thread_id] <= 1'b1;
@@ -1880,7 +1910,7 @@ module search_controller #(
                                     search_thread_phase[move_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
                                 end
                             end else begin
-                                search_first_request[search_stack_addr(move_thread_id, move_ply)] <= 1'b0;
+                                search_stack_top[move_thread_id].first_request <= 1'b0;
                                 if (move_is_legal) begin
                                     search_pending_move[move_thread_id] <= candidate_move;
                                     search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
@@ -1906,12 +1936,12 @@ module search_controller #(
                             search_thread_nodes[eval_thread_id] <= search_thread_nodes[eval_thread_id] + NodeCountType'(1);
 
                             if (search_eval_is_stand_pat[eval_thread_id]) begin
-                                search_stand_pat_done[search_stack_addr(eval_thread_id, eval_ply)] <= 1'b1;
-                                search_best_score_stack[search_stack_addr(eval_thread_id, eval_ply)] <= eval_score;
-                                if (eval_score > search_alpha_stack[search_stack_addr(eval_thread_id, eval_ply)]) begin
-                                    search_alpha_stack[search_stack_addr(eval_thread_id, eval_ply)] <= eval_score;
+                                search_stack_top[eval_thread_id].stand_pat_done <= 1'b1;
+                                search_stack_top[eval_thread_id].best_score <= eval_score;
+                                if (eval_score > search_stack_top[eval_thread_id].alpha) begin
+                                    search_stack_top[eval_thread_id].alpha <= eval_score;
                                 end
-                                if (eval_score >= search_beta_stack[search_stack_addr(eval_thread_id, eval_ply)]) begin
+                                if (eval_score >= search_stack_top[eval_thread_id].beta) begin
                                     search_return_score[eval_thread_id] <= eval_score;
                                     search_return_valid[eval_thread_id] <= 1'b1;
                                     if (eval_ply == PlyIndex'(0)) begin
@@ -1971,31 +2001,31 @@ module search_controller #(
                             lookup_thread_id = search_next_tt_response_thread_from(search_tt_response_dispatch_cursor);
                             lookup_resp = search_tt_response[lookup_thread_id];
                             lookup_ply = search_ply[lookup_thread_id];
-                            tt_alpha_after = search_alpha_stack[search_stack_addr(lookup_thread_id, lookup_ply)];
+                            tt_alpha_after = search_stack_top[lookup_thread_id].alpha;
                             tt_cutoff = 1'b0;
                             search_thread_id <= lookup_thread_id;
                             search_tt_response_dispatch_cursor <= search_thread_after(lookup_thread_id);
                             search_tt_response_pending[lookup_thread_id] <= 1'b0;
 
                             if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_ply)) begin
-                                search_tt_move_stack[search_stack_addr(lookup_thread_id, lookup_ply)] <= lookup_resp.best_move;
-                                search_has_tt_move[search_stack_addr(lookup_thread_id, lookup_ply)] <= !is_null_move(lookup_resp.best_move);
+                                search_stack_top[lookup_thread_id].tt_move <= lookup_resp.best_move;
+                                search_stack_top[lookup_thread_id].has_tt_move <= !is_null_move(lookup_resp.best_move);
                                 if (lookup_resp.bound_type == TT_BOUND_EXACT) begin
                                     search_return_score[lookup_thread_id] <= lookup_resp.score;
                                     search_return_valid[lookup_thread_id] <= 1'b1;
                                     tt_cutoff = 1'b1;
                                 end else if (lookup_resp.bound_type == TT_BOUND_LOWER) begin
-                                    if (lookup_resp.score > search_alpha_stack[search_stack_addr(lookup_thread_id, lookup_ply)]) begin
+                                    if (lookup_resp.score > search_stack_top[lookup_thread_id].alpha) begin
                                         tt_alpha_after = lookup_resp.score;
-                                        search_alpha_stack[search_stack_addr(lookup_thread_id, lookup_ply)] <= lookup_resp.score;
+                                        search_stack_top[lookup_thread_id].alpha <= lookup_resp.score;
                                     end
-                                    if (tt_alpha_after >= search_beta_stack[search_stack_addr(lookup_thread_id, lookup_ply)]) begin
+                                    if (tt_alpha_after >= search_stack_top[lookup_thread_id].beta) begin
                                         search_return_score[lookup_thread_id] <= lookup_resp.score;
                                         search_return_valid[lookup_thread_id] <= 1'b1;
                                         tt_cutoff = 1'b1;
                                     end
                                 end else if (lookup_resp.bound_type == TT_BOUND_UPPER) begin
-                                    if (lookup_resp.score <= search_alpha_stack[search_stack_addr(lookup_thread_id, lookup_ply)]) begin
+                                    if (lookup_resp.score <= search_stack_top[lookup_thread_id].alpha) begin
                                         search_return_score[lookup_thread_id] <= lookup_resp.score;
                                         search_return_valid[lookup_thread_id] <= 1'b1;
                                         tt_cutoff = 1'b1;
@@ -2038,20 +2068,21 @@ module search_controller #(
                             parent_score = -search_return_score[return_thread_id];
                             search_thread_id <= return_thread_id;
                             search_return_dispatch_cursor <= search_thread_after(return_thread_id);
-                            if (!search_has_legal[search_stack_addr(return_thread_id, return_ply)]
-                                    || parent_score > search_best_score_stack[search_stack_addr(return_thread_id, return_ply)]) begin
-                                search_best_score_stack[search_stack_addr(return_thread_id, return_ply)] <= parent_score;
-                                search_best_move_stack[search_stack_addr(return_thread_id, return_ply)] <= search_move_stack[search_stack_addr(return_thread_id, return_ply + PlyIndex'(1))];
+                            if (!search_stack_top[return_thread_id].has_legal
+                                    || parent_score > search_stack_top[return_thread_id].best_score) begin
+                                search_stack_top[return_thread_id].best_score <= parent_score;
+                                search_stack_top[return_thread_id].best_move <= search_return_move[return_thread_id];
                                 if (return_ply == PlyIndex'(0)) begin
-                                    search_best_move[return_thread_id] <= search_move_stack[search_stack_addr(return_thread_id, 1)];
+                                    search_best_move[return_thread_id] <= search_return_move[return_thread_id];
+                                    search_root_best_score[return_thread_id] <= parent_score;
                                 end
                             end
-                            search_has_legal[search_stack_addr(return_thread_id, return_ply)] <= 1'b1;
-                            if (parent_score > search_alpha_stack[search_stack_addr(return_thread_id, return_ply)]) begin
-                                search_alpha_stack[search_stack_addr(return_thread_id, return_ply)] <= parent_score;
+                            search_stack_top[return_thread_id].has_legal <= 1'b1;
+                            if (parent_score > search_stack_top[return_thread_id].alpha) begin
+                                search_stack_top[return_thread_id].alpha <= parent_score;
                             end
                             search_return_valid[return_thread_id] <= 1'b0;
-                            if (parent_score >= search_beta_stack[search_stack_addr(return_thread_id, return_ply)]) begin
+                            if (parent_score >= search_stack_top[return_thread_id].beta) begin
                                 search_return_score[return_thread_id] <= parent_score;
                                 search_return_valid[return_thread_id] <= 1'b1;
                                 if (should_store_search_tt(return_ply)) begin
@@ -2060,8 +2091,8 @@ module search_controller #(
                                 end else if (return_ply == PlyIndex'(0)) begin
                                     automatic Move root_move;
 
-                                    root_move = (is_null_move(search_best_move[return_thread_id]) && !is_null_move(search_move_stack[search_stack_addr(return_thread_id, 1)]))
-                                        ? search_move_stack[search_stack_addr(return_thread_id, 1)]
+                                    root_move = (is_null_move(search_best_move[return_thread_id]) && !is_null_move(search_return_move[return_thread_id]))
+                                        ? search_return_move[return_thread_id]
                                         : search_best_move[return_thread_id];
                                     search_thread_status[return_thread_id] <= SEARCH_THREAD_DONE;
                                     search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
@@ -2128,7 +2159,7 @@ module search_controller #(
 
                         if (search_tt_lookup_issue_valid && tt_lookup_req_ready) begin
                             search_thread_id <= search_tt_lookup_issue_thread;
-                            search_tt_checked[search_stack_addr(search_tt_lookup_issue_thread, search_ply[search_tt_lookup_issue_thread])] <= 1'b1;
+                            search_stack_top[search_tt_lookup_issue_thread].tt_checked <= 1'b1;
                             search_thread_phase[search_tt_lookup_issue_thread] <= SEARCH_PHASE_TT_WAIT;
                             search_tt_lookup_inflight[search_tt_lookup_issue_thread] <= 1'b1;
                             search_tt_lookup_dispatch_cursor <= search_thread_after(search_tt_lookup_issue_thread);
@@ -2140,7 +2171,7 @@ module search_controller #(
                             search_thread_phase[search_eval_issue_thread] <= SEARCH_PHASE_EVAL_WAIT;
                             search_eval_inflight[search_eval_issue_thread] <= 1'b1;
                             search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_ply[search_eval_issue_thread])
-                                && !search_stand_pat_done[search_stack_addr(search_eval_issue_thread, search_ply[search_eval_issue_thread])];
+                                && !search_stack_top[search_eval_issue_thread].stand_pat_done;
                             search_eval_dispatch_cursor <= search_thread_after(search_eval_issue_thread);
                         end
 
@@ -2174,14 +2205,14 @@ module search_controller #(
                                 search_thread_status[store_thread_id] <= SEARCH_THREAD_DONE;
                                 search_thread_phase[store_thread_id] <= SEARCH_PHASE_DONE;
                                 search_thread_completed_depth[store_thread_id] <= search_target_depth;
-                                search_thread_completed_best_move[store_thread_id] <= search_best_move_stack[search_stack_addr(store_thread_id, 0)];
+                                search_thread_completed_best_move[store_thread_id] <= search_stack_top[store_thread_id].best_move;
                                 if (root_result_better(
                                         search_return_score[store_thread_id],
-                                        search_best_move_stack[search_stack_addr(store_thread_id, 0)],
+                                        search_stack_top[store_thread_id].best_move,
                                         iteration_has_result_next,
                                         iteration_best_score_next,
                                         iteration_best_move_next)) begin
-                                    iteration_best_move_next = search_best_move_stack[search_stack_addr(store_thread_id, 0)];
+                                    iteration_best_move_next = search_stack_top[store_thread_id].best_move;
                                     iteration_best_score_next = search_return_score[store_thread_id];
                                 end
                                 iteration_has_result_next = 1'b1;
