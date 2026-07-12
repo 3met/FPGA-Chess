@@ -121,13 +121,7 @@ module search_controller #(
 
     logic [6:0] new_setup_index;
 
-    FullBoard perft_board;
-    ZobristKey perft_zobrist_key;
-    EvalScore perft_pst_eval;
     logic perft_first_request[0:SEARCH_STACK_DEPTH-1];
-    PlyIndex perft_ply;
-    NodeCountType perft_nodes;
-    Move perft_pending_move;
 
     Move search_best_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
@@ -1017,11 +1011,12 @@ module search_controller #(
             board_update_set_data = setup_req_comb.board_wr_data;
         end else if (ENABLE_PERFT && (state == ST_PERFT_PUSH_ISSUE || state == ST_PERFT_REVERSE_ISSUE)) begin
             board_update_op = (state == ST_PERFT_REVERSE_ISSUE) ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
-            board_update_in = perft_board;
-            board_update_zobrist_in = perft_zobrist_key;
-            board_update_pst_in = perft_pst_eval;
-            board_update_move = perft_pending_move;
-            board_update_ply = perft_ply;
+            // Perft serially borrows search context zero instead of owning a duplicate position.
+            board_update_in = search_board[0];
+            board_update_zobrist_in = search_zobrist_key[0];
+            board_update_pst_in = search_pst_eval[0];
+            board_update_move = search_pending_move[0];
+            board_update_ply = search_ply[0];
         end else if (search_board_issue_valid) begin
             board_update_op = search_thread_phase[search_board_issue_thread] == SEARCH_PHASE_REVERSE_WAIT
                 ? BOARD_REVERSE_MOVE_OP
@@ -1048,14 +1043,14 @@ module search_controller #(
 
         if (ENABLE_PERFT && state == ST_PERFT_GEN_ISSUE) begin
             move_gen_op = MOVE_GEN_NORMAL_OP;
-            move_gen_start_node = perft_first_request[perft_ply];
-            move_gen_ply = perft_ply;
-            move_gen_turn = perft_board.turn;
-            move_gen_castle_perms = perft_board.castle_perms;
-            move_gen_has_ep = perft_board.has_ep;
-            move_gen_ep_file = perft_board.ep_file;
+            move_gen_start_node = perft_first_request[search_ply[0]];
+            move_gen_ply = search_ply[0];
+            move_gen_turn = search_board[0].turn;
+            move_gen_castle_perms = search_board[0].castle_perms;
+            move_gen_has_ep = search_board[0].has_ep;
+            move_gen_ep_file = search_board[0].ep_file;
             for (int pos = 0; pos < 64; pos++) begin
-                move_gen_tiles[pos] = perft_board.tiles[pos];
+                move_gen_tiles[pos] = search_board[0].tiles[pos];
             end
         end else if (search_move_issue_valid) begin
             if (!search_in_qsearch(search_ply[search_move_issue_thread])
@@ -1154,12 +1149,6 @@ module search_controller #(
             repetition_req_start_ply <= '0;
             repetition_req_key <= '0;
             new_setup_index <= 7'd0;
-            perft_ply <= PlyIndex'(0);
-            perft_nodes <= NodeCountType'(0);
-            perft_pending_move <= NULL_MOVE;
-            perft_board <= FullBoard'('0);
-            perft_zobrist_key <= ZobristKey'(0);
-            perft_pst_eval <= EvalScore'(0);
             search_nodes <= NodeCountType'(0);
             search_target_depth <= 8'd0;
             search_max_depth <= 8'd0;
@@ -1317,7 +1306,6 @@ module search_controller #(
 
                             ENGINE_CTRL_NEW_GAME: begin
                                 repetition_epoch <= repetition_epoch + 1'b1;
-                                perft_nodes <= NodeCountType'(0);
                                 search_best_move[search_thread_id] <= NULL_MOVE;
                                 search_nodes <= NodeCountType'(0);
                                 search_dispatch_cursor <= ThreadID'(0);
@@ -1368,14 +1356,16 @@ module search_controller #(
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
                                     state <= ST_RESPOND;
                                 end else begin
-                                    perft_board <= active_board;
-                                    perft_zobrist_key <= active_zobrist_key;
-                                    perft_pst_eval <= active_pst_eval;
+                                    // Perft borrows the idle first search context and leaves the game board intact.
+                                    search_board[0] <= active_board;
+                                    search_zobrist_key[0] <= active_zobrist_key;
+                                    search_pst_eval[0] <= active_pst_eval;
+                                    search_pending_move[0] <= NULL_MOVE;
                                     for (int idx = 0; idx < SEARCH_STACK_DEPTH; idx++) begin
                                         perft_first_request[idx] <= 1'b1;
                                     end
-                                    perft_ply <= PlyIndex'(0);
-                                    perft_nodes <= (req.depth_limit == 8'd0) ? NodeCountType'(1) : NodeCountType'(0);
+                                    search_ply[0] <= PlyIndex'(0);
+                                    search_nodes <= (req.depth_limit == 8'd0) ? NodeCountType'(1) : NodeCountType'(0);
                                     if (req.depth_limit == 8'd0) begin
                                         resp_reg <= EngineControllerResponse'('0);
                                         resp_reg.nodes_count <= NodeCountType'(1);
@@ -1417,7 +1407,6 @@ module search_controller #(
                                     search_iteration_has_result <= 1'b0;
                                     search_iteration_best_move <= NULL_MOVE;
                                     search_iteration_best_score <= -SEARCH_INF;
-                                    perft_nodes <= NodeCountType'(0);
                                     search_nodes <= NodeCountType'(0);
                                     search_best_move[search_thread_id] <= NULL_MOVE;
                                     search_pending_move[search_thread_id] <= NULL_MOVE;
@@ -1604,9 +1593,9 @@ module search_controller #(
                 ST_PERFT_GEN_WAIT: begin
                     if (move_wait_count == MoveWaitCount'(1)) begin
                         if (is_null_move(candidate_move)) begin
-                            if (perft_ply == PlyIndex'(0)) begin
+                            if (search_ply[0] == PlyIndex'(0)) begin
                                 resp_reg <= EngineControllerResponse'('0);
-                                resp_reg.nodes_count <= perft_nodes;
+                                resp_reg.nodes_count <= search_nodes;
                                 resp_reg.completed_depth <= active_req.depth_limit;
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
                                 state <= ST_RESPOND;
@@ -1614,13 +1603,13 @@ module search_controller #(
                                 state <= ST_PERFT_REVERSE_ISSUE;
                             end
                         end else begin
-                            perft_first_request[perft_ply] <= 1'b0;
+                            perft_first_request[search_ply[0]] <= 1'b0;
                             if (move_is_legal) begin
-                                if (int'(perft_ply) + 1 >= int'(active_req.depth_limit)) begin
-                                    perft_nodes <= perft_nodes + NodeCountType'(1);
+                                if (int'(search_ply[0]) + 1 >= int'(active_req.depth_limit)) begin
+                                    search_nodes <= search_nodes + NodeCountType'(1);
                                     state <= ST_PERFT_GEN_ISSUE;
                                 end else begin
-                                    perft_pending_move <= candidate_move;
+                                    search_pending_move[0] <= candidate_move;
                                     state <= ST_PERFT_PUSH_ISSUE;
                                 end
                             end else begin
@@ -1639,11 +1628,11 @@ module search_controller #(
 
                 ST_PERFT_PUSH_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
-                        perft_board <= board_update_out;
-                        perft_zobrist_key <= board_update_zobrist_out;
-                        perft_pst_eval <= board_update_pst_out;
-                        perft_first_request[perft_ply + PlyIndex'(1)] <= 1'b1;
-                        perft_ply <= perft_ply + PlyIndex'(1);
+                        search_board[0] <= board_update_out;
+                        search_zobrist_key[0] <= board_update_zobrist_out;
+                        search_pst_eval[0] <= board_update_pst_out;
+                        perft_first_request[search_ply[0] + PlyIndex'(1)] <= 1'b1;
+                        search_ply[0] <= search_ply[0] + PlyIndex'(1);
                         state <= ST_PERFT_GEN_ISSUE;
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
@@ -1657,10 +1646,10 @@ module search_controller #(
 
                 ST_PERFT_REVERSE_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
-                        perft_board <= board_update_out;
-                        perft_zobrist_key <= board_update_zobrist_out;
-                        perft_pst_eval <= board_update_pst_out;
-                        perft_ply <= perft_ply - PlyIndex'(1);
+                        search_board[0] <= board_update_out;
+                        search_zobrist_key[0] <= board_update_zobrist_out;
+                        search_pst_eval[0] <= board_update_pst_out;
+                        search_ply[0] <= search_ply[0] - PlyIndex'(1);
                         state <= ST_PERFT_GEN_ISSUE;
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
