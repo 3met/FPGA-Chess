@@ -40,7 +40,7 @@ module search_controller #(
     localparam int SEARCH_STACK_ENTRY_COUNT = SEARCH_THREAD_COUNT * SEARCH_STACK_DEPTH;
     localparam int SEARCH_STACK_INDEX_BITS = (SEARCH_STACK_ENTRY_COUNT <= 1) ? 1 : $clog2(SEARCH_STACK_ENTRY_COUNT);
     localparam int NEW_GAME_OPS = 68;
-    localparam EvalScore SEARCH_INF = EvalScore'(30000);
+    localparam EvalScore SEARCH_INF = EvalScore'(32001);
 
     typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
     typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
