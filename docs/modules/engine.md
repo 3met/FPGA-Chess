@@ -1,7 +1,5 @@
 # Engine (`engine`)
 
-Status: implemented V1 protocol FSM with an internal real search controller.
-
 The engine module is the complete vendor-neutral chess core between the RX/TX stream wrappers. It contains an `engine_command_layer` that parses fixed-size command payloads and streams responses, plus the `search_controller` that owns board and search state.
 
 The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is internal to `engine`. Board wrappers therefore do not know about controller operations.
@@ -28,8 +26,6 @@ The engine parameters configure the internal controller clock frequency, thread 
 The engine command byte and payload formats are defined in [laptop-fpga-communication.md](../protocols/laptop-fpga-communication.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
 The external protocol should expose `Set board` as a single fixed-size command. The engine may decompose it into multiple direct-board operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
-
-V1 validates protocol shape only: unknown opcodes, reserved move bits, reserved `FullBoard` bits, and `SPARE_PIECE` tile encodings are rejected. The host remains responsible for chess legality.
 
 ## States
 
@@ -99,12 +95,6 @@ stateDiagram-v2
 ## New Game Semantics
 
 The New Game command follows UCI `ucinewgame` semantics. It clears active search state, per-thread stacks, TT contents or TT generation validity, repetition/history state, latched errors, pending responses, and any command FIFO contents that can be safely discarded. It also resets the active board to the normal chess starting position.
-
-## Current RTL Notes
-
-`Set board` is decomposed into 68 direct-board requests: 64 tile writes followed by castling permissions, en passant state, side to move, and halfmove clock. `Make move` emits one direct-board request. The engine keeps only one direct-board request in flight, advances the Set Board sequence only after `search_resp_valid`, and sends an ACK only after the final direct-board response completes.
-
-Search and perft commands wait for a controller response, latch the result, and stream the documented response format. Perft is controlled by the `ENABLE_PERFT` parameter. While waiting for search/perft, the engine accepts only in-band Kill (`0x1f`) as a command byte. Any other byte is rejected as malformed protocol input.
 
 ## Child Modules
 

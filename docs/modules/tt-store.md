@@ -1,7 +1,5 @@
 # TT Store Pipeline (`tt_store`)
 
-Status: implemented portable block-RAM-backed load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
-
 The TT store pipeline writes completed search results into the shared transposition table. Stores are less latency-sensitive than lookups and may be buffered or stalled when lookups need memory bandwidth.
 
 ## Request

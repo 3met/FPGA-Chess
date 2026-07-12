@@ -1,7 +1,5 @@
 # DE1-SoC Top Level (`de1_soc`)
 
-Status: board-wrapper final RTL spec.
-
 The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It maps physical pins and board-specific clocking to the vendor-neutral `engine`.
 
 ## On-Board Interface
@@ -15,11 +13,3 @@ The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It
 | LEDs | `LEDR[7:0]` show the most recently received byte, `LEDR[8]` indicates any RX, remote-reset, TX-full, or engine error, and `LEDR[9]` indicates PLL unlock. |
 | 7-segment displays | `HEX1:HEX0` show the most recently received byte in hexadecimal. `HEX2` shows `{engine_error, tx_full, rx_error}` and `HEX3` shows `{remote_reset, engine_ready, pll_locked}` in hexadecimal. `HEX5:HEX4` are unused. |
 | Display blanking | `SW[9]` turns off all LEDs and seven-segment displays when high. |
-
-## Current RTL Notes
-
-UART bytes flow through `rx_decode`, the complete `engine`, and `tx_encode` using a 50 MHz UART clock and PLL-derived engine clock.
-
-`rx_decode` receives the raw button reset so it can detect UART BREAK and emit `remote_reset`. The engine and TX path use `KEY[3]` combined with `remote_reset`, so BREAK clears latched engine, controller, and output state as an out-of-band reset.
-
-The search controller is a child of `engine`, not the board wrapper. This keeps the board top level limited to physical I/O, clocking, UART wrappers, status presentation, and engine configuration.

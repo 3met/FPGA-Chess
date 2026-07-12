@@ -1,7 +1,5 @@
 # TX Encode (`tx_encode`)
 
-Status: implemented first portable CDC FIFO wrapper.
-
 The output encoder buffers response bytes from the engine and transmits them over UART.
 
 ## Behavior
@@ -23,7 +21,3 @@ The default UART side uses `UART_CLOCK_FREQ = 50_000_000` and `BAUD_RATE = 2_000
 | Input | `tx_stream_valid` | 1 | Indicates `tx_stream` is valid data that should be transmitted. |
 | Output | `uart_tx` | 1 | UART output signal. |
 | Output | `full` | 1 | Indicates that the output FIFO is full and no new input should be written. |
-
-## Current RTL Notes
-
-The current RTL uses `async_fifo` for the engine-to-UART clock crossing and drains the FIFO whenever the UART transmitter can accept another byte.

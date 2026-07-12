@@ -4,13 +4,11 @@
 
 Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP and share only the transposition table.
 
-The number of threads, allocated stack depth, external perft support, Zobrist hashing, TT traffic, and board-update PST ROM use are parameterized at build time. The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, currently 8 threads and 32 plies for simulation and generic RTL testing.
-
-Current RTL note: shared pipelines have explicit multi-thread isolation tests, and the search controller initializes all configured root thread contexts as active and ready for each iterative-deepening pass. It then runs a concurrent scheduler with active-thread count, root round-robin cursor, child-return round-robin cursor, TT-response round-robin cursor, and per-pipeline dispatch cursors for board update, move generation, static evaluation, TT lookup, and TT store issue. Different configured threads can occupy different tagged pipelines at the same time. The controller also applies deterministic per-thread root move hints and a stable score-plus-move tie-break for reproducible best-result selection. The `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
+The number of threads, allocated stack depth, external perft support, Zobrist hashing, TT traffic, and board-update PST ROM use are parameterized at build time.
 
 Search uses side-to-move point-of-view scores internally. Raw evaluation inputs are White-relative, so the search controller normalizes leaf/static scores by negating them when Black is to move.
 
-The full/default search uses iterative deepening with plain alpha/beta, transposition tables, and quiescence search with captures and promotions only. A target may disable TT traffic for synthesis bring-up; in that profile the search still runs alpha/beta/qsearch but loses TT cutoffs, TT move ordering, and TT-based thread cooperation.
+The full/default search uses iterative deepening with plain alpha/beta, transposition tables, and quiescence search with captures and promotions only.
 
 ## Thread State
 
@@ -56,4 +54,3 @@ For threefold repetition, the engine uses authoritative 64-bit Zobrist keys. A s
 
 The default 32-entry search stack represents plies 0 through 31. Its line history therefore uses 16 logical banks; the second slot in the last bank is unused. Static construction occurs before search timing begins and may retry programmable hash seeds. On Cyclone V, the two 256-by-67 static tables use four M10Ks, the 100-by-64 active history uses two, and each independently readable 64-bit line bank uses two. The full eight-thread/32-entry checker therefore uses 38 M10Ks; the DE1-SoC one-thread/eight-entry engine profile uses 14. The high count relative to stored bits is the unavoidable width and shallow-bank underutilization required for parallel reads.
 
-Current RTL note: the active history, both static tables, and every line-history bank use the portable synchronous simple-dual-port wrapper. Quartus infers `altsyncram` M10Ks for these instances; AMD/Xilinx tools use the same synchronous template with the recognized `ram_style="block"` attribute.

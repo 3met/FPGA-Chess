@@ -1,7 +1,5 @@
 # Timer (`timer`)
 
-Status: implemented.
-
 The timer counts elapsed milliseconds for search time control.
 
 ## Parameters

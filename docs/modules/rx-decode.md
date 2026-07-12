@@ -1,7 +1,5 @@
 # RX Decode (`rx_decode`)
 
-Status: implemented first portable CDC FIFO wrapper.
-
 The input decoder receives UART bytes, buffers command/data bytes, and exposes a byte stream to the engine. Kill remains an in-band command for the engine parser, while UART BREAK is reserved for out-of-band remote reset.
 
 ## Behavior
@@ -16,19 +14,15 @@ The default UART side uses `UART_CLOCK_FREQ = 50_000_000` and `BAUD_RATE = 2_000
 
 ## Ports
 
-| Direction | Port Name | Size | Description |
-| --------- | --------- | ---- | ----------- |
-| Input | `clk` | 1 | Engine-side clock. |
-| Input | `uart_clk` | 1 | UART-side clock. |
-| Input | `rst_n` | 1 | Synchronous active-low reset. |
-| Input | `uart_rx` | 1 | UART input signal. |
-| Input | `mark_read` | 1 | Indicates that the current decoded byte has been consumed. |
-| Output | `rx_stream` | 8 | Decoded UART command/data byte. |
-| Output | `rx_stream_valid` | 1 | Indicates `rx_stream` contains valid data. |
-| Output | `kill` | 1 | Reserved for a future out-of-band policy; tied low in the current RTL. |
-| Output | `remote_reset` | 1 | Asserted for one engine-clock cycle when UART BREAK is detected. |
-| Output | `error` | 1 | Latched UART framing error or RX FIFO overflow. |
-
-## Current RTL Notes
-
-The current RTL uses `async_fifo` for the UART-to-engine clock crossing. `error` clears on reset or remote reset.
+| Direction | Port Name         | Size | Description                                                      |
+| --------- | ----------------- | ---- | ---------------------------------------------------------------- |
+| Input     | `clk`             | 1    | Engine-side clock.                                               |
+| Input     | `uart_clk`        | 1    | UART-side clock.                                                 |
+| Input     | `rst_n`           | 1    | Synchronous active-low reset.                                    |
+| Input     | `uart_rx`         | 1    | UART input signal.                                               |
+| Input     | `mark_read`       | 1    | Indicates that the current decoded byte has been consumed.       |
+| Output    | `rx_stream`       | 8    | Decoded UART command/data byte.                                  |
+| Output    | `rx_stream_valid` | 1    | Indicates `rx_stream` contains valid data.                       |
+| Output    | `kill`            | 1    | Reserved for a future out-of-band policy.                        |
+| Output    | `remote_reset`    | 1    | Asserted for one engine-clock cycle when UART BREAK is detected. |
+| Output    | `error`           | 1    | Latched UART framing error or RX FIFO overflow.                  |

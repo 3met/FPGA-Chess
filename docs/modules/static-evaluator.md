@@ -1,7 +1,5 @@
 # Static Evaluator (`static_evaluator`)
 
-Status: implemented V1; this document describes the current RTL contract and planned extension point.
-
 The static evaluator computes a White-relative score from board-state inputs and the current incremental material plus piece-square-table score. Search converts the result to side-to-move point-of-view when consuming it.
 
 ## Ports
@@ -21,11 +19,11 @@ The static evaluator computes a White-relative score from board-state inputs and
 | 1-6 | Each active directional scan inspects one successive square from the matching delayed board copy until it finds the nearest piece, then carries that result forward. Starting short edge and diagonal rays late avoids storing their inactive state in early propagation registers. |
 | 7 | Carry the completed scan results across the existing evaluation boundary, add positional terms to delayed `base_eval`, and set the output score. |
 
-`STATIC_EVAL_PIPELINE_STAGE_CNT` is 8. The pipeline accepts one request per cycle. Outputs are only meaningful after a request has traversed the fixed latency; there are no valid/ready signals in V1.
+`STATIC_EVAL_PIPELINE_STAGE_CNT` is 8. The pipeline accepts one request per cycle. Outputs are only meaningful after a request has traversed the fixed latency.
 
 The seven directional propagation slots are scheduled independently for each square and direction. A ray with maximum distance `d` starts at slot `7-d`, so every ray completes in slot 6. Slot 0 reads the live input board, while slot `s > 0` reads `board_pipe[s-1]`; the registered result therefore remains aligned with `board_pipe[s]` for the same request.
 
-## V1 Positional Terms
+## Positional Terms
 
 `static_eval = delayed base_eval + positional_delta`.
 
@@ -41,6 +39,3 @@ The seven directional propagation slots are scheduled independently for each squ
 
 Positive `static_eval` values favor White. Negative values favor Black. The evaluator should not know whose turn it is unless a future evaluation term explicitly depends on side to move.
 
-## Current RTL Notes
-
-The current RTL uses `base_eval` for material and PST and does not access PST ROMs. Each square's positional terms first accumulate in a signed 10-bit `TilePositionalScore` (all score units are 1/128 pawn), then sign-extend into a signed 12-bit board-wide accumulator. The 12-bit accumulator covers every position reachable in a standard chess game before being added to the 16-bit base evaluation. Simulation assertions catch pawns on the first or eighth rank, adjacent kings, and `SPARE_PIECE` inputs.

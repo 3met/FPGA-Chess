@@ -1,7 +1,5 @@
 # TT Lookup Pipeline (`tt_lookup`)
 
-Status: implemented portable block-RAM-backed load/store slice with compact 96-bit and full-key 128-bit entry profiles; external-memory wrapper and BRAM cache remain planned extension points.
-
 The TT lookup pipeline performs transposition-table lookup requests for search threads. TT lookup is latency-sensitive because a thread often cannot continue until the response returns.
 
 ## Request
@@ -95,7 +93,3 @@ The generation counter should advance on `ucinewgame` and may also advance once 
 - BRAM cache structure.
 - External-memory physical packing for 96-bit entries and any target-specific aligned entry profile.
 - Whether to add a future 2-way bucket profile after measuring TT bandwidth and collision behavior.
-
-## Current RTL Notes
-
-The shared TT constants, request/response structs, bound enum, compact entry codec, and full-key entry codec live in `hardware/rtl/tt/tt_defs.sv`. The implementation stores mate scores node-relative on store and restores them with lookup `ply`; non-mate scores are unchanged. The compact profile verifies the high 48 hash bits after indexing with low hash bits, while the full-key profile verifies all 64 hash bits.

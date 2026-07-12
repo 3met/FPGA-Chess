@@ -8,8 +8,6 @@ The internal design passes explicit board-state values through shared pipelines.
 
 The design has a parameterized number of search threads, a parameterized search stack depth, an optional perft command path, and optional Zobrist, TT, and PST paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests.
 
-Current RTL note: when more than one search context is configured, the current `search_controller` runs Lazy SMP root contexts concurrently through shared tagged board-update, move-generation, static-evaluation, TT lookup, and TT store pipelines. Threads share no search knowledge except the transposition table when TT is enabled. The `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies.
-
 ## Major Blocks
 
 | Block                      | Role                                                                                                                                        |

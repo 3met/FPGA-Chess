@@ -153,10 +153,10 @@ The total packed width is 272 bits.
 
 ### Search Depth
 
-| Name | Value | Description |
+| Name | Value | Description                                                |
 | ---- | ----- | ----------- |
 | `MAX_PLY_COUNT` | `32` | Maximum number of plies tracked by ply-indexed structures. |
-| `PlyIndex` | `log2(MAX_PLY_COUNT)` bits | Search ply index. Currently 5 bits. |
+| `PlyIndex` | `log2(MAX_PLY_COUNT)` bits | Search ply index.                                          |
 
 ### Evaluation Scores
 

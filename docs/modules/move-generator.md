@@ -1,7 +1,5 @@
 # Move Generator (`move_generator`)
 
-Status: tiled pipeline implementation in progress. Standalone move-generation coverage passes, while same-ply node-mask reuse in `search_controller` integration is still being corrected.
-
 The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is strictly legal. A candidate is consumed for the current node whether or not it is legal.
 
 ## Ports
@@ -34,14 +32,14 @@ The move generator accepts a legal input position and emits one ordered candidat
 
 ## Pipeline
 
-| Pipeline Stage | Description |
-| -------------- | ----------- |
-| 0 | Capture the request and board. Destination/direction ray scans inspect their first one or two statically selected board squares; shorter scans remain constant NULL until their later start stage. |
-| 1-3 | Each active destination-local ray scan inspects the next one or two successive squares from the matching delayed board copy until it finds the nearest occupied tile, then carries that result to stage 3. Geometry-specific start stages avoid storing short rays before they are needed while preserving request alignment and one-request-per-cycle throughput. The consumed-mask RAM read is issued late in this window so the selected node mask is available when proposals are formed. |
-| 4 | Sixty-four destination-local processing elements register one proposal each using the propagated rays, statically connected knight sources, compact capture/attacker-type ordering, promotion variants, targeted priority, qsearch filtering, and only the consumed-mask bits belonging to that tile. A small dedicated proposal handles castling. |
-| 5 | First registered comparator level reduces 64 tile proposals plus castling to eight proposals. |
-| 6 | Final registered comparator level reduces eight proposals to one. |
-| 7 | Complete strict legality for the selected proposal, update the consumed mask, and register the result before the external output boundary. |
+| Pipeline Stage | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0              | Capture the request and board. Destination/direction ray scans inspect their first one or two statically selected board squares; shorter scans remain constant NULL until their later start stage.                                                                                                                                                                                                                                                                                            |
+| 1-3            | Each active destination-local ray scan inspects the next one or two successive squares from the matching delayed board copy until it finds the nearest occupied tile, then carries that result to stage 3. Geometry-specific start stages avoid storing short rays before they are needed while preserving request alignment and one-request-per-cycle throughput. The consumed-mask RAM read is issued late in this window so the selected node mask is available when proposals are formed. |
+| 4              | Sixty-four destination-local processing elements register one proposal each using the propagated rays, statically connected knight sources, compact capture/attacker-type ordering, promotion variants, targeted priority, qsearch filtering, and only the consumed-mask bits belonging to that tile. A small dedicated proposal handles castling.                                                                                                                                            |
+| 5              | First registered comparator level reduces 64 tile proposals plus castling to eight proposals.                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 6              | Final registered comparator level reduces eight proposals to one.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 7              | Complete strict legality for the selected proposal, update the consumed mask, and register the result before the external output boundary.                                                                                                                                                                                                                                                                                                                                                    |
 
 ```mermaid
 flowchart LR
@@ -76,11 +74,9 @@ Promotion ordering emits queen, knight, rook, and bishop promotion identities se
 
 Each generated candidate must be marked as searched for the current `thread_id` and `ply`, even when `move_is_legal` is false. This prevents repeated emission of the same illegal pseudo-move.
 
-The consumed-candidate mask is area-conscious rather than a full `from/to` matrix. It stores 378 directional board-edge bits for ordinary non-promotion candidates, 88 side-relative exact promotion bits for 22 promotion edges times four promotion pieces, and two side-relative exact castling bits. The total mask width is 468 bits per `thread_id`/`ply` node state.
+The consumed-candidate mask is area-conscious. It stores 378 directional board-edge bits for ordinary non-promotion candidates, 88 side-relative exact promotion bits for 22 promotion edges times four promotion pieces, and two side-relative exact castling bits. The total mask width is 468 bits per `thread_id`/`ply` node state.
 
-The mask state is stored in a synchronous-read block-RAM template rather than in pipeline registers. The read address is issued shortly before proposal generation, and the loaded mask is carried only through proposal reduction. Proposals do not carry a redundant nine-bit mask index through the comparator tree; the selected move's index is reconstructed once at the mask update boundary. A `start_node` request bypasses the RAM read data with an all-zero mask for that request.
-
-The compressed ordinary edge identity relies on the fixed-board nearest-piece property: for a given destination/direction edge, path blockers leave at most one pseudo-legal ordinary source that can consume that edge in the current node. Promotions and castling are exceptions because their candidate identity is not represented safely by a single ordinary edge, so they have exact dedicated bits.
+The mask state is stored in a synchronous-read BRAM. The read address is issued shortly before proposal generation, and the loaded mask is carried only through proposal reduction. Proposals do not carry a redundant nine-bit mask index through the comparator tree; the selected move's index is reconstructed once at the mask update boundary. A `start_node` request bypasses the RAM read data with an all-zero mask for that request.
 
 The search controller must assert `start_node` with the first request for every new node, including same-ply sibling nodes. Reusing a `thread_id` and `ply` without `start_node` continues consuming candidates from the existing node mask.
 
@@ -90,23 +86,18 @@ The input position is assumed legal. The move generator is responsible for rejec
 
 Legality filtering must cover:
 
-| Case | Required Behavior |
-| ---- | ----------------- |
-| Pinned piece | A pinned piece may move only along the pin line when that preserves king safety. |
-| King move | A king may not move to an attacked square. |
-| Check | If in check, non-king moves must capture the checker, block the checking line, or otherwise remove the check. |
-| Double check | Only king moves can be legal. |
-| En passant | En passant must reject discovered checks created by removing the captured pawn. |
-| Castling | Castling requires clear path squares, castling permission, king not currently in check, and king transit/destination squares not attacked. |
+| Case         | Required Behavior                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pinned piece | A pinned piece may move only along the pin line when that preserves king safety.                                                           |
+| King move    | A king may not move to an attacked square.                                                                                                 |
+| Check        | If in check, non-king moves must capture the checker, block the checking line, or otherwise remove the check.                              |
+| Double check | Only king moves can be legal.                                                                                                              |
+| En passant   | En passant must reject discovered checks created by removing the captured pawn.                                                            |
+| Castling     | Castling requires clear path squares, castling permission, king not currently in check, and king transit/destination squares not attacked. |
 
 The board update pipeline should not select replacement moves after an illegal candidate is rejected; the search controller should dispatch move generation again.
 
 ## Current RTL Notes
 
-The current RTL lives under `hardware/rtl/move_generator/`.
+A ray message contains only the nearest source `Tile` and its three-bit distance; a NULL piece type represents an empty ray, and the source position is reconstructed from destination, direction, and distance. Destination-local ray scans start at a geometry-specific point in the four-stage propagation window and inspect up to two statically selected squares from each matching delayed board copy, choosing the nearer occupied square, so every final ray remains aligned at stage 3 without storing short rays during earlier stages. Sixty-four `move_generator_tile_PE` instances each consume only local ray data, statically connected knight sources, request controls, and the relevant consumed-mask bits from the late RAM read, then emit one packed proposal. A two-level registered comparator tree selects one proposal, and a dedicated path contributes castling. The PE array carries one king-safety bit with each proposal through the existing comparator tree. Castling uses the same attack information for the origin, transit, and destination squares. Selected non-king candidates retain a virtual-board king attack test so pins, checks, and en passant discoveries remain covered.
 
-The current RTL uses the 468-bit compressed per-node consumed-candidate mask and supports normal, targeted, and qsearch generation, including en passant, castling, and all promotion variants. A ray message contains only the nearest source `Tile` and its three-bit distance; a NULL piece type represents an empty ray, and the source position is reconstructed from destination, direction, and distance. Destination-local ray scans start at a geometry-specific point in the four-stage propagation window and inspect up to two statically selected squares from each matching delayed board copy, choosing the nearer occupied square, so every final ray remains aligned at stage 3 without storing short rays during earlier stages. Sixty-four `move_generator_tile_PE` instances each consume only local ray data, statically connected knight sources, request controls, and the relevant consumed-mask bits from the late RAM read, then emit one packed proposal. A two-level registered comparator tree selects one proposal, and a dedicated low-area path contributes castling. The PE array is the only ordinary-move pseudo-legality implementation. It also derives enemy attacks from the propagated nearest-piece rays and statically connected knight sources, including the slider exposed when a king vacates its origin, and carries one king-safety bit with each proposal through the existing comparator tree. Castling uses the same attack information for the origin, transit, and destination squares. Selected non-king candidates retain a virtual-board king attack test so pins, checks, and en passant discoveries remain covered. Pipeline payload and invalid-proposal fields are reset to don't-care values because the separately reset valid pipeline suppresses their use until valid request data has traversed the pipeline.
-
-Current synthesis note: the previous RTL selected candidates through board-wide combinational tasks that accepted complete unpacked board and ray arrays. The current RTL restores explicit destination-local processing elements, compact ray records, localized mask inputs, and a registered reduction tree so synthesis tools elaborate repeated bounded modules instead of duplicating board-wide enumeration.
-
-Current integration note: standalone generation exhausts each tested node without duplicate mask identities, and the search-controller perft regression passes when recycling a ply across sibling nodes with the pipelined `start_node` and consumed-mask state handoff.

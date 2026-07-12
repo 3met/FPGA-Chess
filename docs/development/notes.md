@@ -36,7 +36,3 @@ These notes contain open questions, speculative ideas, and implementation remind
 - Log FIFO overflow.
 - Distinguish UART framing errors from protocol errors.
 - Add optional host-side protocol tracing around every FPGA command and response.
-
-## Current RTL Notes
-
-The current `static_evaluator` RTL adds V1 positional terms to the board update pipeline's White-relative incremental material plus PST state.
