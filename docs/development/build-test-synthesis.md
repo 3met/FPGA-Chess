@@ -1,6 +1,6 @@
 # Build, Test, and Synthesis
 
-The repo-level entrypoint is `python tools/fpga_chess.py`. All scripts are written with pure Python standard library so the same commands work on Windows and Linux when the relevant EDA tools are on `PATH`.
+The repo-level entrypoint is `python -m tools.hardware_build`. The package is split into focused modules for manifest handling, data generation, simulation, synthesis, reporting, shared helpers, and command-line parsing. All scripts are written with pure Python standard library so the same commands work on Windows and Linux when the relevant EDA tools are on `PATH`.
 
 ## Manifests
 
@@ -16,21 +16,21 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 ## Commands
 
-`python tools/fpga_chess.py list` prints the known source sets, tests, generated data, and synthesis targets.
+`python -m tools.hardware_build list` prints the known source sets, tests, generated data, and synthesis targets.
 
-`python tools/fpga_chess.py validate` validates the manifest structure, source-set graph, and required input files.
+`python -m tools.hardware_build validate` validates the manifest structure, source-set graph, and required input files.
 
-`python tools/fpga_chess.py gen-data` runs the deterministic data generators and fails if tracked outputs would change; without `--update`, changed outputs are restored so the command is safe as a check. The PST and Zobrist generators emit both `.hex` reference data and generated SystemVerilog lookup packages used by the portable RTL.
+`python -m tools.hardware_build gen-data` runs the deterministic data generators and fails if tracked outputs would change; without `--update`, changed outputs are restored so the command is safe as a check. The PST and Zobrist generators emit both `.hex` reference data and generated SystemVerilog lookup packages used by the portable RTL.
 
-`python tools/fpga_chess.py gen-data --update` leaves regenerated tracked outputs in place when an intentional data update is being made.
+`python -m tools.hardware_build gen-data --update` leaves regenerated tracked outputs in place when an intentional data update is being made.
 
-`python tools/fpga_chess.py compile --set portable-rtl` compiles an RTL source set with ModelSim/Questa into a clean simulator library under `work/build/compile/`.
+`python -m tools.hardware_build compile --set portable-rtl` compiles an RTL source set with ModelSim/Questa into a clean simulator library under `work/build/compile/`.
 
-`python tools/fpga_chess.py test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa. Use repeated `--name <test>` options to select tests, `--jobs <count>` to run independent tests concurrently, and `--timeout <seconds>` to adjust the per-simulation wall-clock limit (600 seconds by default).
+`python -m tools.hardware_build test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa. Use repeated `--name <test>` options to select tests, `--jobs <count>` to run independent tests concurrently, and `--timeout <seconds>` to adjust the per-simulation wall-clock limit (600 seconds by default).
 
-`python tools/fpga_chess.py check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts `--jobs <count>` concurrency control and `--timeout <seconds>` for RTL tests. A simulation that exceeds its limit is terminated and reported as failed.
+`python -m tools.hardware_build check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts `--jobs <count>` concurrency control and `--timeout <seconds>` for RTL tests. A simulation that exceeds its limit is terminated and reported as failed.
 
-`python tools/fpga_chess.py synth --target quartus-de1-soc` verifies generated data, refreshes the Quartus project and copied generated data under `work/build/quartus-de1-soc/`, preserves Quartus compilation databases for reuse, uses `de1_soc` as the top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis while writing each stage's output to its own log. Pass `--stream-logs` to also print the live vendor output, `--clean` to discard the existing Quartus build directory, `--update-generated-data` to regenerate and keep changed generated data instead of failing on drift, or `--jobs <count>` to override the automatic Quartus processor count.
+`python -m tools.hardware_build synth --target quartus-de1-soc` verifies generated data, refreshes the Quartus project and copied generated data under `work/build/quartus-de1-soc/`, preserves Quartus compilation databases for reuse, uses `de1_soc` as the top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis while writing each stage's output to its own log. Pass `--stream-logs` to also print the live vendor output, `--clean` to discard the existing Quartus build directory, `--update-generated-data` to regenerate and keep changed generated data instead of failing on drift, or `--jobs <count>` to override the automatic Quartus processor count.
 
 The generated Quartus project adds the repo root and target build directory as `SEARCH_PATH` entries and includes generated data outputs as project files so memory/table assets are visible to Quartus from the build directory.
 
@@ -38,17 +38,17 @@ Targets may define a positive integer `seed`; synthesis metadata records it for 
 
 The DE1-SoC synthesis source set uses the same portable RTL path as generic synthesis plus the board-level `de1_soc.sv` wrapper.
 
-`python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
+`python -m tools.hardware_build synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
 
-`python tools/fpga_chess.py synth-report` prints a compact, aligned summary of the most recently modified synthesis target without running an EDA tool. Pass `--target <name>` to select a specific result or `--verbose` to show the complete component hierarchy. The report includes the target, device, timestamp, friendly total and per-stage tool times, run status, deduplicated device resource usage and percentages reported by the vendor, clock/timing results, and major-component utilization when the vendor generated those reports. A failed or interrupted synthesis is identified and any partial reports remain available; if Quartus stops before generating resource reports, the command instead summarizes its log progress, runtime, parsed/elaborated entity counts, warnings, errors, and termination state while clearly marking utilization and Fmax unavailable.
+`python -m tools.hardware_build synth-report` prints a compact, aligned summary of the most recently modified synthesis target without running an EDA tool. Pass `--target <name>` to select a specific result or `--verbose` to show the complete component hierarchy. The report includes the target, device, timestamp, friendly total and per-stage tool times, run status, deduplicated device resource usage and percentages reported by the vendor, clock/timing results, and major-component utilization when the vendor generated those reports. A failed or interrupted synthesis is identified and any partial reports remain available; if Quartus stops before generating resource reports, the command instead summarizes its log progress, runtime, parsed/elaborated entity counts, warnings, errors, and termination state while clearly marking utilization and Fmax unavailable.
 
-`python tools/fpga_chess.py timing-paths --target quartus-de1-soc` runs TimeQuest against an existing Quartus fit and prints the 15 worst failing setup paths, with at most one path per endpoint. Pass `--limit <count>` to choose a different bounded number; this avoids producing an impractically large report when a design has many failing paths. The generated full-detail report is saved beside the Quartus results.
+`python -m tools.hardware_build timing-paths --target quartus-de1-soc` runs TimeQuest against an existing Quartus fit and prints the 15 worst failing setup paths, with at most one path per endpoint. Pass `--limit <count>` to choose a different bounded number; this avoids producing an impractically large report when a design has many failing paths. The generated full-detail report is saved beside the Quartus results.
 
 Each new synthesis run writes `synthesis.json` beside its vendor reports so timestamps, status, and measured stage durations do not depend on vendor-specific log formatting. Quartus hierarchy data is read from its map/fit reports, while the generated Vivado flow requests hierarchical utilization explicitly. Runs created before this metadata was added can still be inspected, but their exact status and duration are reported as unavailable.
 
 ## Adding Tests or Targets
 
-To add a new RTL test, add or reuse a source set, add the testbench file and top module under `tests`, then run `python tools/fpga_chess.py test --name <test-name>`.
+To add a new RTL test, add or reuse a source set, add the testbench file and top module under `tests`, then run `python -m tools.hardware_build test --name <test-name>`.
 
 To add a new board target, create a new `synthesis_targets` entry with its own source set, top module, constraints, and vendor tool settings; generated project files should still be written only under `work/build/`.
 

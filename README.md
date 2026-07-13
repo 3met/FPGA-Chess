@@ -12,26 +12,26 @@ FPGA Chess is an experimental chess engine project targeting FPGA hardware. The 
 | `hardware/tb/` | SystemVerilog testbenches. |
 | `hardware/data/` | Generated lookup data such as piece-square tables. |
 | `hardware/build/` | Build manifests for source sets, tests, generated data, and synthesis targets. |
-| `tools/fpga_chess.py` | Unified Python build, test, data-generation, and synthesis CLI. |
+| `tools/hardware_build/` | Python build, test, data-generation, and synthesis tools for the RTL. |
 | `software/` | Python host-side UCI engine, FPGA protocol encoder/decoder, serial transport, and helper scripts. |
 
 ## Build, Test, and Synthesis
 
-Use `python tools/fpga_chess.py list` to show known source sets, SystemVerilog tests, generated data, and synthesis targets.
+Use `python -m tools.hardware_build list` to show known source sets, SystemVerilog tests, generated data, and synthesis targets.
 
-Use `python tools/fpga_chess.py validate` to validate the manifest, its source-set references, and required input files.
+Use `python -m tools.hardware_build validate` to validate the manifest, its source-set references, and required input files.
 
-Use `python tools/fpga_chess.py gen-data` to verify deterministic generated data is current; use `--update` only when intentionally accepting regenerated `.hex` output.
+Use `python -m tools.hardware_build gen-data` to verify deterministic generated data is current; use `--update` only when intentionally accepting regenerated `.hex` output.
 
-Use `python tools/fpga_chess.py compile --set portable-rtl` for a fast ModelSim/Questa compile-order check.
+Use `python -m tools.hardware_build compile --set portable-rtl` for a fast ModelSim/Questa compile-order check.
 
-Use `python tools/fpga_chess.py test` to compile and run the current SystemVerilog testbenches. Pass `--name <test>` more than once to select tests, `--jobs <count>` to run independent tests concurrently, or `--timeout <seconds>` to adjust the per-simulation wall-clock limit (600 seconds by default).
+Use `python -m tools.hardware_build test` to compile and run the current SystemVerilog testbenches. Pass `--name <test>` more than once to select tests, `--jobs <count>` to run independent tests concurrently, or `--timeout <seconds>` to adjust the per-simulation wall-clock limit (600 seconds by default).
 
-Use `python tools/fpga_chess.py check` for the usual comprehensive check: generated data, host-side Python unit tests, and all RTL tests. It accepts `--jobs <count>` and `--timeout <seconds>` for the RTL tests; a stalled simulation is reported as a failed test rather than leaving the command running indefinitely.
+Use `python -m tools.hardware_build check` for the usual comprehensive check: generated data, host-side Python unit tests, and all RTL tests. It accepts `--jobs <count>` and `--timeout <seconds>` for the RTL tests; a stalled simulation is reported as a failed test rather than leaving the command running indefinitely.
 
-Use `python tools/fpga_chess.py synth --target quartus-de1-soc` for the current Quartus DE1-SoC synthesis smoke path, and `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` for generic Vivado synthesis. Pass `--jobs <count>` to cap Quartus parallel processor use.
+Use `python -m tools.hardware_build synth --target quartus-de1-soc` for the current Quartus DE1-SoC synthesis smoke path, and `python -m tools.hardware_build synth --target vivado-generic --part <xilinx-part>` for generic Vivado synthesis. Pass `--jobs <count>` to cap Quartus parallel processor use.
 
-Use `python tools/fpga_chess.py synth-report` to print utilization by resource and component, device percentages, clock/timing results, and timestamp/runtime metadata from the latest synthesis without rerunning it. Pass `--target <name>` to select a specific target.
+Use `python -m tools.hardware_build synth-report` to print utilization by resource and component, device percentages, clock/timing results, and timestamp/runtime metadata from the latest synthesis without rerunning it. Pass `--target <name>` to select a specific target.
 
 The CLI is pure Python standard library and writes generated projects, simulator libraries, transcripts, and reports under ignored `work/build/`.
 
