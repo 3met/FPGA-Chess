@@ -31,11 +31,13 @@ Use `python -m tools.hardware_build check` for the usual comprehensive check: ge
 
 Use `python -m tools.hardware_build synth --target quartus-de1-soc` for the current Quartus DE1-SoC synthesis smoke path, and `python -m tools.hardware_build synth --target vivado-generic --part <xilinx-part>` for generic Vivado synthesis. Pass `--jobs <count>` to cap Quartus parallel processor use.
 
+After a successful DE1-SoC Quartus synthesis, use `python -m tools.hardware_build flash --target quartus-de1-soc` to program its `.sof` over JTAG. This is a volatile configuration that is cleared on power-down; the tool identifies the target by JTAG ID rather than assuming a chain position. Pass `--device-index <position>` to override that detection, `--cable <name-or-number>` to choose a Quartus cable, or `--dry-run` to inspect the command first.
+
 Use `python -m tools.hardware_build synth-report` to print utilization by resource and component, device percentages, clock/timing results, and timestamp/runtime metadata from the latest synthesis without rerunning it. Pass `--target <name>` to select a specific target.
 
 The CLI is pure Python standard library and writes generated projects, simulator libraries, transcripts, and reports under ignored `work/build/`.
 
-Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, and `vsim` for `compile`, `test`, and `check`; Quartus provides `quartus_map`, `quartus_fit`, `quartus_asm`, and `quartus_sta` for `quartus-de1-soc`; Vivado provides `vivado` for `vivado-generic`.
+Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, and `vsim` for `compile`, `test`, and `check`; Quartus provides `quartus_map`, `quartus_fit`, `quartus_asm`, and `quartus_sta` for `quartus-de1-soc`, plus `quartus_pgm` for `flash`; Vivado provides `vivado` for `vivado-generic`.
 
 ## Host UCI Engine
 

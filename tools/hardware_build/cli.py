@@ -6,6 +6,7 @@ import sys
 from .common import BuildError, RTL_TEST_TIMEOUT_SECONDS
 from .generated_data import command_check, command_gen_data
 from .manifest import command_list, command_validate
+from .programming import command_flash
 from .reports import command_synth_report, command_timing_paths
 from .simulation import command_compile, command_test
 from .synthesis import command_synth
@@ -67,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     synth_parser.set_defaults(func=command_synth)
 
+    flash_parser = subparsers.add_parser("flash", help="Program an FPGA with a synthesized artifact")
+    flash_parser.add_argument("--target", required=True, help="Programming target name")
+    flash_parser.add_argument("--file", help="Artifact file; overrides the target default")
+    flash_parser.add_argument("--cable", help="Quartus programmer cable name or number")
+    flash_parser.add_argument("--device-index", type=int, help="JTAG chain position; overrides automatic ID detection")
+    flash_parser.add_argument("--dry-run", action="store_true", help="Print the programmer command without running it")
+    flash_parser.set_defaults(func=command_flash)
+
     report_parser = subparsers.add_parser("synth-report", help="Print results from the previous synthesis run")
     report_parser.add_argument("--target", help="Synthesis target; defaults to the most recently modified result")
     report_parser.add_argument("--verbose", action="store_true", help="Show the complete component utilization hierarchy")
@@ -88,4 +97,3 @@ def main(argv: list[str] | None = None) -> int:
     except BuildError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-

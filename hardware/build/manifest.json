@@ -194,5 +194,14 @@
       "clock_port": "clk",
       "clock_period_ns": 10.0
     }
+  },
+  "programming_targets": {
+    "quartus-de1-soc": {
+      "tool": "quartus",
+      "synthesis_target": "quartus-de1-soc",
+      "artifact": "work/build/quartus-de1-soc/fpga_chess.sof",
+      "mode": "jtag",
+      "jtag_id": "02D120DD"
+    }
   }
 }

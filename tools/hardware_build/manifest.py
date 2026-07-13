@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from .common import BuildError, MANIFEST_PATH, REPO_ROOT, rel, repo_path
@@ -44,6 +45,7 @@ def validate_manifest(manifest: object) -> None:
     tests = manifest_object(manifest, "tests")
     generated_data = manifest_object(manifest, "generated_data")
     targets = manifest_object(manifest, "synthesis_targets")
+    programming_targets = manifest_object(manifest, "programming_targets")
     simulator = manifest_object(manifest, "simulator")
     modelsim = simulator.get("modelsim")
     if not isinstance(modelsim, dict):
@@ -99,6 +101,23 @@ def validate_manifest(manifest: object) -> None:
                 ]
             )
 
+    for name, target in programming_targets.items():
+        if not isinstance(target, dict):
+            raise BuildError(f"Programming target '{name}' must be an object")
+        require_fields(target, f"Programming target '{name}'", {"tool", "synthesis_target", "artifact", "mode", "jtag_id"})
+        if target["synthesis_target"] not in targets:
+            raise BuildError(
+                f"Programming target '{name}' uses unknown synthesis target '{target['synthesis_target']}'"
+            )
+        if target["tool"] != "quartus":
+            raise BuildError(f"Programming target '{name}' uses unsupported tool '{target['tool']}'")
+        if target["mode"] != "jtag":
+            raise BuildError(f"Programming target '{name}' uses unsupported Quartus mode '{target['mode']}'")
+        if not isinstance(target["jtag_id"], str) or not re.fullmatch(r"[0-9A-Fa-f]{8}", target["jtag_id"]):
+            raise BuildError(f"Programming target '{name}' jtag_id must be an 8-digit hexadecimal ID code")
+        if not isinstance(target["artifact"], str) or not target["artifact"]:
+            raise BuildError(f"Programming target '{name}' artifact must be a non-empty path")
+
 
 def ensure_existing(paths: list[Path]) -> None:
     missing = [rel(path) for path in paths if not path.exists()]
@@ -151,6 +170,10 @@ def print_list(manifest: dict) -> None:
     print("\nSynthesis targets:")
     for name, target in sorted(manifest["synthesis_targets"].items()):
         print(f"  {name}: tool={target['tool']} top={target['top']}")
+
+    print("\nProgramming targets:")
+    for name, target in sorted(manifest["programming_targets"].items()):
+        print(f"  {name}: tool={target['tool']} artifact={target['artifact']}")
 
     print("\nGenerated data:")
     for name, item in sorted(manifest["generated_data"].items()):
