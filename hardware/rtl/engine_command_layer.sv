@@ -50,12 +50,11 @@ module engine_command_layer #(
 
     EngineState state;
     ResponseKind response_kind;
-    logic [7:0] response_type;
-    logic [4:0] response_index;
-    logic [7:0] response_status;
-    logic [7:0] response_error;
+    logic [3:0] response_index;
+    logic [3:0] response_status;
+    logic [2:0] response_error;
     logic [7:0] response_active_op;
-    logic [7:0] error_code;
+    logic [2:0] error_code;
 
     logic [7:0] curr_opcode;
     logic [5:0] payload_count;
@@ -75,15 +74,16 @@ module engine_command_layer #(
     EvalScore last_score;
     NodeCountType last_node_count;
     logic [7:0] last_completed_depth;
-    logic [7:0] last_end_reason;
+    logic [2:0] last_end_reason;
 
-    function automatic logic [7:0] status_byte(
+    // The protocol reserves the upper status bits as zero, so store only its live bits.
+    function automatic logic [3:0] status_byte(
         input logic ready_bit,
         input logic search_bit,
         input logic output_pending_bit,
         input logic error_bit
     );
-        return {4'b0000, error_bit, output_pending_bit, search_bit, ready_bit};
+        return {error_bit, output_pending_bit, search_bit, ready_bit};
     endfunction : status_byte
 
     function automatic logic command_known(input logic [7:0] opcode);
@@ -116,14 +116,14 @@ module engine_command_layer #(
         endcase
     endfunction : payload_len
 
-    function automatic logic [4:0] response_len(input ResponseKind kind);
+    function automatic logic [3:0] response_len(input ResponseKind kind);
         case (kind)
-            RESP_STATUS: return 5'd4;
-            RESP_ACK:    return 5'd2;
-            RESP_SEARCH: return 5'd12;
-            RESP_PERFT:  return 5'd7;
-            RESP_ERROR:  return 5'd3;
-            default:     return 5'd0;
+            RESP_STATUS: return 4'd4;
+            RESP_ACK:    return 4'd2;
+            RESP_SEARCH: return 4'd12;
+            RESP_PERFT:  return 4'd7;
+            RESP_ERROR:  return 4'd3;
+            default:     return 4'd0;
         endcase
     endfunction : response_len
 
@@ -226,36 +226,39 @@ module engine_command_layer #(
 
     always_comb begin
         search_req_valid = (state == ST_DIRECT_BOARD && !direct_request_inflight) || (state == ST_ISSUE_REQUEST) || (state == ST_ISSUE_KILL);
-        if (state == ST_DIRECT_BOARD) begin
+        // The request payload is irrelevant until valid; avoid preserving an idle mux value.
+        search_req = 'x;
+        if (state == ST_DIRECT_BOARD && !direct_request_inflight) begin
             search_req = set_board_request(direct_index);
-        end else begin
+        end else if (state == ST_ISSUE_REQUEST || state == ST_ISSUE_KILL) begin
             search_req = request_reg;
         end
     end
 
     assign ready = (state == ST_IDLE) || (state == ST_RECEIVE_PAYLOAD) || (state == ST_WAIT_RESULT);
     assign data_out_valid = (state == ST_OUTPUT) && ready_for_result;
-    assign error_flag = error_code != ENGINE_ERR_NONE;
+    assign error_flag = error_code != '0;
 
     always_comb begin
-        data_out = 8'h00;
-        if (response_index == 5'd0) begin
-            data_out = response_type;
+        // data_out is only meaningful while data_out_valid is asserted.
+        data_out = 'x;
+        if (response_index == 4'd0) begin
+            data_out = response_type_for(response_kind);
         end else begin
             case (response_kind)
                 RESP_STATUS: begin
                     case (response_index)
-                        5'd1: data_out = response_status;
-                        5'd2: data_out = response_error;
+                        5'd1: data_out = {4'b0000, response_status};
+                        5'd2: data_out = {5'b00000, response_error};
                         5'd3: data_out = response_active_op;
-                        default: data_out = 8'h00;
+                        default: data_out = 'x;
                     endcase
                 end
 
                 RESP_ACK: begin
                     case (response_index)
-                        5'd1: data_out = response_status;
-                        default: data_out = 8'h00;
+                        5'd1: data_out = {4'b0000, response_status};
+                        default: data_out = 'x;
                     endcase
                 end
 
@@ -272,7 +275,7 @@ module engine_command_layer #(
                         5'd9:  data_out = last_node_count[39:32];
                         5'd10: data_out = last_completed_depth;
                         5'd11: data_out = last_end_reason;
-                        default: data_out = 8'h00;
+                        default: data_out = 'x;
                     endcase
                 end
 
@@ -284,39 +287,38 @@ module engine_command_layer #(
                         5'd4: data_out = last_node_count[31:24];
                         5'd5: data_out = last_node_count[39:32];
                         5'd6: data_out = last_completed_depth;
-                        default: data_out = 8'h00;
+                        default: data_out = 'x;
                     endcase
                 end
 
                 RESP_ERROR: begin
                     case (response_index)
-                        5'd1: data_out = response_error;
-                        5'd2: data_out = response_status;
-                        default: data_out = 8'h00;
+                        5'd1: data_out = {5'b00000, response_error};
+                        5'd2: data_out = {4'b0000, response_status};
+                        default: data_out = 'x;
                     endcase
                 end
 
-                default: data_out = 8'h00;
+                default: data_out = 'x;
             endcase
         end
     end
 
     task automatic start_response(
         input ResponseKind kind,
-        input logic [7:0] err,
+        input logic [2:0] err,
         input logic ready_bit,
         input logic search_bit
     );
         response_kind <= kind;
-        response_type <= response_type_for(kind);
-        response_index <= 5'd0;
+        response_index <= 4'd0;
         response_error <= err;
         response_active_op <= search_bit ? active_operation : 8'h00;
         response_status <= status_byte(ready_bit, search_bit, 1'b0, err != ENGINE_ERR_NONE);
         state <= ST_OUTPUT;
     endtask : start_response
 
-    task automatic latch_error(input logic [7:0] err);
+    task automatic latch_error(input logic [2:0] err);
         error_code <= err;
         active_operation <= 8'h00;
         search_active <= 1'b0;
@@ -452,8 +454,7 @@ module engine_command_layer #(
         if (!rst_n) begin
             state <= ST_IDLE;
             response_kind <= RESP_NONE;
-            response_type <= 8'h00;
-            response_index <= 5'd0;
+            response_index <= 4'd0;
             response_status <= 8'h00;
             response_error <= ENGINE_ERR_NONE;
             response_active_op <= 8'h00;
@@ -478,8 +479,7 @@ module engine_command_layer #(
             case (state)
                 ST_IDLE: begin
                     response_kind <= RESP_NONE;
-                    response_type <= 8'h00;
-                    response_index <= 5'd0;
+                    response_index <= 4'd0;
                     active_operation <= 8'h00;
                     if (data_in_valid) begin
                         if (!command_known(data_in)) begin
@@ -588,13 +588,12 @@ module engine_command_layer #(
 
                 ST_OUTPUT: begin
                     if (ready_for_result) begin
-                        if (response_index == response_len(response_kind) - 5'd1) begin
+                        if (response_index == response_len(response_kind) - 4'd1) begin
                             response_kind <= RESP_NONE;
-                            response_type <= 8'h00;
-                            response_index <= 5'd0;
+                            response_index <= 4'd0;
                             state <= ST_IDLE;
                         end else begin
-                            response_index <= response_index + 5'd1;
+                            response_index <= response_index + 4'd1;
                         end
                     end
                 end
