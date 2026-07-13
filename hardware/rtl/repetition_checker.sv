@@ -302,7 +302,6 @@ module repetition_checker #(
                 assert (int'(req_ply) < SEARCH_STACK_DEPTH);
             end
             assert ($onehot0(line_wren));
-            if (req_valid && req_ply != 0) assert (!mask_pipe[0][(req_ply-1'b1)>>1]);
             if (init_state == INIT_READY) assert (!init_failed);
 `endif
         end

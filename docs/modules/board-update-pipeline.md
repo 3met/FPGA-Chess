@@ -39,11 +39,9 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | -------------- | ------------------------------------------------------------------------- |
 | 0              | Register inputs and fetch previous move data for reverse operations.      |
 | 1              | Prepare side-data updates and preserve input context.                     |
-| 2              | Alignment stage.                                                          |
-| 3              | Compute primary tile updates and fetch Zobrist/PST data.                  |
-| 4              | Update first extra tile for en passant or castling and write move record. |
-| 5              | Update second extra tile for castling and account for captured material.  |
-| 6              | Output board data, Zobrist key, and PST evaluation.                       |
+| 2              | Align the synchronous Zobrist and PST ROM outputs.                        |
+| 3              | Apply all tile and side-data updates, including en passant and castling.  |
+| 4              | Register output data and write a pushed move-history record.              |
 
 ```mermaid
 flowchart LR
@@ -52,22 +50,18 @@ flowchart LR
     History["Per-thread move history"]
     Tables["Zobrist and PST tables"]
 
-    subgraph Pipe["Seven-stage fixed-latency pipeline"]
+    subgraph Pipe["Five-stage fixed-latency pipeline"]
         S0["0. Register inputs\nand read reverse context"]
         S1["1. Prepare side-data updates"]
-        S2["2. Alignment"]
-        S3["3. Primary tile update\nand table reads"]
-        S4["4. First extra tile\nor history write"]
-        S5["5. Second extra tile\nand captured-material accounting"]
-        S6["6. Register outputs"]
+        S2["2. Align table reads"]
+        S3["3. Apply board and\nside-data updates"]
+        S4["4. Register outputs\nand write history"]
     end
 
-    In --> S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> Out
+    In --> S0 --> S1 --> S2 --> S3 --> S4 --> Out
     History -->|"Reverse Move read"| S0
     S4 -->|"Push Move write"| History
-    Tables -->|"Primary-square deltas"| S3
-    Tables -->|"Extra-square deltas"| S4
-    Tables -->|"Capture/castle deltas"| S5
+    Tables -->|"Incremental deltas"| S3
 ```
 
 ## Board Setup
@@ -78,7 +72,7 @@ The final engine should set up a board by issuing explicit Set Tile, Set Turn, S
 
 Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations.
 
-The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. The board-update RTL reads the `.hex` data through four replicated synchronous true-dual-port ROMs, providing the eight simultaneous reads needed by the worst-case incremental hash update while preserving the existing seven-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints; Quartus infers the DE1-SoC copies as M10K-backed ROMs. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
+The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. The board-update RTL reads the `.hex` data through four replicated synchronous true-dual-port ROMs, providing the eight simultaneous reads needed by the worst-case incremental hash update while preserving the five-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints; Quartus infers the DE1-SoC copies as M10K-backed ROMs. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
 
 `ENABLE_ZOBRIST` defaults to enabled. With the parameter disabled, `zobrist_key_out` remains unchanged by hash-table lookups and the search controller must also disable TT traffic and repetition-draw detection.
 
@@ -86,7 +80,7 @@ The Zobrist constants are generated from the same deterministic source into `har
 
 ## PST Tables
 
-Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the seven-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
+Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the five-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
 
 ## Move History
 

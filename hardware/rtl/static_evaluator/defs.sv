@@ -2,7 +2,7 @@ package static_evaluator_defs;
 
     import general_chess_defs::*;
 
-    localparam int STATIC_EVAL_PIPELINE_STAGE_CNT = 8;
+    localparam int STATIC_EVAL_PIPELINE_STAGE_CNT = 4;
     localparam int STATIC_EVAL_PROP_STAGE_CNT = STATIC_EVAL_PIPELINE_STAGE_CNT - 1;
 
     localparam EvalScore PAWN_SHIELD_BONUS = EvalScore'('d4);

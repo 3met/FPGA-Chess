@@ -5,7 +5,7 @@ package move_generator_defs;
 
     import general_chess_defs::*;
 
-    localparam int PROP_STAGE_CNT = 4;
+    localparam int PROP_STAGE_CNT = 3;
     localparam int REDUCE_STAGE_CNT = 2;
     localparam int MOVE_GEN_STAGE_CNT = PROP_STAGE_CNT + 1 + REDUCE_STAGE_CNT + 1;
 

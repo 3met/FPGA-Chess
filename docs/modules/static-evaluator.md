@@ -15,13 +15,13 @@ The static evaluator computes a White-relative score from board-state inputs and
 
 | Pipeline Stage | Description |
 | -------------- | ----------- |
-| 0 | Register input board tiles and `base_eval`. Directional scans with maximum distance seven inspect their first statically selected ray square; shorter scans remain constant empty until their geometry-specific start stage. |
-| 1-6 | Each active directional scan inspects one successive square from the matching delayed board copy until it finds the nearest piece, then carries that result forward. Starting short edge and diagonal rays late avoids storing their inactive state in early propagation registers. |
-| 7 | Carry the completed scan results across the existing evaluation boundary, add positional terms to delayed `base_eval`, and set the output score. |
+| 0 | Register input board tiles and `base_eval`. Long directional scans inspect their first one to three statically selected ray squares; shorter scans remain constant empty until their geometry-specific start stage. |
+| 1-2 | Each active directional scan inspects up to three successive squares from the matching delayed board copy until it finds the nearest piece, then carries that result forward. Starting short edge and diagonal rays late avoids storing their inactive state in early propagation registers. |
+| 3 | Add positional terms to delayed `base_eval` and register the output score. |
 
-`STATIC_EVAL_PIPELINE_STAGE_CNT` is 8. The pipeline accepts one request per cycle. Outputs are only meaningful after a request has traversed the fixed latency.
+`STATIC_EVAL_PIPELINE_STAGE_CNT` is 4. The pipeline accepts one request per cycle. Outputs are only meaningful after a request has traversed the fixed latency.
 
-The seven directional propagation slots are scheduled independently for each square and direction. A ray with maximum distance `d` starts at slot `7-d`, so every ray completes in slot 6. Slot 0 reads the live input board, while slot `s > 0` reads `board_pipe[s-1]`; the registered result therefore remains aligned with `board_pipe[s]` for the same request.
+The three directional propagation slots are scheduled independently for each square and direction. A ray uses `ceil(d/3)` slots for maximum distance `d`, with each active slot inspecting the next one to three squares, so every ray completes in slot 2. Slot 0 reads the live input board, while slot `s > 0` reads `board_pipe[s-1]`; the registered result therefore remains aligned with `board_pipe[s]` for the same request.
 
 ## Positional Terms
 
@@ -38,4 +38,3 @@ The seven directional propagation slots are scheduled independently for each squ
 ## Score Convention
 
 Positive `static_eval` values favor White. Negative values favor Black. The evaluator should not know whose turn it is unless a future evaluation term explicitly depends on side to move.
-

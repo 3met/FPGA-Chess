@@ -38,6 +38,7 @@ module search_controller #(
     localparam int SEARCH_EVAL_TAG_PIPE_LEN = EVAL_WAIT_CYCLES + 1;
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
+    localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int NEW_GAME_OPS = 68;
     localparam EvalScore SEARCH_INF = EvalScore'(32001);
 
@@ -46,6 +47,7 @@ module search_controller #(
     typedef logic [EVAL_WAIT_BITS-1:0] EvalWaitCount;
     typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
     typedef logic [SEARCH_STACK_ADDR_BITS-1:0] SearchStackRamAddr;
+    typedef logic [SEARCH_DEPTH_BITS-1:0] SearchDepth;
 
     // A complete node record is packed so each thread's depth stack can infer as
     // one synchronous FPGA RAM instead of many shallow distributed arrays.
@@ -165,9 +167,9 @@ module search_controller #(
     SearchStackRamAddr search_stack_write_addr[0:SEARCH_THREAD_COUNT-1];
     Move search_return_move[0:SEARCH_THREAD_COUNT-1];
     PlyIndex search_ply[0:SEARCH_THREAD_COUNT-1];
-    logic [7:0] search_target_depth;
-    logic [7:0] search_max_depth;
-    logic [7:0] search_completed_depth;
+    SearchDepth search_target_depth;
+    SearchDepth search_max_depth;
+    SearchDepth search_completed_depth;
     Move search_completed_best_move;
     EvalScore search_completed_score;
 `ifndef SYNTHESIS
@@ -630,7 +632,7 @@ module search_controller #(
     endfunction : search_stop_requested
 
     function automatic logic search_in_qsearch(input PlyIndex ply);
-        return int'(ply) >= int'(search_target_depth);
+        return SearchDepth'(ply) >= search_target_depth;
     endfunction : search_in_qsearch
 
     function automatic int search_wrap_thread_index(input int index);
@@ -944,10 +946,10 @@ module search_controller #(
     endfunction : root_result_better
 
     function automatic TTDepth search_remaining_depth(input PlyIndex ply);
-        if (int'(ply) >= int'(search_target_depth)) begin
+        if (SearchDepth'(ply) >= search_target_depth) begin
             return TTDepth'(0);
         end
-        return TTDepth'(int'(search_target_depth) - int'(ply));
+        return TTDepth'(search_target_depth - SearchDepth'(ply));
     endfunction : search_remaining_depth
 
     function automatic TTBoundType tt_bound_for_score(
@@ -1150,9 +1152,9 @@ module search_controller #(
             repetition_req_key <= '0;
             new_setup_index <= 7'd0;
             search_nodes <= NodeCountType'(0);
-            search_target_depth <= 8'd0;
-            search_max_depth <= 8'd0;
-            search_completed_depth <= 8'd0;
+            search_target_depth <= SearchDepth'(0);
+            search_max_depth <= SearchDepth'(0);
+            search_completed_depth <= SearchDepth'(0);
             search_completed_best_move <= NULL_MOVE;
             search_completed_score <= EvalScore'(0);
             search_thread_id <= ThreadID'(0);
@@ -1390,8 +1392,9 @@ module search_controller #(
                                 end else begin
                                     search_ply[search_thread_id] <= PlyIndex'(0);
                                     search_max_depth <= requested_search_depth(req);
-                                    search_target_depth <= (requested_search_depth(req) == 8'd0) ? 8'd0 : 8'd1;
-                                    search_completed_depth <= 8'd0;
+                                    search_target_depth <= (requested_search_depth(req) == SearchDepth'(0))
+                                        ? SearchDepth'(0) : SearchDepth'(1);
+                                    search_completed_depth <= SearchDepth'(0);
                                     search_completed_best_move <= NULL_MOVE;
                                     search_completed_score <= EvalScore'(0);
                                     search_thread_id <= ThreadID'(0);
@@ -1778,7 +1781,7 @@ module search_controller #(
                             stop_best_move = search_iteration_best_move;
                             stop_score = search_iteration_best_score;
                         end
-                        if (search_completed_depth != 8'd0) begin
+                        if (search_completed_depth != SearchDepth'(0)) begin
                             stop_best_move = search_completed_best_move;
                             stop_score = search_completed_score;
                         end
@@ -2242,7 +2245,7 @@ module search_controller #(
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
                                 state <= ST_RESPOND;
                             end else begin
-                                search_target_depth <= search_target_depth + 8'd1;
+                                search_target_depth <= search_target_depth + SearchDepth'(1);
                                 search_thread_id <= ThreadID'(0);
                                 search_dispatch_cursor <= ThreadID'(0);
                                 search_board_dispatch_cursor <= ThreadID'(0);

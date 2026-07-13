@@ -26,9 +26,9 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python tools/fpga_chess.py compile --set portable-rtl` compiles an RTL source set with ModelSim/Questa into a clean simulator library under `work/build/compile/`.
 
-`python tools/fpga_chess.py test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa. Use repeated `--name <test>` options to select tests and `--jobs <count>` to run independent tests concurrently.
+`python tools/fpga_chess.py test` compiles and runs all current SystemVerilog testbenches with ModelSim/Questa. Use repeated `--name <test>` options to select tests, `--jobs <count>` to run independent tests concurrently, and `--timeout <seconds>` to adjust the per-simulation wall-clock limit (600 seconds by default).
 
-`python tools/fpga_chess.py check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts `--jobs <count>` concurrency control for RTL tests.
+`python tools/fpga_chess.py check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts `--jobs <count>` concurrency control and `--timeout <seconds>` for RTL tests. A simulation that exceeds its limit is terminated and reported as failed.
 
 `python tools/fpga_chess.py synth --target quartus-de1-soc` verifies generated data, refreshes the Quartus project and copied generated data under `work/build/quartus-de1-soc/`, preserves Quartus compilation databases for reuse, uses `de1_soc` as the top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis while writing each stage's output to its own log. Pass `--stream-logs` to also print the live vendor output, `--clean` to discard the existing Quartus build directory, `--update-generated-data` to regenerate and keep changed generated data instead of failing on drift, or `--jobs <count>` to override the automatic Quartus processor count.
 

@@ -47,8 +47,8 @@ module board_update_pipeline #(
     localparam MOVE_RECORD_ADDR_BITS = (MOVE_RECORD_COUNT <= 1) ? 1 : $clog2(MOVE_RECORD_COUNT);
     typedef logic [MOVE_RECORD_ADDR_BITS-1:0] MoveRecordAddr;
 
-    BoardUpdatePipelineCtx ctx_pipe[7];
-    BoardUpdatePipelineCtx next_ctx_pipe[7];
+    BoardUpdatePipelineCtx ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT];
+    BoardUpdatePipelineCtx next_ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT];
 
     MoveRecord move_record_in, move_record_out;
     MoveRecordAddr move_record_rd_addr, move_record_wr_addr;
@@ -130,9 +130,9 @@ module board_update_pipeline #(
         end
     endgenerate
 
-    assign board_out = ctx_pipe[6].board;
-    assign zobrist_key_out = ctx_pipe[6].zobrist_key;
-    assign pst_eval_out = ctx_pipe[6].pst_eval;
+    assign board_out = ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT-1].board;
+    assign zobrist_key_out = ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT-1].zobrist_key;
+    assign pst_eval_out = ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT-1].pst_eval;
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
         return MoveRecordAddr'((int'(tid) * MOVE_RECORD_PLY_COUNT) + int'(ply));
@@ -303,10 +303,6 @@ module board_update_pipeline #(
         next_ctx_pipe[0].thread_id   = thread_id;
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
-        next_ctx_pipe[0].is_castle   = 1'b0;
-        next_ctx_pipe[0].is_ep       = 1'b0;
-        next_ctx_pipe[0].is_pawn_move = 1'b0;
-        next_ctx_pipe[0].overwritten_color_has_turn = 1'b0;
 
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
@@ -553,9 +549,6 @@ module board_update_pipeline #(
                 out.move_record.has_ep = in.board.has_ep;
                 out.move_record.ep_file = in.board.ep_file;
                 out.move_record.halfmove_clock = in.board.halfmove_clock;
-                out.is_castle = is_castle;
-                out.is_ep = is_ep;
-                out.is_pawn_move = (start_tile.piece_type == PAWN);
 
                 if (from_pos == Position'('d4)  || from_pos == Position'('d7)  || to_pos == Position'('d7))  next_castle.white_kingside = 1'b0;
                 if (from_pos == Position'('d4)  || from_pos == Position'('d0)  || to_pos == Position'('d0))  next_castle.white_queenside = 1'b0;
@@ -600,8 +593,6 @@ module board_update_pipeline #(
 
                 replace_side_data(out.board, moved_color, rec.castle_perms, rec.has_ep, rec.ep_file, rec.halfmove_clock);
                 out.move_record = rec;
-                out.is_castle = is_castle;
-                out.is_ep = is_ep;
             end
 
             BOARD_SET_TILE_OP: begin
@@ -650,14 +641,6 @@ module board_update_pipeline #(
         end
 
         next_ctx_pipe[4] = out;
-    end
-
-    always_comb begin
-        next_ctx_pipe[5] = ctx_pipe[4];
-    end
-
-    always_comb begin
-        next_ctx_pipe[6] = ctx_pipe[5];
     end
 
 endmodule : board_update_pipeline

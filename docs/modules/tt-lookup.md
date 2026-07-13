@@ -32,7 +32,7 @@ Each lookup returns a response to the requesting thread.
 
 ## Behavior
 
-The RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable synchronous-read simple-dual-port RAM template with Intel and Xilinx block-RAM inference hints and one logical TT entry per memory word. The default compact profile stores 96-bit entries, and the optional full-key profile stores 128-bit entries. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
+The RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable synchronous-read simple-dual-port RAM template with Intel and Xilinx block-RAM inference hints and one logical TT entry per memory word. The default compact profile stores 94-bit entries, and the optional full-key profile stores 126-bit entries. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
 
 The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, and `lookup_resp_valid`. Lookup requests are accepted whenever `clear` is not active. A lookup response is produced for each accepted request, with `hit` deasserted on empty, invalid, or verification-key mismatch entries.
 
@@ -46,18 +46,18 @@ The pipeline verifies a 48-bit high-hash verification key before reporting a hit
 
 TT entry storage should be parameterized. The live Zobrist key should remain 64 bits, but the TT entry does not always need to store all 64 bits because table index bits already come from the key.
 
-The recommended default is a compact 96-bit entry:
+The recommended default is a compact 94-bit entry:
 
 | Bits | Field | Meaning |
 | ---- | ----- | ------- |
 | `47:0` | Verification key | `TT_VERIFY_BITS = 48` high hash bits for hit verification. |
-| `63:48` | Best move | Encoded `Move`, with reserved bits available for future flags. |
+| `61:48` | Best move | Encoded `Move`. |
 | `79:64` | Score | Stored `EvalScore`, side-to-move point-of-view. |
 | `85:80` | Depth | Stored search depth. |
 | `87:86` | Bound type | Invalid, exact, lower-bound, or upper-bound. |
 | `95:88` | Age/generation | Replacement-policy generation. |
 
-The 128-bit full-key profile is enabled with `USE_FULL_KEY = 1` when external memory naturally moves 128-bit records or when debugging TT correctness:
+The 126-bit full-key profile is enabled with `USE_FULL_KEY = 1` when external memory naturally moves 128-bit records or when debugging TT correctness:
 
 | Bits | Field | Meaning |
 | ---- | ----- | ------- |

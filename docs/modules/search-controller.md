@@ -43,7 +43,7 @@ The search controller owns hardware search threads, the active board state visib
 | Input | `board_wr_data` | 4 | Tile, turn, castle-perms, or en-passant data for direct board writes. |
 | Input | `clock_time` | `TIME_BITS` | Time left on the clock for the side to move. |
 | Input | `inc_time` | `TIME_BITS` | Increment for the side to move. |
-| Input | `depth_limit` | Depth field | Maximum search depth. |
+| Input | `depth_limit` | Depth field | Maximum search depth, clipped internally to `SEARCH_STACK_DEPTH - 1`. |
 | Input | `node_limit` | `NODE_COUNT_BITS` | Maximum number of nodes to search. |
 | Input | `time_limit` | `TIME_BITS` | Maximum fixed search duration. |
 | Input | `kill` | 1 | Stops the current operation. |

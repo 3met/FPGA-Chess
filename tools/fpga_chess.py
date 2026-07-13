@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,9 @@ QUARTUS_ERROR_RE = re.compile(
     r"^\s*(?:internal\s+error|fatal|error(?:\s+\(\d+\))?):",
     flags=re.IGNORECASE | re.MULTILINE,
 )
+# The full eight-thread search-controller regression is intentionally large
+# and can take several minutes in the free ModelSim edition.
+RTL_TEST_TIMEOUT_SECONDS = 600
 
 
 class BuildError(RuntimeError):
@@ -153,10 +157,18 @@ def run_command(
     log_path: Path | None = None,
     live_log: bool = False,
     tee_stdout: bool = False,
+    timeout_seconds: float | None = None,
 ) -> tuple[int, str, float]:
     start = time.monotonic()
     if not live_log:
-        proc = subprocess.run(
+        # A wall-clock limit prevents a non-converging simulator delta cycle
+        # from leaving the unified check command running indefinitely.
+        popen_options: dict[str, object] = {}
+        if os.name == "nt":
+            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_options["start_new_session"] = True
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
@@ -164,13 +176,35 @@ def run_command(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **popen_options,
         )
+        timed_out = False
+        try:
+            output, _ = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                output, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    proc.kill()
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                output, _ = proc.communicate()
+            partial_output = exc.output or ""
+            if isinstance(partial_output, bytes):
+                partial_output = partial_output.decode("utf-8", errors="replace")
+            timeout_text = f"Command timed out after {timeout_seconds:.0f}s.\n"
+            output = partial_output + output + timeout_text
         elapsed = time.monotonic() - start
-        output = proc.stdout
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(output, encoding="utf-8")
-        return proc.returncode, output, elapsed
+        return (124 if timed_out else proc.returncode), output, elapsed
 
     if log_path is None:
         raise BuildError("live_log requires a log path")
@@ -392,6 +426,8 @@ def command_gen_data(args: argparse.Namespace) -> int:
 def command_check(args: argparse.Namespace) -> int:
     if args.jobs is not None and args.jobs < 1:
         raise BuildError("--jobs must be at least 1")
+    if args.timeout < 1:
+        raise BuildError("--timeout must be at least 1 second")
     print("== Generated data ==")
     if command_gen_data(argparse.Namespace(update=False)) != 0:
         return 1
@@ -407,7 +443,7 @@ def command_check(args: argparse.Namespace) -> int:
         return 1
 
     print("\n== RTL tests ==")
-    return command_test(argparse.Namespace(names=None, jobs=args.jobs))
+    return command_test(argparse.Namespace(names=None, jobs=args.jobs, timeout=args.timeout))
 
 
 def clean_dir(path: Path) -> None:
@@ -479,7 +515,14 @@ def compile_modelsim(name: str, sources: list[Path], run_dir: Path, sim_config: 
     }
 
 
-def run_modelsim_top(name: str, top: str, lib_dir: Path, run_dir: Path, sim_config: dict) -> dict:
+def run_modelsim_top(
+    name: str,
+    top: str,
+    lib_dir: Path,
+    run_dir: Path,
+    sim_config: dict,
+    timeout_seconds: float,
+) -> dict:
     tools = modelsim_tools()
     run_log = run_dir / "transcript.log"
     cmd = [
@@ -493,18 +536,27 @@ def run_modelsim_top(name: str, top: str, lib_dir: Path, run_dir: Path, sim_conf
         "-do",
         sim_config.get("run_do", "run -all; quit -f"),
     ]
-    code, output, elapsed = run_command(cmd, REPO_ROOT, run_dir / "vsim.stdout.log")
+    code, output, elapsed = run_command(
+        cmd,
+        REPO_ROOT,
+        run_dir / "vsim.stdout.log",
+        timeout_seconds=timeout_seconds,
+    )
     transcript = run_log.read_text(encoding="utf-8", errors="replace") if run_log.exists() else output
     fail_count = parse_fail_count(transcript)
     pass_count = parse_pass_count(transcript)
     has_completion_counts = pass_count is not None and fail_count is not None
+    timed_out = code == 124
     ok = code == 0 and not has_sim_errors(transcript) and has_completion_counts and fail_count == 0
     return {
         "name": name,
         "ok": ok,
         "elapsed": elapsed,
         "log": run_log if run_log.exists() else run_dir / "vsim.stdout.log",
-        "message": "passed" if ok else ("missing completion counts" if not has_completion_counts else "failed"),
+        "message": "passed" if ok else (
+            f"timed out after {timeout_seconds:.0f}s" if timed_out
+            else ("missing completion counts" if not has_completion_counts else "failed")
+        ),
         "pass_count": pass_count,
         "fail_count": fail_count,
         "output": transcript,
@@ -530,7 +582,7 @@ def command_compile(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
-def run_test(manifest: dict, name: str) -> tuple[dict, dict | None]:
+def run_test(manifest: dict, name: str, timeout_seconds: float) -> tuple[dict, dict | None]:
     test = manifest["tests"][name]
     sources = expand_source_set(manifest, test["source_set"]) + [repo_path(test["testbench"])]
     run_dir = BUILD_ROOT / "sim" / name
@@ -545,6 +597,7 @@ def run_test(manifest: dict, name: str) -> tuple[dict, dict | None]:
             compile_result["lib_dir"],
             run_dir,
             manifest["simulator"]["modelsim"],
+            timeout_seconds,
         ),
     )
 
@@ -583,11 +636,13 @@ def command_test(args: argparse.Namespace) -> int:
     jobs = 1 if args.jobs is None else args.jobs
     if jobs < 1:
         raise BuildError("--jobs must be at least 1")
+    if args.timeout < 1:
+        raise BuildError("--timeout must be at least 1 second")
     if jobs == 1:
-        results = {name: run_test(manifest, name) for name in test_names}
+        results = {name: run_test(manifest, name, args.timeout) for name in test_names}
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-            futures = {name: executor.submit(run_test, manifest, name) for name in test_names}
+            futures = {name: executor.submit(run_test, manifest, name, args.timeout) for name in test_names}
             results = {name: futures[name].result() for name in test_names}
 
     failures = 0
@@ -1309,10 +1364,22 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser = subparsers.add_parser("test", help="Run SystemVerilog testbenches with ModelSim/Questa")
     test_parser.add_argument("--name", dest="names", action="append", help="Test name to run; defaults to all tests")
     test_parser.add_argument("--jobs", type=int, help="Number of tests to run concurrently; defaults to 1")
+    test_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=RTL_TEST_TIMEOUT_SECONDS,
+        help=f"Wall-clock seconds allowed per RTL simulation; defaults to {RTL_TEST_TIMEOUT_SECONDS}",
+    )
     test_parser.set_defaults(func=command_test)
 
     check_parser = subparsers.add_parser("check", help="Check generated data and run Python and RTL tests")
     check_parser.add_argument("--jobs", type=int, help="Number of RTL tests to run concurrently; defaults to 1")
+    check_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=RTL_TEST_TIMEOUT_SECONDS,
+        help=f"Wall-clock seconds allowed per RTL simulation; defaults to {RTL_TEST_TIMEOUT_SECONDS}",
+    )
     check_parser.set_defaults(func=command_check)
 
     synth_parser = subparsers.add_parser("synth", help="Run a synthesis target")

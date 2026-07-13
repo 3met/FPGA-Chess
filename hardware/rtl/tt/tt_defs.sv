@@ -4,8 +4,8 @@ package tt_defs;
 
     import general_chess_defs::*;
 
-    localparam int TT_COMPACT_ENTRY_BITS = 96;
-    localparam int TT_FULL_ENTRY_BITS = 128;
+    localparam int TT_COMPACT_ENTRY_BITS = 94;
+    localparam int TT_FULL_ENTRY_BITS = 126;
     localparam int TT_ENTRY_BITS = TT_COMPACT_ENTRY_BITS;
     localparam int TT_VERIFY_BITS = 48;
     localparam int TT_DEPTH_BITS = 6;
@@ -19,6 +19,7 @@ package tt_defs;
     typedef logic [TT_AGE_BITS-1:0] TTAge;
     typedef logic [TT_AUX_BITS-1:0] TTAux;
     typedef logic [TT_VERIFY_BITS-1:0] TTVerifyKey;
+    // Store only the defined move bits; TT records have no unused move padding.
     typedef logic [$bits(Move)-1:0] TTMoveBits;
 
     typedef enum logic [1:0] {

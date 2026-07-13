@@ -5,7 +5,9 @@ package board_update_pipeline_defs;
 
 	import general_chess_defs::*;
 
-    localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 7;
+    // Stages 0-3 align synchronous history/table reads and transform the
+    // board; stage 4 registers the result while committing move history.
+    localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 5;
 
     // Enum for all board update pipeline operations
     typedef enum logic [3:0] {
@@ -54,10 +56,6 @@ package board_update_pipeline_defs;
 
         // Pipeline Internal Values
         MoveRecord move_record;
-        logic is_castle;
-        logic is_ep;
-        logic is_pawn_move; // Used for halfmove clock
-        logic overwritten_color_has_turn; // For SET TILE: Indicates if the overwritten tile belongs to the active player
     } BoardUpdatePipelineCtx;
 
 endpackage

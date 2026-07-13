@@ -36,8 +36,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     typedef logic [MASK_ADDR_BITS-1:0] MoveMaskAddr;
     typedef logic [2:0] RayDistance;
 
-    Move candidate_move_pipe[MOVE_GEN_STAGE_CNT];
-    logic candidate_move_legal_pipe[MOVE_GEN_STAGE_CNT];
+    // Only the final legal stage needs result storage; earlier array entries
+    // were never read and therefore represented misleading pipeline state.
+    Move candidate_move_pipe;
+    logic candidate_move_legal_pipe;
     MoveMaskAddr mask_rd_addr;
     MoveMaskAddr mask_wr_addr;
     logic mask_rd_en;
@@ -1019,10 +1021,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 castle_perms_pipe[stage] <= CastlePerms'('x);
                 has_ep_pipe[stage] <= 1'bx;
                 ep_file_pipe[stage] <= BoardFile'('x);
-                candidate_move_pipe[stage] <= Move'('x);
-                candidate_move_legal_pipe[stage] <= 1'b0;
                 for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= Tile'('x);
             end
+            candidate_move_pipe <= Move'('x);
+            candidate_move_legal_pipe <= 1'b0;
             for (int idx=0; idx<=REDUCE_STAGE_CNT; idx++)
                 proposal_consumed_mask_pipe[idx] <= MoveMask'('x);
             for (int stage=0; stage<PROP_STAGE_CNT; stage++)
@@ -1048,17 +1050,17 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             ep_file_pipe[0] <= ep_file;
             for (int pos=0; pos<64; pos++) board_pipe[0][pos] <= board_tiles[pos];
 
-            // Start each ray only early enough to inspect up to two reachable squares per stage.
+            // Start each ray only early enough to inspect up to three reachable squares per stage.
             for (int pos=0; pos<64; pos++) begin
                 for (int dir_idx=0; dir_idx<8; dir_idx++) begin
                     automatic Direction dir = Direction'(dir_idx);
                     automatic int max_distance = ray_max_distance(Position'(pos), dir);
-                    automatic int active_stage_count = (max_distance + 1) / 2;
+                    automatic int active_stage_count = (max_distance + 2) / 3;
                     automatic int start_stage = PROP_STAGE_CNT - active_stage_count;
 
                     if (start_stage == 0) begin
-                        automatic int scan_end = max_distance - 2 * (PROP_STAGE_CNT - 1);
-                        automatic int scan_start = (scan_end > 1) ? scan_end - 1 : scan_end;
+                        automatic int scan_end = max_distance - 3 * (PROP_STAGE_CNT - 1);
+                        automatic int scan_start = (scan_end > 2) ? scan_end - 2 : 1;
                         automatic Position first_pos = shiftPos(
                             Position'(pos), dir, RayDistance'(scan_start));
                         if (board_tiles[first_pos].piece_type != NULL_PIECE || scan_start == scan_end) begin
@@ -1066,9 +1068,17 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_start - 1);
                         end else begin
                             automatic Position second_pos = shiftPos(
-                                Position'(pos), dir, RayDistance'(scan_end));
-                            ray_pipe[0][pos][dir_idx].tile <= board_tiles[second_pos];
-                            ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_end - 1);
+                                Position'(pos), dir, RayDistance'(scan_start + 1));
+                            if (board_tiles[second_pos].piece_type != NULL_PIECE
+                                || scan_start + 1 == scan_end) begin
+                                ray_pipe[0][pos][dir_idx].tile <= board_tiles[second_pos];
+                                ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_start);
+                            end else begin
+                                automatic Position third_pos = shiftPos(
+                                    Position'(pos), dir, RayDistance'(scan_end));
+                                ray_pipe[0][pos][dir_idx].tile <= board_tiles[third_pos];
+                                ray_pipe[0][pos][dir_idx].distance <= RayDistance'(scan_end - 1);
+                            end
                         end
                     end else ray_pipe[0][pos][dir_idx] <= NULL_RAY;
                 end
@@ -1079,7 +1089,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     for (int dir_idx=0; dir_idx<8; dir_idx++) begin
                         automatic Direction dir = Direction'(dir_idx);
                         automatic int max_distance = ray_max_distance(Position'(pos), dir);
-                        automatic int active_stage_count = (max_distance + 1) / 2;
+                        automatic int active_stage_count = (max_distance + 2) / 3;
                         automatic int start_stage = PROP_STAGE_CNT - active_stage_count;
 
                         if (stage < start_stage) begin
@@ -1088,8 +1098,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             ray_pipe[stage][pos][dir_idx] <= ray_pipe[stage-1][pos][dir_idx];
                         end else begin
                             automatic int scan_end = max_distance
-                                - 2 * (PROP_STAGE_CNT - 1 - stage);
-                            automatic int scan_start = (scan_end > 1) ? scan_end - 1 : scan_end;
+                                - 3 * (PROP_STAGE_CNT - 1 - stage);
+                            automatic int scan_start = (scan_end > 2) ? scan_end - 2 : 1;
                             automatic Position first_pos = shiftPos(
                                 Position'(pos), dir, RayDistance'(scan_start));
                             if (board_pipe[stage-1][first_pos].piece_type != NULL_PIECE
@@ -1098,9 +1108,17 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                                 ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_start - 1);
                             end else begin
                                 automatic Position second_pos = shiftPos(
-                                    Position'(pos), dir, RayDistance'(scan_end));
-                                ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][second_pos];
-                                ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_end - 1);
+                                    Position'(pos), dir, RayDistance'(scan_start + 1));
+                                if (board_pipe[stage-1][second_pos].piece_type != NULL_PIECE
+                                    || scan_start + 1 == scan_end) begin
+                                    ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][second_pos];
+                                    ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_start);
+                                end else begin
+                                    automatic Position third_pos = shiftPos(
+                                        Position'(pos), dir, RayDistance'(scan_end));
+                                    ray_pipe[stage][pos][dir_idx].tile <= board_pipe[stage-1][third_pos];
+                                    ray_pipe[stage][pos][dir_idx].distance <= RayDistance'(scan_end - 1);
+                                end
                             end
                         end
                     end
@@ -1144,15 +1162,15 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             proposal_consumed_mask_pipe[2] <= proposal_consumed_mask_pipe[1];
 
             if (request_valid_pipe[REDUCE_1_STAGE] && reduced_proposal.valid) begin
-                candidate_move_pipe[LEGAL_STAGE] <= reduced_proposal.move;
-                candidate_move_legal_pipe[LEGAL_STAGE] <= reduced_proposal_legal;
+                candidate_move_pipe <= reduced_proposal.move;
+                candidate_move_legal_pipe <= reduced_proposal_legal;
             end else begin
-                candidate_move_pipe[LEGAL_STAGE] <= NULL_MOVE;
-                candidate_move_legal_pipe[LEGAL_STAGE] <= 1'b0;
+                candidate_move_pipe <= NULL_MOVE;
+                candidate_move_legal_pipe <= 1'b0;
             end
 
-            candidate_move <= candidate_move_pipe[LEGAL_STAGE];
-            move_is_legal <= candidate_move_legal_pipe[LEGAL_STAGE];
+            candidate_move <= candidate_move_pipe;
+            move_is_legal <= candidate_move_legal_pipe;
         end
     end
 

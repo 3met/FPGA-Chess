@@ -118,8 +118,9 @@ module move_generator_tile_PE #(
         if (source_piece == SPARE_PIECE || tile_data.piece_type == SPARE_PIECE)
             return MoveScore'('x);
         if (tile_data.piece_type != NULL_PIECE)
-            return MoveScore'(5'd20 + int'(tile_data.piece_type) - int'(source_piece));
-        return MoveScore'(5'd7 - int'(source_piece));
+            return MoveScore'(5'd20 + MoveScore'(tile_data.piece_type)
+                - MoveScore'(source_piece));
+        return MoveScore'(5'd7 - MoveScore'(source_piece));
     endfunction
 
     task automatic consider(
@@ -146,7 +147,7 @@ module move_generator_tile_PE #(
         if (move_gen_op == MOVE_GEN_QSEARCH_OP && !tactical) return;
 
         score = base_score;
-        if (is_promotion) score = MoveScore'(5'd30 - int'(promo));
+        if (is_promotion) score = MoveScore'(5'd30 - MoveScore'(promo));
         if (target_destination
             && candidate.from_pos == target_move.from_pos
             && (!is_promotion || candidate.promo_piece == target_move.promo_piece))

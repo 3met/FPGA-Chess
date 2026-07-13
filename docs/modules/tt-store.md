@@ -19,7 +19,7 @@ Each store request includes:
 
 ## Behavior
 
-The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable synchronous-read simple-dual-port RAM backend with one logical entry per word. The RAM template carries Intel and Xilinx block-RAM inference hints. The default compact profile stores 96-bit entries, and `USE_FULL_KEY = 1` selects the 128-bit full-key profile. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
+The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable synchronous-read simple-dual-port RAM backend with one logical entry per word. The RAM template carries Intel and Xilinx block-RAM inference hints. The default compact profile stores 94-bit entries, and `USE_FULL_KEY = 1` selects the 126-bit full-key profile. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
 
 Stores use `store_req_valid` and `store_req_ready`. Accepted stores enter a depth-4 FIFO by default. Stores are not dropped; when the FIFO is full, `store_req_ready` deasserts until queued stores drain.
 
@@ -31,7 +31,7 @@ Scores stored in the TT use the search controller's side-to-move point-of-view c
 
 ## Logical Entry Format
 
-The store pipeline writes the parameterized logical entry described in [tt-lookup.md](tt-lookup.md). The recommended default is the compact 96-bit entry with a 48-bit verification key. The implemented 128-bit full-key profile is valid when the external-memory interface makes that alignment preferable.
+The store pipeline writes the parameterized logical entry described in [tt-lookup.md](tt-lookup.md). The recommended default is the compact 94-bit entry with a 48-bit verification key. The implemented 126-bit full-key profile is valid when the external-memory interface makes that alignment preferable.
 
 ## Replacement Policy
 

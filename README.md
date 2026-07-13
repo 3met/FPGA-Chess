@@ -25,9 +25,9 @@ Use `python tools/fpga_chess.py gen-data` to verify deterministic generated data
 
 Use `python tools/fpga_chess.py compile --set portable-rtl` for a fast ModelSim/Questa compile-order check.
 
-Use `python tools/fpga_chess.py test` to compile and run the current SystemVerilog testbenches. Pass `--name <test>` more than once to select tests or `--jobs <count>` to run independent tests concurrently.
+Use `python tools/fpga_chess.py test` to compile and run the current SystemVerilog testbenches. Pass `--name <test>` more than once to select tests, `--jobs <count>` to run independent tests concurrently, or `--timeout <seconds>` to adjust the per-simulation wall-clock limit (600 seconds by default).
 
-Use `python tools/fpga_chess.py check` for the usual comprehensive check: generated data, host-side Python unit tests, and all RTL tests. It also accepts `--jobs <count>` for the RTL tests.
+Use `python tools/fpga_chess.py check` for the usual comprehensive check: generated data, host-side Python unit tests, and all RTL tests. It accepts `--jobs <count>` and `--timeout <seconds>` for the RTL tests; a stalled simulation is reported as a failed test rather than leaving the command running indefinitely.
 
 Use `python tools/fpga_chess.py synth --target quartus-de1-soc` for the current Quartus DE1-SoC synthesis smoke path, and `python tools/fpga_chess.py synth --target vivado-generic --part <xilinx-part>` for generic Vivado synthesis. Pass `--jobs <count>` to cap Quartus parallel processor use.
 

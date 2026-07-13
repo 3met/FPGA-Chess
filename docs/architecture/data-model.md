@@ -207,14 +207,14 @@ These parameters control TT storage format rather than the live Zobrist key. The
 
 | Name | Default | Description |
 | ---- | ------- | ----------- |
-| `TT_COMPACT_ENTRY_BITS` | `96` | Logical TT entry width for the compact profile. |
-| `TT_FULL_ENTRY_BITS` | `128` | Logical TT entry width for the full-key profile. |
-| `TT_ENTRY_BITS` | `96` | Backward-compatible alias for the default compact profile width. |
+| `TT_COMPACT_ENTRY_BITS` | `94` | Logical TT entry width for the compact profile. |
+| `TT_FULL_ENTRY_BITS` | `126` | Logical TT entry width for the full-key profile. |
+| `TT_ENTRY_BITS` | `94` | Backward-compatible alias for the default compact profile width. |
 | `TT_VERIFY_BITS` | `48` | Number of high hash bits stored in each compact TT entry for hit verification. |
 | `TT_DEPTH_BITS` | `6` | Stored depth width. |
 | `TT_AGE_BITS` | `8` | Replacement generation/age width. |
 
-The compact RTL stores one 96-bit entry per inferred-RAM word, indexes entries with low Zobrist bits, and verifies hits with the high `TT_VERIFY_BITS` Zobrist bits. The optional full-key RTL profile stores one 128-bit entry per inferred-RAM word and verifies all 64 Zobrist bits after index selection.
+The compact RTL stores one 94-bit entry per inferred-RAM word, indexes entries with low Zobrist bits, and verifies hits with the high `TT_VERIFY_BITS` Zobrist bits. The optional full-key RTL profile stores one 126-bit entry per inferred-RAM word and verifies all 64 Zobrist bits after index selection.
 
 ## Directions
 
