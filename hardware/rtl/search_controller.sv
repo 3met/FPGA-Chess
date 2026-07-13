@@ -458,48 +458,6 @@ module search_controller #(
         return square_attacked(board, find_king(board, board.turn), Color'(~board.turn));
     endfunction : side_in_check
 
-    function automatic logic square_is_light(input Position pos);
-        automatic BoardFile file = getFile(pos);
-        automatic BoardRank rank = getRank(pos);
-        return file[0] ^ rank[0];
-    endfunction : square_is_light
-
-    function automatic logic insufficient_material(input FullBoard board);
-        automatic int white_minor_count = 0;
-        automatic int black_minor_count = 0;
-        automatic int knight_count = 0;
-        automatic int bishop_count = 0;
-        automatic logic bishop_color_seen = 1'b0;
-        automatic logic bishop_light_color = 1'b0;
-
-        for (int pos = 0; pos < 64; pos++) begin
-            automatic Tile tile = board.tiles[pos];
-            if (tile.piece_type == PAWN || tile.piece_type == ROOK || tile.piece_type == QUEEN) begin
-                return 1'b0;
-            end
-            if (tile.piece_type == BISHOP || tile.piece_type == KNIGHT) begin
-                if (tile.piece_color == WHITE) white_minor_count += 1;
-                else black_minor_count += 1;
-                if (tile.piece_type == KNIGHT) begin
-                    knight_count += 1;
-                end else begin
-                    bishop_count += 1;
-                    if (!bishop_color_seen) begin
-                        bishop_color_seen = 1'b1;
-                        bishop_light_color = square_is_light(Position'(pos));
-                    end else if (bishop_light_color != square_is_light(Position'(pos))) begin
-                        return 1'b0;
-                    end
-                end
-            end
-        end
-
-        if ((white_minor_count + black_minor_count) <= 1) begin
-            return 1'b1;
-        end
-        return knight_count == 0 && bishop_count != 0;
-    endfunction : insufficient_material
-
     function automatic logic committed_move_is_irreversible(input FullBoard before_board, input FullBoard after_board, input Move move);
         automatic Tile start_tile;
         automatic Tile end_tile;
@@ -711,8 +669,7 @@ module search_controller #(
     function automatic logic search_thread_terminal_draw_ready(input int thread_index);
         return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
             && search_thread_phase[thread_index] == SEARCH_PHASE_READY
-            && (search_board[thread_index].halfmove_clock >= HalfmoveClock'(100)
-                || insufficient_material(search_board[thread_index]));
+            && search_board[thread_index].halfmove_clock >= HalfmoveClock'(100);
     endfunction : search_thread_terminal_draw_ready
 
     function automatic logic search_thread_tt_lookup_ready(input int thread_index);

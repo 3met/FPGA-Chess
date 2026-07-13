@@ -675,14 +675,6 @@ module tb_search_controller;
         set_turn(BLACK, "checkmate black to move");
     endtask : setup_checkmate_position
 
-    task automatic setup_same_color_bishops_only();
-        setup_kings_only();
-        set_tile(WHITE_BISHOP, Position'(2), "place white bishop c1");
-        set_tile(BLACK_BISHOP, Position'(61), "place black bishop f8");
-        set_castle_perms(CastlePerms'(4'b0000), "clear castle perms for bishop draw");
-        set_turn(WHITE, "white to move for bishop draw");
-    endtask : setup_same_color_bishops_only
-
     task automatic setup_rook_takes_queen();
         setup_kings_only();
         set_tile(WHITE_ROOK, Position'(0), "place white rook a1");
@@ -698,19 +690,6 @@ module tb_search_controller;
         set_castle_perms(CastlePerms'(4'b0000), "clear castle perms for black capture");
         set_turn(BLACK, "black to move");
     endtask : setup_black_rook_takes_queen
-
-    task automatic run_insufficient_material_search(input string label);
-        automatic EngineControllerRequest request = zero_request();
-
-        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
-        request.depth_limit = 8'd3;
-        pulse_request(request, label);
-        wait_response(label);
-        check(!resp.error, {label, " no error"});
-        check(resp.score == DRAW_EVAL_SCORE, {label, " draw score"});
-        check(resp.best_move.from_pos == Position'(0) && resp.best_move.to_pos == Position'(0), {label, " no best move needed"});
-        check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
-    endtask : run_insufficient_material_search
 
     task automatic run_stalemate_search(input string label);
         automatic EngineControllerRequest request = zero_request();
@@ -888,14 +867,6 @@ module tb_search_controller;
         kill_active_search("kill active search");
         run_perft_error(8'd32, "oversized perft depth");
         run_search_depth_error(8'd32, "oversized search depth");
-
-        new_game();
-        setup_kings_only();
-        run_insufficient_material_search("kings-only search");
-
-        new_game();
-        setup_same_color_bishops_only();
-        run_insufficient_material_search("same-color bishops search");
 
         new_game();
         setup_rook_takes_queen();

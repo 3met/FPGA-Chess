@@ -48,7 +48,7 @@ A winning forced mate at search ply `ply` is encoded as `MATE_SCORE - ply`. A lo
 
 TT stores should normalize mate scores to be relative to the stored node rather than the root ply. TT lookups should restore scores relative to the current root search.
 
-Draw scores are `DRAW_EVAL_SCORE = 0`. A fully legal implementation must detect checkmate, stalemate, the 50-move rule, insufficient material, and repetition draws. The 50-move rule uses `halfmove_clock` from `FullBoard`. Repetition detection uses a separate history of reversible-position hashes because repetition history is intentionally not part of `FullBoard`.
+Draw scores are `DRAW_EVAL_SCORE = 0`. The controller detects checkmate, stalemate, the 50-move rule, and repetition draws; it deliberately does not detect insufficient material to avoid the area cost of a full-board material scan. The 50-move rule uses `halfmove_clock` from `FullBoard`. Repetition detection uses a separate history of reversible-position hashes because repetition history is intentionally not part of `FullBoard`.
 
 For threefold repetition, the engine uses authoritative 64-bit Zobrist keys. A shared checker builds two collision-free 256-entry pre-root tables, one for each root-relative side-to-move parity, and stores per-thread search-line keys in one simple-dual-port RAM bank per adjacent pair of plies. Runtime requests have a five-cycle fixed latency and an initiation interval of one cycle. The current node is excluded from both histories, stale line entries are masked by the current ply and irreversible boundary, and a draw is reported after two saturated previous occurrences. Repetition-draw detection is disabled when `ENABLE_ZOBRIST = 0`.
 
