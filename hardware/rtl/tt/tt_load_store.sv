@@ -35,6 +35,17 @@ module tt_load_store #(
     typedef logic [FIFO_COUNT_BITS-1:0] StoreFifoCount;
     typedef logic [FIFO_PTR_BITS-1:0] StoreFifoPtr;
 
+    // The TT never needs a publisher identity after a store is accepted.
+    typedef struct packed {
+        ZobristKey zobrist_key;
+        TTDepth depth;
+        EvalScore score;
+        TTBoundType bound_type;
+        Move best_move;
+        TTAge age;
+        PlyIndex ply;
+    } TTStorePayload;
+
     typedef enum logic [1:0] {
         STORE_IDLE,
         STORE_WRITE,
@@ -42,12 +53,11 @@ module tt_load_store #(
     } StoreState;
 
     StoreState store_state;
-    TTStoreRequest active_store_req;
-    TTStorageEntry active_store_old_entry;
-    TTIndex active_store_index;
+    TTStorePayload active_store_req;
+    logic active_store_replace;
     TTLookupRequest active_lookup_req;
 
-    TTStoreRequest store_fifo[0:STORE_FIFO_DEPTH-1];
+    TTStorePayload store_fifo[0:STORE_FIFO_DEPTH-1];
     StoreFifoCount store_fifo_count;
     StoreFifoPtr store_fifo_head;
     StoreFifoPtr store_fifo_tail;
@@ -86,6 +96,19 @@ module tt_load_store #(
 
         return ptr + StoreFifoPtr'(1);
     endfunction : next_store_fifo_ptr
+
+    function automatic TTStorePayload store_payload(input TTStoreRequest req);
+        automatic TTStorePayload payload;
+
+        payload.zobrist_key = req.zobrist_key;
+        payload.depth = req.depth;
+        payload.score = req.score;
+        payload.bound_type = req.bound_type;
+        payload.best_move = req.best_move;
+        payload.age = req.age;
+        payload.ply = req.ply;
+        return payload;
+    endfunction : store_payload
 
     function automatic EvalScore normalize_mate_for_store(input EvalScore score, input PlyIndex ply);
         automatic int signed adjusted;
@@ -127,7 +150,7 @@ module tt_load_store #(
         return TTStorageEntry'(tt_invalid_entry());
     endfunction : invalid_storage_entry
 
-    function automatic TTStorageEntry make_storage_entry(input TTStoreRequest req);
+    function automatic TTStorageEntry make_storage_entry(input TTStorePayload req);
         if (USE_FULL_KEY) begin
             return TTStorageEntry'(tt_make_full_entry(
                 req.zobrist_key,
@@ -261,7 +284,7 @@ module tt_load_store #(
         return resp;
     endfunction : make_lookup_response
 
-    function automatic logic should_replace(input TTStorageEntry old_entry, input TTStoreRequest req);
+    function automatic logic should_replace(input TTStorageEntry old_entry, input TTStorePayload req);
         automatic logic old_invalid;
         automatic logic key_mismatch;
         automatic logic stale_with_depth_window;
@@ -279,6 +302,7 @@ module tt_load_store #(
         return old_invalid || key_mismatch || stale_with_depth_window || new_deeper_or_equal || exact_over_non_exact;
     endfunction : should_replace
 
+    // Keep response data continuously driven so it is stable with the valid pulse.
     assign lookup_resp = make_lookup_response(active_lookup_req, mem_read_data);
 
     always_comb begin
@@ -309,15 +333,15 @@ module tt_load_store #(
                 STORE_WRITE: begin
                     if (should_replace(mem_read_data, active_store_req)) begin
                         mem_write_enable = 1'b1;
-                        mem_write_address = active_store_index;
+                        mem_write_address = tt_index(active_store_req.zobrist_key);
                         mem_write_data = make_storage_entry(active_store_req);
                     end
                 end
 
                 STORE_RETRY: begin
-                    if (should_replace(active_store_old_entry, active_store_req)) begin
+                    if (active_store_replace) begin
                         mem_write_enable = 1'b1;
-                        mem_write_address = active_store_index;
+                        mem_write_address = tt_index(active_store_req.zobrist_key);
                         mem_write_data = make_storage_entry(active_store_req);
                     end
                 end
@@ -376,12 +400,13 @@ module tt_load_store #(
 
                 if (lookup_accept) begin
                     if (store_state == STORE_WRITE) begin
-                        active_store_old_entry <= mem_read_data;
+                        // The interrupted write needs only this decision, not a full old entry copy.
+                        active_store_replace <= should_replace(mem_read_data, active_store_req);
                         store_state <= STORE_RETRY;
                     end
 
                     if (store_accept) begin
-                        store_fifo[store_fifo_tail] <= store_req;
+                        store_fifo[store_fifo_tail] <= store_payload(store_req);
                         store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
                         store_fifo_count <= store_fifo_count + StoreFifoCount'(1);
                     end
@@ -390,11 +415,10 @@ module tt_load_store #(
                         STORE_IDLE: begin
                             if (store_fifo_count != StoreFifoCount'(0)) begin
                                 active_store_req <= store_fifo[store_fifo_head];
-                                active_store_index <= tt_index(store_fifo[store_fifo_head].zobrist_key);
                                 store_fifo_head <= next_store_fifo_ptr(store_fifo_head);
 
                                 if (store_accept) begin
-                                    store_fifo[store_fifo_tail] <= store_req;
+                                    store_fifo[store_fifo_tail] <= store_payload(store_req);
                                     store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
                                 end else begin
                                     store_fifo_count <= store_fifo_count - StoreFifoCount'(1);
@@ -402,8 +426,7 @@ module tt_load_store #(
 
                                 store_state <= STORE_WRITE;
                             end else if (store_accept) begin
-                                active_store_req <= store_req;
-                                active_store_index <= tt_index(store_req.zobrist_key);
+                                active_store_req <= store_payload(store_req);
                                 store_state <= STORE_WRITE;
                             end
                         end
@@ -412,7 +435,7 @@ module tt_load_store #(
                             store_state <= STORE_IDLE;
 
                             if (store_accept) begin
-                                store_fifo[store_fifo_tail] <= store_req;
+                                store_fifo[store_fifo_tail] <= store_payload(store_req);
                                 store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
                                 store_fifo_count <= store_fifo_count + StoreFifoCount'(1);
                             end
@@ -422,7 +445,7 @@ module tt_load_store #(
                             store_state <= STORE_IDLE;
 
                             if (store_accept) begin
-                                store_fifo[store_fifo_tail] <= store_req;
+                                store_fifo[store_fifo_tail] <= store_payload(store_req);
                                 store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
                                 store_fifo_count <= store_fifo_count + StoreFifoCount'(1);
                             end
