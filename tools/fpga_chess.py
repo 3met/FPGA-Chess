@@ -874,6 +874,127 @@ def parse_quartus_summary(lines: list[str]) -> list[list[str]]:
     return resources
 
 
+def quartus_report_table(lines: list[str], title: str) -> tuple[list[str], list[list[str]]]:
+    """Return the first semicolon-delimited Quartus table following *title*."""
+    for index, raw in enumerate(lines):
+        if title not in raw or not raw.strip().startswith(";"):
+            continue
+        headers: list[str] = []
+        rows: list[list[str]] = []
+        for table_line in lines[index + 1 :]:
+            stripped = table_line.strip()
+            if not headers:
+                if stripped.startswith(";") and ";" in stripped:
+                    headers = [cell.strip() for cell in stripped.strip(";").split(";")]
+                continue
+            if stripped.startswith("+"):
+                if rows:
+                    return headers, rows
+                continue
+            if not stripped.startswith(";"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip(";").split(";")]
+            if len(cells) == len(headers):
+                rows.append(cells)
+        if headers:
+            return headers, rows
+    return [], []
+
+
+def quartus_multicorner_timing(lines: list[str]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Return per-clock worst slack and TNS rows from Quartus's combined table."""
+    headers, rows = quartus_report_table(lines, "Multicorner Timing Analysis Summary")
+    if not headers:
+        return {}, {}
+    name_index = headers.index("Clock")
+    slack_rows: dict[str, list[str]] = {}
+    tns_rows: dict[str, list[str]] = {}
+    current: dict[str, list[str]] | None = None
+    for row in rows:
+        name = row[name_index]
+        if name == "Worst-case Slack":
+            current = slack_rows
+        elif name == "Design-wide TNS":
+            current = tns_rows
+        elif current is not None and name:
+            current[name] = row
+    return slack_rows, tns_rows
+
+
+def short_quartus_clock_name(name: str) -> str:
+    """Convert implementation-specific PLL names into stable report labels."""
+    if name == "CLOCK_50":
+        return name
+    if "PLL_OUTPUT_COUNTER|divclk" in name:
+        return "PLL engine clock"
+    if "FRACTIONAL_PLL|vcoph" in name:
+        return "PLL VCO clock"
+    return name
+
+
+def quartus_timing_summary(lines: list[str]) -> tuple[str, list[list[str]]]:
+    """Extract a compact per-clock timing summary from Quartus STA output."""
+    clock_headers, clock_rows = quartus_report_table(lines, "Clocks")
+    fmax_headers, fmax_rows = quartus_report_table(lines, "Slow 1100mV 85C Model Fmax Summary")
+    slack_rows, tns_rows = quartus_multicorner_timing(lines)
+    if not (clock_headers and slack_rows):
+        return "", []
+
+    def column(headers: list[str], name: str) -> int | None:
+        try:
+            return headers.index(name)
+        except ValueError:
+            return None
+
+    clock_name = column(clock_headers, "Clock Name")
+    frequency = column(clock_headers, "Frequency")
+    setup = 1
+    hold = 2
+    fmax_name = column(fmax_headers, "Clock Name")
+    fmax = column(fmax_headers, "Fmax")
+    if None in (clock_name, frequency):
+        return "", []
+
+    frequencies = {row[clock_name]: row[frequency] for row in clock_rows}
+    fmax_values = (
+        {row[fmax_name]: row[fmax] for row in fmax_rows}
+        if fmax_name is not None and fmax is not None
+        else {}
+    )
+    timing_rows: list[list[str]] = []
+    worst_setup: float | None = None
+    worst_tns = "N/A"
+    for name, row in slack_rows.items():
+        if name not in frequencies:
+            continue
+        setup_slack = row[setup]
+        # Internal PLL VCO clocks only participate in pulse-width analysis.
+        # Omit them from this setup/hold-oriented summary.
+        if setup_slack == "N/A" and row[hold] == "N/A":
+            continue
+        try:
+            setup_value = float(setup_slack)
+            if worst_setup is None or setup_value < worst_setup:
+                worst_setup = setup_value
+                worst_tns = tns_rows.get(name, ["", "N/A"])[setup]
+        except ValueError:
+            pass
+        timing_rows.append(
+            [
+                short_quartus_clock_name(name),
+                frequencies[name],
+                fmax_values.get(name, "N/A"),
+                setup_slack,
+                tns_rows.get(name, ["", "N/A"])[setup],
+                row[hold],
+            ]
+        )
+    if worst_setup is None:
+        return "", []
+    status = "PASS" if worst_setup >= 0 else "FAIL"
+    return f"{status} (worst setup slack {worst_setup:.3f} ns; TNS {worst_tns} ns)", timing_rows
+
+
 def quartus_table(lines: list[str], title: str) -> tuple[list[str], list[list[str]]]:
     for index, raw in enumerate(lines):
         if title not in raw:
@@ -940,20 +1061,19 @@ def quartus_synth_report(build_dir: Path, verbose: bool = False) -> bool:
     summary = report_lines(fit_summary_paths) or report_lines(map_summary_paths)
     timing = report_lines(timing_paths)
     resources = parse_quartus_summary(summary)
-    clocks = matching_report_rows(
-        timing,
-        (r"Fmax", r"Restricted Fmax", r"Slack", r"Timing requirements", r"\bMHz\b"),
-    )
+    timing_status, timing_rows = quartus_timing_summary(timing)
     fit_lines = report_lines(fit_paths)
     components = quartus_hierarchy(fit_lines, True, verbose)
     if not components:
         components = quartus_hierarchy(report_lines(map_paths), False, verbose)
-    found = bool(resources or clocks or components)
+    found = bool(resources or timing_rows or components)
     if not found:
         return False
     print_table("Device utilization", ["Resource", "Used", "Available", "Use"], resources)
-    if clocks:
-        print_table("Clock and timing", ["Result"], [[row] for row in clocks[:20]])
+    if timing_rows:
+        print(f"\nClock and timing: {timing_status}")
+        print("  Fmax is reported for the slow 1100mV 85C corner; slack and TNS are worst-case across corners.")
+        print_table("Clock summary", ["Clock", "Target", "Fmax", "Setup WNS", "Setup TNS", "Hold WNS"], timing_rows)
     else:
         print_unavailable("Clock and timing", "timing report not generated")
     print_table("Utilization by component", ["Component", "Logic", "Registers", "Memory bits", "DSP"], components)
@@ -1168,6 +1288,69 @@ def command_synth_report(args: argparse.Namespace) -> int:
         print("\nNo synthesis reports or partial logs were found.")
         print(f"  Build directory: {rel(build_dir)}")
         return 1
+    return 0
+
+
+def command_timing_paths(args: argparse.Namespace) -> int:
+    """Run TimeQuest on an existing Quartus fit and print its worst setup paths."""
+    if args.limit < 1:
+        raise BuildError("--limit must be at least 1")
+    manifest = load_manifest()
+    targets = manifest["synthesis_targets"]
+    if args.target not in targets:
+        raise BuildError(f"Unknown synthesis target '{args.target}'")
+    target = targets[args.target]
+    if target["tool"] != "quartus":
+        raise BuildError("timing-paths currently supports Quartus targets only")
+    build_dir = BUILD_ROOT / args.target
+    project = build_dir / "fpga_chess.qpf"
+    if not project.exists():
+        raise BuildError(f"No Quartus project found for target '{args.target}'")
+
+    require_tool("quartus_sta")
+    report = build_dir / "failing_setup_paths.rpt"
+    script = build_dir / "report_failing_paths.tcl"
+    script.write_text(
+        "\n".join(
+            [
+                "project_open fpga_chess -revision fpga_chess",
+                "create_timing_netlist",
+                "read_sdc",
+                "update_timing_netlist",
+                # Restrict to negative-slack setup paths so a timing-clean build
+                # has an intentionally empty report rather than arbitrary paths.
+                f"report_timing -setup -less_than_slack 0.0 -npaths {args.limit} -nworst 1 -detail summary -file {{{quote_tcl_path(report)}}}",
+                "delete_timing_netlist",
+                "project_close",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    log = build_dir / "quartus_timing_paths.log"
+    code, output, elapsed = run_command(["quartus_sta", "-t", str(script)], build_dir, log)
+    if code != 0 or QUARTUS_ERROR_RE.search(output):
+        raise BuildError(f"Quartus timing-path analysis failed; see {rel(log)}")
+    if not report.exists():
+        raise BuildError(f"Quartus did not produce {rel(report)}")
+    report_text = report.read_text(encoding="utf-8", errors="replace").strip()
+    print(f"\nWorst failing setup paths (up to {args.limit}; {elapsed:.2f}s):")
+    headers, rows = quartus_report_table(report_text.splitlines(), "Report Timing")
+    if not rows:
+        print("  None. No setup paths have negative slack.")
+    else:
+        indices = {header: index for index, header in enumerate(headers)}
+        columns = [
+            ("Slack (ns)", "Slack"),
+            ("From node", "From Node"),
+            ("To node", "To Node"),
+            ("Required (ns)", "Relationship"),
+            ("Skew (ns)", "Clock Skew"),
+            ("Delay (ns)", "Data Delay"),
+        ]
+        compact_rows = [[row[indices[source]] for _, source in columns] for row in rows]
+        print_table("Path summary", [display for display, _ in columns], compact_rows)
+    print(f"\n  Report: {rel(report)}")
     return 0
 
 
@@ -1403,6 +1586,11 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--target", help="Synthesis target; defaults to the most recently modified result")
     report_parser.add_argument("--verbose", action="store_true", help="Show the complete component utilization hierarchy")
     report_parser.set_defaults(func=command_synth_report)
+
+    paths_parser = subparsers.add_parser("timing-paths", help="Report the worst failing setup paths from an existing Quartus fit")
+    paths_parser.add_argument("--target", required=True, help="Quartus synthesis target to inspect")
+    paths_parser.add_argument("--limit", type=int, default=15, help="Maximum failing paths to report; defaults to 15")
+    paths_parser.set_defaults(func=command_timing_paths)
 
     return parser
 
