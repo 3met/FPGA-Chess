@@ -15,9 +15,11 @@ module de1_soc(input CLOCK_50,
             output logic [9:0] LEDR
             );
 
-	parameter ENGINE_CLOCK_FREQ = 100_000_000;	// Main clock at 100 MHz
 	parameter UART_CLOCK_FREQ = 50_000_000;
 	parameter BAUD_RATE = 2_000_000;
+
+	// The build target generates this value from its engine_clock_mhz setting.
+	`include "engine_clock_config.svh"
 
 	wire rst_n;
 	assign rst_n = KEY[3];

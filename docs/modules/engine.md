@@ -19,7 +19,7 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Output | `data_out` | 8 | Response byte. |
 | Output | `data_out_valid` | 1 | Indicates `data_out` is valid. |
 
-The engine parameters configure the internal controller clock frequency, thread count, stack depth, perft support, Zobrist hashing, transposition table, and piece-square tables.
+The engine parameters configure the internal controller clock frequency, thread count, stack depth, perft support, Zobrist hashing, transposition table, and piece-square tables. Each board wrapper must set `CLOCK_FREQ` to the exact frequency driven on `clk`; clock generation itself stays in the board wrapper so the core remains portable across Intel/Altera and Xilinx devices.
 
 ## Commands
 

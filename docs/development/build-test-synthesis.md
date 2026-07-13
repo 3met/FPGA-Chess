@@ -38,7 +38,7 @@ The generated Quartus project adds the repo root and target build directory as `
 
 Targets may define a positive integer `seed`; synthesis metadata records it for every target, and Quartus targets apply it to the fitter. Quartus targets may also define `message_disable` with recurring informational message IDs to suppress from the normal Quartus message stream; warnings and errors should remain unsuppressed. Targets may also define `map_effort` and `fit_effort` in the manifest; the DE1-SoC target uses fast map and fitter effort to keep first-pass synthesis runtime bounded at the possible cost of lower Fmax or higher resource use.
 
-The DE1-SoC synthesis source set uses the same portable RTL path as generic synthesis plus the board-level `de1_soc.sv` wrapper.
+The DE1-SoC synthesis source set uses the same portable RTL path as generic synthesis plus the board-level `de1_soc.sv` wrapper. Its `engine_clock_mhz` target setting is the single source of truth for the engine rate: the build generates the engine timing include and a configured copy of the Intel PLL IP under the target build directory. Change that value when selecting a different DE1-SoC engine frequency.
 
 `python -m tools.hardware_build synth --target vivado-generic --part <xilinx-part>` generates a generic Vivado batch synthesis project under `work/build/vivado-generic/` with a clock-only XDC and no board pin constraints.
 

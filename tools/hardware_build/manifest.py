@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
@@ -85,9 +86,26 @@ def validate_manifest(manifest: object) -> None:
         if target["tool"] not in tool_fields:
             raise BuildError(f"Synthesis target '{name}' uses unsupported tool '{target['tool']}'")
         require_fields(target, f"Synthesis target '{name}'", tool_fields[target["tool"]])
+        if "engine_clock_mhz" in target and (
+            isinstance(target["engine_clock_mhz"], bool)
+            or not isinstance(target["engine_clock_mhz"], (int, float))
+            or not math.isfinite(target["engine_clock_mhz"])
+            or target["engine_clock_mhz"] <= 0
+        ):
+            raise BuildError(f"Synthesis target '{name}' engine_clock_mhz must be a positive finite number")
         if "seed" in target and (not isinstance(target["seed"], int) or target["seed"] < 1):
             raise BuildError(f"Synthesis target '{name}' seed must be a positive integer")
         if target["tool"] == "quartus":
+            clock_generator = target.get("clock_generator")
+            if clock_generator is not None:
+                if not isinstance(clock_generator, dict):
+                    raise BuildError(f"Synthesis target '{name}' clock_generator must be an object")
+                require_fields(clock_generator, f"Synthesis target '{name}' clock_generator", {"kind", "template"})
+                if clock_generator["kind"] != "intel-pll":
+                    raise BuildError(f"Synthesis target '{name}' uses unsupported clock generator '{clock_generator['kind']}'")
+                if "engine_clock_mhz" not in target:
+                    raise BuildError(f"Synthesis target '{name}' clock_generator requires engine_clock_mhz")
+                ensure_existing([repo_path(clock_generator["template"])])
             message_disable = target.get("message_disable", [])
             if not isinstance(message_disable, list) or not all(
                 isinstance(message_id, int) and message_id > 0 for message_id in message_disable

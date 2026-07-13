@@ -1,13 +1,16 @@
 """Quartus and Vivado project generation and synthesis commands."""
 
 import argparse
+import base64
 import json
+import re
 import shutil
 from pathlib import Path
 
 from .common import (
     BUILD_ROOT,
     BuildError,
+    QUARTUS_ERROR_RE,
     REPO_ROOT,
     begin_synth_metadata,
     clean_dir,
@@ -15,12 +18,14 @@ from .common import (
     host_parallel_processors,
     print_failure_excerpt,
     print_quartus_failure_excerpt,
+    quote_tcl_path,
     rel,
     require_tool,
     run_command,
+    write_synth_metadata,
 )
 from .generated_data import command_gen_data
-from .manifest import expand_source_set, load_manifest, repo_path
+from .manifest import ensure_existing, expand_source_set, load_manifest, repo_path
 from .reports import collect_quartus_summary
 
 
@@ -54,12 +59,72 @@ def qsf_relevant_pin_line(line: str) -> bool:
     )
 
 
+def replace_once(path: Path, pattern: str, replacement: str) -> None:
+    """Update one generated PLL setting and reject an unexpected IP layout."""
+    contents = path.read_text(encoding="utf-8")
+    updated, count = re.subn(pattern, replacement, contents, count=1)
+    if count != 1:
+        raise BuildError(f"Could not configure clock-generator template {rel(path)}")
+    path.write_text(updated, encoding="utf-8")
+
+
+def engine_clock_values(engine_clock_mhz: float) -> tuple[str, int]:
+    """Quantize MHz to the PLL's micro-MHz precision and derive exact Hz for RTL."""
+    frequency_text = f"{engine_clock_mhz:.6f}"
+    return frequency_text, round(float(frequency_text) * 1_000_000)
+
+
+def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: float) -> Path:
+    """Copy the Intel PLL IP and set its output frequency for this build target."""
+    destination = build_dir / "clock_generator"
+    shutil.copytree(template, destination, dirs_exist_ok=True)
+    frequency_text, _ = engine_clock_values(engine_clock_mhz)
+    replace_once(
+        destination / "pll_ip" / "pll_ip_0002.v",
+        r'\.output_clock_frequency0\("[^"]+"\),',
+        f'.output_clock_frequency0("{frequency_text} MHz"),',
+    )
+    replace_once(
+        destination / "pll_ip.v",
+        r'(gui_output_clock_frequency0" value=")[^"]+(" />)',
+        rf"\g<1>{float(frequency_text):g}\g<2>",
+    )
+    qip = destination / "pll_ip.qip"
+    gui_value = base64.b64encode(f"{float(frequency_text):g}".encode()).decode()
+    output_value = base64.b64encode(f"{frequency_text} MHz".encode()).decode()
+    replace_once(
+        qip,
+        r"(Z3VpX291dHB1dF9jbG9ja19mcmVxdWVuY3kw::)[^:]+(::RGVzaXJlZCBGcmVxdWVuY3k=)",
+        rf"\g<1>{gui_value}\g<2>",
+    )
+    replace_once(
+        qip,
+        r"(b3V0cHV0X2Nsb2NrX2ZyZXF1ZW5jeTA=::)[^:]+(::b3V0cHV0X2Nsb2NrX2ZyZXF1ZW5jeTA=)",
+        rf"\g<1>{output_value}\g<2>",
+    )
+    return destination / "pll_ip.qip"
+
+
+def write_engine_clock_config(build_dir: Path, engine_clock_mhz: float) -> Path:
+    """Generate the engine timing parameter from the target's clock setting."""
+    config = build_dir / "engine_clock_config.svh"
+    config.write_text(
+        "// Generated from synthesis_targets.<target>.engine_clock_mhz; do not edit.\n"
+        f"localparam int ENGINE_CLOCK_FREQ = {engine_clock_values(engine_clock_mhz)[1]:_};\n",
+        encoding="utf-8",
+    )
+    return config
+
+
 def write_quartus_project(manifest: dict, target: dict, build_dir: Path, parallel_processors: int) -> Path:
     build_dir.mkdir(parents=True, exist_ok=True)
     project = build_dir / "fpga_chess"
     qpf = project.with_suffix(".qpf")
     qsf = project.with_suffix(".qsf")
     sources = expand_source_set(manifest, target["source_set"])
+    generated_clock_config = None
+    if "engine_clock_mhz" in target:
+        generated_clock_config = write_engine_clock_config(build_dir, target["engine_clock_mhz"])
     generated_outputs = [
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
@@ -94,13 +159,22 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
         lines.append(f"set_global_assignment -name MESSAGE_DISABLE {message_id}")
     assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
+    if generated_clock_config is not None:
+        lines.append(qsf_assignment_for_source(generated_clock_config))
     lines.extend(
         qsf_assignment_for_source(copied_generated_outputs[output])
         for output in generated_outputs
         if output not in assigned_sources
     )
-    for qip in target.get("qip_files", []):
-        lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(repo_path(qip))}"')
+    qip_files = [repo_path(qip) for qip in target.get("qip_files", [])]
+    if "clock_generator" in target:
+        qip_files.append(
+            materialize_intel_pll(
+                repo_path(target["clock_generator"]["template"]), build_dir, target["engine_clock_mhz"]
+            )
+        )
+    for qip in qip_files:
+        lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(qip)}"')
 
     template = repo_path(target["qsf_template"])
     if template.exists():

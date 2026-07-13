@@ -2,6 +2,14 @@
 
 The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It maps physical pins and board-specific clocking to the vendor-neutral `engine`.
 
+## Clocking
+
+`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The UART continues to use the undivided 50 MHz reference clock.
+
+To select 20 MHz, change `hardware/build/manifest.json`'s `quartus-de1-soc.engine_clock_mhz` to `20.0` and rerun synthesis. Fractional-MHz rates such as `12.5` are supported. The source PLL template remains unchanged; the configured vendor IP and engine timing include are generated under `work/build/quartus-de1-soc/` for that build.
+
+The core does not depend on the Intel PLL: a new board wrapper should generate its intended engine clock with its vendor's PLL/MMCM (or use a suitable board clock), connect it to `engine.clk`, and set `engine.CLOCK_FREQ` to the exact resulting frequency. Do not override the DE1-SoC clock-rate constant independently of its PLL output.
+
 ## On-Board Interface
 
 | Resource | Required Behavior |
