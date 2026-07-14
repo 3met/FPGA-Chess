@@ -107,6 +107,7 @@ module search_controller #(
         SEARCH_PHASE_REVERSE_WAIT,
         SEARCH_PHASE_REPETITION_WAIT,
         SEARCH_PHASE_STORE_WAIT,
+        SEARCH_PHASE_TERMINAL_WAIT,
         SEARCH_PHASE_DONE
     } SearchThreadPhase;
 
@@ -194,6 +195,10 @@ module search_controller #(
     EvalScore search_return_score[0:SEARCH_THREAD_COUNT-1];
     logic search_return_valid[0:SEARCH_THREAD_COUNT-1];
     logic search_eval_is_stand_pat[0:SEARCH_THREAD_COUNT-1];
+    logic terminal_result_valid_pipe;
+    ThreadID terminal_result_thread_pipe;
+    PlyIndex terminal_result_ply_pipe;
+    EvalScore terminal_result_score_pipe;
 
     BoardOp board_update_op;
     FullBoard board_update_in;
@@ -457,6 +462,12 @@ module search_controller #(
     function automatic logic side_in_check(input FullBoard board);
         return square_attacked(board, find_king(board, board.turn), Color'(~board.turn));
     endfunction : side_in_check
+
+    // A pushed board has already toggled turn, so validate the king belonging
+    // to the side that made the speculative move.
+    function automatic logic last_mover_in_check(input FullBoard board);
+        return square_attacked(board, find_king(board, Color'(~board.turn)), board.turn);
+    endfunction : last_mover_in_check
 
     function automatic logic committed_move_is_irreversible(input FullBoard before_board, input FullBoard after_board, input Move move);
         automatic Tile start_tile;
@@ -1137,6 +1148,10 @@ module search_controller #(
             search_iteration_best_score <= -SEARCH_INF;
             search_budget_ms <= TimeType'(0);
             tt_age <= TTAge'(0);
+            terminal_result_valid_pipe <= 1'b0;
+            terminal_result_thread_pipe <= ThreadID'(0);
+            terminal_result_ply_pipe <= PlyIndex'(0);
+            terminal_result_score_pipe <= EvalScore'(0);
             for (int idx = 0; idx < SEARCH_STACK_DEPTH; idx++) begin
                 perft_first_request[idx] <= 1'b1;
             end
@@ -1194,6 +1209,7 @@ module search_controller #(
             search_board_result_valid <= 1'b0;
             search_move_result_valid <= 1'b0;
             search_eval_result_valid <= 1'b0;
+            terminal_result_valid_pipe <= 1'b0;
 
             if (tt_lookup_resp_valid) begin
                 search_tt_response[tt_lookup_resp.thread_id] <= tt_lookup_resp;
@@ -1215,6 +1231,7 @@ module search_controller #(
 
             if (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE) begin
                 repetition_epoch <= repetition_epoch + 1'b1;
+                terminal_result_valid_pipe <= 1'b0;
                 resp_reg <= EngineControllerResponse'('0);
                 resp_reg.end_reason <= ENGINE_END_KILLED;
                 for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
@@ -1565,13 +1582,8 @@ module search_controller #(
                         end else begin
                             perft_first_request[search_ply[0]] <= 1'b0;
                             if (move_is_legal) begin
-                                if (int'(search_ply[0]) + 1 >= int'(active_req.depth_limit)) begin
-                                    search_nodes <= search_nodes + NodeCountType'(1);
-                                    state <= ST_PERFT_GEN_ISSUE;
-                                end else begin
-                                    search_pending_move[0] <= candidate_move;
-                                    state <= ST_PERFT_PUSH_ISSUE;
-                                end
+                                search_pending_move[0] <= candidate_move;
+                                state <= ST_PERFT_PUSH_ISSUE;
                             end else begin
                                 state <= ST_PERFT_GEN_ISSUE;
                             end
@@ -1588,12 +1600,19 @@ module search_controller #(
 
                 ST_PERFT_PUSH_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
-                        search_board[0] <= board_update_out;
-                        search_zobrist_key[0] <= board_update_zobrist_out;
-                        search_pst_eval[0] <= board_update_pst_out;
-                        perft_first_request[search_ply[0] + PlyIndex'(1)] <= 1'b1;
-                        search_ply[0] <= search_ply[0] + PlyIndex'(1);
-                        state <= ST_PERFT_GEN_ISSUE;
+                        if (last_mover_in_check(board_update_out)) begin
+                            state <= ST_PERFT_GEN_ISSUE;
+                        end else if (int'(search_ply[0]) + 1 >= int'(active_req.depth_limit)) begin
+                            search_nodes <= search_nodes + NodeCountType'(1);
+                            state <= ST_PERFT_GEN_ISSUE;
+                        end else begin
+                            search_board[0] <= board_update_out;
+                            search_zobrist_key[0] <= board_update_zobrist_out;
+                            search_pst_eval[0] <= board_update_pst_out;
+                            perft_first_request[search_ply[0] + PlyIndex'(1)] <= 1'b1;
+                            search_ply[0] <= search_ply[0] + PlyIndex'(1);
+                            state <= ST_PERFT_GEN_ISSUE;
+                        end
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
                     end
@@ -1753,6 +1772,40 @@ module search_controller #(
                             : ENGINE_END_TIME_LIMIT;
                         state <= ST_RESPOND;
                     end else begin
+                        if (terminal_result_valid_pipe) begin
+                            automatic ThreadID terminal_thread_id;
+                            automatic PlyIndex terminal_ply;
+                            automatic EvalScore node_score;
+
+                            terminal_thread_id = terminal_result_thread_pipe;
+                            terminal_ply = terminal_result_ply_pipe;
+                            node_score = terminal_result_score_pipe;
+                            search_return_score[terminal_thread_id] <= node_score;
+                            search_return_valid[terminal_thread_id] <= 1'b1;
+                            if (should_store_search_tt(terminal_ply)) begin
+                                search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_STORE_WAIT;
+                                search_tt_store_inflight[terminal_thread_id] <= 1'b1;
+                            end else if (terminal_ply == PlyIndex'(0)) begin
+                                search_thread_status[terminal_thread_id] <= SEARCH_THREAD_DONE;
+                                search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_DONE;
+                                search_thread_completed_depth[terminal_thread_id] <= search_target_depth;
+                                search_thread_completed_best_move[terminal_thread_id] <= search_best_move[terminal_thread_id];
+                                if (root_result_better(
+                                    node_score,
+                                    search_best_move[terminal_thread_id],
+                                    iteration_has_result_next,
+                                    iteration_best_score_next,
+                                    iteration_best_move_next)) begin
+                                    iteration_best_move_next = search_best_move[terminal_thread_id];
+                                    iteration_best_score_next = node_score;
+                                end
+                                iteration_has_result_next = 1'b1;
+                                if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                            end else begin
+                                search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
+                            end
+                        end
+
                         if (search_board_tag_valid_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1]) begin
                             automatic ThreadID board_thread_id;
                             automatic PlyIndex board_ply;
@@ -1769,15 +1822,23 @@ module search_controller #(
 `endif
                             search_board_wait_count[board_thread_id] <= BoardWaitCount'(0);
                             search_board_inflight[board_thread_id] <= 1'b0;
-                            search_board[board_thread_id] <= board_update_out;
-                            search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
-                            search_pst_eval[board_thread_id] <= board_update_pst_out;
                             if (reverse_complete) begin
+                                search_board[board_thread_id] <= board_update_out;
+                                search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
+                                search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_return_move[board_thread_id] <= search_stack_top[board_thread_id].move;
                                 search_stack_top[board_thread_id] <= search_stack_parent_q[board_thread_id];
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                            end else if (last_mover_in_check(board_update_out)) begin
+                                // The board pipeline is stateless. Ignore the
+                                // speculative result; its history entry will be
+                                // overwritten by the next candidate at this ply.
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else begin
+                                search_board[board_thread_id] <= board_update_out;
+                                search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
+                                search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 repetition_line_write_valid <= ENABLE_ZOBRIST;
                                 repetition_line_write_thread <= board_thread_id;
                                 repetition_line_write_ply <= child_ply;
@@ -1827,37 +1888,19 @@ module search_controller #(
                             search_move_inflight[move_thread_id] <= 1'b0;
 
                             if (is_null_move(candidate_move)) begin
-                                automatic EvalScore node_score;
-
-                                node_score = search_in_qsearch(move_ply)
+                                // Register the terminal score before applying
+                                // root selection or return-state updates. This
+                                // isolates the full-board check scan from those
+                                // downstream control paths.
+                                terminal_result_valid_pipe <= 1'b1;
+                                terminal_result_thread_pipe <= move_thread_id;
+                                terminal_result_ply_pipe <= move_ply;
+                                terminal_result_score_pipe <= search_in_qsearch(move_ply)
                                     ? search_stack_top[move_thread_id].best_score
                                     : search_stack_top[move_thread_id].has_legal
                                     ? search_stack_top[move_thread_id].best_score
                                     : terminal_no_move_score(search_board[move_thread_id], move_ply);
-                                search_return_score[move_thread_id] <= node_score;
-                                search_return_valid[move_thread_id] <= 1'b1;
-                                if (should_store_search_tt(move_ply)) begin
-                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_STORE_WAIT;
-                                    search_tt_store_inflight[move_thread_id] <= 1'b1;
-                                end else if (move_ply == PlyIndex'(0)) begin
-                                    search_thread_status[move_thread_id] <= SEARCH_THREAD_DONE;
-                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_DONE;
-                                    search_thread_completed_depth[move_thread_id] <= search_target_depth;
-                                    search_thread_completed_best_move[move_thread_id] <= search_best_move[move_thread_id];
-                                    if (root_result_better(
-                                            node_score,
-                                            search_best_move[move_thread_id],
-                                            iteration_has_result_next,
-                                            iteration_best_score_next,
-                                            iteration_best_move_next)) begin
-                                        iteration_best_move_next = search_best_move[move_thread_id];
-                                        iteration_best_score_next = node_score;
-                                    end
-                                    iteration_has_result_next = 1'b1;
-                                    if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
-                                end else begin
-                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
-                                end
+                                search_thread_phase[move_thread_id] <= SEARCH_PHASE_TERMINAL_WAIT;
                             end else begin
                                 search_stack_top[move_thread_id].first_request <= 1'b0;
                                 if (move_is_legal) begin

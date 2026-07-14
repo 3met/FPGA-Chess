@@ -1027,9 +1027,7 @@ module tb_move_generator;
         test_thread_mask_isolation();
         test_qsearch_filtering();
         test_promotion_ordering();
-        test_no_legal_moves();
         test_small_reference_perft();
-        test_dut_streaming_perft();
 
         $display("Testbench run complete.");
         $display("Pass Count: %0d", pass_count);

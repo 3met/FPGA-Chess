@@ -86,4 +86,4 @@ Piece-square-table constants are generated from `hardware/data/pst_values/pst_va
 
 Push Move writes enough data to reverse the move later, including origin, destination, captured piece, castling permissions, en passant state, halfmove clock, and special-move flag. Reverse Move reads the record for `thread_id` and `search_ply - 1`.
 
-Each thread may have one reversible move per ply. Search must reverse all pushed moves before reusing that ply record for a different line.
+Each thread may have one reversible move per ply. Search must reverse accepted pushed moves before reusing that ply record for a different line. A speculative push rejected for leaving the moving king in check is never accepted as thread state; its record may be overwritten by the next candidate at the same ply.

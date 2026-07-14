@@ -655,23 +655,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         return !square_attacked_after_move(board, own_king_pos, enemy_color, move, moving_color, ep_move, 1'b0);
     endfunction : is_strictly_legal_move
 
-    // Ordinary proposals are pseudo-legal, so only the resulting king square is tested.
-    function automatic logic nonking_move_is_legal(
-        input Tile board[64],
-        input Move move,
-        input Color moving_color,
-        input logic ep_valid,
-        input BoardFile ep_target_file
-    );
-        automatic logic ep_move;
-        automatic Position own_king_pos;
-
-        ep_move = is_ep_move(board, move, moving_color, ep_valid, ep_target_file);
-        own_king_pos = find_king(board, moving_color);
-        return !square_attacked_after_move(
-            board, own_king_pos, Color'(~moving_color), move, moving_color, ep_move, 1'b0);
-    endfunction : nonking_move_is_legal
-
     function automatic int move_mask_addr(input ThreadID tid, input PlyIndex search_ply);
         return (int'(tid) * MAX_PLY_COUNT) + int'(search_ply);
     endfunction : move_mask_addr
@@ -989,13 +972,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         start_tile = board_pipe[REDUCE_1_STAGE][reduced_proposal.move.from_pos];
 
         if (reduced_proposal.valid) begin
-            if (start_tile.piece_type == KING) begin
+            // Only castling needs an early strict check because its origin and
+            // transit squares are no longer observable after board update.
+            if (start_tile.piece_type == KING
+                && is_castle_move(board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
+                    turn_pipe[REDUCE_1_STAGE])) begin
                 reduced_proposal_legal = reduced_proposal.king_safe;
             end else begin
-                reduced_proposal_legal = nonking_move_is_legal(
-                    board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
-                    turn_pipe[REDUCE_1_STAGE], has_ep_pipe[REDUCE_1_STAGE],
-                    ep_file_pipe[REDUCE_1_STAGE]);
+                reduced_proposal_legal = 1'b1;
             end
         end
 

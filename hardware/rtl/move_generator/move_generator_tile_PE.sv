@@ -221,7 +221,9 @@ module move_generator_tile_PE #(
                             consider(move, ep_move, 1'b0, PROMO_QUEEN,
                                 ray_consumed[dir_idx],
                                 move_order_score(source.piece_type), target_destination,
-                                (source.piece_type == KING) ? !king_move_attacked : 1'bx, best);
+                                // Ordinary king safety is checked after proposal reduction.
+                                // This field is retained only for the castling proposal.
+                                1'bx, best);
                         end
                     end
                 end

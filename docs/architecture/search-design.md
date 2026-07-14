@@ -28,9 +28,9 @@ Pipeline arbitration prioritizes captured TT lookup responses, parent-return fol
 
 ## Move Generation and Legality
 
-The move generator accepts a legal input position and emits one ordered candidate move per dispatch. It also reports whether the candidate is legal. If the candidate is illegal, it is still consumed for that node, and the thread should dispatch move generation again to obtain the next candidate.
+The move generator accepts a legal input position and emits one ordered pseudo-legal candidate per dispatch. It cheaply rejects invalid castling paths; ordinary strict legality is checked after speculative board update. Every candidate is consumed for the node even when the updated result is rejected.
 
-Illegal-move filtering is intended to cover cases such as pinned pieces, king moves into attacked squares, check restrictions, double-check restrictions, en passant discovered checks, and castling through check. The board update pipeline does not create a replacement move after an illegal move is rejected.
+After a search push completes, the controller tests whether the side that moved left its king attacked. If so, it ignores the updated board, hash, and evaluation and requests another candidate from the unchanged node. The stateless board pipeline needs no reverse operation, and its unused history entry is overwritten by the next push at the same ply. Castling through check remains an early move-generator rejection because its origin and transit conditions are not visible in the final board. Checkmate-versus-stalemate scoring registers the terminal check result before root selection and return-state updates so the full-board scan does not share their timing path.
 
 Host-supplied game-position commands are assumed valid because the Python host validates UCI inputs before sending FPGA commands. Search-generated moves still need legality filtering because pseudo-legal candidate generation can produce moves that leave the moving side in check.
 
