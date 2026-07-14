@@ -19,5 +19,5 @@ The core does not depend on the Intel PLL: a new board wrapper should generate i
 | PLL reset button | `KEY[2]` controls PLL reset. |
 | UART GPIO | Route host RX/TX pins to `rx_decode` and `tx_encode`. |
 | LEDs | `LEDR[7:0]` show the most recently received byte, `LEDR[8]` indicates any RX, remote-reset, TX-full, or engine error, and `LEDR[9]` indicates PLL unlock. |
-| 7-segment displays | `HEX1:HEX0` show the most recently received byte in hexadecimal. `HEX2` shows `{engine_error, tx_full, rx_error}` and `HEX3` shows `{remote_reset, engine_ready, pll_locked}` in hexadecimal. `HEX5:HEX4` are unused. |
+| 7-segment displays | `HEX1:HEX0` show the most recently received byte in hexadecimal. `HEX2` shows `{engine_error, tx_full, rx_error}` and `HEX3` shows `{remote_reset, engine_ready, pll_locked}` in hexadecimal. `HEX5:HEX4` show a wrapping count of engine response bytes accepted by the UART TX path. |
 | Display blanking | `SW[9]` turns off all LEDs and seven-segment displays when high. |

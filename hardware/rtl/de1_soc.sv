@@ -44,7 +44,17 @@ module de1_soc(input CLOCK_50,
 	wire engine_error;
 	wire [7:0] engine_data_out;
 	wire engine_data_out_valid;
+	logic [7:0] tx_response_byte_count;
 	assign engine_rst_n = rst_n && !remote_reset;
+
+	// Count engine response bytes accepted by the UART transmit path for board bring-up.
+	always_ff @(posedge clk) begin
+		if (!engine_rst_n) begin
+			tx_response_byte_count <= 8'h00;
+		end else if (engine_data_out_valid && !tx_full) begin
+			tx_response_byte_count <= tx_response_byte_count + 8'h01;
+		end
+	end
 
 	rx_decode #(
 		.BAUD_RATE(BAUD_RATE),
@@ -135,8 +145,8 @@ module de1_soc(input CLOCK_50,
 		HEX1 = 7'h7f;
 		HEX2 = 7'h7f;
 		HEX3 = 7'h7f;
-		HEX4 = 7'h7f;
-		HEX5 = 7'h7f;
+		HEX4 = hex_digit(tx_response_byte_count[3:0]);
+		HEX5 = hex_digit(tx_response_byte_count[7:4]);
 		if (!SW[9]) begin
 			LEDR[7:0] = mem;
 			LEDR[8] = rx_error | remote_reset | tx_full | engine_error;

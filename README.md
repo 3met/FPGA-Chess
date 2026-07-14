@@ -41,4 +41,6 @@ Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, a
 
 ## Host UCI Engine
 
-Run `python software/fpga_engine.py` to expose the FPGA as a UCI chess engine. The host defaults to `FPGA_CHESS_PORT` when set, otherwise it auto-detects a single or clearly identifiable USB UART port; pass `--port <serial-port>` on headless systems with multiple adapters. The host requires `python-chess` for legal UCI position validation and `pyserial` for UART communication; it serializes commands using the protocol in `docs/protocols/`.
+Run `python software/fpga_engine.py` to expose the FPGA as a UCI chess engine. The host defaults to `FPGA_CHESS_PORT` when set, otherwise it auto-detects a single or clearly identifiable USB UART port; pass `--port <serial-port>` on headless systems with multiple adapters. The host requires `python-chess` for legal UCI position validation and `pyserial` for UART communication; install them with `python -m pip install python-chess pyserial`. It serializes commands using the protocol in `docs/protocols/`.
+
+For manual bring-up, enter `fpga help` on the host's standard input. The non-UCI `fpga` commands report status and cached results, display or synchronize the local board, issue a UART BREAK reset, and run hardware perft. Their replies are emitted as UCI `info string` lines, so they are also safe to observe through a UCI console. `go perft <depth>` performs a software-side root divide: it generates legal root moves locally, runs FPGA perft below each child, and prints a move-by-move node table plus the total.

@@ -2,9 +2,10 @@ import contextlib
 import importlib.util
 import io
 import logging
+import threading
 import unittest
 
-from software.protocol import Command
+from software.protocol import Command, EngineError, StatusResponse, cmd_get_status
 from software.fpga_engine import FPGAUCIHost
 
 
@@ -50,6 +51,30 @@ class UCIHostSpecTests(unittest.TestCase):
         self.assertFalse(is_perft)
         self.assertTrue(wait_for_stop)
 
+class UCIHostDiagnosticTests(unittest.TestCase):
+    """Exercise diagnostics without requiring python-chess or a serial adapter."""
+
+    def test_status_diagnostic_formats_protocol_state(self):
+        class Client:
+            def request(self, command):
+                self.command = command
+                return StatusResponse(status=0x09, error=EngineError.INTERNAL, active_operation=7)
+
+        host = object.__new__(FPGAUCIHost)
+        host.client = Client()
+        host._search_active = False
+        host._search_lock = threading.Lock()
+        lines: list[str] = []
+        host.emit = lines.append
+        host.connect = lambda: host.client
+
+        host._handle_debug_command(["status"])
+
+        self.assertEqual(host.client.command, cmd_get_status())
+        self.assertEqual(
+            lines,
+            ["info string fpga status ready=1 search_active=0 output_pending=0 error=internal operation=7"],
+        )
 
 if __name__ == "__main__":
     unittest.main()

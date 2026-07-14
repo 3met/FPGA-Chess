@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from software.protocol import (
+    AckResponse,
     BAUD_RATE,
     BITS_TO_PROMOTION,
-    EndReason,
     ErrorResponse,
     PerftResultResponse,
     ProtocolError,
@@ -73,7 +74,16 @@ class FPGAClient:
         self.transport.write(cmd_kill())
 
     def remote_reset(self) -> None:
+        """Reset the FPGA transport state and discard any pre-reset reply bytes."""
         self.transport.send_break()
+        self.transport.reset_input_buffer()
+
+    def initialize(self) -> None:
+        """Start a clean game after BREAK, including clearing RAM-backed engine state."""
+        self.remote_reset()
+        response = self.request(cmd_new_game())
+        if not isinstance(response, AckResponse):
+            raise HostError(f"FPGA initialization returned unexpected response: {response}")
 
 
 class FPGAUCIHost:
@@ -116,7 +126,16 @@ class FPGAUCIHost:
                 baudrate=self.baudrate,
                 interactive_port_select=False,
             )
-            self.client = FPGAClient(transport, response_timeout=self.response_timeout)
+            client = FPGAClient(transport, response_timeout=self.response_timeout)
+            try:
+                # A host process has no trustworthy view of a previously running FPGA.
+                # New Game also clears TT RAM, which survives the controller-only BREAK reset.
+                client.initialize()
+            except Exception:
+                client.close()
+                raise
+            self.client = client
+            self.position_synced = False
             self.logger.info("Connected to FPGA serial port %s at %d baud", transport.port, self.baudrate)
         return self.client
 
@@ -165,6 +184,7 @@ class FPGAUCIHost:
             "stop",
             "ponderhit",
             "quit",
+            "fpga",
         }
         command_index = next((idx for idx, token in enumerate(tokens) if token.lower() in known_commands), None)
         if command_index is None:
@@ -196,6 +216,8 @@ class FPGAUCIHost:
             elif command == "quit":
                 self.close()
                 return False
+            elif command == "fpga":
+                self._handle_debug_command(args)
         except Exception as exc:
             self.emit(f"info string error: {exc}")
             self.logger.exception("UCI command failed: %s", stripped)
@@ -247,6 +269,66 @@ class FPGAUCIHost:
         self._raise_on_error_response(response, "ucinewgame")
         self.position_synced = True
 
+    def _handle_debug_command(self, args: list[str]) -> None:
+        """Handle manual-only FPGA diagnostics without extending the UCI protocol."""
+
+        if not args or args[0].lower() in {"help", "?"}:
+            self.emit("info string fpga commands: status, result, board, sync, reset, perft <depth>")
+            return
+
+        subcommand = args[0].lower()
+        if subcommand == "board":
+            self.emit(f"info string fpga fen {self.board.fen()}")
+            for row in str(self.board).splitlines():
+                self.emit(f"info string fpga board {row}")
+            return
+        if subcommand == "reset":
+            self.stop_search(wait=True)
+            self.connect().initialize()
+            # Initialization resets FPGA command/search state, so the local position must be resent.
+            self.position_synced = False
+            self.emit("info string fpga reset sent; resend position before searching")
+            return
+        if self._is_search_active():
+            raise HostError("FPGA diagnostics are unavailable while search is active")
+        if subcommand == "sync":
+            response = self.connect().request(cmd_set_board(self.board.fen()))
+            self._raise_on_error_response(response, "sync")
+            self.position_synced = True
+            self.emit("info string fpga position synchronized")
+            return
+        if subcommand == "status":
+            response = self.connect().request(cmd_get_status())
+            if not isinstance(response, StatusResponse):
+                raise HostError(f"status returned unexpected response: {response}")
+            self.emit(
+                "info string fpga status "
+                f"ready={int(response.ready)} search_active={int(response.search_active)} "
+                f"output_pending={int(response.output_pending)} error={self._enum_name(response.error)} "
+                f"operation={response.active_operation}"
+            )
+            return
+        if subcommand == "result":
+            response = self.connect().request(cmd_get_search_result())
+            if isinstance(response, SearchResultResponse):
+                reason = self._enum_name(response.end_reason)
+                move = self._format_bestmove(response.best_move, self.board)
+                self.emit(
+                    f"info string fpga result move={move} score={response.score} nodes={response.nodes} "
+                    f"depth={response.completed_depth} end={reason}"
+                )
+                return
+            if isinstance(response, ErrorResponse):
+                self.emit(f"info string fpga result error={self._enum_name(response.error)}")
+                return
+            raise HostError(f"result returned unexpected response: {response}")
+        if subcommand == "perft":
+            if len(args) != 2:
+                raise HostError("usage: fpga perft <depth>")
+            self._handle_go(["perft", args[1]])
+            return
+        raise HostError(f"unknown fpga command '{args[0]}'; use 'fpga help'")
+
     def _handle_position(self, args: list[str]) -> None:
         if self._is_search_active():
             raise HostError("Cannot change position while search is active")
@@ -279,9 +361,11 @@ class FPGAUCIHost:
         board_snapshot = self.board.copy(stack=False)
         self._stop_event.clear()
 
+        target = self._perft_divide_worker if is_perft else self._search_worker
+        worker_args = (command[1], board_snapshot) if is_perft else (command, False, board_snapshot, wait_for_stop)
         thread = threading.Thread(
-            target=self._search_worker,
-            args=(command, is_perft, board_snapshot, wait_for_stop),
+            target=target,
+            args=worker_args,
             daemon=True,
         )
         with self._search_lock:
@@ -376,16 +460,17 @@ class FPGAUCIHost:
         try:
             with self._search_lock:
                 self._hardware_search_inflight = True
+            search_start = time.monotonic()
             response = self.connect().search_request(command)
+            search_elapsed = time.monotonic() - search_start
             with self._search_lock:
                 self._hardware_search_inflight = False
             if wait_for_stop and not self._stop_event.is_set():
                 self._stop_event.wait()
             if isinstance(response, SearchResultResponse):
-                self._emit_search_result(response, board_snapshot)
+                self._emit_search_result(response, board_snapshot, search_elapsed)
             elif isinstance(response, PerftResultResponse):
                 self.emit(f"info string perft depth {response.completed_depth} nodes {response.nodes}")
-                self.emit("bestmove 0000")
             elif isinstance(response, StatusResponse):
                 self._emit_killed_search_result(board_snapshot)
             elif isinstance(response, ErrorResponse):
@@ -405,12 +490,84 @@ class FPGAUCIHost:
                 self._search_active = False
                 self._search_thread = None
 
-    def _emit_search_result(self, response: SearchResultResponse, board_snapshot: Any) -> None:
-        reason = response.end_reason.name.lower() if isinstance(response.end_reason, EndReason) else str(response.end_reason)
+    def _perft_divide_worker(self, depth: int, board_snapshot: Any) -> None:
+        """Run FPGA perft below each locally generated root move and print a divide table."""
+        total_nodes = 1 if depth == 0 else 0
+        try:
+            with self._search_lock:
+                self._hardware_search_inflight = True
+            client = self.connect()
+            if depth > 0:
+                root_moves = sorted(
+                    board_snapshot.legal_moves,
+                    key=lambda move: self._perft_root_move_key(board_snapshot, move),
+                )
+                for move in root_moves:
+                    if self._stop_event.is_set():
+                        break
+                    child_board = board_snapshot.copy(stack=False)
+                    child_board.push(move)
+                    setup_response = client.request(cmd_set_board(child_board.fen()))
+                    if not isinstance(setup_response, AckResponse):
+                        self._raise_on_error_response(setup_response, f"perft setup {move.uci()}")
+                        raise HostError(f"perft setup {move.uci()} returned unexpected response: {setup_response}")
+                    response = client.search_request(cmd_perft(depth - 1))
+                    if not isinstance(response, PerftResultResponse):
+                        self._raise_on_error_response(response, f"perft {move.uci()}")
+                        raise HostError(f"perft {move.uci()} returned unexpected response: {response}")
+                    total_nodes += response.nodes
+                    self.emit(f"{move.uci()}: {response.nodes}")
+            self.emit("")
+            self.emit(f"Nodes searched: {total_nodes}\n")
+        except Exception as exc:
+            self.emit(f"info string perft failed: {exc}")
+            self.logger.exception("Perft divide worker failed")
+        finally:
+            try:
+                response = self.connect().request(cmd_set_board(board_snapshot.fen()))
+                if not isinstance(response, AckResponse):
+                    self._raise_on_error_response(response, "perft position restore")
+                    raise HostError(f"perft position restore returned unexpected response: {response}")
+                self.position_synced = True
+            except Exception as exc:
+                self.position_synced = False
+                self.emit(f"info string perft position restore failed: {exc}")
+                self.logger.exception("Failed to restore position after perft divide")
+            finally:
+                with self._search_lock:
+                    self._hardware_search_inflight = False
+                    self._search_active = False
+                    self._search_thread = None
+
+    def _perft_root_move_key(self, board: Any, move: Any) -> tuple[int, int, int, int, int]:
+        """Keep divide output stable, listing pawn pushes before the remaining root moves."""
+        piece = board.piece_at(move.from_square)
+        if piece is not None and piece.piece_type == self.chess.PAWN:
+            distance = abs(move.to_square - move.from_square)
+            pawn_group = 0 if distance == 8 else 1 if distance == 16 else 2
+            return 0, pawn_group, move.from_square, move.to_square, move.promotion or 0
+        return 1, 0, move.from_square, move.to_square, move.promotion or 0
+
+    def _emit_search_result(
+        self, response: SearchResultResponse, board_snapshot: Any, elapsed_seconds: float | None = None
+    ) -> None:
+        """Emit the standard UCI result fields, including host-measured throughput when available."""
+        nps = ""
+        elapsed = ""
+        if elapsed_seconds is not None:
+            elapsed = f" time {int(elapsed_seconds * 1000)}"
+            nps = f" nps {int(response.nodes / max(elapsed_seconds, 1e-9))}"
+        score_cp = self._eval_score_to_centipawns(response.score)
         self.emit(
-            f"info depth {response.completed_depth} score cp {response.score} nodes {response.nodes} string end {reason}"
+            f"info depth {response.completed_depth} score cp {score_cp}{elapsed} nodes {response.nodes}{nps}"
         )
         self.emit(f"bestmove {self._format_bestmove(response.best_move, board_snapshot)}")
+
+    @staticmethod
+    def _eval_score_to_centipawns(score: int) -> int:
+        """Convert the FPGA's signed 1/128-pawn score to rounded UCI centipawns."""
+        magnitude = (abs(score) * 100 + 64) // 128
+        return magnitude if score >= 0 else -magnitude
 
     def _emit_killed_search_result(self, board_snapshot: Any) -> None:
         try:
@@ -453,6 +610,13 @@ class FPGAUCIHost:
     def _is_search_active(self) -> bool:
         with self._search_lock:
             return self._search_active
+
+    @staticmethod
+    def _enum_name(value: Any) -> str:
+        """Return a stable lower-case diagnostic name for known protocol enums."""
+
+        name = getattr(value, "name", None)
+        return name.lower() if isinstance(name, str) else str(value)
 
     @staticmethod
     def _parse_depth(value: str, name: str) -> int:
