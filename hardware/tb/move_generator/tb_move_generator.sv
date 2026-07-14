@@ -261,13 +261,13 @@ module tb_move_generator;
         dir = ref_move_dir(move.from_pos, move.to_pos);
         case (dir)
             NORTH:      return NS_MASK_OFFSET + (to_file * 7) + (to_rank - 1);
-            SOUTH:      return NS_MASK_OFFSET + (to_file * 7) + to_rank;
+            SOUTH:      return NS_MASK_OFFSET + 56 + (to_file * 7) + to_rank;
             EAST:       return EW_MASK_OFFSET + ((to_file - 1) * 8) + to_rank;
-            WEST:       return EW_MASK_OFFSET + (to_file * 8) + to_rank;
+            WEST:       return EW_MASK_OFFSET + 56 + (to_file * 8) + to_rank;
             NORTH_EAST: return POS_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + (to_rank - 1);
-            SOUTH_WEST: return POS_DIAG_MASK_OFFSET + (to_file * 7) + to_rank;
+            SOUTH_WEST: return POS_DIAG_MASK_OFFSET + 49 + (to_file * 7) + to_rank;
             SOUTH_EAST: return NEG_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + to_rank;
-            NORTH_WEST: return NEG_DIAG_MASK_OFFSET + (to_file * 7) + (to_rank - 1);
+            NORTH_WEST: return NEG_DIAG_MASK_OFFSET + 49 + (to_file * 7) + (to_rank - 1);
             default:    return 0;
         endcase
     endfunction

@@ -6,7 +6,8 @@ import move_generator_defs::*;
 
 module move_generator_tile_PE #(
     parameter int POS = 0,
-    parameter int DIST_BITS = 3
+    parameter int DIST_BITS = 3,
+    parameter bit ENABLE_CASTLE_ATTACKS = 1'b0
 ) (
     input Tile tile_data,
     input RayRecord ray_in[8],
@@ -112,15 +113,13 @@ module move_generator_tile_PE #(
                 || (source.piece_type == BISHOP && isDirDiag(dir)));
     endfunction
 
-    // Compact MVV/LVA-like ordering. This deliberately avoids a static-exchange
-    // calculation in every destination PE; ordering does not affect correctness.
+    // Compact MVV ordering avoids replicated source-piece arithmetic in every PE.
     function automatic MoveScore move_order_score(input PieceType source_piece);
         if (source_piece == SPARE_PIECE || tile_data.piece_type == SPARE_PIECE)
             return MoveScore'('x);
         if (tile_data.piece_type != NULL_PIECE)
-            return MoveScore'(5'd20 + MoveScore'(tile_data.piece_type)
-                - MoveScore'(source_piece));
-        return MoveScore'(5'd7 - MoveScore'(source_piece));
+            return MoveScore'({2'b10, tile_data.piece_type});
+        return MoveScore'(0);
     endfunction
 
     task automatic consider(
@@ -172,27 +171,30 @@ module move_generator_tile_PE #(
         enemy_attacked = 1'b0;
         king_move_attacked = 1'b0;
 
-        for (int dir_idx=0; dir_idx<8; dir_idx++) begin
-            automatic EncodedDistance ray_distance = EncodedDistance'(ray_in[dir_idx].distance);
-            if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
-                source = ray_in[dir_idx].tile;
-                if (ray_source_attacks(source, Direction'(dir_idx), ray_distance)) begin
-                    enemy_attacked = 1'b1;
-                    king_move_attacked = 1'b1;
-                end
-                if (source == Tile'({turn, KING}) && ray_distance == EncodedDistance'(0)
-                    && ray_slider_attacks(
-                        king_vacated_ray_in[dir_idx].tile,
-                        Direction'(dir_idx))) begin
-                    king_move_attacked = 1'b1;
-                end
-            end
-            if (isKnightShiftOnBoard(DEST_POS, KnightDirection'(dir_idx))) begin
-                source = knight_tile_in[dir_idx];
-                if (source.piece_type == KNIGHT) begin
-                    if (source.piece_color != turn) begin
+        // Only the ten castling origin/transit/destination squares need attack outputs.
+        if (ENABLE_CASTLE_ATTACKS) begin
+            for (int dir_idx=0; dir_idx<8; dir_idx++) begin
+                automatic EncodedDistance ray_distance = EncodedDistance'(ray_in[dir_idx].distance);
+                if (isShiftOnBoard(DEST_POS, Direction'(dir_idx), 3'd1)) begin
+                    source = ray_in[dir_idx].tile;
+                    if (ray_source_attacks(source, Direction'(dir_idx), ray_distance)) begin
                         enemy_attacked = 1'b1;
                         king_move_attacked = 1'b1;
+                    end
+                    if (source == Tile'({turn, KING}) && ray_distance == EncodedDistance'(0)
+                        && ray_slider_attacks(
+                            king_vacated_ray_in[dir_idx].tile,
+                            Direction'(dir_idx))) begin
+                        king_move_attacked = 1'b1;
+                    end
+                end
+                if (isKnightShiftOnBoard(DEST_POS, KnightDirection'(dir_idx))) begin
+                    source = knight_tile_in[dir_idx];
+                    if (source.piece_type == KNIGHT) begin
+                        if (source.piece_color != turn) begin
+                            enemy_attacked = 1'b1;
+                            king_move_attacked = 1'b1;
+                        end
                     end
                 end
             end

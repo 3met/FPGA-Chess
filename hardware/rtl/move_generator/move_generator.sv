@@ -723,13 +723,13 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         dir = move_dir(move.from_pos, move.to_pos);
         case (dir)
             NORTH:      return NS_MASK_OFFSET + (to_file * 7) + (to_rank - 1);
-            SOUTH:      return NS_MASK_OFFSET + (to_file * 7) + to_rank;
+            SOUTH:      return NS_MASK_OFFSET + 56 + (to_file * 7) + to_rank;
             EAST:       return EW_MASK_OFFSET + ((to_file - 1) * 8) + to_rank;
-            WEST:       return EW_MASK_OFFSET + (to_file * 8) + to_rank;
+            WEST:       return EW_MASK_OFFSET + 56 + (to_file * 8) + to_rank;
             NORTH_EAST: return POS_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + (to_rank - 1);
-            SOUTH_WEST: return POS_DIAG_MASK_OFFSET + (to_file * 7) + to_rank;
+            SOUTH_WEST: return POS_DIAG_MASK_OFFSET + 49 + (to_file * 7) + to_rank;
             SOUTH_EAST: return NEG_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + to_rank;
-            NORTH_WEST: return NEG_DIAG_MASK_OFFSET + (to_file * 7) + (to_rank - 1);
+            NORTH_WEST: return NEG_DIAG_MASK_OFFSET + 49 + (to_file * 7) + (to_rank - 1);
             default:    return 0;
         endcase
     endfunction : normal_edge_mask_index
@@ -848,6 +848,9 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     generate
         for (tile_idx=0; tile_idx<64; tile_idx=tile_idx+1) begin : gen_tile_pe
             localparam int TILE_DISTANCE_BITS = $clog2(tile_max_distance(Position'(tile_idx)));
+            localparam bit ENABLE_CASTLE_ATTACKS = tile_idx == 2 || tile_idx == 3 || tile_idx == 4
+                || tile_idx == 5 || tile_idx == 6 || tile_idx == 58 || tile_idx == 59
+                || tile_idx == 60 || tile_idx == 61 || tile_idx == 62;
             for (knight_idx=0; knight_idx<8; knight_idx=knight_idx+1) begin : gen_knight_input
                 if (isKnightShiftOnBoard(Position'(tile_idx), KnightDirection'(knight_idx))) begin
                     localparam Position KNIGHT_POS = shiftKnightPos(Position'(tile_idx), KnightDirection'(knight_idx));
@@ -894,7 +897,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
             move_generator_tile_PE #(
                 .POS(tile_idx),
-                .DIST_BITS(TILE_DISTANCE_BITS)
+                .DIST_BITS(TILE_DISTANCE_BITS),
+                .ENABLE_CASTLE_ATTACKS(ENABLE_CASTLE_ATTACKS)
             ) tile_pe (
                 .tile_data(board_pipe[PROP_STAGE_CNT-1][tile_idx]),
                 .ray_in(ray_pipe[PROP_STAGE_CNT-1][tile_idx]),

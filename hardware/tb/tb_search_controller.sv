@@ -831,6 +831,14 @@ module tb_search_controller;
         run_perft(8'd2, NodeCountType'(400), "startpos perft depth 2");
         run_search_depth(8'd2, "startpos search depth 2");
 
+        // Opposite-direction moves h2h4 and h5h3 must have distinct mask identities.
+        new_game();
+        make_direct_move(make_move(Position'(12), Position'(20), PROMO_QUEEN), "perft regression e2e3");
+        make_direct_move(make_move(Position'(48), Position'(40), PROMO_QUEEN), "perft regression a7a6");
+        make_direct_move(make_move(Position'(3), Position'(39), PROMO_QUEEN), "perft regression d1h5");
+        make_direct_move(make_move(Position'(40), Position'(32), PROMO_QUEEN), "perft regression a6a5");
+        run_perft(8'd1, NodeCountType'(44), "queen sortie perft depth 1");
+
         new_game();
         setup_kings_only();
         run_perft(8'd1, NodeCountType'(5), "kings-only perft depth 1");

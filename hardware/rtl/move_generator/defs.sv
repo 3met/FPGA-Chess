@@ -23,19 +23,20 @@ package move_generator_defs;
         logic has_king_or_major;
     } KnightBusData;
 
-    localparam int NORMAL_MOVE_MASK_BITS = 378;
+    // Sliding edges are directed so opposite-direction moves cannot alias.
+    localparam int NORMAL_MOVE_MASK_BITS = 588;
     localparam int PROMOTION_EDGE_COUNT = 22;
     localparam int PROMOTION_MASK_BITS = PROMOTION_EDGE_COUNT * 4;
     localparam int CASTLING_MASK_BITS = 2;
     localparam int MOVE_MASK_BITS = NORMAL_MOVE_MASK_BITS + PROMOTION_MASK_BITS + CASTLING_MASK_BITS;
     localparam int NS_MASK_OFFSET = 0;
-    localparam int EW_MASK_OFFSET = 56;
-    localparam int POS_DIAG_MASK_OFFSET = 112;
-    localparam int NEG_DIAG_MASK_OFFSET = 161;
-    localparam int NNE_SSW_KNIGHT_MASK_OFFSET = 210;
-    localparam int NEE_SWW_KNIGHT_MASK_OFFSET = 252;
-    localparam int SEE_NWW_KNIGHT_MASK_OFFSET = 294;
-    localparam int SSE_NNW_KNIGHT_MASK_OFFSET = 336;
+    localparam int EW_MASK_OFFSET = 112;
+    localparam int POS_DIAG_MASK_OFFSET = 224;
+    localparam int NEG_DIAG_MASK_OFFSET = 322;
+    localparam int NNE_SSW_KNIGHT_MASK_OFFSET = 420;
+    localparam int NEE_SWW_KNIGHT_MASK_OFFSET = 462;
+    localparam int SEE_NWW_KNIGHT_MASK_OFFSET = 504;
+    localparam int SSE_NNW_KNIGHT_MASK_OFFSET = 546;
     localparam int PROMOTION_MASK_OFFSET = NORMAL_MOVE_MASK_BITS;
     localparam int CASTLING_MASK_OFFSET = PROMOTION_MASK_OFFSET + PROMOTION_MASK_BITS;
 

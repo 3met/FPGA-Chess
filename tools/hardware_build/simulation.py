@@ -5,7 +5,7 @@ import concurrent.futures
 import re
 from pathlib import Path
 
-from .common import BUILD_ROOT, BuildError, clean_dir, print_failure_excerpt, rel, require_tool, run_command
+from .common import BUILD_ROOT, REPO_ROOT, BuildError, clean_dir, print_failure_excerpt, rel, require_tool, run_command
 from .manifest import expand_source_set, load_manifest, repo_path
 
 
