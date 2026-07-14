@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .common import BUILD_ROOT, BuildError, REPO_ROOT, SYNTH_METADATA, rel, require_tool, run_command
+from .common import BUILD_ROOT, BuildError, QUARTUS_ERROR_RE, REPO_ROOT, SYNTH_METADATA, quote_tcl_path, rel, require_tool, run_command
 from .manifest import load_manifest
 
 
@@ -557,7 +557,7 @@ def command_synth_report(args: argparse.Namespace) -> int:
 
 
 def command_timing_paths(args: argparse.Namespace) -> int:
-    """Run TimeQuest on an existing Quartus fit and print its worst setup paths."""
+    """Run TimeQuest and print failing paths, or tightest passing paths when clean."""
     if args.limit < 1:
         raise BuildError("--limit must be at least 1")
     manifest = load_manifest()
@@ -573,7 +573,8 @@ def command_timing_paths(args: argparse.Namespace) -> int:
         raise BuildError(f"No Quartus project found for target '{args.target}'")
 
     require_tool("quartus_sta")
-    report = build_dir / "failing_setup_paths.rpt"
+    failing_report = build_dir / "failing_setup_paths.rpt"
+    tightest_report = build_dir / "tightest_setup_paths.rpt"
     script = build_dir / "report_failing_paths.tcl"
     script.write_text(
         "\n".join(
@@ -582,9 +583,10 @@ def command_timing_paths(args: argparse.Namespace) -> int:
                 "create_timing_netlist",
                 "read_sdc",
                 "update_timing_netlist",
-                # Restrict to negative-slack setup paths so a timing-clean build
-                # has an intentionally empty report rather than arbitrary paths.
-                f"report_timing -setup -less_than_slack 0.0 -npaths {args.limit} -nworst 1 -detail summary -file {{{quote_tcl_path(report)}}}",
+                # Keep the reports separate so passing paths are never presented
+                # as failures when the design meets all setup requirements.
+                f"report_timing -setup -less_than_slack 0.0 -npaths {args.limit} -nworst 1 -detail summary -file {{{quote_tcl_path(failing_report)}}}",
+                f"report_timing -setup -npaths {args.limit} -nworst 1 -detail summary -file {{{quote_tcl_path(tightest_report)}}}",
                 "delete_timing_netlist",
                 "project_close",
                 "",
@@ -596,14 +598,20 @@ def command_timing_paths(args: argparse.Namespace) -> int:
     code, output, elapsed = run_command(["quartus_sta", "-t", str(script)], build_dir, log)
     if code != 0 or QUARTUS_ERROR_RE.search(output):
         raise BuildError(f"Quartus timing-path analysis failed; see {rel(log)}")
-    if not report.exists():
-        raise BuildError(f"Quartus did not produce {rel(report)}")
-    report_text = report.read_text(encoding="utf-8", errors="replace").strip()
-    print(f"\nWorst failing setup paths (up to {args.limit}; {elapsed:.2f}s):")
-    headers, rows = quartus_report_table(report_text.splitlines(), "Report Timing")
-    if not rows:
-        print("  None. No setup paths have negative slack.")
+    if not failing_report.exists() or not tightest_report.exists():
+        raise BuildError("Quartus did not produce one or more timing-path reports")
+    failing_text = failing_report.read_text(encoding="utf-8", errors="replace").strip()
+    headers, rows = quartus_report_table(failing_text.splitlines(), "Report Timing")
+    if rows:
+        report = failing_report
+        heading = f"Worst failing setup paths (up to {args.limit}; {elapsed:.2f}s):"
     else:
+        report = tightest_report
+        passing_text = tightest_report.read_text(encoding="utf-8", errors="replace").strip()
+        headers, rows = quartus_report_table(passing_text.splitlines(), "Report Timing")
+        heading = f"Timing met: tightest passing setup paths (up to {args.limit}; {elapsed:.2f}s):"
+    print(f"\n{heading}")
+    if rows:
         indices = {header: index for index, header in enumerate(headers)}
         columns = [
             ("Slack (ns)", "Slack"),
@@ -615,5 +623,7 @@ def command_timing_paths(args: argparse.Namespace) -> int:
         ]
         compact_rows = [[row[indices[source]] for _, source in columns] for row in rows]
         print_table("Path summary", [display for display, _ in columns], compact_rows)
+    elif report == tightest_report:
+        print("  No setup paths were reported.")
     print(f"\n  Report: {rel(report)}")
     return 0

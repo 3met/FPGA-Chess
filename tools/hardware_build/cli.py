@@ -81,9 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--verbose", action="store_true", help="Show the complete component utilization hierarchy")
     report_parser.set_defaults(func=command_synth_report)
 
-    paths_parser = subparsers.add_parser("timing-paths", help="Report the worst failing setup paths from an existing Quartus fit")
+    paths_parser = subparsers.add_parser(
+        "timing-paths", help="Report failing setup paths, or the tightest passing paths when timing is met"
+    )
     paths_parser.add_argument("--target", required=True, help="Quartus synthesis target to inspect")
-    paths_parser.add_argument("--limit", type=int, default=15, help="Maximum failing paths to report; defaults to 15")
+    paths_parser.add_argument("--limit", type=int, default=15, help="Maximum paths to report; defaults to 15")
     paths_parser.set_defaults(func=command_timing_paths)
 
     return parser
