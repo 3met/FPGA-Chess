@@ -93,7 +93,7 @@ Raw static evaluation and incremental PST/material state should be White-relativ
 
 ## Transposition Table
 
-The transposition table used to store previously computed information is required for the Lazy SMP multithreading to be effective. The primary TT lives in external memory behind a vendor-neutral wrapper. A BRAM cache may be used to reduce external-memory pressure when a target FPGA has sufficient block memory.
+The transposition table used to store previously computed information is required for Lazy SMP multithreading. The DE1 implementation stores the primary TT in its FPGA-side SDR SDRAM behind a vendor-neutral burst interface and uses a small direct-mapped BRAM cache. Other targets can connect a different memory controller to the same logical interface or retain the inferred-BRAM fallback.
 
 TT lookups are more latency-sensitive than TT stores and receive priority when lookup/store bandwidth conflicts. Stores can be stalled when memory bandwidth is needed by lookups. The memory arbitration policy is a tunable design parameter and should be selected based on measured search throughput.
 

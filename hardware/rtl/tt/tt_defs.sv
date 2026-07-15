@@ -60,6 +60,20 @@ package tt_defs;
     } TTStoreRequest;
 
     typedef struct packed {
+        ThreadID thread_id;
+        logic error;
+    } TTStoreResponse;
+
+    localparam int TT_PHYSICAL_ENTRY_BITS = 96;
+    localparam int TT_WORD_BITS = 16;
+    localparam int TT_WORDS_PER_ENTRY = 6;
+    localparam int TT_EXTERNAL_WORD_ADDR_BITS = 25;
+    localparam int TT_EXTERNAL_ENTRY_COUNT = 5_592_405;
+
+    typedef logic [TT_PHYSICAL_ENTRY_BITS-1:0] TTPhysicalEntry;
+    typedef logic [TT_EXTERNAL_WORD_ADDR_BITS-1:0] TTWordAddress;
+
+    typedef struct packed {
         TTAge age;
         TTBoundType bound_type;
         TTDepth depth;

@@ -2,6 +2,7 @@
 // Complete vendor-neutral engine core.
 
 import engine_defs::*;
+import tt_defs::*;
 
 module engine #(
     parameter int CLOCK_FREQ = 100_000_000,
@@ -10,7 +11,8 @@ module engine #(
     parameter bit ENABLE_PERFT = 1'b1,
     parameter bit ENABLE_ZOBRIST = 1'b1,
     parameter bit ENABLE_TT = 1'b1,
-    parameter bit ENABLE_PST = 1'b1
+    parameter bit ENABLE_PST = 1'b1,
+    parameter bit EXTERNAL_TT = 1'b0
 ) (
     input wire clk,
     input wire rst_n,
@@ -21,7 +23,15 @@ module engine #(
     output logic error_flag,
     output logic ready,
     output logic [7:0] data_out,
-    output logic data_out_valid
+    output logic data_out_valid,
+    input logic tt_memory_ready, input logic tt_memory_error,
+    output logic tt_mem_req_valid, input logic tt_mem_req_ready,
+    output logic tt_mem_req_write, output TTWordAddress tt_mem_req_address, output logic [3:0] tt_mem_req_length,
+    output logic tt_mem_write_valid, input logic tt_mem_write_ready,
+    output logic [15:0] tt_mem_write_data, output logic tt_mem_write_last,
+    input logic tt_mem_read_valid, output logic tt_mem_read_ready,
+    input logic [15:0] tt_mem_read_data, input logic tt_mem_read_last,
+    input logic tt_mem_done_valid, output logic tt_mem_done_ready, input logic tt_mem_done_error
 );
 
     logic controller_req_valid;
@@ -57,7 +67,8 @@ module engine #(
         .ENABLE_PERFT(ENABLE_PERFT),
         .ENABLE_ZOBRIST(ENABLE_ZOBRIST),
         .ENABLE_TT(ENABLE_TT),
-        .ENABLE_PST(ENABLE_PST)
+        .ENABLE_PST(ENABLE_PST),
+        .EXTERNAL_TT(EXTERNAL_TT)
     ) controller (
         .clk(clk),
         .rst_n(rst_n),
@@ -65,7 +76,15 @@ module engine #(
         .req_ready(controller_req_ready),
         .req(controller_req),
         .resp_valid(controller_resp_valid),
-        .resp(controller_resp)
+        .resp(controller_resp),
+        .tt_memory_ready(tt_memory_ready), .tt_memory_error(tt_memory_error),
+        .tt_mem_req_valid(tt_mem_req_valid), .tt_mem_req_ready(tt_mem_req_ready),
+        .tt_mem_req_write(tt_mem_req_write), .tt_mem_req_address(tt_mem_req_address), .tt_mem_req_length(tt_mem_req_length),
+        .tt_mem_write_valid(tt_mem_write_valid), .tt_mem_write_ready(tt_mem_write_ready),
+        .tt_mem_write_data(tt_mem_write_data), .tt_mem_write_last(tt_mem_write_last),
+        .tt_mem_read_valid(tt_mem_read_valid), .tt_mem_read_ready(tt_mem_read_ready),
+        .tt_mem_read_data(tt_mem_read_data), .tt_mem_read_last(tt_mem_read_last),
+        .tt_mem_done_valid(tt_mem_done_valid), .tt_mem_done_ready(tt_mem_done_ready), .tt_mem_done_error(tt_mem_done_error)
     );
 
 endmodule : engine

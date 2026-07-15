@@ -22,7 +22,9 @@ module tt_load_store #(
 
     input logic store_req_valid,
     output logic store_req_ready,
-    input var TTStoreRequest store_req
+    input var TTStoreRequest store_req,
+    output logic store_resp_valid,
+    output TTStoreResponse store_resp
 );
 
     localparam int TT_ENTRY_COUNT = 1 << TT_INDEX_BITS;
@@ -35,8 +37,9 @@ module tt_load_store #(
     typedef logic [FIFO_COUNT_BITS-1:0] StoreFifoCount;
     typedef logic [FIFO_PTR_BITS-1:0] StoreFifoPtr;
 
-    // The TT never needs a publisher identity after a store is accepted.
+    // Retain the publisher until the memory operation completes.
     typedef struct packed {
+        ThreadID thread_id;
         ZobristKey zobrist_key;
         TTDepth depth;
         EvalScore score;
@@ -100,6 +103,7 @@ module tt_load_store #(
     function automatic TTStorePayload store_payload(input TTStoreRequest req);
         automatic TTStorePayload payload;
 
+        payload.thread_id = req.thread_id;
         payload.zobrist_key = req.zobrist_key;
         payload.depth = req.depth;
         payload.score = req.score;
@@ -368,6 +372,8 @@ module tt_load_store #(
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             lookup_resp_valid <= 1'b0;
+            store_resp_valid <= 1'b0;
+            store_resp <= TTStoreResponse'('0);
             store_state <= STORE_IDLE;
             store_fifo_count <= StoreFifoCount'(0);
             store_fifo_head <= StoreFifoPtr'(0);
@@ -377,6 +383,7 @@ module tt_load_store #(
             clear_prev <= 1'b0;
         end else begin
             lookup_resp_valid <= 1'b0;
+            store_resp_valid <= 1'b0;
             clear_prev <= clear;
 
             if (clear_start) begin
@@ -432,6 +439,9 @@ module tt_load_store #(
                         end
 
                         STORE_WRITE: begin
+                            store_resp_valid <= 1'b1;
+                            store_resp.thread_id <= active_store_req.thread_id;
+                            store_resp.error <= 1'b0;
                             store_state <= STORE_IDLE;
 
                             if (store_accept) begin
@@ -442,6 +452,9 @@ module tt_load_store #(
                         end
 
                         STORE_RETRY: begin
+                            store_resp_valid <= 1'b1;
+                            store_resp.thread_id <= active_store_req.thread_id;
+                            store_resp.error <= 1'b0;
                             store_state <= STORE_IDLE;
 
                             if (store_accept) begin

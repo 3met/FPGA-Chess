@@ -32,13 +32,13 @@ Each lookup returns a response to the requesting thread.
 
 ## Behavior
 
-The RTL implementation is `tt_load_store` under `hardware/rtl/tt/`. It uses a portable synchronous-read simple-dual-port RAM template with Intel and Xilinx block-RAM inference hints and one logical TT entry per memory word. The default compact profile stores 94-bit entries, and the optional full-key profile stores 126-bit entries. The default table has `TT_INDEX_BITS = 10`, or 1024 entries, and the parameter is intended to scale up to 16 compact-index bits before an external-memory wrapper is added.
+The portable fallback implementation is `tt_load_store` under `hardware/rtl/tt/` and uses inferred block RAM. The DE1 build selects `tt_external_load_store`, which stores 5,592,405 compact entries in the FPGA-side 64 MiB SDRAM. Each 94-bit logical entry occupies six aligned 16-bit words with two padding bits. A 1024-line direct-mapped BRAM cache stores the full external index tag; generation matching uses the age field already present in the cached 96-bit record rather than a duplicate metadata RAM. Misses and write-through stores use the explicit burst-memory protocol.
 
 The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, and `lookup_resp_valid`. Lookup requests are accepted whenever `clear` is not active. A lookup response is produced for each accepted request, with `hit` deasserted on empty, invalid, or verification-key mismatch entries.
 
-Lookups have priority over stores when memory bandwidth conflicts. The synchronous RAM read and registered request metadata produce a response during the cycle immediately after request acceptance. If a store is queued or ready to write and a lookup arrives, the lookup runs first and the store remains delayed. When a lookup interrupts the write phase of a store read-modify-write operation, the old store entry is retained in a small register so the replacement decision and possible write can resume after the lookup. This preserves lookup correctness for same-index conflicts by preventing a store write in the same cycle as a lookup.
+Lookups have priority over stores when memory bandwidth conflicts. An external lookup or store remains outstanding until its tagged completion returns, and all search contexts share cache and SDRAM entries. A store applies the depth/generation replacement policy from the cached entry when its external index is resident, otherwise it reads the old SDRAM entry, and writes through the cache and SDRAM when replacement is selected.
 
-The first implementation includes a `clear` input for `ucinewgame` and reset-style invalidation. A rising edge on `clear` starts one sequential table clear. While `clear_busy` is asserted, lookup and store request readiness are deasserted, and the table is filled with invalid entries.
+The `clear` input implements `ucinewgame`. The BRAM fallback sequentially invalidates its entries. The external frontend increments the stored generation immediately; power-up and generation wrap perform a low-area serial sweep of the external validity/metadata word, with requests held off until the sweep completes.
 
 The pipeline verifies a 48-bit high-hash verification key before reporting a hit. The low `TT_INDEX_BITS` of the Zobrist key index the table, so compact mode leaves any middle hash bits outside the selected index and verification fields unchecked.
 
@@ -88,7 +88,5 @@ The generation counter should advance on `ucinewgame` and may also advance once 
 
 ## Open Design Items
 
-- External memory banking and arbitration.
-- BRAM cache structure.
-- External-memory physical packing for 96-bit entries and any target-specific aligned entry profile.
+- Measurement-driven cache sizing and memory arbitration tuning.
 - Whether to add a future 2-way bucket profile after measuring TT bandwidth and collision behavior.

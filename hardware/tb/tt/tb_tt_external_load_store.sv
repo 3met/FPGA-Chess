@@ -1,0 +1,130 @@
+`timescale 1ns/1ns
+
+import general_chess_defs::*;
+import tt_defs::*;
+
+module tb_tt_external_load_store;
+    logic clk = 0, rst_n = 0, clear = 0;
+    always #5 clk = ~clk;
+    TTLookupRequest lookup_req; logic lookup_req_valid, lookup_req_ready, lookup_resp_valid;
+    TTLookupResponse lookup_resp;
+    TTStoreRequest store_req; logic store_req_valid, store_req_ready, store_resp_valid;
+    TTStoreResponse store_resp;
+    logic mem_req_valid, mem_req_ready, mem_req_write; TTWordAddress mem_req_address; logic [3:0] mem_req_length;
+    logic mem_write_valid, mem_write_ready, mem_write_last; logic [15:0] mem_write_data;
+    logic mem_read_valid, mem_read_ready, mem_read_last; logic [15:0] mem_read_data;
+    logic mem_done_valid, mem_done_ready, mem_done_error;
+    logic [15:0] memory[0:95];
+    logic read_active, write_active, completion_pending; logic [24:0] memory_address; logic [3:0] memory_remaining;
+    int request_count, pass_count, fail_count;
+    TTAge old_generation;
+
+    tt_external_load_store #(.CACHE_INDEX_BITS(2), .ENTRY_COUNT(16)) dut (
+        .clk, .rst_n, .memory_ready(1'b1), .memory_error(1'b0), .clear, .clear_busy(),
+        .lookup_req_valid, .lookup_req_ready, .lookup_req, .lookup_resp_valid, .lookup_resp,
+        .store_req_valid, .store_req_ready, .store_req, .store_resp_valid, .store_resp,
+        .mem_req_valid, .mem_req_ready, .mem_req_write, .mem_req_address, .mem_req_length,
+        .mem_write_valid, .mem_write_ready, .mem_write_data, .mem_write_last,
+        .mem_read_valid, .mem_read_ready, .mem_read_data, .mem_read_last,
+        .mem_done_valid, .mem_done_ready, .mem_done_error);
+
+    assign mem_req_ready = !read_active && !write_active;
+    assign mem_write_ready = write_active;
+    assign mem_done_valid = completion_pending;
+    assign mem_done_error = 1'b0;
+
+    always @(posedge clk) begin
+        mem_read_valid <= 1'b0;
+        if (!rst_n) begin
+            read_active <= 1'b0; write_active <= 1'b0; completion_pending <= 1'b0; request_count <= 0;
+        end else begin
+            if (completion_pending && mem_done_ready) completion_pending <= 1'b0;
+            if (mem_req_valid && mem_req_ready) begin
+                request_count <= request_count + 1;
+                memory_address <= mem_req_address;
+                memory_remaining <= mem_req_length;
+                if (mem_req_write) write_active <= 1'b1; else read_active <= 1'b1;
+            end
+            if (read_active && mem_read_ready) begin
+                mem_read_valid <= 1'b1;
+                mem_read_data <= memory[memory_address];
+                mem_read_last <= memory_remaining == 1;
+                memory_address <= memory_address + 1;
+                memory_remaining <= memory_remaining - 1;
+                if (memory_remaining == 1) begin
+                    read_active <= 1'b0;
+                    completion_pending <= 1'b1;
+                end
+            end
+            if (write_active && mem_write_valid) begin
+                memory[memory_address] <= mem_write_data;
+                memory_address <= memory_address + 1;
+                memory_remaining <= memory_remaining - 1;
+                if (mem_write_last || memory_remaining == 1) begin
+                    write_active <= 1'b0;
+                    completion_pending <= 1'b1;
+                end
+            end
+        end
+    end
+
+    task automatic check(input logic condition, input string label);
+        if (condition) pass_count++; else begin fail_count++; $error("[FAIL] %s", label); end
+    endtask
+    task automatic do_store(input ZobristKey key, input ThreadID thread_id);
+        store_req = TTStoreRequest'('0); store_req.zobrist_key = key; store_req.thread_id = thread_id;
+        store_req.depth = 6; store_req.score = 123; store_req.bound_type = TT_BOUND_EXACT;
+        store_req.best_move.from_pos = 1; store_req.best_move.to_pos = 18;
+        store_req_valid = 1;
+        do @(posedge clk); while (!store_req_ready);
+        store_req_valid = 0;
+        do @(posedge clk); while (!store_resp_valid);
+        check(!store_resp.error, "store completed");
+        check(store_resp.thread_id == thread_id, "store completion retained thread tag");
+    endtask
+    task automatic do_lookup(input ZobristKey key, input logic expected_hit, input ThreadID thread_id);
+        lookup_req = TTLookupRequest'('0); lookup_req.zobrist_key = key; lookup_req.thread_id = thread_id;
+        lookup_req_valid = 1;
+        do @(posedge clk); while (!lookup_req_ready);
+        lookup_req_valid = 0;
+        do @(posedge clk); while (!lookup_resp_valid);
+        check(lookup_resp.thread_id == thread_id, "lookup response retained thread tag");
+        check(lookup_resp.hit == expected_hit, expected_hit ? "lookup hit" : "lookup miss");
+        if (expected_hit) check(lookup_resp.score == 123, "lookup score");
+    endtask
+
+    initial begin
+        lookup_req_valid = 0; store_req_valid = 0; mem_read_valid = 0;
+        pass_count = 0; fail_count = 0;
+        for (int i = 0; i < 96; i++) memory[i] = 0;
+        repeat (3) @(posedge clk); rst_n = 1; repeat (8) @(posedge clk);
+        do_store(64'h0123_4567_89ab_cdef, ThreadID'(0));
+        check(request_count == 2, "store used read and write bursts");
+        do_store(64'h0123_4567_89ab_cdef, ThreadID'(1));
+        check(request_count == 3, "cache-resident store skipped replacement read");
+        do_lookup(64'h0123_4567_89ab_cdef, 1'b1, ThreadID'(1));
+        check(request_count == 3, "cache hit avoided SDRAM");
+
+        // A New Game pulse must remain pending while another thread owns the
+        // external-memory transaction, then invalidate it when the port idles.
+        old_generation = dut.generation;
+        lookup_req = TTLookupRequest'('0);
+        lookup_req.zobrist_key = 64'hfedc_ba98_7654_3210;
+        lookup_req.thread_id = ThreadID'(1);
+        lookup_req_valid = 1;
+        do @(posedge clk); while (!lookup_req_ready);
+        lookup_req_valid = 0;
+        do @(posedge clk); while (!read_active);
+        clear = 1; @(posedge clk); clear = 0;
+        do @(posedge clk); while (!lookup_resp_valid);
+        do @(posedge clk); while (dut.clear_busy);
+        check(dut.generation == old_generation + TTAge'(1), "busy clear pulse advanced generation");
+
+        clear = 1; @(posedge clk); clear = 0; repeat (2) @(posedge clk);
+        do_lookup(64'h0123_4567_89ab_cdef, 1'b0, ThreadID'(0));
+        check(mem_req_address < 96 && mem_req_length == 6, "bounded aligned burst mapping");
+        $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);
+        if (fail_count) $fatal(1, "external TT test failed");
+        $finish;
+    end
+endmodule

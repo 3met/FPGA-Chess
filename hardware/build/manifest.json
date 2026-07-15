@@ -49,7 +49,13 @@
       "@common",
       "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
       "hardware/rtl/tt/tt_defs.sv",
-      "hardware/rtl/tt/tt_load_store.sv"
+      "hardware/rtl/tt/tt_load_store.sv",
+      "hardware/rtl/tt/tt_external_load_store.sv"
+    ],
+    "tt-sdram-controller": [
+      "@common",
+      "hardware/rtl/tt/tt_defs.sv",
+      "hardware/rtl/memory/sdr_sdram_controller.sv"
     ],
     "repetition-checker": [
       "@common",
@@ -90,6 +96,8 @@
     ],
     "quartus-de1-soc": [
       "@portable-rtl",
+      "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
+      "hardware/rtl/memory/sdr_sdram_controller.sv",
       "hardware/rtl/de1_soc.sv"
     ],
     "vivado-generic": [
@@ -121,6 +129,16 @@
       "source_set": "tt-load-store",
       "testbench": "hardware/tb/tt/tb_tt_load_store.sv",
       "top": "tb_tt_load_store"
+    },
+    "tt-external-load-store": {
+      "source_set": "tt-load-store",
+      "testbench": "hardware/tb/tt/tb_tt_external_load_store.sv",
+      "top": "tb_tt_external_load_store"
+    },
+    "tt-sdram-controller": {
+      "source_set": "tt-sdram-controller",
+      "testbench": "hardware/tb/tt/tb_sdr_sdram_controller.sv",
+      "top": "tb_sdr_sdram_controller"
     },
     "async-fifo": {
       "source_set": "async-fifo",
@@ -176,7 +194,7 @@
       "source_set": "quartus-de1-soc",
       "family": "Cyclone V",
       "device": "5CSEMA5F31C6",
-      "engine_clock_mhz": 20.0,
+      "engine_clock_mhz": 22.727273,
       "clock_generator": {
         "kind": "intel-pll",
         "template": "hardware/ip/pll"

@@ -54,6 +54,7 @@ def qsf_relevant_pin_line(line: str) -> bool:
     return (
         base == "CLOCK_50"
         or base in {"KEY", "SW", "LEDR"}
+        or base.startswith("DRAM_")
         or base.startswith("GPIO_0")
         or base.startswith("HEX")
     )
@@ -114,6 +115,16 @@ def write_engine_clock_config(build_dir: Path, engine_clock_mhz: float) -> Path:
         encoding="utf-8",
     )
     return config
+
+
+def quartus_negative_slack(build_dir: Path) -> list[str]:
+    """Return STA summary rows that violate a setup or hold requirement."""
+    failures: list[str] = []
+    for path in sorted(build_dir.glob("*.sta.summary")):
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if re.search(r"\bSlack\s*:\s*-", raw):
+                failures.append(f"{rel(path)}: {raw.strip()}")
+    return failures
 
 
 def write_quartus_project(manifest: dict, target: dict, build_dir: Path, parallel_processors: int) -> Path:
@@ -255,6 +266,14 @@ def synth_quartus(
         failed = failed or not ok
         if not ok:
             break
+
+    timing_failures = quartus_negative_slack(build_dir) if not failed else []
+    if timing_failures:
+        failed = True
+        metadata["stages"][-1]["status"] = "fail"
+        print("[FAIL] quartus_sta reported negative slack")
+        for line in timing_failures:
+            print(f"  {line}")
 
     finish_synth_metadata(build_dir, metadata, failed)
     for line in collect_quartus_summary(build_dir):

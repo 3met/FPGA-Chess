@@ -9,6 +9,9 @@ module pll_ip (
 		input  wire  refclk,   //  refclk.clk
 		input  wire  rst,      //   reset.reset
 		output wire  outclk_0, // outclk0.clk
+		output wire  outclk_1,
+		output wire  outclk_2,
+		output wire  outclk_3,
 		output wire  locked    //  locked.export
 	);
 
@@ -16,6 +19,9 @@ module pll_ip (
 		.refclk   (refclk),   //  refclk.clk
 		.rst      (rst),      //   reset.reset
 		.outclk_0 (outclk_0), // outclk0.clk
+		.outclk_1 (outclk_1),
+		.outclk_2 (outclk_2),
+		.outclk_3 (outclk_3),
 		.locked   (locked)    //  locked.export
 	);
 

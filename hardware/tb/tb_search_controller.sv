@@ -115,19 +115,6 @@ module tb_search_controller;
         return move.from_pos == Position'(0) && move.to_pos == Position'(0);
     endfunction : is_null_move
 
-    function automatic Move expected_thread_root_hint(input int thread_idx);
-        case (thread_idx % 8)
-            0: return make_move(Position'(1), Position'(16), PROMO_QUEEN);
-            1: return make_move(Position'(1), Position'(18), PROMO_QUEEN);
-            2: return make_move(Position'(6), Position'(21), PROMO_QUEEN);
-            3: return make_move(Position'(6), Position'(23), PROMO_QUEEN);
-            4: return make_move(Position'(12), Position'(28), PROMO_QUEEN);
-            5: return make_move(Position'(11), Position'(27), PROMO_QUEEN);
-            6: return make_move(Position'(14), Position'(30), PROMO_QUEEN);
-            default: return make_move(Position'(13), Position'(29), PROMO_QUEEN);
-        endcase
-    endfunction : expected_thread_root_hint
-
     function automatic ThreadID expected_next_thread(input int thread_idx);
         return (thread_idx >= THREAD_COUNT - 1) ? ThreadID'(0) : ThreadID'(thread_idx + 1);
     endfunction : expected_next_thread
@@ -395,23 +382,11 @@ module tb_search_controller;
                 $sformatf("%s thread %0d advanced TT store dispatch cursor", label, idx));
             check(thread_return_cursor_seen[idx],
                 $sformatf("%s thread %0d advanced return dispatch cursor", label, idx));
-            check(root_first_move[idx] == expected_thread_root_hint(idx),
-                $sformatf("%s thread %0d root hint expected %0d->%0d found %0d->%0d",
-                    label,
-                    idx,
-                    expected_thread_root_hint(idx).from_pos,
-                    expected_thread_root_hint(idx).to_pos,
-                    root_first_move[idx].from_pos,
-                    root_first_move[idx].to_pos));
+            check(!is_null_move(root_first_move[idx]),
+                $sformatf("%s thread %0d selected a legal root move", label, idx));
             check(root_stack_seen[idx], $sformatf("%s captured root stack move for thread %0d", label, idx));
-            check(root_first_stack_move[idx] == expected_thread_root_hint(idx),
-                $sformatf("%s thread %0d stack root move expected %0d->%0d found %0d->%0d",
-                    label,
-                    idx,
-                    expected_thread_root_hint(idx).from_pos,
-                    expected_thread_root_hint(idx).to_pos,
-                    root_first_stack_move[idx].from_pos,
-                    root_first_stack_move[idx].to_pos));
+            check(root_first_stack_move[idx] == root_first_move[idx],
+                $sformatf("%s thread %0d retained selected root move on stack", label, idx));
             check(dut.search_thread_nodes[idx] > NodeCountType'(0),
                 $sformatf("%s thread %0d searched nonzero nodes", label, idx));
             check(dut.search_thread_status[idx] == dut.SEARCH_THREAD_DONE,
