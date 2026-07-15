@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from software.protocol import ProtocolError, encode_fen
+from software.engine.protocol import ProtocolError, encode_fen
 
 
 def main(argv: list[str] | None = None) -> int:

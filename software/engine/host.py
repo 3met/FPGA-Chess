@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from software.protocol import (
+from software.engine.protocol import (
     AckResponse,
     BAUD_RATE,
     BITS_TO_PROMOTION,
@@ -37,7 +37,7 @@ from software.protocol import (
     move_to_uci,
     read_response,
 )
-from software.transmit import SerialByteTransport, SerialDependencyError, SerialTimeoutError, describe_serial_ports, list_serial_ports
+from software.engine.transport import SerialByteTransport, SerialDependencyError, SerialTimeoutError, describe_serial_ports, list_serial_ports
 
 
 MAX_SEARCH_DEPTH = 31
@@ -467,6 +467,9 @@ class FPGAUCIHost:
                 self._hardware_search_inflight = False
             if wait_for_stop and not self._stop_event.is_set():
                 self._stop_event.wait()
+            # UCI consumers may submit a new position as soon as bestmove is printed.
+            # The FPGA response is complete here, so release the host search state first.
+            self._clear_search_state()
             if isinstance(response, SearchResultResponse):
                 self._emit_search_result(response, board_snapshot, search_elapsed)
             elif isinstance(response, PerftResultResponse):
@@ -485,14 +488,19 @@ class FPGAUCIHost:
             self.logger.exception("Search worker failed")
             self.emit("bestmove 0000")
         finally:
-            with self._search_lock:
-                self._hardware_search_inflight = False
-                self._search_active = False
-                self._search_thread = None
+            self._clear_search_state()
+
+    def _clear_search_state(self) -> None:
+        """Mark a completed host search idle before exposing its terminal UCI output."""
+        with self._search_lock:
+            self._hardware_search_inflight = False
+            self._search_active = False
+            self._search_thread = None
 
     def _perft_divide_worker(self, depth: int, board_snapshot: Any) -> None:
         """Run FPGA perft below each locally generated root move and print a divide table."""
         total_nodes = 1 if depth == 0 else 0
+        perft_complete = False
         try:
             with self._search_lock:
                 self._hardware_search_inflight = True
@@ -517,8 +525,7 @@ class FPGAUCIHost:
                         raise HostError(f"perft {move.uci()} returned unexpected response: {response}")
                     total_nodes += response.nodes
                     self.emit(f"{move.uci()}: {response.nodes}")
-            self.emit("")
-            self.emit(f"Nodes searched: {total_nodes}\n")
+            perft_complete = not self._stop_event.is_set()
         except Exception as exc:
             self.emit(f"info string perft failed: {exc}")
             self.logger.exception("Perft divide worker failed")
@@ -538,6 +545,9 @@ class FPGAUCIHost:
                     self._hardware_search_inflight = False
                     self._search_active = False
                     self._search_thread = None
+        # Emit completion only after restoring the position and releasing the search state.
+        if perft_complete and self.position_synced:
+            self.emit(f"Nodes searched: {total_nodes}")
 
     def _perft_root_move_key(self, board: Any, move: Any) -> tuple[int, int, int, int, int]:
         """Keep divide output stable, listing pawn pushes before the remaining root moves."""

@@ -15,6 +15,8 @@ FPGA Chess is an experimental chess engine project targeting FPGA hardware. The 
 | `tools/hardware_build/` | Python build, test, data-generation, and synthesis tools for the RTL. |
 | `software/` | Python host-side UCI engine, FPGA protocol encoder/decoder, serial transport, and helper scripts. |
 
+The Python software is divided by responsibility: `software/engine/` contains the FPGA protocol, serial transport, FEN encoder, and UCI host; `software/benchmarks/` contains the live-FPGA session, named positions, sanity/perft checks, and puzzle rating tool; and `software/tests/` contains hardware-independent unit tests. The few modules directly under `software/` are compatibility entrypoints for older commands.
+
 ## Build, Test, and Synthesis
 
 Use `python -m tools.hardware_build list` to show known source sets, SystemVerilog tests, generated data, and synthesis targets.
@@ -41,6 +43,12 @@ Required tools depend on the command: ModelSim/Questa provides `vlib`, `vlog`, a
 
 ## Host UCI Engine
 
-Run `python software/fpga_engine.py` to expose the FPGA as a UCI chess engine. The host defaults to `FPGA_CHESS_PORT` when set, otherwise it auto-detects a single or clearly identifiable USB UART port; pass `--port <serial-port>` on headless systems with multiple adapters. The host requires `python-chess` for legal UCI position validation and `pyserial` for UART communication; install them with `python -m pip install python-chess pyserial`. It serializes commands using the protocol in `docs/protocols/`.
+Run `python -m software.engine` to expose the FPGA as a UCI chess engine. The host defaults to `FPGA_CHESS_PORT` when set, otherwise it auto-detects a single or clearly identifiable USB UART port; pass `--port <serial-port>` on headless systems with multiple adapters. The host requires `python-chess` for legal UCI position validation and `pyserial` for UART communication; install them with `python -m pip install python-chess pyserial`. It serializes commands using the protocol in `docs/protocols/`.
 
 For manual bring-up, enter `fpga help` on the host's standard input. The non-UCI `fpga` commands report status and cached results, display or synchronize the local board, issue a UART BREAK reset, and run hardware perft. Their replies are emitted as UCI `info string` lines, so they are also safe to observe through a UCI console. `go perft <depth>` performs a software-side root divide: it generates legal root moves locally, runs FPGA perft below each child, and prints a move-by-move node table plus the total.
+
+## UCI Test and Benchmark Tools
+
+`python -m software.benchmarks` runs opt-in checks only against the checked-in FPGA host and its connected FPGA. The host auto-detects the serial port or uses `FPGA_CHESS_PORT`. For example: `python -m software.benchmarks all --depth 3`. `sanity` verifies `uci`, `isready`, deterministic fixed-depth node counts across `ucinewgame` on three named middlegame FENs, and a 500 ms `go movetime` response window of 475–525 ms on those same positions. `perft` runs the committed fast move-generation regression; `rate` evaluates an external Lichess CSV.
+
+The named sanity and perft vectors are in `software/benchmarks/positions.py`; print the perft FEN/depth/reference-node list without touching hardware with `python -m software.benchmarks perft --list`. The perft suite expects this host's non-standard `go perft <depth>` output to end with `Nodes searched: <count>`; it is therefore a host/FPGA integration check, not a generic UCI feature. Rating input defaults to the ignored `puzzles/lichess_db_puzzle.csv` file and is never downloaded automatically. `rate` ignores puzzles below 1000 by default; pass `--min-rating 0` to restore the full data set. Its first run creates an ignored, rating-specific byte-offset index next to the CSV, then later runs load only the requested rows. It reports exact-solution accuracy plus a logistic estimate derived from the Lichess puzzle ratings and a 95% confidence interval; this is a reproducible comparative benchmark, not an official playing rating. These live-engine commands are deliberately not part of `python -m tools.hardware_build check`.

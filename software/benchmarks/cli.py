@@ -1,0 +1,305 @@
+"""FPGA UCI sanity checks, perft regressions, and puzzle benchmarks."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import os
+import random
+import re
+import struct
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
+
+from software.benchmarks.positions import PERFT_POSITIONS, SANITY_POSITIONS
+from software.benchmarks.session import FPGAUCISession, FPGAUCIError
+
+NODES_RE = re.compile(r"\bnodes\s+(\d+)\b")
+PERFT_RE = re.compile(r"(?:Nodes searched:\s*|\bnodes\s+)(\d+)\b", re.IGNORECASE)
+MOVE_RE = re.compile(r"^(?:[a-h][1-8][a-h][1-8][qrbn]?|0000)$")
+
+
+FAST_PERFT = PERFT_POSITIONS
+SANITY_MOVETIME_MS = 500
+SANITY_MOVETIME_MIN_MS = 475
+SANITY_MOVETIME_MAX_MS = 525
+PUZZLE_INDEX_MAGIC = b"FPCPZIDX"
+PUZZLE_INDEX_HEADER = struct.Struct("<8sQQdQQ")
+
+
+@dataclass(frozen=True)
+class Puzzle:
+    fen: str
+    moves: tuple[str, ...]
+    rating: float
+
+
+def _node_count(lines: Iterable[str]) -> int | None:
+    result = None
+    for line in lines:
+        match = NODES_RE.search(line)
+        if match:
+            result = int(match.group(1))
+    return result
+
+
+def _bestmove(lines: Iterable[str]) -> str | None:
+    for line in reversed(list(lines)):
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "bestmove" and MOVE_RE.fullmatch(parts[1]):
+            return parts[1]
+    return None
+
+
+def _search(engine: FPGAUCISession, fen: str, go: str, timeout: float) -> tuple[int, str, float]:
+    engine.send("position fen " + fen)
+    engine.send(go)
+    result = engine.wait_for(lambda line: line.startswith("bestmove "), timeout, "bestmove")
+    nodes, move = _node_count(result.lines), _bestmove(result.lines)
+    if nodes is None or move is None:
+        raise FPGAUCIError("search response did not contain both nodes and a parseable bestmove")
+    return nodes, move, result.elapsed_seconds
+
+
+def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbose: bool) -> int:
+    """Exercise the checked-in FPGA UCI host and its connected hardware."""
+    reset_failures: list[str] = []
+    timing_failures: list[str] = []
+    with FPGAUCISession(verbose=verbose) as engine:
+        engine.initialize(startup_timeout)
+        for case in SANITY_POSITIONS:
+            first_nodes, _, _ = _search(engine, case.fen, f"go depth {depth}", search_timeout)
+            engine.send("ucinewgame")
+            engine.ready(startup_timeout)
+            second_nodes, _, _ = _search(engine, case.fen, f"go depth {depth}", search_timeout)
+            if first_nodes != second_nodes:
+                reset_failures.append(f"{case.name}: first={first_nodes}, after ucinewgame={second_nodes}")
+            _, _, elapsed_seconds = _search(engine, case.fen, f"go movetime {SANITY_MOVETIME_MS}", search_timeout)
+            elapsed_ms = elapsed_seconds * 1000
+            if not SANITY_MOVETIME_MIN_MS <= elapsed_ms <= SANITY_MOVETIME_MAX_MS:
+                timing_failures.append(f"{case.name}: {elapsed_ms:.0f} ms (expected {SANITY_MOVETIME_MIN_MS}-{SANITY_MOVETIME_MAX_MS} ms)")
+    for failure in reset_failures:
+        print(f"FAIL reset {failure}")
+    for failure in timing_failures:
+        print(f"FAIL movetime {failure}")
+    reset_passes = len(SANITY_POSITIONS) - len(reset_failures)
+    timing_passes = len(SANITY_POSITIONS) - len(timing_failures)
+    print(f"sanity: reset {reset_passes}/{len(SANITY_POSITIONS)} passed; movetime {timing_passes}/{len(SANITY_POSITIONS)} passed")
+    return 1 if reset_failures or timing_failures else 0
+
+
+def run_perft(startup_timeout: float, search_timeout: float, verbose: bool) -> int:
+    failures = 0
+    with FPGAUCISession(verbose=verbose) as engine:
+        engine.initialize(startup_timeout)
+        for case in FAST_PERFT:
+            engine.send("position fen " + case.fen)
+            engine.send(f"go perft {case.depth}")
+            result = engine.wait_for(lambda line: line.lower().startswith("nodes searched:"), search_timeout, f"perft {case.name}")
+            actual = None
+            for line in result.lines:
+                match = PERFT_RE.search(line)
+                if match:
+                    actual = int(match.group(1))
+            passed = actual == case.nodes
+            if not passed:
+                print(f"FAIL {case.name}: got {actual}, expected {case.nodes}")
+            failures += not passed
+    print(f"perft: {len(FAST_PERFT) - failures}/{len(FAST_PERFT)} passed")
+    return 1 if failures else 0
+
+
+def _puzzle_index_path(path: Path, min_rating: float) -> Path:
+    """Keep the generated index beside the ignored external puzzle CSV."""
+    return path.with_name(f"{path.name}.rating-{min_rating:g}.idx")
+
+
+def _parse_puzzle(row: dict[str, str]) -> Puzzle:
+    """Validate the subset of Lichess fields the benchmark needs."""
+    moves = tuple(row["Moves"].split())
+    if len(moves) < 2 or not all(MOVE_RE.fullmatch(move) and move != "0000" for move in moves):
+        raise ValueError
+    return Puzzle(row["FEN"], moves, float(row["Rating"]))
+
+
+def _load_puzzle_index(index_path: Path, source_stat: os.stat_result, min_rating: float) -> tuple[list[int], int] | None:
+    """Return a current offset index, rejecting stale or incomplete cache files."""
+    try:
+        with index_path.open("rb") as handle:
+            header = handle.read(PUZZLE_INDEX_HEADER.size)
+            magic, mtime_ns, size, cached_min_rating, malformed, count = PUZZLE_INDEX_HEADER.unpack(header)
+            if (magic != PUZZLE_INDEX_MAGIC or mtime_ns != source_stat.st_mtime_ns or size != source_stat.st_size or cached_min_rating != min_rating):
+                return None
+            offsets: list[int] = []
+            remaining = count
+            while remaining:
+                chunk_count = min(remaining, 65536)
+                data = handle.read(chunk_count * 8)
+                if len(data) != chunk_count * 8:
+                    return None
+                offsets.extend(struct.unpack(f"<{chunk_count}Q", data))
+                remaining -= chunk_count
+            if handle.read(1):
+                return None
+        return offsets, malformed
+    except (OSError, struct.error):
+        return None
+
+
+def _build_puzzle_index(path: Path, index_path: Path, min_rating: float) -> tuple[list[int], int]:
+    """Scan the CSV once and cache byte offsets for valid, eligible puzzles."""
+    offsets: list[int] = []
+    malformed = 0
+    with path.open("rb") as handle:
+        header = next(csv.reader([handle.readline().decode("utf-8")]))
+        for offset in iter(handle.tell, None):
+            line = handle.readline()
+            if not line:
+                break
+            try:
+                values = next(csv.reader([line.decode("utf-8")]))
+                puzzle = _parse_puzzle(dict(zip(header, values)))
+                if puzzle.rating >= min_rating:
+                    offsets.append(offset)
+            except (UnicodeDecodeError, csv.Error, KeyError, TypeError, ValueError):
+                malformed += 1
+
+    source_stat = path.stat()
+    temporary_path = index_path.with_suffix(index_path.suffix + ".tmp")
+    try:
+        with temporary_path.open("wb") as handle:
+            handle.write(PUZZLE_INDEX_HEADER.pack(PUZZLE_INDEX_MAGIC, source_stat.st_mtime_ns, source_stat.st_size, min_rating, malformed, len(offsets)))
+            for start in range(0, len(offsets), 65536):
+                chunk = offsets[start:start + 65536]
+                handle.write(struct.pack(f"<{len(chunk)}Q", *chunk))
+        os.replace(temporary_path, index_path)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+    return offsets, malformed
+
+
+def load_puzzles(path: Path, count: int, seed: int, min_rating: float = 1000.0) -> tuple[list[Puzzle], int]:
+    """Load a deterministic random sample without reparsing a large CSV on later runs."""
+    source_stat = path.stat()
+    index_path = _puzzle_index_path(path, min_rating)
+    indexed = _load_puzzle_index(index_path, source_stat, min_rating)
+    offsets, malformed = indexed if indexed is not None else _build_puzzle_index(path, index_path, min_rating)
+    if len(offsets) < count:
+        raise ValueError(f"only {len(offsets)} valid puzzles rated at least {min_rating:g} available; requested {count}")
+
+    puzzles: list[Puzzle] = []
+    with path.open("rb") as handle:
+        header = next(csv.reader([handle.readline().decode("utf-8")]))
+        for offset in random.Random(seed).sample(offsets, count):
+            handle.seek(offset)
+            values = next(csv.reader([handle.readline().decode("utf-8")]))
+            puzzles.append(_parse_puzzle(dict(zip(header, values))))
+    return puzzles, malformed
+
+
+def solve_puzzle(engine: FPGAUCISession, puzzle: Puzzle, movetime_ms: int, timeout: float) -> bool:
+    history = [puzzle.moves[0]]  # Lichess begins each solution with the opponent's move.
+    for expected_index in range(1, len(puzzle.moves), 2):
+        engine.send("position fen " + puzzle.fen + " moves " + " ".join(history))
+        engine.send(f"go movetime {movetime_ms}")
+        response = engine.wait_for(lambda line: line.startswith("bestmove "), timeout, "puzzle bestmove")
+        move = _bestmove(response.lines)
+        if move != puzzle.moves[expected_index]:
+            return False
+        history.append(move)
+        if expected_index + 1 < len(puzzle.moves):
+            history.append(puzzle.moves[expected_index + 1])
+    return True
+
+
+def estimate_rating(results: Sequence[tuple[float, bool]]) -> tuple[float, float | None]:
+    """Fit a logistic Elo rating; uncertainty is unavailable at an all-win/loss boundary."""
+    wins = sum(solved for _, solved in results)
+    if wins == 0:
+        return 0.0, None
+    if wins == len(results):
+        return 4000.0, None
+    lo, hi = -1000.0, 5000.0
+    for _ in range(80):
+        rating = (lo + hi) / 2
+        score = sum(solved - 1 / (1 + 10 ** ((puzzle - rating) / 400)) for puzzle, solved in results)
+        if score > 0:
+            lo = rating
+        else:
+            hi = rating
+    rating = (lo + hi) / 2
+    information = sum((math.log(10) / 400) ** 2 * (1 / (1 + 10 ** ((p - rating) / 400))) * (1 - 1 / (1 + 10 ** ((p - rating) / 400))) for p, _ in results)
+    return rating, 1.96 / math.sqrt(information)
+
+
+def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_rating: float, startup_timeout: float, search_timeout: float, verbose: bool) -> int:
+    load_started = time.monotonic()
+    puzzles, malformed = load_puzzles(puzzles_path, count, seed, min_rating)
+    load_seconds = time.monotonic() - load_started
+    if malformed:
+        print(f"warning: skipped {malformed} malformed puzzle rows", file=sys.stderr)
+    results: list[tuple[float, bool]] = []
+    started = time.monotonic()
+    with FPGAUCISession(verbose=verbose) as engine:
+        engine.initialize(startup_timeout)
+        for index, puzzle in enumerate(puzzles, 1):
+            solved = solve_puzzle(engine, puzzle, movetime_ms, search_timeout)
+            results.append((puzzle.rating, solved))
+            print(f"{'PASS' if solved else 'FAIL'} puzzle {index}/{count} rating={puzzle.rating:.0f}")
+    rating, interval = estimate_rating(results)
+    solved = sum(result for _, result in results)
+    buckets: dict[int, list[bool]] = {}
+    for puzzle_rating, result in results:
+        buckets.setdefault(int(puzzle_rating // 200 * 200), []).append(result)
+    bucket_text = ", ".join(f"{bucket}-{bucket + 199}: {sum(values)}/{len(values)}" for bucket, values in sorted(buckets.items()))
+    uncertainty = "unbounded (all solved/failed)" if interval is None else f"±{interval:.1f} (95% CI)"
+    print(
+        f"rating: {rating:.1f} {uncertainty}; score {solved}/{count}; "
+        f"ratings={min(p.rating for p in puzzles):.0f}-{max(p.rating for p in puzzles):.0f}; "
+        f"minimum-rating={min_rating:g}; seed={seed}; movetime={movetime_ms}ms; load={load_seconds:.1f}s; elapsed={time.monotonic() - started:.1f}s"
+    )
+    print(f"rating buckets: {bucket_text}")
+    return 0
+
+
+def _add_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--startup-timeout", type=float, default=10.0)
+    parser.add_argument("--search-timeout", type=float, default=120.0)
+    parser.add_argument("--verbose", action="store_true")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="suite", required=True)
+    sanity = sub.add_parser("sanity"); sanity.add_argument("--depth", type=int, default=3); _add_common(sanity)
+    perft = sub.add_parser("perft"); perft.add_argument("--profile", choices=["fast"], default="fast"); perft.add_argument("--list", action="store_true", help="Print named FEN/depth/node cases without contacting the FPGA."); _add_common(perft)
+    rate = sub.add_parser("rate"); rate.add_argument("--puzzles", type=Path, default=Path("puzzles/lichess_db_puzzle.csv")); rate.add_argument("--count", type=int, default=100); rate.add_argument("--seed", type=int, default=0); rate.add_argument("--movetime-ms", type=int, default=100); rate.add_argument("--min-rating", type=float, default=1000.0); _add_common(rate)
+    all_suite = sub.add_parser("all"); all_suite.add_argument("--depth", type=int, default=3); _add_common(all_suite)
+    args = parser.parse_args(argv)
+    if args.startup_timeout <= 0 or args.search_timeout <= 0:
+        parser.error("timeouts must be positive")
+    try:
+        if args.suite == "sanity": return run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose)
+        if args.suite == "perft":
+            if args.list:
+                for case in FAST_PERFT:
+                    print(f"{case.name}: FEN={case.fen}; depth={case.depth}; nodes={case.nodes}")
+                return 0
+            return run_perft(args.startup_timeout, args.search_timeout, args.verbose)
+        if args.suite == "rate":
+            if args.count <= 0 or args.movetime_ms <= 0 or args.min_rating < 0 or not math.isfinite(args.min_rating): parser.error("count and movetime-ms must be positive, and min-rating must be a finite non-negative value")
+            return run_rate(args.puzzles, args.count, args.seed, args.movetime_ms, args.min_rating, args.startup_timeout, args.search_timeout, args.verbose)
+        sanity_status = run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose)
+        perft_status = run_perft(args.startup_timeout, args.search_timeout, args.verbose)
+        return 1 if sanity_status or perft_status else 0
+    except (OSError, FPGAUCIError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

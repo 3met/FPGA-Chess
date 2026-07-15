@@ -1,6 +1,6 @@
 import unittest
 
-from software.protocol import (
+from software.engine.protocol import (
     EndReason,
     Move,
     SearchResultResponse,

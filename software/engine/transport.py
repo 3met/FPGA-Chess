@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from software.protocol import BAUD_RATE
+from software.engine.protocol import BAUD_RATE
 
 
 class SerialDependencyError(RuntimeError):

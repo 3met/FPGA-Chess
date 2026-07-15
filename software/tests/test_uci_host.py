@@ -5,8 +5,8 @@ import logging
 import threading
 import unittest
 
-from software.protocol import Command, EngineError, StatusResponse, cmd_get_status
-from software.fpga_engine import FPGAUCIHost
+from software.engine.protocol import Command, EngineError, StatusResponse, cmd_get_status
+from software.engine.host import FPGAUCIHost
 
 
 @unittest.skipIf(importlib.util.find_spec("chess") is None, "python-chess is required for the UCI host")
