@@ -43,6 +43,10 @@ from software.engine.transport import SerialByteTransport, SerialDependencyError
 MAX_SEARCH_DEPTH = 31
 DEFAULT_SEARCH_DEPTH = MAX_SEARCH_DEPTH
 SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
+# These values mirror hardware/rtl/tt/tt_defs.sv. Scores in this range encode
+# a forced mate as MATE_SCORE minus the distance in plies.
+MATE_SCORE = 32_000
+MATE_THRESHOLD = 31_000
 
 
 class HostError(RuntimeError):
@@ -567,9 +571,9 @@ class FPGAUCIHost:
         if elapsed_seconds is not None:
             elapsed = f" time {int(elapsed_seconds * 1000)}"
             nps = f" nps {int(response.nodes / max(elapsed_seconds, 1e-9))}"
-        score_cp = self._eval_score_to_centipawns(response.score)
+        score_kind, score_value = self._eval_score_to_uci(response.score)
         self.emit(
-            f"info depth {response.completed_depth} score cp {score_cp}{elapsed} nodes {response.nodes}{nps}"
+            f"info depth {response.completed_depth} score {score_kind} {score_value}{elapsed} nodes {response.nodes}{nps}"
         )
         self.emit(f"bestmove {self._format_bestmove(response.best_move, board_snapshot)}")
 
@@ -578,6 +582,17 @@ class FPGAUCIHost:
         """Convert the FPGA's signed 1/128-pawn score to rounded UCI centipawns."""
         magnitude = (abs(score) * 100 + 64) // 128
         return magnitude if score >= 0 else -magnitude
+
+    @staticmethod
+    def _eval_score_to_uci(score: int) -> tuple[str, int]:
+        """Convert an FPGA score to UCI's centipawn or signed mate representation."""
+        if abs(score) >= MATE_THRESHOLD:
+            # UCI mate values are whole moves, while the hardware stores the
+            # distance from the root in plies. Both one and two plies mean mate
+            # in one move from the root player's perspective.
+            moves = (MATE_SCORE - abs(score) + 1) // 2
+            return "mate", moves if score > 0 else -moves
+        return "cp", FPGAUCIHost._eval_score_to_centipawns(score)
 
     def _emit_killed_search_result(self, board_snapshot: Any) -> None:
         try:

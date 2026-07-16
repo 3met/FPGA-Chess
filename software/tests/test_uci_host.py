@@ -5,7 +5,15 @@ import logging
 import threading
 import unittest
 
-from software.engine.protocol import Command, EngineError, StatusResponse, cmd_get_status
+from software.engine.protocol import (
+    Command,
+    EndReason,
+    EngineError,
+    Move,
+    SearchResultResponse,
+    StatusResponse,
+    cmd_get_status,
+)
 from software.engine.host import FPGAUCIHost
 
 
@@ -50,6 +58,30 @@ class UCIHostSpecTests(unittest.TestCase):
         self.assertEqual(command, bytes([Command.SEARCH_DEPTH, 31]))
         self.assertFalse(is_perft)
         self.assertTrue(wait_for_stop)
+
+    def test_eval_score_uci_representation(self):
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(128), ("cp", 100))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(30_999), ("cp", 24_218))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_000), ("mate", 500))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_999), ("mate", 1))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_998), ("mate", 1))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_997), ("mate", 2))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(-31_997), ("mate", -2))
+
+    def test_search_result_emits_uci_mate_score(self):
+        host = self.make_host()
+        lines: list[str] = []
+        host.emit = lines.append
+
+        host._emit_search_result(
+            SearchResultResponse(
+                Move(0, 0), 31_999, nodes=42, completed_depth=3, end_reason=EndReason.DEPTH_LIMIT
+            ),
+            board_snapshot=None,
+        )
+
+        self.assertEqual(lines, ["info depth 3 score mate 1 nodes 42", "bestmove 0000"])
+
 
 class UCIHostDiagnosticTests(unittest.TestCase):
     """Exercise diagnostics without requiring python-chess or a serial adapter."""
