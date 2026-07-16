@@ -7,9 +7,7 @@ import zobrist_defs::*;
 
 module board_update_pipeline #(
     parameter int MOVE_RECORD_THREAD_COUNT = THREAD_COUNT,
-    parameter int MOVE_RECORD_PLY_COUNT = MAX_PLY_COUNT,
-    parameter bit ENABLE_ZOBRIST = 1'b1,
-    parameter bit ENABLE_PST = 1'b1
+    parameter int MOVE_RECORD_PLY_COUNT = MAX_PLY_COUNT
 ) (
     input wire clk,
     input BoardOp board_op,
@@ -76,59 +74,46 @@ module board_update_pipeline #(
     ZobristKey zobrist_read_data[ZOBRIST_READ_PORTS];
 
     genvar port_pair;
-    genvar port_idx;
     generate
-        if (ENABLE_ZOBRIST) begin : gen_zobrist_roms
-            for (port_pair = 0; port_pair < ZOBRIST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_zobrist_rom
-                synchronous_dual_port_rom #(
-                    .NUM_WORDS(ZOBRIST_ENTRY_CNT),
-                    .WORD_SIZE($bits(ZobristKey)),
-                    .MEM_INIT_FILE(ZOBRIST_MEM_INIT_FILE)
-                ) zobrist_rom (
-                    .clock(clk),
-                    .address_a(zobrist_read_plan.address[port_pair * 2]),
-                    .address_b(zobrist_read_plan.address[port_pair * 2 + 1]),
-                    .rden_a(zobrist_read_plan.enable[port_pair * 2]),
-                    .rden_b(zobrist_read_plan.enable[port_pair * 2 + 1]),
-                    .q_a(zobrist_read_data[port_pair * 2]),
-                    .q_b(zobrist_read_data[port_pair * 2 + 1])
-                );
-            end
-        end else begin : gen_no_zobrist_roms
-            for (port_idx = 0; port_idx < ZOBRIST_READ_PORTS; port_idx = port_idx + 1) begin : gen_zero_zobrist
-                assign zobrist_read_data[port_idx] = ZobristKey'(0);
-            end
+        for (port_pair = 0; port_pair < ZOBRIST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_zobrist_rom
+            synchronous_dual_port_rom #(
+                .NUM_WORDS(ZOBRIST_ENTRY_CNT),
+                .WORD_SIZE($bits(ZobristKey)),
+                .MEM_INIT_FILE(ZOBRIST_MEM_INIT_FILE)
+            ) zobrist_rom (
+                .clock(clk),
+                .address_a(zobrist_read_plan.address[port_pair * 2]),
+                .address_b(zobrist_read_plan.address[port_pair * 2 + 1]),
+                .rden_a(zobrist_read_plan.enable[port_pair * 2]),
+                .rden_b(zobrist_read_plan.enable[port_pair * 2 + 1]),
+                .q_a(zobrist_read_data[port_pair * 2]),
+                .q_b(zobrist_read_data[port_pair * 2 + 1])
+            );
         end
     endgenerate
 
     generate
-        if (ENABLE_PST) begin : gen_pst
-            for (port_pair = 0; port_pair < PST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_pst_rom
-                synchronous_dual_port_rom #(
-                    .NUM_WORDS(PST_ENTRY_COUNT),
-                    .WORD_SIZE($bits(EvalScore)),
-                    .MEM_INIT_FILE(PST_MEM_INIT_FILE)
-                ) pst_rom (
-                    .clock(clk),
-                    .address_a(pst_read_plan.address[port_pair * 2]),
-                    .address_b(pst_read_plan.address[port_pair * 2 + 1]),
-                    .rden_a(pst_read_plan.enable[port_pair * 2]),
-                    .rden_b(pst_read_plan.enable[port_pair * 2 + 1]),
-                    .q_a(pst_read_data[port_pair * 2]),
-                    .q_b(pst_read_data[port_pair * 2 + 1])
-                );
-            end
-            assign pst_start_out = pst_read_enable_q[0] ? pst_read_data[0] : EvalScore'(0);
-            assign pst_end_out = pst_read_enable_q[1] ? pst_read_data[1] : EvalScore'(0);
-            assign pst_killed_out = pst_read_enable_q[2] ? pst_read_data[2] : EvalScore'(0);
-            assign pst_castle_out = pst_read_enable_q[3] ? pst_read_data[3] : EvalScore'(0);
-        end else begin : gen_no_pst
-            assign pst_start_out = EvalScore'(0);
-            assign pst_end_out = EvalScore'(0);
-            assign pst_killed_out = EvalScore'(0);
-            assign pst_castle_out = EvalScore'(0);
+        for (port_pair = 0; port_pair < PST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_pst_rom
+            synchronous_dual_port_rom #(
+                .NUM_WORDS(PST_ENTRY_COUNT),
+                .WORD_SIZE($bits(EvalScore)),
+                .MEM_INIT_FILE(PST_MEM_INIT_FILE)
+            ) pst_rom (
+                .clock(clk),
+                .address_a(pst_read_plan.address[port_pair * 2]),
+                .address_b(pst_read_plan.address[port_pair * 2 + 1]),
+                .rden_a(pst_read_plan.enable[port_pair * 2]),
+                .rden_b(pst_read_plan.enable[port_pair * 2 + 1]),
+                .q_a(pst_read_data[port_pair * 2]),
+                .q_b(pst_read_data[port_pair * 2 + 1])
+            );
         end
     endgenerate
+
+    assign pst_start_out = pst_read_enable_q[0] ? pst_read_data[0] : EvalScore'(0);
+    assign pst_end_out = pst_read_enable_q[1] ? pst_read_data[1] : EvalScore'(0);
+    assign pst_killed_out = pst_read_enable_q[2] ? pst_read_data[2] : EvalScore'(0);
+    assign pst_castle_out = pst_read_enable_q[3] ? pst_read_data[3] : EvalScore'(0);
 
     assign board_out = ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT-1].board;
     assign zobrist_key_out = ctx_pipe[BOARD_UPDATE_PIPELINE_STAGE_CNT-1].zobrist_key;

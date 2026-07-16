@@ -4,9 +4,7 @@ import general_chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 
-module engine_command_layer #(
-    parameter bit ENABLE_PERFT = 1'b1
-) (
+module engine_command_layer (
     input wire clk,
     input wire rst_n,
     input logic [7:0] data_in,
@@ -26,7 +24,6 @@ module engine_command_layer #(
 );
 
     localparam int SET_BOARD_PAYLOAD_BYTES = 36;
-    localparam int DIRECT_SET_BOARD_OPS = 68;
 
     typedef enum logic [2:0] {
         ST_IDLE,
@@ -98,7 +95,7 @@ module engine_command_layer #(
             ENGINE_CMD_SEARCH_NODES,
             ENGINE_CMD_KILL,
             ENGINE_CMD_GET_SEARCH_RESULT: return 1'b1;
-            ENGINE_CMD_PERFT: return ENABLE_PERFT;
+            ENGINE_CMD_PERFT: return 1'b1;
             default: return 1'b0;
         endcase
     endfunction : command_known
@@ -111,7 +108,7 @@ module engine_command_layer #(
             ENGINE_CMD_SEARCH_FIXED_TIME: return 6'd3;
             ENGINE_CMD_SEARCH_ON_CLOCK:   return 6'd12;
             ENGINE_CMD_SEARCH_NODES:      return 6'd5;
-            ENGINE_CMD_PERFT:             return ENABLE_PERFT ? 6'd1 : 6'd0;
+            ENGINE_CMD_PERFT:             return 6'd1;
             default:                      return 6'd0;
         endcase
     endfunction : payload_len

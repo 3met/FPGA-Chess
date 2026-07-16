@@ -4,13 +4,7 @@ These notes contain open questions, speculative ideas, and implementation remind
 
 ## Open Questions
 
-- Decide external-memory banking, cache structure, and physical packing for compact 96-bit TT entries.
 - Decide exact 7-segment display/debug behavior for the board wrapper.
-
-## Additional Functionality to Test
-
-- Exact repetition-history memory layout for active game state and per-thread search lines.
-- TT hit, miss, replacement, and load/store conflict behavior.
 
 ## Speculative Evaluation Ideas
 
@@ -26,8 +20,7 @@ These notes contain open questions, speculative ideas, and implementation remind
 
 ## Future Search Ideas
 
-- Principal variation search.
-- Quiescence search refinements beyond the required captures-and-promotions baseline, still excluding checking non-captures unless promoted into the search design.
+- Quiescence-search refinements beyond the captures-and-promotions baseline, still excluding checking non-captures unless promoted into the search design.
 - Root move diversity between Lazy SMP threads.
 
 ## Error Detection Ideas

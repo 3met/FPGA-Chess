@@ -173,7 +173,6 @@ Material values are available in two forms:
 
 | Array | Unit | Values by piece type |
 | ----- | ---- | -------------------- |
-| `PIECE_VALS_1` | Pawns | null `0`, pawn `1`, knight `3`, bishop `3`, rook `5`, queen `9`, king `0`, spare `x`. |
 | `PIECE_VALS_128` | 1/128 pawn | null `0`, pawn `128`, knight `416`, bishop `416`, rook `640`, queen `1152`, king `0`, spare `x`. |
 
 ### Time and Node Counts
@@ -189,15 +188,10 @@ Material values are available in two forms:
 
 | Name               | Value                         | Description                                                                                             |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `ZOBRIST_KEY_BITS` | `64` default                  | Width of the live Zobrist key. Keep parameterized for experiments, but use 64 bits for the main design. |
-| `ZobristKey`       | `ZOBRIST_KEY_BITS` bits       | Zobrist-style position key.                                                                             |
+| `ZobristKey`       | `64` bits                     | Zobrist-style position key.                                                                             |
 | `THREAD_COUNT`     | Package parameter             | Maximum/default hardware search-thread count. Current RTL test default is 8. |
 | `SEARCH_THREAD_COUNT` | Controller parameter       | Number of active search contexts configured for a `search_controller` instance. Defaults to `THREAD_COUNT`. |
 | `SEARCH_STACK_DEPTH` | Controller parameter       | Number of plies allocated in a `search_controller` instance. Defaults to `MAX_PLY_COUNT`. |
-| `ENABLE_PERFT` | Engine/controller parameter | Enables the external perft command path. Defaults to enabled for RTL tests. |
-| `ENABLE_ZOBRIST` | Board-update/search-controller parameter | Enables incremental Zobrist hash-table updates and repetition hashing. Defaults to enabled for RTL tests. |
-| `ENABLE_TT` | Search-controller parameter | Enables TT lookup/store traffic. Defaults to enabled for RTL tests and must also be disabled when Zobrist hashing is disabled. |
-| `ENABLE_PST` | Board-update/search-controller parameter | Enables board-update PST lookups for incremental PST/material scoring. Defaults to enabled for RTL tests; disabling it still preserves material deltas. |
 | `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |
 | `ThreadID`         | `THREAD_ID_BITS` bits         | Hardware search thread identifier.                                                                      |
 
@@ -209,7 +203,7 @@ These parameters control TT storage format rather than the live Zobrist key. The
 | ---- | ------- | ----------- |
 | `TT_COMPACT_ENTRY_BITS` | `94` | Logical TT entry width for the compact profile. |
 | `TT_FULL_ENTRY_BITS` | `126` | Logical TT entry width for the full-key profile. |
-| `TT_ENTRY_BITS` | `94` | Backward-compatible alias for the default compact profile width. |
+| `TT_ENTRY_BITS` | `94` | Default compact entry width. |
 | `TT_VERIFY_BITS` | `48` | Number of high hash bits stored in each compact TT entry for hit verification. |
 | `TT_DEPTH_BITS` | `6` | Stored depth width. |
 | `TT_AGE_BITS` | `8` | Replacement generation/age width. |
@@ -233,7 +227,7 @@ The compact RTL stores one 94-bit entry per inferred-RAM word, indexes entries w
 | `6` | `WEST` | `-1` |
 | `7` | `NORTH_WEST` | `+7` |
 
-`POS_SHIFT[direction]` gives the one-square position delta. `DIST_SHIFT` extends that to distances from `0` through `7`, where distance `0` is always zero.
+`DIST_SHIFT` gives the position delta for each direction and distances from `0` through `7`, where distance `0` is always zero.
 
 ### `KnightDirection`
 

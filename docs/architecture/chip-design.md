@@ -6,7 +6,7 @@ The FPGA maintains the active game/search state between commands and performs th
 
 The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
-The design has a parameterized number of search threads, a parameterized search stack depth, an optional perft command path, and optional Zobrist, TT, and PST paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests.
+The design has a parameterized number of search threads and a parameterized search stack depth. Perft, Zobrist hashing, the transposition table, and incremental piece-square-table evaluation are core engine paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT` and `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests.
 
 ## Major Blocks
 

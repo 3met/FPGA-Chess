@@ -145,12 +145,6 @@ package general_chess_defs;
 	localparam EvalScore DRAW_EVAL_SCORE = EvalScore'(0);
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 
-	// Value of each type of piece in units of pawns
-	// Indexed by PieceType
-	localparam logic[3:0] PIECE_VALS_1[8] = '{
-		4'd0, 4'd1, 4'd3, 4'd3, 4'd5, 4'd9, 4'd0, 4'dx
-	};
-
 	// Value of each type of piece in units of 128ths of a pawn
 	// Indexed by PieceType
 	// https://web.archive.org/web/20160314214435/http://www.danheisman.com/Articles/evaluation_of_material_imbalance.htm
@@ -178,20 +172,9 @@ package general_chess_defs;
 
 	localparam Direction UNKNOWN_DIR = Direction'(3'bxxx);
 
-	// Maps a direction to its opposite direction
-	localparam Direction OPPOSITE_DIR[8] = '{
-		SOUTH, SOUTH_WEST, WEST, NORTH_WEST, NORTH, NORTH_EAST, EAST, SOUTH_EAST
-	};
-
 	// List of Cardinal and diagonal directions for looping through
 	localparam Direction CARDINAL_DIR[4] = '{NORTH, SOUTH, EAST, WEST};
 	localparam Direction DIAG_DIR[4] = '{NORTH_EAST, SOUTH_EAST, SOUTH_WEST, NORTH_WEST};
-
-	// Position shift of one tile given a direction
-	localparam logic signed [5:0] POS_SHIFT[8] = '{
-		6'd8, 6'd9, 6'd1, -6'd7,
-		-6'd8, -6'd9, -6'd1, 6'd7
-	};
 
 	// Position shift for in some direction for some distance [direction][distance]
 	localparam logic signed [5:0] DIST_SHIFT[8][8] = '{

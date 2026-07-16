@@ -2,7 +2,7 @@
 
 ## Current RTL Summary
 
-Full RTL tests instantiate the real `search_controller`. It owns active board state, applies direct-board operations through `board_update_pipeline`, stores active-game repetition keys for draw detection when Zobrist hashing is enabled, clears the compact TT on New Game when TT is enabled, initializes the normal starting position through board-update setup operations, optionally runs generic stack-based perft through the real move generator with current-board push/reverse state, and runs iterative-deepening Lazy SMP PVS negamax with board-update pushes and reverse moves, optional TT lookup/store cutoffs, targeted TT move ordering, static-evaluator leaves, and qsearch captures and promotions after nominal depth. The first legal main-search child receives the full alpha/beta window; later children receive a null window and are pushed again with the full window after a non-cutting fail-high. Perft is deliberately serialized and borrows search context zero, including its board, Zobrist key, PST value, ply, pending move, node counter, and move-history bank; it does not allocate a duplicate position or modify the active game board.
+`search_controller` owns active board state, applies direct-board operations through `board_update_pipeline`, maintains repetition history, clears the compact TT on New Game, initializes the normal starting position through board-update setup operations, runs generic stack-based perft through the real move generator, and runs iterative-deepening Lazy SMP PVS negamax. It uses board-update push/reverse operations, TT lookup/store cutoffs and move ordering, static-evaluator leaves, and qsearch captures and promotions after nominal depth. The first legal main-search child receives the full alpha/beta window; later children receive a null window and are pushed again with the full window after a non-cutting fail-high. Perft is serialized and borrows search context zero without modifying the active game board.
 
 Search state is stored per configured thread for lifecycle status, scheduler phase, current board, Zobrist key, PST state, board, move, eval, and TT wait counters, in-flight flags, TT response pending records, move stacks, alpha/beta values, repetition line state, return values, current best moves, completed results, completed depths, and node counters. Full board states are not stored per ply. The 117-bit per-node search variables are packed into one synchronous block-RAM stack per thread. Each thread caches its current node in registers, writes that cache through to its current-ply RAM entry, and continuously prefetches the parent entry. Descents construct the child directly in the cache, while the board-reverse pipeline hides the synchronous parent-read latency before ascent completes.
 
@@ -12,11 +12,11 @@ Board-update requests carry controller-local thread, operation, and ply tag shif
 
 Controller-level perft tests cover start-position depths 0, 1, and 2 plus direct-setup positions for kings-only, castling, en passant, promotion, stalemate, and checkmate. Search tests cover White and Black POV capture scoring, 50-move draw, stalemate draw, checkmate losing-mate terminal scores, node limit, fixed-time stop, clock-budget stop, oversized-depth errors, TT reuse, all-thread root scheduling, overlapping move-generator requests, and overlap between different tagged pipelines.
 
-At the start of each root iteration, the controller initializes every `SEARCH_THREAD_COUNT` context as active and ready at the root position and shares TT state when enabled. The primary owns the reported iteration PV and score; helper results contribute through TT entries rather than overriding the main result. It also handles kill during active work, bounds requested depth to the local stack, clears active repetition history on direct setup writes, cancels search pipeline wait, tag, and in-flight state on Kill, New Game, or search start, returns only fully completed iteration depth for node and time stops, and scores 50-move and repetition draws when Zobrist hashing is enabled plus checkmate and stalemate when no legal moves remain.
+At the start of each root iteration, the controller initializes every `SEARCH_THREAD_COUNT` context as active and ready at the root position. The primary owns the reported iteration PV and score; helper results contribute through TT entries rather than overriding the main result. It handles kill during active work, bounds requested depth to the local stack, clears active repetition history on direct setup writes, cancels search pipeline wait, tag, and in-flight state on Kill, New Game, or search start, returns only fully completed iteration depth for node and time stops, and scores 50-move and repetition draws plus checkmate and stalemate when no legal moves remain.
 
-The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, `ACTIVE_REPETITION_DEPTH = 100`, `ENABLE_PERFT = 1`, `ENABLE_ZOBRIST = 1`, `ENABLE_TT = 1`, and `ENABLE_PST = 1`.
+The controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT`, `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, and `ACTIVE_REPETITION_DEPTH = 100`. Perft, Zobrist/repetition handling, TT traffic, and incremental PST evaluation are always present.
 
-Current RTL note: the `quartus-de1-soc` synthesis target uses the real controller with one search context and eight allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
+The `quartus-de1-soc` synthesis target uses one search context and 16 allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
 
 The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
 
@@ -39,23 +39,11 @@ The search controller owns hardware search threads, the active board state visib
 | --------- | --------- | ---- | ----------- |
 | Input | `clk` | 1 | Clock. |
 | Input | `rst_n` | 1 | Synchronous active-low reset. |
-| Input | `operation` | Enum | Operation for the search controller to start or continue. |
-| Input | `direct_board_op` | `BoardOp` | Board operation to execute during Direct Board mode. |
-| Input | `move_in` | `Move` | Move for Direct Board, root move hints, or legality/perft operations as needed. |
-| Input | `board_wr_data` | 4 | Tile, turn, castle-perms, or en-passant data for direct board writes. |
-| Input | `clock_time` | `TIME_BITS` | Time left on the clock for the side to move. |
-| Input | `inc_time` | `TIME_BITS` | Increment for the side to move. |
-| Input | `depth_limit` | Depth field | Maximum search depth, clipped internally to `SEARCH_STACK_DEPTH - 1`. |
-| Input | `node_limit` | `NODE_COUNT_BITS` | Maximum number of nodes to search. |
-| Input | `time_limit` | `TIME_BITS` | Maximum fixed search duration. |
-| Input | `kill` | 1 | Stops the current operation. |
-| Output | `ready` | 1 | Indicates the current request was captured. Completion is reported separately with the response-valid signal. |
-| Output | `board_rd_data` | 4 | Data read from direct board access. |
-| Output | `score` | `EvalScore` | Best score from the most recent search, root side-to-move point-of-view. |
-| Output | `move_out` | `Move` | Best move from the most recent search. |
-| Output | `nodes_count` | `NODE_COUNT_BITS` | Number of nodes searched. |
-| Output | `completed_depth` | Depth field | Deepest fully completed root iteration. |
-| Output | `end_reason` | Enum | Reason the search stopped. |
+| Input | `req_valid`, `req` | 1, `EngineControllerRequest` | Decoded direct-board, new-game, perft, search, or kill request. |
+| Output | `req_ready` | 1 | The controller captured `req`. |
+| Output | `resp_valid`, `resp` | 1, `EngineControllerResponse` | Completion and result for the captured request. |
+| Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status from the selected TT backend. |
+| Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral external TT memory command, write-data, read-data, and completion channels. |
 
 ## Score Convention
 
@@ -116,14 +104,10 @@ flowchart LR
 | Register Name | Size | Description |
 | ------------- | ---- | ----------- |
 | `state` | Enum | Current search-controller FSM state. |
-| `curr_operation` | Enum | Operation currently running. |
-| `curr_depth` | Depth field | Current iterative-deepening depth. |
-| `target_depth` | Depth field | Search depth limit. |
-| `search_stack_ram[THREAD_COUNT][SEARCH_STACK_DEPTH]` | Packed 117-bit records | Synchronous block-RAM search stacks containing moves, scores, bounds, repetition boundary, and node/PVS flags. |
+| `gen_search_stack_ram[].search_stack_mem` | Packed 117-bit records | One synchronous block-RAM search stack per thread, containing moves, scores, bounds, repetition boundary, and node/PVS flags. |
 | `search_stack_top[THREAD_COUNT]` | Packed 117-bit records | Register caches for each thread's current node. |
 | `search_stack_parent_q[THREAD_COUNT]` | Packed 117-bit records | Continuously prefetched synchronous-RAM parent values used on ascent. |
-| `node_count[THREAD_COUNT]` | `NODE_COUNT_BITS` | Node count per thread. |
-| `thread_state[THREAD_COUNT]` | Struct | Per-thread search state, current ply, wait state, and active board snapshot. |
+| `search_nodes` | `NODE_COUNT_BITS` | Node count for the active operation. |
 | `search_thread_phase[THREAD_COUNT]` | Enum | Per-thread scheduler phase: ready, TT wait, eval wait, move wait, board wait, store wait, done, or idle. |
 | `search_*_inflight[THREAD_COUNT]` | Bit arrays | Per-thread flags indicating accepted or pending board, move, eval, TT lookup, and TT store pipeline work. |
 | `search_active_thread_count` | Count | Number of root-thread contexts still active in the current iterative-deepening pass. |

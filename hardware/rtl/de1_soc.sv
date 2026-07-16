@@ -117,10 +117,6 @@ module de1_soc(input CLOCK_50,
 		.CLOCK_FREQ(ENGINE_CLOCK_FREQ),
 		.SEARCH_THREAD_COUNT(1),
 		.SEARCH_STACK_DEPTH(16),
-		.ENABLE_PERFT(1'b1),
-		.ENABLE_ZOBRIST(1'b1),
-		.ENABLE_TT(1'b1),
-		.ENABLE_PST(1'b1),
 		.EXTERNAL_TT(1'b1)
 	) engine (
 		.clk(clk),

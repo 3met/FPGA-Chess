@@ -11,7 +11,6 @@ These docs describe the RTL architecture.
 | [protocols/binary-encoding.md](protocols/binary-encoding.md)                                                                                                                                                           | Common byte and bit encodings used between host and FPGA.              |
 | [protocols/laptop-fpga-communication.md](protocols/laptop-fpga-communication.md)                                                                                                                                       | Host-to-FPGA command and response protocol.                            |
 | [architecture/evaluation-design.md](architecture/evaluation-design.md) and [architecture/search-design.md](architecture/search-design.md)                                                                              | Evaluation and search conventions.                                     |
-| [architecture/rtl-microarchitecture.md](architecture/rtl-microarchitecture.md)                                                                                                                                        | Source-derived Mermaid diagrams of the complete handwritten RTL and its microarchitecture. |
 | [architecture/time-management.md](architecture/time-management.md)                                                                                                                                                     | Search time-control policy.                                            |
 | [modules/board-update-pipeline.md](modules/board-update-pipeline.md)                                                                                                                                                   | Board-state update pipeline contract.                                  |
 | [modules/move-generator.md](modules/move-generator.md)                                                                                                                                                                 | Move-generation interface, ordering, and legality behavior.            |
@@ -27,7 +26,7 @@ These docs describe the RTL architecture.
 | [architecture/](architecture/) | Chip design, shared data model, search, evaluation, and time-management notes. |
 | [modules/](modules/)           | Per-module design notes.                                                       |
 | [protocols/](protocols/)       | Binary encoding and laptop-FPGA communication.                                 |
-| [development/](development/)   | Build/test flow, open questions, metrics, and active documentation TODOs.      |
+| [development/](development/)   | Build/test flow, open questions, and test metrics.                              |
 
 ## Development Docs
 
@@ -35,5 +34,4 @@ These docs describe the RTL architecture.
 | -------- | ------- |
 | [development/build-test-synthesis.md](development/build-test-synthesis.md) | Unified Python CLI, manifests, simulator tests, generated-data checks, and synthesis flows. |
 | [development/notes.md](development/notes.md) | Open questions, speculative ideas, and low-commitment design notes. |
-| [development/pending-changes.md](development/pending-changes.md) | Small documentation backlog for issues not yet folded into the main specs. |
 | [development/testing-metrics.md](development/testing-metrics.md) | Metrics worth tracking for correctness, performance, and hardware utilization. |

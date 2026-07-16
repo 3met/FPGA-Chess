@@ -8,10 +8,6 @@ module engine #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT,
-    parameter bit ENABLE_PERFT = 1'b1,
-    parameter bit ENABLE_ZOBRIST = 1'b1,
-    parameter bit ENABLE_TT = 1'b1,
-    parameter bit ENABLE_PST = 1'b1,
     parameter bit EXTERNAL_TT = 1'b0
 ) (
     input wire clk,
@@ -40,9 +36,7 @@ module engine #(
     logic controller_resp_valid;
     EngineControllerResponse controller_resp;
 
-    engine_command_layer #(
-        .ENABLE_PERFT(ENABLE_PERFT)
-    ) command_layer (
+    engine_command_layer command_layer (
         .clk(clk),
         .rst_n(rst_n),
         .data_in(data_in),
@@ -64,10 +58,6 @@ module engine #(
         .CLOCK_FREQ(CLOCK_FREQ),
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
-        .ENABLE_PERFT(ENABLE_PERFT),
-        .ENABLE_ZOBRIST(ENABLE_ZOBRIST),
-        .ENABLE_TT(ENABLE_TT),
-        .ENABLE_PST(ENABLE_PST),
         .EXTERNAL_TT(EXTERNAL_TT)
     ) controller (
         .clk(clk),

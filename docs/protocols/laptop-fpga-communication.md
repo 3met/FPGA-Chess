@@ -66,7 +66,7 @@ sequenceDiagram
 
 The command payload encodings are defined in [binary-encoding.md](binary-encoding.md).
 
-Perft is an optional hardware command controlled by the engine/controller `ENABLE_PERFT` parameter. The generic RTL/test configuration enables it, and the current DE1-SoC synthesis target enables it through the real search controller.
+Perft is a supported hardware command in the engine/controller protocol and is enabled in every RTL target.
 
 `Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
 

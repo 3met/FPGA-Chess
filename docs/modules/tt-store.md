@@ -19,7 +19,7 @@ Each store request includes:
 
 ## Behavior
 
-The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable synchronous-read simple-dual-port RAM backend with one logical entry per word. The RAM template carries Intel and Xilinx block-RAM inference hints. The default compact profile stores 94-bit entries, and `USE_FULL_KEY = 1` selects the 126-bit full-key profile. A later external-memory wrapper should preserve the same logical request, response, and entry format unless a documented target profile replaces it.
+The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable synchronous-read simple-dual-port RAM backend with one logical entry per word. The RAM template carries Intel and Xilinx block-RAM inference hints. The default compact profile stores 94-bit entries, and `USE_FULL_KEY = 1` selects the 126-bit full-key profile. The external-memory wrapper preserves the same logical request, response, and compact entry format.
 
 Stores use `store_req_valid` and `store_req_ready`. Accepted stores enter a depth-4 FIFO by default. Stores are not dropped; when the FIFO is full, `store_req_ready` deasserts until queued stores drain.
 
@@ -37,9 +37,6 @@ The store pipeline writes the parameterized logical entry described in [tt-looku
 
 The store pipeline should apply the single-entry depth/age replacement policy defined in [tt-lookup.md](tt-lookup.md). A store may be skipped when the existing entry is current-generation, deeper, and at least as useful as the new bound. Skipped stores are not errors.
 
-## Open Design Items
+## Open Design Item
 
-- Store buffering depth.
-- Store stall versus drop behavior under sustained memory pressure.
-- External-memory physical packing for 96-bit entries and any target-specific aligned entry profile.
 - Whether to add a future 2-way bucket profile after measuring TT bandwidth and collision behavior.

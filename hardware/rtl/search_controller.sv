@@ -14,10 +14,6 @@ module search_controller #(
     parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
-    parameter bit ENABLE_PERFT = 1'b1,
-    parameter bit ENABLE_ZOBRIST = 1'b1,
-    parameter bit ENABLE_TT = 1'b1,
-    parameter bit ENABLE_PST = 1'b1,
     parameter bit EXTERNAL_TT = 1'b0
 ) (
     input wire clk,
@@ -58,7 +54,6 @@ module search_controller #(
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
-    localparam int NEW_GAME_OPS = 68;
     localparam EvalScore SEARCH_INF = EvalScore'(32001);
 
     typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
@@ -330,9 +325,7 @@ module search_controller #(
 
     board_update_pipeline #(
         .MOVE_RECORD_THREAD_COUNT(SEARCH_THREAD_COUNT),
-        .MOVE_RECORD_PLY_COUNT(SEARCH_STACK_DEPTH),
-        .ENABLE_ZOBRIST(ENABLE_ZOBRIST),
-        .ENABLE_PST(ENABLE_PST)
+        .MOVE_RECORD_PLY_COUNT(SEARCH_STACK_DEPTH)
     ) board_update_pipeline (
         .clk(clk),
         .board_op(board_update_op),
@@ -940,11 +933,11 @@ module search_controller #(
     endfunction : search_next_tt_response_thread_from
 
     function automatic logic should_probe_search_tt(input ThreadID thread, input PlyIndex ply);
-        return ENABLE_TT && ENABLE_ZOBRIST && !(ply == PlyIndex'(0) && thread != ThreadID'(0));
+        return !(ply == PlyIndex'(0) && thread != ThreadID'(0));
     endfunction : should_probe_search_tt
 
     function automatic logic should_store_search_tt(input ThreadID thread, input PlyIndex ply);
-        return ENABLE_TT && ENABLE_ZOBRIST && !search_in_qsearch(ply);
+        return !search_in_qsearch(ply);
     endfunction : should_store_search_tt
 
     function automatic Move root_hint_for_thread(input ThreadID thread);
@@ -1046,7 +1039,7 @@ module search_controller #(
             board_update_op = setup_req_comb.direct_board_op;
             board_update_move = setup_req_comb.move;
             board_update_set_data = setup_req_comb.board_wr_data;
-        end else if (ENABLE_PERFT && (state == ST_PERFT_PUSH_ISSUE || state == ST_PERFT_REVERSE_ISSUE)) begin
+        end else if (state == ST_PERFT_PUSH_ISSUE || state == ST_PERFT_REVERSE_ISSUE) begin
             board_update_op = (state == ST_PERFT_REVERSE_ISSUE) ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
             // Perft serially borrows search context zero instead of owning a duplicate position.
             board_update_in = search_board[0];
@@ -1078,7 +1071,7 @@ module search_controller #(
             move_gen_tiles[pos] = active_board.tiles[pos];
         end
 
-        if (ENABLE_PERFT && state == ST_PERFT_GEN_ISSUE) begin
+        if (state == ST_PERFT_GEN_ISSUE) begin
             move_gen_op = MOVE_GEN_NORMAL_OP;
             move_gen_start_node = perft_first_request[search_ply[0]];
             move_gen_ply = search_ply[0];
@@ -1123,8 +1116,8 @@ module search_controller #(
                 : search_board[search_thread_id].tiles[pos];
         end
 
-        tt_clear = ENABLE_TT && (state == ST_NEW_CLEAR_START);
-        tt_lookup_req_valid = ENABLE_TT && search_tt_lookup_issue_valid;
+        tt_clear = state == ST_NEW_CLEAR_START;
+        tt_lookup_req_valid = search_tt_lookup_issue_valid;
         tt_lookup_req = TTLookupRequest'('0);
         tt_lookup_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
         tt_lookup_req.zobrist_key = search_zobrist_key[tt_lookup_req.thread_id];
@@ -1133,7 +1126,7 @@ module search_controller #(
         tt_lookup_req.beta = search_stack_top[tt_lookup_req.thread_id].beta;
         tt_lookup_req.ply = search_ply[tt_lookup_req.thread_id];
 
-        tt_store_req_valid = ENABLE_TT && search_tt_store_issue_valid;
+        tt_store_req_valid = search_tt_store_issue_valid;
         tt_store_req = TTStoreRequest'('0);
         tt_store_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_store_issue_thread : search_thread_id;
         tt_store_req.zobrist_key = search_zobrist_key[tt_store_req.thread_id];
@@ -1149,13 +1142,12 @@ module search_controller #(
         tt_store_req.ply = search_ply[tt_store_req.thread_id];
 
         timer_rst = (state == ST_IDLE);
-        timer_run = (ENABLE_PERFT
-            && ((state == ST_PERFT_GEN_ISSUE)
+        timer_run = ((state == ST_PERFT_GEN_ISSUE)
             || (state == ST_PERFT_GEN_WAIT)
             || (state == ST_PERFT_PUSH_ISSUE)
             || (state == ST_PERFT_PUSH_WAIT)
             || (state == ST_PERFT_REVERSE_ISSUE)
-            || (state == ST_PERFT_REVERSE_WAIT)))
+            || (state == ST_PERFT_REVERSE_WAIT))
             || (state == ST_SEARCH_ITER_START)
             || (state == ST_SEARCH_RUN);
     end
@@ -1415,7 +1407,7 @@ module search_controller #(
                             end
 
                             ENGINE_CTRL_PERFT: begin
-                                if (!ENABLE_PERFT || req.depth_limit >= 8'(SEARCH_STACK_DEPTH)) begin
+                                if (req.depth_limit >= 8'(SEARCH_STACK_DEPTH)) begin
                                     resp_reg <= EngineControllerResponse'('0);
                                     resp_reg.error <= 1'b1;
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
@@ -1525,8 +1517,8 @@ module search_controller #(
                                         search_eval_tag_valid_pipe[idx] <= 1'b0;
                                     end
                                     repetition_epoch <= repetition_epoch + 1'b1;
-                                    repetition_init_start <= ENABLE_ZOBRIST;
-                                    state <= ENABLE_ZOBRIST ? ST_REPETITION_INIT : ST_SEARCH_ITER_START;
+                                    repetition_init_start <= 1'b1;
+                                    state <= ST_REPETITION_INIT;
                                 end
                             end
 
@@ -1597,14 +1589,14 @@ module search_controller #(
                         active_pst_eval <= board_update_pst_out;
                         if (active_req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
                             if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
-                                repetition_history_reset <= ENABLE_ZOBRIST;
+                                repetition_history_reset <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
                             end else begin
-                                repetition_history_write <= ENABLE_ZOBRIST;
+                                repetition_history_write <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
                             end
                         end else if (is_direct_setup_op(active_req.direct_board_op)) begin
-                            repetition_history_reset <= ENABLE_ZOBRIST;
+                            repetition_history_reset <= 1'b1;
                             repetition_history_key <= board_update_zobrist_out;
                         end
                         resp_reg <= EngineControllerResponse'('0);
@@ -1641,7 +1633,7 @@ module search_controller #(
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         if (new_setup_index == 7'd67) begin
-                            repetition_history_reset <= ENABLE_ZOBRIST;
+                            repetition_history_reset <= 1'b1;
                             repetition_history_key <= board_update_zobrist_out;
                             resp_reg <= EngineControllerResponse'('0);
                             state <= ST_NEW_DONE;
@@ -1942,18 +1934,18 @@ module search_controller #(
                                 search_board[board_thread_id] <= board_update_out;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
-                                repetition_line_write_valid <= ENABLE_ZOBRIST;
+                                repetition_line_write_valid <= 1'b1;
                                 repetition_line_write_thread <= board_thread_id;
                                 repetition_line_write_ply <= child_ply;
                                 repetition_line_write_key <= board_update_zobrist_out;
-                                repetition_req_valid <= ENABLE_ZOBRIST;
+                                repetition_req_valid <= 1'b1;
                                 repetition_req_thread <= board_thread_id;
                                 repetition_req_ply <= child_ply;
                                 repetition_req_start_ply <= committed_move_is_irreversible(
                                     search_board[board_thread_id], board_update_out, search_pending_move[board_thread_id]
                                 ) ? child_ply : search_stack_top[board_thread_id].repetition_start;
                                 repetition_req_key <= board_update_zobrist_out;
-                                search_repetition_pending[board_thread_id] <= ENABLE_ZOBRIST;
+                                search_repetition_pending[board_thread_id] <= 1'b1;
                                 search_stack_top[board_thread_id].move <= search_pending_move[board_thread_id];
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
@@ -1987,8 +1979,7 @@ module search_controller #(
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
-                                search_thread_phase[board_thread_id] <= ENABLE_ZOBRIST
-                                    ? SEARCH_PHASE_REPETITION_WAIT : SEARCH_PHASE_READY;
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_REPETITION_WAIT;
                             end
                         end
 

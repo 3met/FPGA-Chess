@@ -74,9 +74,7 @@ Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en pa
 
 The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. The board-update RTL reads the `.hex` data through four replicated synchronous true-dual-port ROMs, providing the eight simultaneous reads needed by the worst-case incremental hash update while preserving the five-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints; Quartus infers the DE1-SoC copies as M10K-backed ROMs. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
 
-`ENABLE_ZOBRIST` defaults to enabled. With the parameter disabled, `zobrist_key_out` remains unchanged by hash-table lookups and the search controller must also disable TT traffic and repetition-draw detection.
-
-`ENABLE_PST` defaults to enabled. With the parameter disabled, PST lookup values are zero and the pipeline still updates material deltas through `PIECE_VALS_128`.
+The pipeline always maintains Zobrist keys and incremental PST/material evaluation. Zobrist and PST ROMs are instantiated directly rather than retaining zero-value fallback implementations.
 
 ## PST Tables
 
