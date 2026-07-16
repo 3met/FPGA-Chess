@@ -34,6 +34,8 @@ module tb_search_controller;
     bit tt_response_pending_dispatch_seen;
     bit multi_move_inflight_seen;
     bit pipeline_overlap_seen;
+    bit pvs_scout_seen;
+    bit pvs_research_seen;
     bit thread_selected_active_seen[0:THREAD_COUNT-1];
     bit thread_rr_cursor_seen[0:THREAD_COUNT-1];
     bit thread_board_cursor_seen[0:THREAD_COUNT-1];
@@ -514,6 +516,10 @@ module tb_search_controller;
                 $sformatf("%s thread %0d TT lookup in-flight canceled", label, tid));
             check(!dut.search_tt_store_inflight[tid],
                 $sformatf("%s thread %0d TT store in-flight canceled", label, tid));
+            check(!dut.search_return_was_scout[tid],
+                $sformatf("%s thread %0d PVS scout return canceled", label, tid));
+            check(!dut.search_pvs_research[tid],
+                $sformatf("%s thread %0d PVS re-search canceled", label, tid));
             check(dut.search_thread_status[tid] == dut.SEARCH_THREAD_IDLE,
                 $sformatf("%s thread %0d status idle after kill", label, tid));
         end
@@ -805,6 +811,8 @@ module tb_search_controller;
         run_perft(8'd1, NodeCountType'(20), "startpos perft depth 1");
         run_perft(8'd2, NodeCountType'(400), "startpos perft depth 2");
         run_search_depth(8'd2, "startpos search depth 2");
+        check(pvs_scout_seen, "startpos depth 2 used a PVS scout window");
+        check(pvs_research_seen, "startpos depth 2 re-searched a PVS scout fail-high");
 
         // Opposite-direction moves h2h4 and h5h3 must have distinct mask identities.
         new_game();
@@ -900,6 +908,14 @@ module tb_search_controller;
     always_ff @(posedge clk) begin
         if (rst_n) begin
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+                if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
+                    pvs_scout_seen = 1'b1;
+                    check(dut.search_stack_top[idx].beta == dut.search_stack_top[idx].alpha + EvalScore'(1),
+                        "PVS scout window has unit width");
+                end
+                if (dut.search_pvs_research[idx]) begin
+                    pvs_research_seen = 1'b1;
+                end
                 if (root_stack_capture_pending[idx]) begin
                     root_stack_seen[idx] = 1'b1;
                 root_first_stack_move[idx] = dut.search_stack_top[idx].move;
