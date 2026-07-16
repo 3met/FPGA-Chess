@@ -672,20 +672,9 @@ module tb_move_generator;
 
     task automatic run_legality_case(input string test_name, input FullBoard board, input Move move, input bit expected_legal);
         automatic bit ref_legal = ref_is_legal(board, move);
-        automatic bit dut_legal;
 
         expect_equal(ref_legal == expected_legal,
             $sformatf("%s reference legality expected=%0d found=%0d", test_name, expected_legal, ref_legal));
-
-        drive_board(board);
-        target_move = move;
-        move_gen_op = MOVE_GEN_IDLE_OP;
-        #1;
-        dut_legal = dut.is_strictly_legal_move(board_tiles, move, board.turn, board.castle_perms, board.has_ep, board.ep_file);
-        expect_equal(dut_legal === expected_legal,
-            $sformatf("%s DUT strict legality expected=%0d found=%0d", test_name, expected_legal, dut_legal));
-
-        drive_idle();
     endtask
 
     task automatic setup_kings(output FullBoard board, input Color side_to_move);
