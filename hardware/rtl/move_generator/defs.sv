@@ -54,20 +54,47 @@ package move_generator_defs;
     } RayRecord;
 
     typedef logic [4:0] MoveScore;
+    localparam MoveScore INVALID_MOVE_SCORE = MoveScore'(5'd0);
+    localparam MoveScore QUIET_MOVE_SCORE = MoveScore'(5'd1);
+    localparam logic [2:0] KNIGHT_SOURCE_DISTANCE = 3'd7;
 
     typedef struct packed {
-        logic valid;
-        Move move;
+        Position to_pos;
+        Direction source_dir;
+        logic [2:0] source_distance;
+        PromoType promo_piece;
+        logic is_promotion;
+        logic is_castle;
         MoveScore score;
         logic king_safe;
     } CandidateProposal;
 
+    // The destination is a compile-time constant inside each destination PE.
+    typedef struct packed {
+        Direction source_dir;
+        logic [2:0] source_distance;
+        PromoType promo_piece;
+        logic is_promotion;
+        MoveScore score;
+    } TileCandidateProposal;
+
     localparam RayRecord NULL_RAY = RayRecord'({EMPTY_TILE, 3'd0});
     localparam CandidateProposal NULL_PROPOSAL = CandidateProposal'({
-        1'b0,
-        Move'('x),
-        MoveScore'('x),
+        Position'('x),
+        Direction'('x),
+        3'bxxx,
+        PromoType'('x),
+        1'bx,
+        1'bx,
+        INVALID_MOVE_SCORE,
         1'bx
+    });
+    localparam TileCandidateProposal NULL_TILE_PROPOSAL = TileCandidateProposal'({
+        Direction'('x),
+        3'bxxx,
+        PromoType'('x),
+        1'bx,
+        INVALID_MOVE_SCORE
     });
 
 endpackage : move_generator_defs

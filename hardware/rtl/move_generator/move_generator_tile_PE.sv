@@ -16,12 +16,15 @@ module move_generator_tile_PE #(
     input Color turn,
     input MoveGenOp move_gen_op,
     input Move target_move,
+    input logic target_destination,
     input logic has_ep,
     input BoardFile ep_file,
     input logic ray_consumed[8],
     input logic knight_consumed[8],
     input logic promotion_consumed[8][4],
-    output CandidateProposal proposal,
+    output TileCandidateProposal proposal,
+    output logic target_valid,
+    output logic target_is_promotion,
     output logic enemy_attacked,
     output logic king_move_attacked
 );
@@ -119,55 +122,29 @@ module move_generator_tile_PE #(
             return MoveScore'('x);
         if (tile_data.piece_type != NULL_PIECE)
             return MoveScore'({2'b10, tile_data.piece_type});
-        return MoveScore'(0);
+        return QUIET_MOVE_SCORE;
     endfunction
 
-    task automatic consider(
-        input Move move,
-        input logic is_ep,
-        input logic is_promotion,
-        input PromoType promo,
-        input logic consumed,
-        input MoveScore base_score,
-        input logic target_destination,
-        input logic candidate_king_safe,
-        inout CandidateProposal best
-    );
-        automatic Move candidate;
-        automatic MoveScore score;
-        automatic logic tactical;
-
-        candidate = move;
-        candidate.promo_piece = promo;
-        if (consumed) return;
-
-        tactical = is_promotion || is_ep
-            || (tile_data.piece_type != NULL_PIECE && tile_data.piece_color != turn);
-        if (move_gen_op == MOVE_GEN_QSEARCH_OP && !tactical) return;
-
-        score = base_score;
-        if (is_promotion) score = MoveScore'(5'd30 - MoveScore'(promo));
-        if (target_destination
-            && candidate.from_pos == target_move.from_pos
-            && (!is_promotion || candidate.promo_piece == target_move.promo_piece))
-            score = MoveScore'(5'd31);
-
-        if (!best.valid || score > best.score) begin
-            best.valid = 1'b1;
-            best.move = candidate;
-            best.score = score;
-            best.king_safe = candidate_king_safe;
-        end
-    endtask
-
     always_comb begin
-        automatic CandidateProposal best;
+        automatic TileCandidateProposal ordinary_best;
+        automatic TileCandidateProposal promotion_best;
+        automatic logic promotion_found[4];
+        automatic Direction promotion_dir[4];
+        automatic logic [2:0] promotion_distance[4];
         automatic Move move;
         automatic Tile source;
         automatic logic ep_move;
-        automatic logic target_destination;
+        automatic logic tactical;
 
-        best = NULL_PROPOSAL;
+        ordinary_best = NULL_TILE_PROPOSAL;
+        promotion_best = NULL_TILE_PROPOSAL;
+        target_valid = 1'b0;
+        target_is_promotion = 1'bx;
+        for (int promo_idx=0; promo_idx<4; promo_idx++) begin
+            promotion_found[promo_idx] = 1'b0;
+            promotion_dir[promo_idx] = Direction'('x);
+            promotion_distance[promo_idx] = 3'bxxx;
+        end
         enemy_attacked = 1'b0;
         king_move_attacked = 1'b0;
 
@@ -200,8 +177,6 @@ module move_generator_tile_PE #(
             end
         end
 
-        target_destination = move_gen_op == MOVE_GEN_TARGETED_OP && target_move.to_pos == DEST_POS;
-
         if (move_gen_op != MOVE_GEN_IDLE_OP
             && !(tile_data.piece_type != NULL_PIECE && tile_data.piece_color == turn)) begin
             for (int dir_idx=0; dir_idx<8; dir_idx++) begin
@@ -215,17 +190,39 @@ module move_generator_tile_PE #(
                     if (source.piece_type != NULL_PIECE && source.piece_color == turn
                         && ray_can_move(source, Direction'(dir_idx), ray_distance, ep_move)) begin
                         if (source.piece_type == PAWN && (DEST_RANK == 0 || DEST_RANK == 7)) begin
-                            for (int promo_idx=0; promo_idx<4; promo_idx++)
-                                consider(move, ep_move, 1'b1, PromoType'(promo_idx),
-                                    promotion_consumed[dir_idx][promo_idx],
-                                    MoveScore'(0), target_destination, 1'bx, best);
+                            for (int promo_idx=0; promo_idx<4; promo_idx++) begin
+                                if (!promotion_consumed[dir_idx][promo_idx]
+                                    && !promotion_found[promo_idx]) begin
+                                    promotion_found[promo_idx] = 1'b1;
+                                    promotion_dir[promo_idx] = Direction'(dir_idx);
+                                    promotion_distance[promo_idx] = 3'(ray_distance);
+                                end
+                                if (!promotion_consumed[dir_idx][promo_idx]
+                                    && target_destination
+                                    && move.from_pos == target_move.from_pos
+                                    && PromoType'(promo_idx) == target_move.promo_piece) begin
+                                    target_valid = 1'b1;
+                                    target_is_promotion = 1'b1;
+                                end
+                            end
                         end else begin
-                            consider(move, ep_move, 1'b0, PROMO_QUEEN,
-                                ray_consumed[dir_idx],
-                                move_order_score(source.piece_type), target_destination,
-                                // Ordinary king safety is checked after proposal reduction.
-                                // This field is retained only for the castling proposal.
-                                1'bx, best);
+                            tactical = ep_move
+                                || (tile_data.piece_type != NULL_PIECE
+                                    && tile_data.piece_color != turn);
+                            if (!ray_consumed[dir_idx]
+                                && (move_gen_op != MOVE_GEN_QSEARCH_OP || tactical)
+                                && ordinary_best.score == INVALID_MOVE_SCORE) begin
+                                ordinary_best.source_dir = Direction'(dir_idx);
+                                ordinary_best.source_distance = 3'(ray_distance);
+                                ordinary_best.promo_piece = PROMO_QUEEN;
+                                ordinary_best.is_promotion = 1'b0;
+                                ordinary_best.score = move_order_score(source.piece_type);
+                            end
+                            if (!ray_consumed[dir_idx] && target_destination
+                                && move.from_pos == target_move.from_pos) begin
+                                target_valid = 1'b1;
+                                target_is_promotion = 1'b0;
+                            end
                         end
                     end
                 end
@@ -238,15 +235,41 @@ module move_generator_tile_PE #(
                         move.from_pos = shiftKnightPos(DEST_POS, KnightDirection'(knight_dir));
                         move.to_pos = DEST_POS;
                         move.promo_piece = PROMO_QUEEN;
-                        consider(move, 1'b0, 1'b0, PROMO_QUEEN,
-                            knight_consumed[knight_dir],
-                            move_order_score(KNIGHT), target_destination, 1'bx, best);
+                        tactical = tile_data.piece_type != NULL_PIECE
+                            && tile_data.piece_color != turn;
+                        if (!knight_consumed[knight_dir]
+                            && (move_gen_op != MOVE_GEN_QSEARCH_OP || tactical)
+                            && ordinary_best.score == INVALID_MOVE_SCORE) begin
+                            ordinary_best.source_dir = Direction'(knight_dir);
+                            ordinary_best.source_distance = KNIGHT_SOURCE_DISTANCE;
+                            ordinary_best.promo_piece = PROMO_QUEEN;
+                            ordinary_best.is_promotion = 1'b0;
+                            ordinary_best.score = move_order_score(KNIGHT);
+                        end
+                        if (!knight_consumed[knight_dir] && target_destination
+                            && move.from_pos == target_move.from_pos) begin
+                            target_valid = 1'b1;
+                            target_is_promotion = 1'b0;
+                        end
                     end
                 end
             end
         end
 
-        proposal = best;
+        // Fixed Q/N/R/B ordering needs only presence selection, not four
+        // general score comparisons and full-proposal muxes per promotion ray.
+        for (int promo_idx=3; promo_idx>=0; promo_idx--)
+            if (promotion_found[promo_idx]) begin
+                promotion_best.source_dir = promotion_dir[promo_idx];
+                promotion_best.source_distance = promotion_distance[promo_idx];
+                promotion_best.promo_piece = PromoType'(promo_idx);
+                promotion_best.is_promotion = 1'b1;
+                promotion_best.score = MoveScore'(5'd30 - promo_idx);
+            end
+        if (promotion_best.score == INVALID_MOVE_SCORE)
+            proposal = ordinary_best;
+        else
+            proposal = promotion_best;
     end
 
 endmodule : move_generator_tile_PE

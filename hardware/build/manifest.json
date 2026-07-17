@@ -194,7 +194,7 @@
       "source_set": "quartus-de1-soc",
       "family": "Cyclone V",
       "device": "5CSEMA5F31C6",
-      "engine_clock_mhz": 23,
+      "engine_clock_mhz": 23.076923,
       "clock_generator": {
         "kind": "intel-pll",
         "template": "hardware/ip/pll"

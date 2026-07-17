@@ -54,29 +54,45 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     localparam int REDUCE_1_STAGE = REDUCE_8_STAGE + 1;
 
     logic request_valid_pipe[MOVE_GEN_STAGE_CNT];
-    logic start_node_pipe[MOVE_GEN_STAGE_CNT];
-    MoveGenOp op_pipe[MOVE_GEN_STAGE_CNT];
+    logic start_node_pipe[PROP_STAGE_CNT];
+    MoveGenOp op_pipe[PROP_STAGE_CNT];
     ThreadID thread_id_pipe[MOVE_GEN_STAGE_CNT];
     PlyIndex ply_pipe[MOVE_GEN_STAGE_CNT];
     Move target_move_pipe[MOVE_GEN_STAGE_CNT];
     Color turn_pipe[MOVE_GEN_STAGE_CNT];
-    CastlePerms castle_perms_pipe[MOVE_GEN_STAGE_CNT];
-    logic has_ep_pipe[MOVE_GEN_STAGE_CNT];
-    BoardFile ep_file_pipe[MOVE_GEN_STAGE_CNT];
-    Tile board_pipe[MOVE_GEN_STAGE_CNT][64];
+    CastlePerms castle_perms_pipe[PROP_STAGE_CNT];
+    logic has_ep_pipe[PROP_STAGE_CNT];
+    BoardFile ep_file_pipe[PROP_STAGE_CNT];
+    Tile board_pipe[PROP_STAGE_CNT][64];
     RayRecord ray_pipe[PROP_STAGE_CNT][64][8];
     RayRecord king_vacated_ray[64][8];
     Tile knight_tile[64][8];
     logic ray_consumed[64][8];
     logic knight_consumed[64][8];
     logic promotion_consumed[64][8][4];
-    CandidateProposal tile_proposal_in[64];
+    logic target_destination[64];
+    logic tile_target_valid[64];
+    logic tile_target_is_promotion[64];
+    logic target_valid_in;
+    logic target_is_promotion_in;
+    logic target_is_castle_in;
+    logic target_king_safe_in;
+    logic target_valid_pipe[REDUCE_STAGE_CNT + 1];
+    logic target_is_promotion_pipe[REDUCE_STAGE_CNT + 1];
+    logic target_is_castle_pipe[REDUCE_STAGE_CNT + 1];
+    logic target_king_safe_pipe[REDUCE_STAGE_CNT + 1];
+    TileCandidateProposal tile_proposal_in[64];
     CandidateProposal tile_proposal_pipe[64];
     CandidateProposal reduce_8_pipe[8];
     CandidateProposal reduce_1_pipe;
     CandidateProposal castle_proposal_in;
     CandidateProposal castle_proposal_pipe;
     CandidateProposal reduced_proposal;
+    Move reduced_move;
+    Move selected_move;
+    logic selected_valid;
+    logic selected_is_promotion;
+    logic selected_is_castle;
     logic reduced_proposal_legal;
     logic tile_enemy_attacked[64];
     logic tile_king_move_attacked[64];
@@ -261,7 +277,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             SOUTH_WEST: return POS_DIAG_MASK_OFFSET + 49 + (to_file * 7) + to_rank;
             SOUTH_EAST: return NEG_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + to_rank;
             NORTH_WEST: return NEG_DIAG_MASK_OFFSET + 49 + (to_file * 7) + (to_rank - 1);
-            default:    return 0;
+            default:    return 'x;
         endcase
     endfunction : normal_edge_mask_index
 
@@ -273,12 +289,17 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d62)) ? 0 : 1);
     endfunction : castling_mask_index
 
-    function automatic MoveMaskIndex candidate_mask_index(input Tile board[64], input Move move, input Color moving_color);
+    function automatic MoveMaskIndex candidate_mask_index(
+        input Move move,
+        input Color moving_color,
+        input logic is_promotion,
+        input logic is_castle
+    );
         automatic int index;
 
-        if (move_is_promotion(board, move, moving_color)) begin
+        if (is_promotion) begin
             index = PROMOTION_MASK_OFFSET + (promotion_edge_index(move, moving_color) * 4) + int'(move.promo_piece);
-        end else if (is_castle_move(board, move, moving_color)) begin
+        end else if (is_castle) begin
             index = castling_mask_index(move, moving_color);
         end else begin
             index = normal_edge_mask_index(move);
@@ -291,14 +312,46 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         input CandidateProposal left,
         input CandidateProposal right
     );
-        if (right.valid && (!left.valid || right.score > left.score)) return right;
+        if (right.score > left.score) return right;
         return left;
+    endfunction
+
+    // Add the destination only after the destination-local candidate comparison.
+    function automatic CandidateProposal add_proposal_destination(
+        input TileCandidateProposal tile_proposal,
+        input Position destination
+    );
+        automatic CandidateProposal proposal;
+
+        proposal.to_pos = destination;
+        proposal.source_dir = tile_proposal.source_dir;
+        proposal.source_distance = tile_proposal.source_distance;
+        proposal.promo_piece = tile_proposal.promo_piece;
+        proposal.is_promotion = tile_proposal.is_promotion;
+        proposal.is_castle = 1'b0;
+        proposal.score = tile_proposal.score;
+        proposal.king_safe = 1'bx;
+        return proposal;
+    endfunction
+
+    // Reconstruct the selected source only after the global proposal reduction.
+    function automatic Move proposal_move(input CandidateProposal proposal);
+        automatic Move move;
+
+        move.to_pos = proposal.to_pos;
+        move.promo_piece = proposal.promo_piece;
+        if (proposal.source_distance == KNIGHT_SOURCE_DISTANCE)
+            move.from_pos = shiftKnightPos(proposal.to_pos, KnightDirection'(proposal.source_dir));
+        else
+            move.from_pos = shiftPos(proposal.to_pos, proposal.source_dir,
+                3'(proposal.source_distance + 3'd1));
+        return move;
     endfunction
 
     assign mask_rd_addr = MoveMaskAddr'(move_mask_addr(thread_id_pipe[PROP_STAGE_CNT - 2], ply_pipe[PROP_STAGE_CNT - 2]));
     assign mask_rd_en = request_valid_pipe[PROP_STAGE_CNT - 2] && !start_node_pipe[PROP_STAGE_CNT - 2];
     assign mask_wr_addr = MoveMaskAddr'(move_mask_addr(thread_id_pipe[REDUCE_1_STAGE], ply_pipe[REDUCE_1_STAGE]));
-    assign mask_wr_en = request_valid_pipe[REDUCE_1_STAGE] && reduced_proposal.valid;
+    assign mask_wr_en = request_valid_pipe[REDUCE_1_STAGE] && selected_valid;
 
     synchronous_simple_dual_port_ram #(
         .NUM_WORDS(MASK_ENTRY_COUNT),
@@ -314,6 +367,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     );
 
     always_comb request_consumed_mask = start_node_pipe[PROP_STAGE_CNT - 1] ? MoveMask'(0) : mask_rd_data;
+    always_comb
+        for (int pos=0; pos<64; pos++)
+            target_destination[pos] = op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
+                && target_move_pipe[PROP_STAGE_CNT-1].to_pos == Position'(pos);
 
     genvar tile_idx;
     genvar knight_idx;
@@ -382,12 +439,15 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 .turn(turn_pipe[PROP_STAGE_CNT-1]),
                 .move_gen_op(op_pipe[PROP_STAGE_CNT-1]),
                 .target_move(target_move_pipe[PROP_STAGE_CNT-1]),
+                .target_destination(target_destination[tile_idx]),
                 .has_ep(has_ep_pipe[PROP_STAGE_CNT-1]),
                 .ep_file(ep_file_pipe[PROP_STAGE_CNT-1]),
                 .ray_consumed(ray_consumed[tile_idx]),
                 .knight_consumed(knight_consumed[tile_idx]),
                 .promotion_consumed(promotion_consumed[tile_idx]),
                 .proposal(tile_proposal_in[tile_idx]),
+                .target_valid(tile_target_valid[tile_idx]),
+                .target_is_promotion(tile_target_is_promotion[tile_idx]),
                 .enemy_attacked(tile_enemy_attacked[tile_idx]),
                 .king_move_attacked(tile_king_move_attacked[tile_idx])
             );
@@ -400,6 +460,18 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         automatic logic pseudo_legal;
 
         castle_proposal_in = NULL_PROPOSAL;
+        target_valid_in = 1'b0;
+        target_is_promotion_in = 1'bx;
+        target_is_castle_in = 1'bx;
+        target_king_safe_in = 1'bx;
+        for (int pos=0; pos<64; pos++) begin
+            if (tile_target_valid[pos]) begin
+                target_valid_in = 1'b1;
+                target_is_promotion_in = tile_target_is_promotion[pos];
+                target_is_castle_in = 1'b0;
+                target_king_safe_in = 1'bx;
+            end
+        end
         move.promo_piece = PROMO_QUEEN;
         move.from_pos = (turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? Position'(4) : Position'(60);
         move.to_pos = (turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? Position'(6) : Position'(62);
@@ -410,15 +482,24 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         if (op_pipe[PROP_STAGE_CNT-1] != MOVE_GEN_IDLE_OP
             && op_pipe[PROP_STAGE_CNT-1] != MOVE_GEN_QSEARCH_OP
             && pseudo_legal && !request_consumed_mask[index]) begin
-            castle_proposal_in.valid = 1'b1;
-            castle_proposal_in.move = move;
-            castle_proposal_in.score = (op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
-                && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos
-                && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(5'd31) : MoveScore'(5'd13);
+            castle_proposal_in.to_pos = move.to_pos;
+            castle_proposal_in.source_dir = WEST;
+            castle_proposal_in.source_distance = 3'd1;
+            castle_proposal_in.promo_piece = move.promo_piece;
+            castle_proposal_in.is_promotion = 1'b0;
+            castle_proposal_in.is_castle = 1'b1;
+            castle_proposal_in.score = MoveScore'(5'd13);
             castle_proposal_in.king_safe =
                 !tile_enemy_attacked[move.from_pos]
                 && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 5 : 61)]
                 && !tile_king_move_attacked[move.to_pos];
+            if (target_destination[move.to_pos]
+                && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos) begin
+                target_valid_in = 1'b1;
+                target_is_promotion_in = 1'b0;
+                target_is_castle_in = 1'b1;
+                target_king_safe_in = castle_proposal_in.king_safe;
+            end
         end
 
         move.to_pos = (turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? Position'(2) : Position'(58);
@@ -431,42 +512,57 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             && pseudo_legal && !request_consumed_mask[index]) begin
             automatic CandidateProposal queenside;
             queenside = NULL_PROPOSAL;
-            queenside.valid = 1'b1;
-            queenside.move = move;
-            queenside.score = (op_pipe[PROP_STAGE_CNT-1] == MOVE_GEN_TARGETED_OP
-                && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos
-                && move.to_pos == target_move_pipe[PROP_STAGE_CNT-1].to_pos) ? MoveScore'(5'd31) : MoveScore'(5'd13);
+            queenside.to_pos = move.to_pos;
+            queenside.source_dir = EAST;
+            queenside.source_distance = 3'd1;
+            queenside.promo_piece = move.promo_piece;
+            queenside.is_promotion = 1'b0;
+            queenside.is_castle = 1'b1;
+            queenside.score = MoveScore'(5'd13);
             queenside.king_safe =
                 !tile_enemy_attacked[move.from_pos]
                 && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 3 : 59)]
                 && !tile_king_move_attacked[move.to_pos];
+            if (target_destination[move.to_pos]
+                && move.from_pos == target_move_pipe[PROP_STAGE_CNT-1].from_pos) begin
+                target_valid_in = 1'b1;
+                target_is_promotion_in = 1'b0;
+                target_is_castle_in = 1'b1;
+                target_king_safe_in = queenside.king_safe;
+            end
             castle_proposal_in = better_proposal(castle_proposal_in, queenside);
         end
     end
 
     always_comb begin
-        automatic Tile start_tile;
         reduced_proposal = reduce_1_pipe;
+        reduced_move = proposal_move(reduced_proposal);
+        selected_valid = target_valid_pipe[REDUCE_STAGE_CNT]
+            || reduced_proposal.score != INVALID_MOVE_SCORE;
+        selected_move = target_valid_pipe[REDUCE_STAGE_CNT]
+            ? target_move_pipe[REDUCE_1_STAGE] : reduced_move;
+        selected_is_promotion = target_valid_pipe[REDUCE_STAGE_CNT]
+            ? target_is_promotion_pipe[REDUCE_STAGE_CNT] : reduced_proposal.is_promotion;
+        selected_is_castle = target_valid_pipe[REDUCE_STAGE_CNT]
+            ? target_is_castle_pipe[REDUCE_STAGE_CNT] : reduced_proposal.is_castle;
         reduced_proposal_legal = 1'b0;
-        start_tile = board_pipe[REDUCE_1_STAGE][reduced_proposal.move.from_pos];
 
-        if (reduced_proposal.valid) begin
+        if (selected_valid) begin
             // Only castling needs an early strict check because its origin and
             // transit squares are no longer observable after board update.
-            if (start_tile.piece_type == KING
-                && is_castle_move(board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
-                    turn_pipe[REDUCE_1_STAGE])) begin
-                reduced_proposal_legal = reduced_proposal.king_safe;
+            if (selected_is_castle) begin
+                reduced_proposal_legal = target_valid_pipe[REDUCE_STAGE_CNT]
+                    ? target_king_safe_pipe[REDUCE_STAGE_CNT] : reduced_proposal.king_safe;
             end else begin
                 reduced_proposal_legal = 1'b1;
             end
         end
 
         next_consumed_mask = proposal_consumed_mask_pipe[REDUCE_STAGE_CNT];
-        if (reduced_proposal.valid)
+        if (selected_valid)
             next_consumed_mask[candidate_mask_index(
-                board_pipe[REDUCE_1_STAGE], reduced_proposal.move,
-                turn_pipe[REDUCE_1_STAGE])] = 1'b1;
+                selected_move, turn_pipe[REDUCE_1_STAGE],
+                selected_is_promotion, selected_is_castle)] = 1'b1;
     end
 
 
@@ -475,21 +571,30 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         if (!rst_n) begin
             for (int stage=0; stage<MOVE_GEN_STAGE_CNT; stage++) begin
                 request_valid_pipe[stage] <= 1'b0;
-                start_node_pipe[stage] <= 1'bx;
-                op_pipe[stage] <= MoveGenOp'('x);
                 thread_id_pipe[stage] <= ThreadID'('x);
                 ply_pipe[stage] <= PlyIndex'('x);
                 target_move_pipe[stage] <= Move'('x);
                 turn_pipe[stage] <= Color'('x);
+            end
+            for (int stage=0; stage<PROP_STAGE_CNT; stage++) begin
+                start_node_pipe[stage] <= 1'bx;
+                op_pipe[stage] <= MoveGenOp'('x);
                 castle_perms_pipe[stage] <= CastlePerms'('x);
                 has_ep_pipe[stage] <= 1'bx;
                 ep_file_pipe[stage] <= BoardFile'('x);
-                for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= Tile'('x);
             end
+            for (int stage=0; stage<PROP_STAGE_CNT; stage++)
+                for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= Tile'('x);
             candidate_move_pipe <= Move'('x);
             candidate_move_legal_pipe <= 1'b0;
             for (int idx=0; idx<=REDUCE_STAGE_CNT; idx++)
                 proposal_consumed_mask_pipe[idx] <= MoveMask'('x);
+            for (int idx=0; idx<=REDUCE_STAGE_CNT; idx++) begin
+                target_valid_pipe[idx] <= 1'b0;
+                target_is_promotion_pipe[idx] <= 1'bx;
+                target_is_castle_pipe[idx] <= 1'bx;
+                target_king_safe_pipe[idx] <= 1'bx;
+            end
             for (int stage=0; stage<PROP_STAGE_CNT; stage++)
                 for (int pos=0; pos<64; pos++)
                     for (int dir_idx=0; dir_idx<8; dir_idx++)
@@ -590,21 +695,30 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
             for (int stage=1; stage<MOVE_GEN_STAGE_CNT; stage++) begin
                 request_valid_pipe[stage] <= request_valid_pipe[stage-1];
-                start_node_pipe[stage] <= start_node_pipe[stage-1];
-                op_pipe[stage] <= op_pipe[stage-1];
                 thread_id_pipe[stage] <= thread_id_pipe[stage-1];
                 ply_pipe[stage] <= ply_pipe[stage-1];
                 target_move_pipe[stage] <= target_move_pipe[stage-1];
                 turn_pipe[stage] <= turn_pipe[stage-1];
+            end
+            for (int stage=1; stage<PROP_STAGE_CNT; stage++) begin
+                start_node_pipe[stage] <= start_node_pipe[stage-1];
+                op_pipe[stage] <= op_pipe[stage-1];
                 castle_perms_pipe[stage] <= castle_perms_pipe[stage-1];
                 has_ep_pipe[stage] <= has_ep_pipe[stage-1];
                 ep_file_pipe[stage] <= ep_file_pipe[stage-1];
-                for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= board_pipe[stage-1][pos];
             end
+            for (int stage=1; stage<PROP_STAGE_CNT; stage++)
+                for (int pos=0; pos<64; pos++) board_pipe[stage][pos] <= board_pipe[stage-1][pos];
 
-            for (int pos=0; pos<64; pos++) tile_proposal_pipe[pos] <= tile_proposal_in[pos];
+            for (int pos=0; pos<64; pos++)
+                tile_proposal_pipe[pos] <= add_proposal_destination(
+                    tile_proposal_in[pos], Position'(pos));
             castle_proposal_pipe <= castle_proposal_in;
             proposal_consumed_mask_pipe[0] <= request_consumed_mask;
+            target_valid_pipe[0] <= target_valid_in;
+            target_is_promotion_pipe[0] <= target_is_promotion_in;
+            target_is_castle_pipe[0] <= target_is_castle_in;
+            target_king_safe_pipe[0] <= target_king_safe_in;
 
             for (int group=0; group<8; group++) begin
                 automatic CandidateProposal winner = (group == 0)
@@ -615,6 +729,10 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 reduce_8_pipe[group] <= winner;
             end
             proposal_consumed_mask_pipe[1] <= proposal_consumed_mask_pipe[0];
+            target_valid_pipe[1] <= target_valid_pipe[0];
+            target_is_promotion_pipe[1] <= target_is_promotion_pipe[0];
+            target_is_castle_pipe[1] <= target_is_castle_pipe[0];
+            target_king_safe_pipe[1] <= target_king_safe_pipe[0];
 
             begin
                 automatic CandidateProposal winner = reduce_8_pipe[0];
@@ -623,9 +741,14 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                 reduce_1_pipe <= winner;
             end
             proposal_consumed_mask_pipe[2] <= proposal_consumed_mask_pipe[1];
+            target_valid_pipe[2] <= target_valid_pipe[1];
+            target_is_promotion_pipe[2] <= target_is_promotion_pipe[1];
+            target_is_castle_pipe[2] <= target_is_castle_pipe[1];
+            target_king_safe_pipe[2] <= target_king_safe_pipe[1];
 
-            if (request_valid_pipe[REDUCE_1_STAGE] && reduced_proposal.valid) begin
-                candidate_move_pipe <= reduced_proposal.move;
+            if (request_valid_pipe[REDUCE_1_STAGE]
+                && selected_valid) begin
+                candidate_move_pipe <= selected_move;
                 candidate_move_legal_pipe <= reduced_proposal_legal;
             end else begin
                 candidate_move_pipe <= NULL_MOVE;
