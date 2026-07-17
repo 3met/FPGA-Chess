@@ -1,6 +1,7 @@
 """Command-line parsing and dispatch for the hardware build tools."""
 
 import argparse
+import signal
 import sys
 
 from .common import BuildError, RTL_TEST_TIMEOUT_SECONDS
@@ -10,6 +11,11 @@ from .programming import command_flash
 from .reports import command_synth_report, command_timing_paths
 from .simulation import command_compile, command_test
 from .synthesis import command_synth
+
+
+def handle_termination_signal(_signum: int, _frame: object) -> None:
+    """Turn SIGTERM into normal interruption so active tool trees are cleaned up."""
+    raise KeyboardInterrupt
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,10 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    signal.signal(signal.SIGTERM, handle_termination_signal)
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except KeyboardInterrupt:
+        print("Interrupted; stopped active build processes.", file=sys.stderr)
+        return 130
     except BuildError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

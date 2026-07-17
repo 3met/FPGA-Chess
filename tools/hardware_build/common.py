@@ -64,6 +64,40 @@ def host_parallel_processors() -> int:
     return max(1, os.cpu_count() or 1)
 
 
+def process_group_options() -> dict[str, object]:
+    """Start each tool in its own group so interruption can stop all of its workers."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def terminate_process_tree(proc: subprocess.Popen[str], force: bool = False) -> None:
+    """Stop a launched tool and every process it started, on either supported host OS."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        # taskkill's /T includes vendor-tool worker processes that do not exit
+        # when their immediate launcher is terminated.
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+
+
+def stop_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Allow a tool tree to exit cleanly, then force it down if necessary."""
+    terminate_process_tree(proc)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        terminate_process_tree(proc, force=True)
+        proc.wait()
+
+
 def run_command(
     cmd: list[str],
     cwd: Path,
@@ -76,11 +110,6 @@ def run_command(
     if not live_log:
         # A wall-clock limit prevents a non-converging simulator delta cycle
         # from leaving the unified check command running indefinitely.
-        popen_options: dict[str, object] = {}
-        if os.name == "nt":
-            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            popen_options["start_new_session"] = True
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
@@ -89,30 +118,29 @@ def run_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            **popen_options,
+            **process_group_options(),
         )
         timed_out = False
         try:
             output, _ = proc.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            if os.name == "nt":
-                proc.kill()
-            else:
-                os.killpg(proc.pid, signal.SIGTERM)
+            terminate_process_tree(proc)
             try:
                 output, _ = proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
-                if os.name == "nt":
-                    proc.kill()
-                else:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                terminate_process_tree(proc, force=True)
                 output, _ = proc.communicate()
             partial_output = exc.output or ""
             if isinstance(partial_output, bytes):
                 partial_output = partial_output.decode("utf-8", errors="replace")
             timeout_text = f"Command timed out after {timeout_seconds:.0f}s.\n"
             output = partial_output + output + timeout_text
+        except BaseException:
+            # KeyboardInterrupt and termination signals are delivered to this
+            # Python process, not the isolated vendor-tool process group.
+            stop_process_tree(proc)
+            raise
         elapsed = time.monotonic() - start
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +162,7 @@ def run_command(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **process_group_options(),
         )
         try:
             assert proc.stdout is not None
@@ -145,12 +174,7 @@ def run_command(
                     print(line, end="", flush=True)
             code = proc.wait()
         except BaseException:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            stop_process_tree(proc)
             raise
     elapsed = time.monotonic() - start
     return code, "".join(chunks), elapsed
