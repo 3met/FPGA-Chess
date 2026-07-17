@@ -5,9 +5,9 @@ package board_update_pipeline_defs;
 
 	import general_chess_defs::*;
 
-    // Stages 0-3 align synchronous history/table reads and transform the
-    // board; stage 4 registers the result while committing move history.
-    localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 5;
+    // Stage 0 captures the request and launches table reads, stage 1 aligns
+    // their synchronous outputs, and stage 2 registers the transformed board.
+    localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 3;
 
     // Enum for all board update pipeline operations
     typedef enum logic [3:0] {

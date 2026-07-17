@@ -37,11 +37,9 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 | Pipeline Stage | Description                                                               |
 | -------------- | ------------------------------------------------------------------------- |
-| 0              | Register inputs and fetch previous move data for reverse operations.      |
-| 1              | Prepare side-data updates and preserve input context.                     |
-| 2              | Align the synchronous Zobrist and PST ROM outputs.                        |
-| 3              | Apply all tile and side-data updates, including en passant and castling.  |
-| 4              | Register output data and write a pushed move-history record.              |
+| 0              | Register inputs, fetch reverse history, decode move effects, and launch table reads. |
+| 1              | Align synchronous table outputs with the registered request and decoded effects. |
+| 2              | Apply tile, side-data, Zobrist, and PST updates, register outputs, and write pushed move history. |
 
 ```mermaid
 flowchart LR
@@ -50,18 +48,16 @@ flowchart LR
     History["Per-thread move history"]
     Tables["Zobrist and PST tables"]
 
-    subgraph Pipe["Five-stage fixed-latency pipeline"]
-        S0["0. Register inputs\nand read reverse context"]
-        S1["1. Prepare side-data updates"]
-        S2["2. Align table reads"]
-        S3["3. Apply board and\nside-data updates"]
-        S4["4. Register outputs\nand write history"]
+    subgraph Pipe["Three-stage fixed-latency pipeline"]
+        S0["0. Register inputs,\ndecode effects, launch reads"]
+        S1["1. Align synchronous\ntable outputs"]
+        S2["2. Apply updates, register\noutputs, write history"]
     end
 
-    In --> S0 --> S1 --> S2 --> S3 --> S4 --> Out
+    In --> S0 --> S1 --> S2 --> Out
     History -->|"Reverse Move read"| S0
-    S4 -->|"Push Move write"| History
-    Tables -->|"Incremental deltas"| S3
+    S2 -->|"Push Move write"| History
+    Tables -->|"Incremental deltas"| S2
 ```
 
 ## Board Setup
@@ -72,13 +68,13 @@ The final engine should set up a board by issuing explicit Set Tile, Set Turn, S
 
 Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations.
 
-The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. The board-update RTL reads the `.hex` data through four replicated synchronous true-dual-port ROMs, providing the eight simultaneous reads needed by the worst-case incremental hash update while preserving the five-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints; Quartus infers the DE1-SoC copies as M10K-backed ROMs. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
+The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. Two replicated synchronous true-dual-port ROMs provide four piece-hash reads, sufficient for castling's two king and two rook deltas. A third dual-port ROM supplies the old and new en-passant file keys, while fixed turn and castling keys are XORed as constants. This separation avoids dynamically packing side-state changes into piece-table ports and preserves one accepted request per cycle. The portable ROM template carries Intel and Xilinx block-RAM inference hints; Quartus infers the DE1-SoC copies as M10K-backed ROMs and prunes the en-passant ROM to its reachable entries. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`; the generator uses deterministic SHA-256-derived candidates and accepts only nonzero unique values with balanced Hamming weight, minimum pairwise Hamming-distance checks, and a whole-table bit-balance check. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
 
 The pipeline always maintains Zobrist keys and incremental PST/material evaluation. Zobrist and PST ROMs are instantiated directly rather than retaining zero-value fallback implementations.
 
 ## PST Tables
 
-Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the five-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
+Piece-square-table constants are generated from `hardware/data/pst_values/pst_values.json` into `hardware/data/pst_values/pst_values.hex` and `hardware/rtl/generated/pst_values_pkg.sv`. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the three-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate both files with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
 
 ## Move History
 
