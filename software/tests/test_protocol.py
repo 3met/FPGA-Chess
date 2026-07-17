@@ -2,10 +2,12 @@ import unittest
 
 from software.engine.protocol import (
     EndReason,
+    DebugStatResponse,
     Move,
     SearchResultResponse,
     STARTPOS_FEN,
     cmd_make_move,
+    cmd_get_debug_stat,
     decode_response,
     encode_fen,
     encode_move,
@@ -54,6 +56,11 @@ class ProtocolEncodingTests(unittest.TestCase):
         self.assertEqual(response.nodes, 0x0102030405)
         self.assertEqual(response.completed_depth, 5)
         self.assertEqual(response.end_reason, EndReason.DEPTH_LIMIT)
+
+    def test_debug_stat_command_and_response(self):
+        self.assertEqual(cmd_get_debug_stat(0x12), bytes.fromhex("2112"))
+        response = decode_response(bytes.fromhex("84120504030201"))
+        self.assertEqual(response, DebugStatResponse(address=0x12, value=0x0102030405))
 
 
 if __name__ == "__main__":

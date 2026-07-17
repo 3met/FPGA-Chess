@@ -14,14 +14,17 @@ module tb_tt_external_load_store;
     logic mem_write_valid, mem_write_ready, mem_write_last; logic [15:0] mem_write_data;
     logic mem_read_valid, mem_read_ready, mem_read_last; logic [15:0] mem_read_data;
     logic mem_done_valid, mem_done_ready, mem_done_error;
+    logic cache_access, cache_hit, cache_access_is_store;
     logic [15:0] memory[0:95];
     logic read_active, write_active, completion_pending; logic [24:0] memory_address; logic [3:0] memory_remaining;
     int request_count, pass_count, fail_count;
+    int lookup_cache_access_count, lookup_cache_hit_count, store_cache_access_count;
     TTAge old_generation;
 
     tt_external_load_store #(.CACHE_INDEX_BITS(2), .ENTRY_COUNT(16)) dut (
         .clk, .rst_n, .memory_ready(1'b1), .memory_error(1'b0), .clear, .clear_busy(),
         .lookup_req_valid, .lookup_req_ready, .lookup_req, .lookup_resp_valid, .lookup_resp,
+        .cache_access, .cache_hit, .cache_access_is_store,
         .store_req_valid, .store_req_ready, .store_req, .store_resp_valid, .store_resp,
         .mem_req_valid, .mem_req_ready, .mem_req_write, .mem_req_address, .mem_req_length,
         .mem_write_valid, .mem_write_ready, .mem_write_data, .mem_write_last,
@@ -37,7 +40,15 @@ module tb_tt_external_load_store;
         mem_read_valid <= 1'b0;
         if (!rst_n) begin
             read_active <= 1'b0; write_active <= 1'b0; completion_pending <= 1'b0; request_count <= 0;
+            lookup_cache_access_count <= 0; lookup_cache_hit_count <= 0; store_cache_access_count <= 0;
         end else begin
+            if (cache_access) begin
+                if (cache_access_is_store) store_cache_access_count <= store_cache_access_count + 1;
+                else begin
+                    lookup_cache_access_count <= lookup_cache_access_count + 1;
+                    if (cache_hit) lookup_cache_hit_count <= lookup_cache_hit_count + 1;
+                end
+            end
             if (completion_pending && mem_done_ready) completion_pending <= 1'b0;
             if (mem_req_valid && mem_req_ready) begin
                 request_count <= request_count + 1;
@@ -103,7 +114,11 @@ module tb_tt_external_load_store;
         do_store(64'h0123_4567_89ab_cdef, ThreadID'(1));
         check(request_count == 3, "cache-resident store skipped replacement read");
         do_lookup(64'h0123_4567_89ab_cdef, 1'b1, ThreadID'(1));
+        @(posedge clk);
         check(request_count == 3, "cache hit avoided SDRAM");
+        check(store_cache_access_count == 2, "store cache probes identified separately");
+        check(lookup_cache_access_count == 1, "lookup cache probe counted");
+        check(lookup_cache_hit_count == 1, "lookup cache hit counted");
 
         // A New Game pulse must remain pending while another thread owns the
         // external-memory transaction, then invalidate it when the port idles.

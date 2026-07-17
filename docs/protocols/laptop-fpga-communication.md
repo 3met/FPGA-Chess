@@ -63,6 +63,7 @@ sequenceDiagram
 | `0x14` | Perft | Depth, 1 byte | Perft result when complete. |
 | `0x1f` | Kill | None | Status response after search is stopped. |
 | `0x20` | Get search result | None | Most recent search result. |
+| `0x21` | Get debug statistic | Statistic address, 1 byte | Debug statistic response. |
 
 The command payload encodings are defined in [binary-encoding.md](binary-encoding.md).
 
@@ -86,7 +87,10 @@ Every response starts with a response-type byte followed by a fixed-size payload
 | `0x81` | Ack | Status byte. |
 | `0x82` | Search result | Best move, score, node count, completed depth, end reason. |
 | `0x83` | Perft result | Node count and completed depth. |
+| `0x84` | Debug statistic | Requested address followed by an unsigned 40-bit little-endian value. |
 | `0xff` | Error | Error byte and status byte. |
+
+Debug statistic addresses `0`, `1`, and `2` report whether search statistics are enabled, the configured search-thread count, and the search-phase count. Addresses `3` through `6` report TT lookups, TT hits, TT-cache lookup probes, and TT-cache lookup hits. Addresses starting at `16` report per-thread phase cycles in thread-major order for ready, TT wait, evaluation wait, move wait, board wait, reverse wait, repetition wait, store wait, terminal wait, and done. Disabled builds return zero except for the configuration metadata. Statistics reset when a new search command is accepted and are intended to be read only after search completion.
 
 Search result payload:
 

@@ -35,6 +35,7 @@ class Command(IntEnum):
     PERFT = 0x14
     KILL = 0x1F
     GET_SEARCH_RESULT = 0x20
+    GET_DEBUG_STAT = 0x21
 
 
 class ResponseType(IntEnum):
@@ -42,7 +43,19 @@ class ResponseType(IntEnum):
     ACK = 0x81
     SEARCH_RESULT = 0x82
     PERFT_RESULT = 0x83
+    DEBUG_STAT = 0x84
     ERROR = 0xFF
+
+
+class DebugStatAddress(IntEnum):
+    ENABLED = 0
+    THREAD_COUNT = 1
+    PHASE_COUNT = 2
+    TT_LOOKUPS = 3
+    TT_HITS = 4
+    TT_CACHE_LOOKUPS = 5
+    TT_CACHE_HITS = 6
+    PHASE_BASE = 16
 
 
 class EngineError(IntEnum):
@@ -155,11 +168,18 @@ class ErrorResponse:
     status: int
 
 
+@dataclass(frozen=True)
+class DebugStatResponse:
+    address: int
+    value: int
+
+
 EngineResponse = (
     StatusResponse
     | AckResponse
     | SearchResultResponse
     | PerftResultResponse
+    | DebugStatResponse
     | ErrorResponse
 )
 
@@ -373,6 +393,12 @@ def cmd_get_search_result() -> bytes:
     return command(Command.GET_SEARCH_RESULT)
 
 
+def cmd_get_debug_stat(address: int) -> bytes:
+    if not 0 <= address <= 0xFF:
+        raise ProtocolError("Debug statistic address must fit in one byte")
+    return command(Command.GET_DEBUG_STAT, bytes([address]))
+
+
 def response_payload_length(response_type: int) -> int:
     if response_type == ResponseType.STATUS:
         return 3
@@ -381,6 +407,8 @@ def response_payload_length(response_type: int) -> int:
     if response_type == ResponseType.SEARCH_RESULT:
         return 11
     if response_type == ResponseType.PERFT_RESULT:
+        return 6
+    if response_type == ResponseType.DEBUG_STAT:
         return 6
     if response_type == ResponseType.ERROR:
         return 2
@@ -416,6 +444,11 @@ def decode_response(packet: bytes) -> EngineResponse:
         return PerftResultResponse(
             nodes=int.from_bytes(payload[0:5], "little", signed=False),
             completed_depth=payload[5],
+        )
+    if response_type == ResponseType.DEBUG_STAT:
+        return DebugStatResponse(
+            address=payload[0],
+            value=int.from_bytes(payload[1:6], "little", signed=False),
         )
     return ErrorResponse(
         error=_enum_or_int(EngineError, payload[0]),

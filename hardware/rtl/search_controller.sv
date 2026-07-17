@@ -14,7 +14,8 @@ module search_controller #(
     parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
-    parameter bit EXTERNAL_TT = 1'b0
+    parameter bit EXTERNAL_TT = 1'b0,
+    parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
     input wire clk,
     input wire rst_n,
@@ -23,6 +24,8 @@ module search_controller #(
     input EngineControllerRequest req,
     output logic resp_valid,
     output EngineControllerResponse resp,
+    input logic [7:0] debug_stat_address,
+    output logic [39:0] debug_stat_value,
     input logic tt_memory_ready,
     input logic tt_memory_error,
     output logic tt_mem_req_valid,
@@ -255,6 +258,9 @@ module search_controller #(
     TTLookupRequest tt_lookup_req;
     logic tt_lookup_resp_valid;
     TTLookupResponse tt_lookup_resp;
+    logic tt_cache_access;
+    logic tt_cache_hit;
+    logic tt_cache_access_is_store;
     logic tt_store_req_valid;
     logic tt_store_req_ready;
     TTStoreRequest tt_store_req;
@@ -384,6 +390,8 @@ module search_controller #(
                 .clear(tt_clear), .clear_busy(tt_clear_busy),
                 .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
                 .lookup_req(tt_lookup_req), .lookup_resp_valid(tt_lookup_resp_valid), .lookup_resp(tt_lookup_resp),
+                .cache_access(tt_cache_access), .cache_hit(tt_cache_hit),
+                .cache_access_is_store(tt_cache_access_is_store),
                 .store_req_valid(tt_store_req_valid), .store_req_ready(tt_store_req_ready), .store_req(tt_store_req),
                 .store_resp_valid(tt_store_resp_valid), .store_resp(tt_store_resp),
                 .mem_req_valid(tt_mem_req_valid), .mem_req_ready(tt_mem_req_ready),
@@ -398,6 +406,8 @@ module search_controller #(
                 .clk(clk), .rst_n(rst_n), .clear(tt_clear), .clear_busy(tt_clear_busy),
                 .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
                 .lookup_req(tt_lookup_req), .lookup_resp_valid(tt_lookup_resp_valid), .lookup_resp(tt_lookup_resp),
+                .cache_access(tt_cache_access), .cache_hit(tt_cache_hit),
+                .cache_access_is_store(tt_cache_access_is_store),
                 .store_req_valid(tt_store_req_valid), .store_req_ready(tt_store_req_ready), .store_req(tt_store_req),
                 .store_resp_valid(tt_store_resp_valid), .store_resp(tt_store_resp));
             assign tt_mem_req_valid = 1'b0;
@@ -411,6 +421,106 @@ module search_controller #(
             assign tt_mem_done_ready = 1'b0;
         end
     endgenerate
+
+    logic [39:0] stat_tt_lookups;
+    logic [39:0] stat_tt_hits;
+    logic [39:0] stat_cache_lookups;
+    logic [39:0] stat_cache_hits;
+    logic [39:0] stat_phase_cycles[0:SEARCH_THREAD_COUNT-1][0:ENGINE_STAT_PHASE_COUNT_VALUE-1];
+    logic [39:0] stat_search_cycle;
+
+    generate
+        if (ENABLE_SEARCH_STATS) begin : gen_search_stats
+            always_ff @(posedge clk) begin
+                if (!rst_n) begin
+                    stat_tt_lookups <= 40'd0;
+                    stat_tt_hits <= 40'd0;
+                    stat_cache_lookups <= 40'd0;
+                    stat_cache_hits <= 40'd0;
+                    stat_search_cycle <= 40'd0;
+                    for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                        for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
+                            stat_phase_cycles[tid][phase] <= 40'd0;
+                        end
+                    end
+                end else if (state == ST_IDLE && req_valid
+                        && (req.operation == ENGINE_CTRL_SEARCH_DEPTH
+                            || req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
+                            || req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK
+                            || req.operation == ENGINE_CTRL_SEARCH_NODES)) begin
+                    stat_tt_lookups <= 40'd0;
+                    stat_tt_hits <= 40'd0;
+                    stat_cache_lookups <= 40'd0;
+                    stat_cache_hits <= 40'd0;
+                    stat_search_cycle <= 40'd0;
+                    for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                        for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
+                            stat_phase_cycles[tid][phase] <= 40'd0;
+                        end
+                    end
+                end else begin
+                    if (tt_lookup_resp_valid
+                            && search_tt_lookup_inflight[tt_lookup_resp.thread_id]
+                            && search_thread_phase[tt_lookup_resp.thread_id] == SEARCH_PHASE_TT_WAIT) begin
+                        stat_tt_lookups <= stat_tt_lookups + 40'd1;
+                        if (tt_lookup_resp.hit) stat_tt_hits <= stat_tt_hits + 40'd1;
+                    end
+                    // Cache rate describes lookup probes; store probes are excluded.
+                    if (tt_cache_access && !tt_cache_access_is_store) begin
+                        stat_cache_lookups <= stat_cache_lookups + 40'd1;
+                        if (tt_cache_hit) stat_cache_hits <= stat_cache_hits + 40'd1;
+                    end
+                    if (state == ST_SEARCH_RUN) begin
+                        stat_search_cycle <= stat_search_cycle + 40'd1;
+                        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                            if (search_thread_phase[tid] >= SEARCH_PHASE_READY
+                                    && search_thread_phase[tid] <= SEARCH_PHASE_DONE) begin
+                                stat_phase_cycles[tid][search_thread_phase[tid] - SEARCH_PHASE_READY]
+                                    <= stat_phase_cycles[tid][search_thread_phase[tid] - SEARCH_PHASE_READY] + 40'd1;
+                            end
+                        end
+                    end
+                end
+            end
+        end else begin : gen_no_search_stats
+            always_comb begin
+                stat_tt_lookups = 40'd0;
+                stat_tt_hits = 40'd0;
+                stat_cache_lookups = 40'd0;
+                stat_cache_hits = 40'd0;
+                stat_search_cycle = 40'd0;
+                for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                    for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
+                        stat_phase_cycles[tid][phase] = 40'd0;
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Debug reads are intentionally a slow combinational mux used only between searches.
+    always_comb begin
+        debug_stat_value = 40'd0;
+        case (debug_stat_address)
+            ENGINE_STAT_ENABLED:          debug_stat_value = {39'd0, ENABLE_SEARCH_STATS};
+            ENGINE_STAT_THREAD_COUNT:     debug_stat_value = 40'(SEARCH_THREAD_COUNT);
+            ENGINE_STAT_PHASE_COUNT:      debug_stat_value = 40'(ENGINE_STAT_PHASE_COUNT_VALUE);
+            ENGINE_STAT_TT_LOOKUPS:       debug_stat_value = stat_tt_lookups;
+            ENGINE_STAT_TT_HITS:          debug_stat_value = stat_tt_hits;
+            ENGINE_STAT_TT_CACHE_LOOKUPS: debug_stat_value = stat_cache_lookups;
+            ENGINE_STAT_TT_CACHE_HITS:    debug_stat_value = stat_cache_hits;
+            default: begin
+                for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                    for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
+                        if (debug_stat_address == ENGINE_STAT_PHASE_BASE
+                                + 8'(tid * ENGINE_STAT_PHASE_COUNT_VALUE + phase)) begin
+                            debug_stat_value = stat_phase_cycles[tid][phase];
+                        end
+                    end
+                end
+            end
+        endcase
+    end
 
     timer #(
         .CLOCK_FREQ(CLOCK_FREQ)

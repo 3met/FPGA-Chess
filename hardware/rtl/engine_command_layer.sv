@@ -20,7 +20,9 @@ module engine_command_layer (
     input logic search_req_ready,
     output EngineControllerRequest search_req,
     input logic search_resp_valid,
-    input EngineControllerResponse search_resp
+    input EngineControllerResponse search_resp,
+    output logic [7:0] debug_stat_address,
+    input logic [39:0] debug_stat_value
 );
 
     localparam int SET_BOARD_PAYLOAD_BYTES = 36;
@@ -42,6 +44,7 @@ module engine_command_layer (
         RESP_ACK,
         RESP_SEARCH,
         RESP_PERFT,
+        RESP_DEBUG,
         RESP_ERROR
     } ResponseKind;
 
@@ -72,6 +75,9 @@ module engine_command_layer (
     NodeCountType last_node_count;
     logic [7:0] last_completed_depth;
     logic [2:0] last_end_reason;
+    logic [7:0] debug_stat_address_reg;
+
+    assign debug_stat_address = debug_stat_address_reg;
 
     // The protocol reserves the upper status bits as zero, so store only its live bits.
     function automatic logic [3:0] status_byte(
@@ -95,6 +101,7 @@ module engine_command_layer (
             ENGINE_CMD_SEARCH_NODES,
             ENGINE_CMD_KILL,
             ENGINE_CMD_GET_SEARCH_RESULT: return 1'b1;
+            ENGINE_CMD_GET_DEBUG_STAT: return 1'b1;
             ENGINE_CMD_PERFT: return 1'b1;
             default: return 1'b0;
         endcase
@@ -109,6 +116,7 @@ module engine_command_layer (
             ENGINE_CMD_SEARCH_ON_CLOCK:   return 6'd12;
             ENGINE_CMD_SEARCH_NODES:      return 6'd5;
             ENGINE_CMD_PERFT:             return 6'd1;
+            ENGINE_CMD_GET_DEBUG_STAT:    return 6'd1;
             default:                      return 6'd0;
         endcase
     endfunction : payload_len
@@ -119,6 +127,7 @@ module engine_command_layer (
             RESP_ACK:    return 4'd2;
             RESP_SEARCH: return 4'd12;
             RESP_PERFT:  return 4'd7;
+            RESP_DEBUG:  return 4'd7;
             RESP_ERROR:  return 4'd3;
             default:     return 4'd0;
         endcase
@@ -130,6 +139,7 @@ module engine_command_layer (
             RESP_ACK:    return ENGINE_RESP_ACK;
             RESP_SEARCH: return ENGINE_RESP_SEARCH_RESULT;
             RESP_PERFT:  return ENGINE_RESP_PERFT_RESULT;
+            RESP_DEBUG:  return ENGINE_RESP_DEBUG_STAT;
             RESP_ERROR:  return ENGINE_RESP_ERROR;
             default:     return 8'h00;
         endcase
@@ -288,6 +298,18 @@ module engine_command_layer (
                     endcase
                 end
 
+                RESP_DEBUG: begin
+                    case (response_index)
+                        5'd1: data_out = debug_stat_address_reg;
+                        5'd2: data_out = debug_stat_value[7:0];
+                        5'd3: data_out = debug_stat_value[15:8];
+                        5'd4: data_out = debug_stat_value[23:16];
+                        5'd5: data_out = debug_stat_value[31:24];
+                        5'd6: data_out = debug_stat_value[39:32];
+                        default: data_out = 'x;
+                    endcase
+                end
+
                 RESP_ERROR: begin
                     case (response_index)
                         5'd1: data_out = {5'b00000, response_error};
@@ -440,6 +462,11 @@ module engine_command_layer (
                     issue_single_request(req, RESP_PERFT, 1'b1, 1'b0);
                 end
 
+                ENGINE_CMD_GET_DEBUG_STAT: begin
+                    debug_stat_address_reg <= payload[0];
+                    start_response(RESP_DEBUG, error_code, 1'b1, 1'b0);
+                end
+
                 default: begin
                     latch_error(ENGINE_ERR_UNKNOWN_OPCODE);
                 end
@@ -472,6 +499,7 @@ module engine_command_layer (
             last_node_count <= NodeCountType'(0);
             last_completed_depth <= 8'd0;
             last_end_reason <= ENGINE_END_NORMAL;
+            debug_stat_address_reg <= 8'd0;
         end else begin
             case (state)
                 ST_IDLE: begin

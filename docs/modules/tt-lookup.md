@@ -36,6 +36,8 @@ The portable fallback implementation is `tt_load_store` under `hardware/rtl/tt/`
 
 The implemented lookup interface uses `lookup_req_valid`, `lookup_req_ready`, and `lookup_resp_valid`. Lookup requests are accepted whenever `clear` is not active. A lookup response is produced for each accepted request, with `hit` deasserted on empty, invalid, or verification-key mismatch entries.
 
+The load/store frontend also emits one-cycle `cache_access`, `cache_hit`, and `cache_access_is_store` instrumentation signals. The search statistics use only lookup probes for the reported cache hit rate; store probes are identified separately because stores use the same cache but do not measure lookup effectiveness. The inferred-RAM backend ties the signals low because it has no separate frontend cache.
+
 Lookups have priority over stores when memory bandwidth conflicts. An external lookup or store remains outstanding until its tagged completion returns, and all search contexts share cache and SDRAM entries. A store applies the depth/generation replacement policy from the cached entry when its external index is resident, otherwise it reads the old SDRAM entry, and writes through the cache and SDRAM when replacement is selected.
 
 The `clear` input implements `ucinewgame`. The BRAM fallback sequentially invalidates its entries. The external frontend increments the stored generation immediately; power-up and generation wrap perform a low-area serial sweep of the external validity/metadata word, with requests held off until the sweep completes.

@@ -4,6 +4,8 @@ The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It
 
 The DE1 build uses the FPGA-side 64 MiB, 32M-by-16 SDR SDRAM as the backing store for the transposition table. A portable controller performs JEDEC initialization, a serial validity-word sweep, open-row burst accesses, and distributed refresh. Runtime writes are fully staged before the physical WRITE command so upstream ready/valid gaps cannot interrupt the SDRAM's mandatory consecutive data beats. The engine remains in reset until memory initialization completes.
 
+The DE1 wrapper enables search statistics by default through `ENABLE_SEARCH_STATS = 1`; override the wrapper parameter with zero to synthesize them out. The generic engine and search-controller modules remain default-off.
+
 ## Clocking
 
 `CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses a 25 MHz engine clock. The UART continues to use the undivided 50 MHz reference clock.

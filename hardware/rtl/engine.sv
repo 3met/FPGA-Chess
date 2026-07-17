@@ -8,7 +8,8 @@ module engine #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT,
-    parameter bit EXTERNAL_TT = 1'b0
+    parameter bit EXTERNAL_TT = 1'b0,
+    parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
     input wire clk,
     input wire rst_n,
@@ -35,6 +36,8 @@ module engine #(
     EngineControllerRequest controller_req;
     logic controller_resp_valid;
     EngineControllerResponse controller_resp;
+    logic [7:0] debug_stat_address;
+    logic [39:0] debug_stat_value;
 
     engine_command_layer command_layer (
         .clk(clk),
@@ -51,14 +54,17 @@ module engine #(
         .search_req_ready(controller_req_ready),
         .search_req(controller_req),
         .search_resp_valid(controller_resp_valid),
-        .search_resp(controller_resp)
+        .search_resp(controller_resp),
+        .debug_stat_address(debug_stat_address),
+        .debug_stat_value(debug_stat_value)
     );
 
     search_controller #(
         .CLOCK_FREQ(CLOCK_FREQ),
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
-        .EXTERNAL_TT(EXTERNAL_TT)
+        .EXTERNAL_TT(EXTERNAL_TT),
+        .ENABLE_SEARCH_STATS(ENABLE_SEARCH_STATS)
     ) controller (
         .clk(clk),
         .rst_n(rst_n),
@@ -67,6 +73,8 @@ module engine #(
         .req(controller_req),
         .resp_valid(controller_resp_valid),
         .resp(controller_resp),
+        .debug_stat_address(debug_stat_address),
+        .debug_stat_value(debug_stat_value),
         .tt_memory_ready(tt_memory_ready), .tt_memory_error(tt_memory_error),
         .tt_mem_req_valid(tt_mem_req_valid), .tt_mem_req_ready(tt_mem_req_ready),
         .tt_mem_req_write(tt_mem_req_write), .tt_mem_req_address(tt_mem_req_address), .tt_mem_req_length(tt_mem_req_length),

@@ -22,6 +22,10 @@ module tb_engine;
     EngineControllerRequest search_req;
     logic search_resp_valid;
     EngineControllerResponse search_resp;
+    logic [7:0] debug_stat_address;
+    logic [39:0] debug_stat_value;
+
+    assign debug_stat_value = 40'd0;
 
     int pass_count = 0;
     int fail_count = 0;
@@ -41,7 +45,9 @@ module tb_engine;
         .search_req_ready(search_req_ready),
         .search_req(search_req),
         .search_resp_valid(search_resp_valid),
-        .search_resp(search_resp)
+        .search_resp(search_resp),
+        .debug_stat_address(debug_stat_address),
+        .debug_stat_value(debug_stat_value)
     );
 
     task automatic do_clock(input int count = 1);
@@ -215,6 +221,14 @@ module tb_engine;
         $display("=== engine status and error tests ===");
         send_byte(ENGINE_CMD_GET_STATUS);
         expect_status_response(8'h01, ENGINE_ERR_NONE, 8'h00);
+
+        send_byte(ENGINE_CMD_GET_DEBUG_STAT);
+        send_byte(8'd0);
+        expect_byte(ENGINE_RESP_DEBUG_STAT, "debug statistic response type");
+        expect_byte(8'd0, "debug statistic address");
+        for (int idx = 0; idx < 5; idx++) begin
+            expect_byte(8'd0, "disabled debug statistic value");
+        end
 
         ready_for_result = 1'b0;
         send_byte(ENGINE_CMD_GET_STATUS);

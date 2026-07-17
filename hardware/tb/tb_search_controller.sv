@@ -14,6 +14,9 @@ module tb_search_controller;
     EngineControllerRequest req;
     logic resp_valid;
     EngineControllerResponse resp;
+    logic [7:0] debug_stat_address;
+    logic [39:0] debug_stat_value;
+    logic stats_reset_pending;
 
     int pass_count = 0;
     int fail_count = 0;
@@ -74,7 +77,8 @@ module tb_search_controller;
 
     search_controller #(
         .CLOCK_FREQ(1_000_000),
-        .TT_INDEX_BITS(4)
+        .TT_INDEX_BITS(4),
+        .ENABLE_SEARCH_STATS(1'b1)
     ) dut (
         .clk(clk),
         .rst_n(rst_n),
@@ -82,7 +86,9 @@ module tb_search_controller;
         .req_ready(req_ready),
         .req(req),
         .resp_valid(resp_valid),
-        .resp(resp)
+        .resp(resp),
+        .debug_stat_address(debug_stat_address),
+        .debug_stat_value(debug_stat_value)
     );
 
     task automatic do_clock(input int count = 1);
@@ -137,6 +143,34 @@ module tb_search_controller;
         check(req_ready, "controller ready after reset");
         check(!resp_valid, "no response valid after reset");
     endtask : reset_dut
+
+    task automatic check_search_stats(input string label);
+        automatic logic [39:0] phase_total;
+
+        debug_stat_address = ENGINE_STAT_ENABLED;
+        #1;
+        check(debug_stat_value == 40'd1, {label, " enabled"});
+        debug_stat_address = ENGINE_STAT_THREAD_COUNT;
+        #1;
+        check(debug_stat_value == 40'(THREAD_COUNT), {label, " thread count"});
+        debug_stat_address = ENGINE_STAT_PHASE_COUNT;
+        #1;
+        check(debug_stat_value == 40'(ENGINE_STAT_PHASE_COUNT_VALUE), {label, " phase count"});
+        debug_stat_address = ENGINE_STAT_TT_LOOKUPS;
+        #1;
+        check(debug_stat_value != 40'd0, {label, " recorded TT lookups"});
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            phase_total = 40'd0;
+            for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
+                debug_stat_address = ENGINE_STAT_PHASE_BASE
+                    + 8'(tid * ENGINE_STAT_PHASE_COUNT_VALUE + phase);
+                #1;
+                phase_total += debug_stat_value;
+            end
+            check(phase_total == dut.stat_search_cycle,
+                $sformatf("%s thread %0d phase total matches search cycles", label, tid));
+        end
+    endtask : check_search_stats
 
     task automatic hold_request_until_ready(input EngineControllerRequest request, input string label);
         automatic int wait_cycles = 0;
@@ -839,6 +873,7 @@ module tb_search_controller;
         run_perft(8'd1, NodeCountType'(20), "startpos perft depth 1");
         run_perft(8'd2, NodeCountType'(400), "startpos perft depth 2");
         run_search_depth(8'd2, "startpos search depth 2");
+        check_search_stats("startpos search statistics");
         check(pvs_scout_seen, "startpos depth 2 used a PVS scout window");
         check(pvs_research_seen, "startpos depth 2 re-searched a PVS scout fail-high");
 
@@ -935,7 +970,29 @@ module tb_search_controller;
     end
 
     always_ff @(posedge clk) begin
-        if (rst_n) begin
+        if (!rst_n) begin
+            stats_reset_pending <= 1'b0;
+        end else begin
+            if (stats_reset_pending) begin
+                check(dut.stat_tt_lookups == 40'd0, "new search resets TT lookup statistics");
+                check(dut.stat_tt_hits == 40'd0, "new search resets TT hit statistics");
+                check(dut.stat_cache_lookups == 40'd0, "new search resets cache lookup statistics");
+                check(dut.stat_cache_hits == 40'd0, "new search resets cache hit statistics");
+                for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                    for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
+                        check(dut.stat_phase_cycles[tid][phase] == 40'd0,
+                            "new search resets phase statistics");
+                    end
+                end
+                stats_reset_pending <= 1'b0;
+            end
+            if (req_valid && req_ready
+                    && (req.operation == ENGINE_CTRL_SEARCH_DEPTH
+                        || req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
+                        || req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK
+                        || req.operation == ENGINE_CTRL_SEARCH_NODES)) begin
+                stats_reset_pending <= 1'b1;
+            end
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                 if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
                     pvs_scout_seen = 1'b1;

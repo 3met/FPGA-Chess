@@ -19,6 +19,9 @@ module tt_load_store #(
     input var TTLookupRequest lookup_req,
     output logic lookup_resp_valid,
     output TTLookupResponse lookup_resp,
+    output logic cache_access,
+    output logic cache_hit,
+    output logic cache_access_is_store,
 
     input logic store_req_valid,
     output logic store_req_ready,
@@ -80,6 +83,10 @@ module tt_load_store #(
     TTStorageEntry mem_read_data;
 
     assign clear_start = clear && !clear_prev && !clear_active;
+    // The inferred-RAM backend has no separate frontend cache.
+    assign cache_access = 1'b0;
+    assign cache_hit = 1'b0;
+    assign cache_access_is_store = 1'b0;
     assign clear_busy = clear_start || clear_active;
     assign lookup_req_ready = !clear_start && !clear_active;
     assign lookup_accept = lookup_req_valid && lookup_req_ready;

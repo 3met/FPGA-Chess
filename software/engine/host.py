@@ -18,6 +18,8 @@ from software.engine.protocol import (
     BAUD_RATE,
     BITS_TO_PROMOTION,
     ErrorResponse,
+    DebugStatResponse,
+    DebugStatAddress,
     PerftResultResponse,
     ProtocolError,
     SearchResultResponse,
@@ -25,6 +27,7 @@ from software.engine.protocol import (
     STARTPOS_FEN,
     cmd_get_search_result,
     cmd_get_status,
+    cmd_get_debug_stat,
     cmd_kill,
     cmd_make_move,
     cmd_new_game,
@@ -47,6 +50,18 @@ SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
 # a forced mate as MATE_SCORE minus the distance in plies.
 MATE_SCORE = 32_000
 MATE_THRESHOLD = 31_000
+SEARCH_PHASE_NAMES = (
+    "ready",
+    "tt_wait",
+    "eval_wait",
+    "move_wait",
+    "board_wait",
+    "reverse_wait",
+    "repetition_wait",
+    "store_wait",
+    "terminal_wait",
+    "done",
+)
 
 
 class HostError(RuntimeError):
@@ -285,7 +300,7 @@ class FPGAUCIHost:
         """Handle manual diagnostics requested through the UCI debug command."""
 
         if not args or args[0].lower() in {"help", "?"}:
-            self.emit("info string debug commands: status, result, board, sync, reset")
+            self.emit("info string debug commands: status, result, stats, board, sync, reset")
             return
 
         subcommand = args[0].lower()
@@ -338,6 +353,40 @@ class FPGAUCIHost:
                 self.emit(f"info string result error={self._enum_name(response.error)}")
                 return
             raise HostError(f"result returned unexpected response: {response}")
+        if subcommand == "stats":
+            def read_stat(address: int) -> int:
+                response = self.connect().request(cmd_get_debug_stat(address))
+                if not isinstance(response, DebugStatResponse) or response.address != address:
+                    raise HostError(f"stat {address} returned unexpected response: {response}")
+                return response.value
+
+            if not read_stat(DebugStatAddress.ENABLED):
+                self.emit("info string search statistics disabled in this FPGA build")
+                return
+            thread_count = read_stat(DebugStatAddress.THREAD_COUNT)
+            phase_count = read_stat(DebugStatAddress.PHASE_COUNT)
+            if phase_count != len(SEARCH_PHASE_NAMES):
+                raise HostError(f"FPGA reports unsupported search phase count {phase_count}")
+            tt_lookups = read_stat(DebugStatAddress.TT_LOOKUPS)
+            tt_hits = read_stat(DebugStatAddress.TT_HITS)
+            cache_lookups = read_stat(DebugStatAddress.TT_CACHE_LOOKUPS)
+            cache_hits = read_stat(DebugStatAddress.TT_CACHE_HITS)
+            tt_rate = 100.0 * tt_hits / tt_lookups if tt_lookups else 0.0
+            cache_rate = 100.0 * cache_hits / cache_lookups if cache_lookups else 0.0
+            self.emit(
+                f"info string TT hits={tt_hits} lookups={tt_lookups} hit_rate={tt_rate:.2f}%"
+            )
+            self.emit(
+                f"info string TT cache hits={cache_hits} lookups={cache_lookups} "
+                f"hit_rate={cache_rate:.2f}%"
+            )
+            for thread_id in range(thread_count):
+                values = [
+                    f"{name}={read_stat(DebugStatAddress.PHASE_BASE + thread_id * phase_count + phase)}"
+                    for phase, name in enumerate(SEARCH_PHASE_NAMES)
+                ]
+                self.emit(f"info string search thread={thread_id} cycles " + " ".join(values))
+            return
         raise HostError(f"unknown debug command '{args[0]}'; use 'debug help'")
 
     def _handle_position(self, args: list[str]) -> None:

@@ -18,6 +18,9 @@ module tt_external_load_store #(
     input TTLookupRequest lookup_req,
     output logic lookup_resp_valid,
     output TTLookupResponse lookup_resp,
+    output logic cache_access,
+    output logic cache_hit,
+    output logic cache_access_is_store,
     input logic store_req_valid,
     output logic store_req_ready,
     input TTStoreRequest store_req,
@@ -182,6 +185,9 @@ module tt_external_load_store #(
             clear_prev <= 1'b0;
             clear_pending <= 1'b0;
             lookup_resp_valid <= 1'b0;
+            cache_access <= 1'b0;
+            cache_hit <= 1'b0;
+            cache_access_is_store <= 1'b0;
             store_resp_valid <= 1'b0;
             lookup_resp <= TTLookupResponse'('0);
             store_resp <= TTStoreResponse'('0);
@@ -190,6 +196,9 @@ module tt_external_load_store #(
             cache_clear_index <= '0;
         end else begin
             lookup_resp_valid <= 1'b0;
+            cache_access <= 1'b0;
+            cache_hit <= 1'b0;
+            cache_access_is_store <= 1'b0;
             store_resp_valid <= 1'b0;
             clear_prev <= clear;
             if (clear && !clear_prev) clear_pending <= 1'b1;
@@ -210,6 +219,10 @@ module tt_external_load_store #(
                     else cache_clear_index <= cache_clear_index + CacheIndex'(1);
                 end
                 S_CACHE_READ: begin
+                    cache_access <= 1'b1;
+                    cache_hit <= cache_read_valid && cache_read_data[95:88] == generation
+                        && cache_read_tag == active_index;
+                    cache_access_is_store <= operation_store;
                     if (cache_read_valid && cache_read_data[95:88] == generation
                             && cache_read_tag == active_index) begin
                         if (!operation_store) begin

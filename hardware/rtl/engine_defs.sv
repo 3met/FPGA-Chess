@@ -16,12 +16,24 @@ package engine_defs;
     localparam logic [7:0] ENGINE_CMD_PERFT             = 8'h14;
     localparam logic [7:0] ENGINE_CMD_KILL              = 8'h1f;
     localparam logic [7:0] ENGINE_CMD_GET_SEARCH_RESULT = 8'h20;
+    localparam logic [7:0] ENGINE_CMD_GET_DEBUG_STAT    = 8'h21;
 
     localparam logic [7:0] ENGINE_RESP_STATUS        = 8'h80;
     localparam logic [7:0] ENGINE_RESP_ACK           = 8'h81;
     localparam logic [7:0] ENGINE_RESP_SEARCH_RESULT = 8'h82;
     localparam logic [7:0] ENGINE_RESP_PERFT_RESULT  = 8'h83;
+    localparam logic [7:0] ENGINE_RESP_DEBUG_STAT    = 8'h84;
     localparam logic [7:0] ENGINE_RESP_ERROR         = 8'hff;
+
+    localparam logic [7:0] ENGINE_STAT_ENABLED          = 8'd0;
+    localparam logic [7:0] ENGINE_STAT_THREAD_COUNT     = 8'd1;
+    localparam logic [7:0] ENGINE_STAT_PHASE_COUNT      = 8'd2;
+    localparam logic [7:0] ENGINE_STAT_TT_LOOKUPS       = 8'd3;
+    localparam logic [7:0] ENGINE_STAT_TT_HITS          = 8'd4;
+    localparam logic [7:0] ENGINE_STAT_TT_CACHE_LOOKUPS = 8'd5;
+    localparam logic [7:0] ENGINE_STAT_TT_CACHE_HITS    = 8'd6;
+    localparam logic [7:0] ENGINE_STAT_PHASE_BASE       = 8'd16;
+    localparam int ENGINE_STAT_PHASE_COUNT_VALUE = 10;
 
     localparam logic [7:0] ENGINE_ERR_NONE              = 8'd0;
     localparam logic [7:0] ENGINE_ERR_UNKNOWN_OPCODE    = 8'd1;

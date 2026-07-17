@@ -7,6 +7,7 @@ import unittest
 
 from software.engine.protocol import (
     Command,
+    DebugStatResponse,
     EndReason,
     EngineError,
     Move,
@@ -145,6 +146,28 @@ class UCIHostDiagnosticTests(unittest.TestCase):
             lines,
             ["info string status ready=1 search_active=0 output_pending=0 error=internal operation=7"],
         )
+
+    def test_stats_diagnostic_formats_rates_and_per_thread_cycles(self):
+        class Client:
+            def request(self, command):
+                address = command[1]
+                values = {0: 1, 1: 1, 2: 10, 3: 8, 4: 2, 5: 4, 6: 3}
+                return DebugStatResponse(address=address, value=values.get(address, address - 15))
+
+        host = object.__new__(FPGAUCIHost)
+        host.client = Client()
+        host._search_active = False
+        host._search_lock = threading.Lock()
+        lines: list[str] = []
+        host.emit = lines.append
+        host.connect = lambda: host.client
+
+        host._handle_debug_command(["stats"])
+
+        self.assertEqual(lines[0], "info string TT hits=2 lookups=8 hit_rate=25.00%")
+        self.assertEqual(lines[1], "info string TT cache hits=3 lookups=4 hit_rate=75.00%")
+        self.assertIn("ready=1", lines[2])
+        self.assertIn("done=10", lines[2])
 
 if __name__ == "__main__":
     unittest.main()
