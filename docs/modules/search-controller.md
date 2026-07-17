@@ -107,7 +107,7 @@ flowchart LR
 | `gen_search_stack_ram[].search_stack_mem` | Packed 117-bit records | One synchronous block-RAM search stack per thread, containing moves, scores, bounds, repetition boundary, and node/PVS flags. |
 | `search_stack_top[THREAD_COUNT]` | Packed 117-bit records | Register caches for each thread's current node. |
 | `search_stack_parent_q[THREAD_COUNT]` | Packed 117-bit records | Continuously prefetched synchronous-RAM parent values used on ascent. |
-| `search_nodes` | `NODE_COUNT_BITS` | Node count for the active operation. |
+| `search_nodes` | `NODE_COUNT_BITS` | Search node count for the active operation; increments when a real legal move commits and enters its child position. Perft retains its conventional fixed-depth leaf count. |
 | `search_thread_phase[THREAD_COUNT]` | Enum | Per-thread scheduler phase: ready, TT wait, eval wait, move wait, board wait, store wait, done, or idle. |
 | `search_*_inflight[THREAD_COUNT]` | Bit arrays | Per-thread flags indicating accepted or pending board, move, eval, TT lookup, and TT store pipeline work. |
 | `search_active_thread_count` | Count | Number of root-thread contexts still active in the current iterative-deepening pass. |

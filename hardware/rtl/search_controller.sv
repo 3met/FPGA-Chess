@@ -1931,6 +1931,11 @@ module search_controller #(
                                 // overwritten by the next candidate at this ply.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else begin
+                                // A node is entered only after a speculative push
+                                // proves legal. Count that committed child here so
+                                // TT cutoffs, draws, and terminal children count too.
+                                nodes_next += NodeCountType'(1);
+                                search_thread_nodes[board_thread_id] <= search_thread_nodes[board_thread_id] + NodeCountType'(1);
                                 search_board[board_thread_id] <= board_update_out;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
@@ -2031,8 +2036,6 @@ module search_controller #(
                             search_eval_wait_count[eval_thread_id] <= EvalWaitCount'(0);
                             search_eval_inflight[eval_thread_id] <= 1'b0;
                             eval_score = pov_eval(search_board[eval_thread_id], static_eval_out);
-                            nodes_next += NodeCountType'(1);
-                            search_thread_nodes[eval_thread_id] <= search_thread_nodes[eval_thread_id] + NodeCountType'(1);
 
                             if (search_eval_is_stand_pat[eval_thread_id]) begin
                                 search_stack_top[eval_thread_id].stand_pat_done <= 1'b1;
