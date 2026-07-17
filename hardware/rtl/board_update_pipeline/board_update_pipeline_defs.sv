@@ -56,6 +56,8 @@ package board_update_pipeline_defs;
 
         // Pipeline Internal Values
         MoveRecord move_record;
+        Position mover_king_square;
+        logic mover_in_check;
     } BoardUpdatePipelineCtx;
 
 endpackage

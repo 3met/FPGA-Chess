@@ -94,6 +94,11 @@ module static_evaluator (
     always_comb begin
         automatic PositionalScore positional_delta;
         automatic TilePositionalScore tile_positional_delta[64];
+        automatic PositionalScore positional_sum_32[32];
+        automatic PositionalScore positional_sum_16[16];
+        automatic PositionalScore positional_sum_8[8];
+        automatic PositionalScore positional_sum_4[4];
+        automatic PositionalScore positional_sum_2[2];
 
         for (int stage = 0; stage < STATIC_EVAL_PROP_STAGE_CNT; stage++) begin
             next_base_eval_pipe[stage] = base_eval_pipe[stage];
@@ -256,10 +261,24 @@ module static_evaluator (
                 tile_positional_delta[pos] = color_signed(occupant.piece_color, magnitude);
             end
 
-            positional_delta += PositionalScore'(tile_positional_delta[pos]);
         end
 
-        // This is the existing stage-7 register boundary; no further board or
+        // Keep the board reduction balanced so its depth grows logarithmically
+        // instead of relying on the synthesizer to reassociate a procedural sum.
+        for (int idx = 0; idx < 32; idx++)
+            positional_sum_32[idx] = PositionalScore'(tile_positional_delta[2 * idx])
+                + PositionalScore'(tile_positional_delta[2 * idx + 1]);
+        for (int idx = 0; idx < 16; idx++)
+            positional_sum_16[idx] = positional_sum_32[2 * idx] + positional_sum_32[2 * idx + 1];
+        for (int idx = 0; idx < 8; idx++)
+            positional_sum_8[idx] = positional_sum_16[2 * idx] + positional_sum_16[2 * idx + 1];
+        for (int idx = 0; idx < 4; idx++)
+            positional_sum_4[idx] = positional_sum_8[2 * idx] + positional_sum_8[2 * idx + 1];
+        for (int idx = 0; idx < 2; idx++)
+            positional_sum_2[idx] = positional_sum_4[2 * idx] + positional_sum_4[2 * idx + 1];
+        positional_delta = positional_sum_2[0] + positional_sum_2[1];
+
+        // This is the existing final evaluation register boundary; no further board or
         // scan state is required once the reduction has been computed.
         next_static_eval = base_eval_pipe[STATIC_EVAL_PROP_STAGE_CNT-1] + EvalScore'(positional_delta);
     end

@@ -18,6 +18,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Output | `board_out` | Output `FullBoard` state. |
 | Output | `zobrist_key_out` | Updated Zobrist key for the board position. |
 | Output | `pst_eval_out` | Updated White-relative PST evaluation. |
+| Output | `mover_in_check_out` | For push operations, indicates that the resulting position attacks the king of the side that moved. |
 
 ## Operations
 
@@ -37,14 +38,14 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 | Pipeline Stage | Description                                                               |
 | -------------- | ------------------------------------------------------------------------- |
-| 0              | Register inputs, fetch reverse history, decode move effects, and launch table reads. |
-| 1              | Align synchronous table outputs with the registered request and decoded effects. |
-| 2              | Apply tile, side-data, Zobrist, and PST updates, register outputs, and write pushed move history. |
+| 0              | Register inputs, locate the mover's post-move king square, fetch reverse history, decode move effects, and launch table reads. |
+| 1              | Align synchronous table outputs with the registered request and decoded effects, and evaluate push-move king safety. |
+| 2              | Apply tile, side-data, Zobrist, and PST updates, register outputs including push legality, and write pushed move history. |
 
 ```mermaid
 flowchart LR
     In["Request inputs:\nboard, side data, op, move, thread, ply"]
-    Out["Outputs:\nboard_out, zobrist_key_out, pst_eval_out"]
+    Out["Outputs:\nboard_out, zobrist_key_out,\npst_eval_out, mover_in_check_out"]
     History["Per-thread move history"]
     Tables["Zobrist and PST tables"]
 

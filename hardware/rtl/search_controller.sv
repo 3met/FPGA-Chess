@@ -165,6 +165,7 @@ module search_controller #(
     BoardOp search_board_op_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     PlyIndex search_board_ply_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     ThreadID search_move_tag_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
+    logic search_move_in_check_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
     ThreadID search_eval_tag_pipe[0:SEARCH_EVAL_TAG_PIPE_LEN-1];
     logic search_board_tag_valid_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     logic search_move_tag_valid_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
@@ -233,6 +234,7 @@ module search_controller #(
     FullBoard board_update_out;
     ZobristKey board_update_zobrist_out;
     EvalScore board_update_pst_out;
+    logic board_update_mover_in_check;
 
     MoveGenOp move_gen_op;
     logic move_gen_start_node;
@@ -344,7 +346,8 @@ module search_controller #(
         .search_ply(board_update_ply),
         .board_out(board_update_out),
         .zobrist_key_out(board_update_zobrist_out),
-        .pst_eval_out(board_update_pst_out)
+        .pst_eval_out(board_update_pst_out),
+        .mover_in_check_out(board_update_mover_in_check)
     );
 
     repetition_checker #(
@@ -610,12 +613,6 @@ module search_controller #(
         return square_attacked(board, find_king(board, board.turn), Color'(~board.turn));
     endfunction : side_in_check
 
-    // A pushed board has already toggled turn, so validate the king belonging
-    // to the side that made the speculative move.
-    function automatic logic last_mover_in_check(input FullBoard board);
-        return square_attacked(board, find_king(board, Color'(~board.turn)), board.turn);
-    endfunction : last_mover_in_check
-
     function automatic logic committed_move_is_irreversible(input FullBoard before_board, input FullBoard after_board, input Move move);
         automatic Tile start_tile;
         automatic Tile end_tile;
@@ -627,8 +624,8 @@ module search_controller #(
             || before_board.castle_perms != after_board.castle_perms;
     endfunction : committed_move_is_irreversible
 
-    function automatic EvalScore terminal_no_move_score(input FullBoard board, input PlyIndex ply);
-        if (side_in_check(board)) begin
+    function automatic EvalScore terminal_no_move_score(input logic in_check, input PlyIndex ply);
+        if (in_check) begin
             return EvalScore'(int'(ply) - int'(MATE_SCORE));
         end
         return DRAW_EVAL_SCORE;
@@ -1367,6 +1364,7 @@ module search_controller #(
             for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
                 search_move_tag_pipe[idx] <= ThreadID'(0);
                 search_move_tag_valid_pipe[idx] <= 1'b0;
+                search_move_in_check_pipe[idx] <= 1'b0;
             end
             for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
                 search_eval_tag_pipe[idx] <= ThreadID'(0);
@@ -1446,6 +1444,7 @@ module search_controller #(
                 for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
                     search_move_tag_pipe[idx] <= ThreadID'(0);
                     search_move_tag_valid_pipe[idx] <= 1'b0;
+                    search_move_in_check_pipe[idx] <= 1'b0;
                 end
                 for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
                     search_eval_tag_pipe[idx] <= ThreadID'(0);
@@ -1507,6 +1506,7 @@ module search_controller #(
                                 for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
                                     search_move_tag_pipe[idx] <= ThreadID'(0);
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
+                                    search_move_in_check_pipe[idx] <= 1'b0;
                                 end
                                 for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
                                     search_eval_tag_pipe[idx] <= ThreadID'(0);
@@ -1621,6 +1621,7 @@ module search_controller #(
                                     for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
                                         search_move_tag_pipe[idx] <= ThreadID'(0);
                                         search_move_tag_valid_pipe[idx] <= 1'b0;
+                                        search_move_in_check_pipe[idx] <= 1'b0;
                                     end
                                     for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
                                         search_eval_tag_pipe[idx] <= ThreadID'(0);
@@ -1669,6 +1670,7 @@ module search_controller #(
                                 for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
                                     search_move_tag_pipe[idx] <= ThreadID'(0);
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
+                                    search_move_in_check_pipe[idx] <= 1'b0;
                                 end
                                 for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
                                     search_eval_tag_pipe[idx] <= ThreadID'(0);
@@ -1799,7 +1801,7 @@ module search_controller #(
 
                 ST_PERFT_PUSH_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
-                        if (last_mover_in_check(board_update_out)) begin
+                        if (board_update_mover_in_check) begin
                             state <= ST_PERFT_GEN_ISSUE;
                         end else if (int'(search_ply[0]) + 1 >= int'(active_req.depth_limit)) begin
                             search_nodes <= search_nodes + NodeCountType'(1);
@@ -1938,9 +1940,13 @@ module search_controller #(
                     for (int idx = SEARCH_MOVE_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
                         search_move_tag_pipe[idx] <= search_move_tag_pipe[idx - 1];
                         search_move_tag_valid_pipe[idx] <= search_move_tag_valid_pipe[idx - 1];
+                        search_move_in_check_pipe[idx] <= search_move_in_check_pipe[idx - 1];
                     end
                     search_move_tag_pipe[0] <= search_move_issue_thread;
                     search_move_tag_valid_pipe[0] <= search_move_issue_valid;
+                    search_move_in_check_pipe[0] <= search_move_issue_valid
+                        ? side_in_check(search_board[search_move_issue_thread])
+                        : 1'b0;
                     for (int idx = SEARCH_EVAL_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
                         search_eval_tag_pipe[idx] <= search_eval_tag_pipe[idx - 1];
                         search_eval_tag_valid_pipe[idx] <= search_eval_tag_valid_pipe[idx - 1];
@@ -2035,7 +2041,7 @@ module search_controller #(
                                 search_stack_top[board_thread_id] <= search_stack_parent_q[board_thread_id];
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
-                            end else if (last_mover_in_check(board_update_out)) begin
+                            end else if (board_update_mover_in_check) begin
                                 // The board pipeline is stateless. Ignore the
                                 // speculative result; its history entry will be
                                 // overwritten by the next candidate at this ply.
@@ -2121,7 +2127,10 @@ module search_controller #(
                                     ? search_stack_top[move_thread_id].best_score
                                     : search_stack_top[move_thread_id].has_legal
                                     ? search_stack_top[move_thread_id].best_score
-                                    : terminal_no_move_score(search_board[move_thread_id], move_ply);
+                                    : terminal_no_move_score(
+                                        search_move_in_check_pipe[SEARCH_MOVE_TAG_PIPE_LEN - 1],
+                                        move_ply
+                                    );
                                 search_thread_phase[move_thread_id] <= SEARCH_PHASE_TERMINAL_WAIT;
                             end else begin
                                 search_stack_top[move_thread_id].first_request <= 1'b0;

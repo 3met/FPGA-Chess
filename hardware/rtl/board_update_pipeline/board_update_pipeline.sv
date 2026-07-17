@@ -22,7 +22,8 @@ module board_update_pipeline #(
 
     output FullBoard board_out,
     output ZobristKey zobrist_key_out,
-    output EvalScore pst_eval_out
+    output EvalScore pst_eval_out,
+    output logic mover_in_check_out
 );
 
     typedef logic [8:0] PstAddr;
@@ -227,6 +228,101 @@ module board_update_pipeline #(
         return (tile.piece_color == WHITE) ? score : -score;
     endfunction : signed_piece_score
 
+    function automatic logic is_line_attacker(input PieceType piece, input Direction dir);
+        return piece == QUEEN
+            || (piece == ROOK && isDirCardinal(dir))
+            || (piece == BISHOP && isDirDiag(dir));
+    endfunction : is_line_attacker
+
+    function automatic Position find_king(input FullBoard board, input Color king_color);
+        for (int pos = 0; pos < 64; pos++) begin
+            if (board.tiles[pos] == Tile'({king_color, KING})) begin
+                return Position'(pos);
+            end
+        end
+        return Position'('x);
+    endfunction : find_king
+
+    function automatic Tile pushed_tile(input FullBoard board, input MoveEffects effects, input Position pos);
+        automatic Tile tile = board.tiles[pos];
+
+        if (pos == effects.from_pos) tile = EMPTY_TILE;
+        if (pos == effects.to_pos) tile = effects.placed_tile;
+        if (effects.is_ep && pos == effects.ep_capture_pos) tile = EMPTY_TILE;
+        if (effects.is_castle && pos == effects.rook_from) tile = EMPTY_TILE;
+        if (effects.is_castle && pos == effects.rook_to) tile = Tile'({board.turn, ROOK});
+        return tile;
+    endfunction : pushed_tile
+
+    function automatic logic pushed_square_attacked(
+        input FullBoard board,
+        input MoveEffects effects,
+        input Position square,
+        input Color attacker_color
+    );
+        automatic Position test_pos;
+        automatic Tile test_tile;
+
+        if (attacker_color == WHITE) begin
+            if (isShiftOnBoard(square, SOUTH_WEST, 3'd1)
+                    && pushed_tile(board, effects, shiftPos(square, SOUTH_WEST, 3'd1)) == WHITE_PAWN) return 1'b1;
+            if (isShiftOnBoard(square, SOUTH_EAST, 3'd1)
+                    && pushed_tile(board, effects, shiftPos(square, SOUTH_EAST, 3'd1)) == WHITE_PAWN) return 1'b1;
+        end else begin
+            if (isShiftOnBoard(square, NORTH_WEST, 3'd1)
+                    && pushed_tile(board, effects, shiftPos(square, NORTH_WEST, 3'd1)) == BLACK_PAWN) return 1'b1;
+            if (isShiftOnBoard(square, NORTH_EAST, 3'd1)
+                    && pushed_tile(board, effects, shiftPos(square, NORTH_EAST, 3'd1)) == BLACK_PAWN) return 1'b1;
+        end
+
+        for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
+            if (isKnightShiftOnBoard(square, KnightDirection'(knight_dir))) begin
+                test_pos = shiftKnightPos(square, KnightDirection'(knight_dir));
+                if (pushed_tile(board, effects, test_pos) == Tile'({attacker_color, KNIGHT})) return 1'b1;
+            end
+        end
+
+        for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
+            automatic Direction dir = Direction'(dir_idx);
+            for (int distance = 1; distance < 8; distance++) begin
+                if (isShiftOnBoard(square, dir, distance[2:0])) begin
+                    test_pos = shiftPos(square, dir, distance[2:0]);
+                    test_tile = pushed_tile(board, effects, test_pos);
+                    if (test_tile.piece_type != NULL_PIECE) begin
+                        if (test_tile.piece_color == attacker_color) begin
+                            if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
+                            if (is_line_attacker(test_tile.piece_type, dir)) return 1'b1;
+                        end
+                        break;
+                    end
+                end
+            end
+        end
+
+        return 1'b0;
+    endfunction : pushed_square_attacked
+
+    function automatic logic pushed_mover_in_check(
+        input FullBoard board,
+        input MoveEffects effects,
+        input Position king_square
+    );
+        automatic Color mover_color = board.turn;
+        return pushed_square_attacked(
+            board,
+            effects,
+            king_square,
+            Color'(~mover_color)
+        );
+    endfunction : pushed_mover_in_check
+
+    function automatic Position pushed_king_square(input FullBoard board, input Move move);
+        if (board.tiles[move.from_pos].piece_type == KING) begin
+            return move.to_pos;
+        end
+        return find_king(board, board.turn);
+    endfunction : pushed_king_square
+
     task automatic plan_side_delta(
         input FullBoard old_board,
         input Color new_turn,
@@ -352,6 +448,7 @@ module board_update_pipeline #(
         board_out <= next_board_out;
         zobrist_key_out <= next_zobrist_key_out;
         pst_eval_out <= next_pst_eval_out;
+        mover_in_check_out <= ctx_pipe[1].mover_in_check;
         zobrist_read_enable_q <= zobrist_read_plan.enable;
         zobrist_turn_toggle_q <= zobrist_turn_toggle;
         zobrist_castle_toggle_q <= zobrist_castle_toggle;
@@ -371,6 +468,12 @@ module board_update_pipeline #(
         next_ctx_pipe[0].thread_id   = thread_id;
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
+        // Locate the mover's king one stage before the attack scan so neither
+        // operation sits in series on the same timing path.
+        next_ctx_pipe[0].mover_king_square = (board_op == BOARD_PUSH_MOVE_OP)
+            ? pushed_king_square(board_in, move_in)
+            : Position'(0);
+        next_ctx_pipe[0].mover_in_check = 1'b0;
 
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
@@ -378,6 +481,11 @@ module board_update_pipeline #(
 
     always_comb begin
         next_ctx_pipe[1] = ctx_pipe[0];
+        // King safety is evaluated in parallel with the synchronous table
+        // reads and carried to the stage-2 board result without adding a cycle.
+        next_ctx_pipe[1].mover_in_check = (ctx_pipe[0].board_op == BOARD_PUSH_MOVE_OP)
+            ? pushed_mover_in_check(ctx_pipe[0].board, move_effects, ctx_pipe[0].mover_king_square)
+            : 1'b0;
     end
 
     // Form the incremental hash delta one stage before board mutation. The

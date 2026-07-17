@@ -17,7 +17,7 @@ The static evaluator computes a White-relative score from board-state inputs and
 | -------------- | ----------- |
 | 0 | Register input board tiles and `base_eval`. Long directional scans inspect their first one to three statically selected ray squares; shorter scans remain constant empty until their geometry-specific start stage. |
 | 1-2 | Each active directional scan inspects up to three successive squares from the matching delayed board copy until it finds the nearest piece, then carries that result forward. Starting short edge and diagonal rays late avoids storing their inactive state in early propagation registers. |
-| 3 | Add positional terms to delayed `base_eval` and register the output score. |
+| 3 | Add positional terms to delayed `base_eval` with a balanced fixed-width reduction tree and register the output score. |
 
 `STATIC_EVAL_PIPELINE_STAGE_CNT` is 4. The pipeline accepts one request per cycle. Outputs are only meaningful after a request has traversed the fixed latency.
 

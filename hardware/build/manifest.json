@@ -194,14 +194,14 @@
       "source_set": "quartus-de1-soc",
       "family": "Cyclone V",
       "device": "5CSEMA5F31C6",
-      "engine_clock_mhz": 25.0,
+      "engine_clock_mhz": 35.714286,
       "clock_generator": {
         "kind": "intel-pll",
         "template": "hardware/ip/pll"
       },
       "seed": 1,
       "map_effort": "fast",
-      "fit_effort": "fast",
+      "fit_effort": "standard",
       "message_disable": [12021, 12022, 12128, 12134, 169065, 169070, 286033],
       "sdc": "hardware/constraints/engine.sdc",
       "qsf_template": "hardware/constraints/DE1_SoC.qsf",
