@@ -188,19 +188,24 @@ class FPGAUCIHost:
             "stop",
             "ponderhit",
             "quit",
-            "fpga",
+            "help",
         }
         command_index = next((idx for idx, token in enumerate(tokens) if token.lower() in known_commands), None)
         if command_index is None:
+            self.emit(f"info string unknown command: {tokens[0]}")
             return True
         command = tokens[command_index].lower()
         args = tokens[command_index + 1 :]
         try:
             if command == "uci":
                 self._handle_uci()
+            elif command == "help":
+                self._handle_help()
             elif command == "debug":
                 if args and args[0].lower() in {"on", "off"}:
                     self.debug = args[0].lower() == "on"
+                else:
+                    self._handle_debug_command(args)
             elif command == "isready":
                 self._handle_isready()
             elif command == "setoption":
@@ -220,8 +225,6 @@ class FPGAUCIHost:
             elif command == "quit":
                 self.close()
                 return False
-            elif command == "fpga":
-                self._handle_debug_command(args)
         except Exception as exc:
             self.emit(f"info string error: {exc}")
             self.logger.exception("UCI command failed: %s", stripped)
@@ -233,6 +236,11 @@ class FPGAUCIHost:
         self.emit("option name Port type string default auto")
         self.emit(f"option name Baud type spin default {BAUD_RATE} min 9600 max 4000000")
         self.emit("uciok")
+
+    def _handle_help(self) -> None:
+        """Print the supported host commands for interactive use."""
+        self.emit("info string commands: uci, isready, setoption, ucinewgame, position, go, stop, quit, debug, help")
+        self.emit("info string use 'debug help' for diagnostics")
 
     def _handle_isready(self) -> None:
         if self._is_search_active():
@@ -274,24 +282,28 @@ class FPGAUCIHost:
         self.position_synced = True
 
     def _handle_debug_command(self, args: list[str]) -> None:
-        """Handle manual-only FPGA diagnostics without extending the UCI protocol."""
+        """Handle manual diagnostics requested through the UCI debug command."""
 
         if not args or args[0].lower() in {"help", "?"}:
-            self.emit("info string fpga commands: status, result, board, sync, reset, perft <depth>")
+            self.emit("info string debug commands: status, result, board, sync, reset")
             return
 
         subcommand = args[0].lower()
         if subcommand == "board":
-            self.emit(f"info string fpga fen {self.board.fen()}")
-            for row in str(self.board).splitlines():
-                self.emit(f"info string fpga board {row}")
+            self.emit("-------------------")
+            for rank, row in zip(range(8, 0, -1), str(self.board).splitlines()):
+                self.emit(f"{rank} | {row}")
+            self.emit("  +----------------")
+            self.emit("    a b c d e f g h")
+            self.emit(f"FEN: {self.board.fen()}")
+            self.emit("-------------------")
             return
         if subcommand == "reset":
             self.stop_search(wait=True)
             self.connect().initialize()
             # Initialization resets FPGA command/search state, so the local position must be resent.
             self.position_synced = False
-            self.emit("info string fpga reset sent; resend position before searching")
+            self.emit("info string reset sent; resend position before searching")
             return
         if self._is_search_active():
             raise HostError("FPGA diagnostics are unavailable while search is active")
@@ -299,14 +311,14 @@ class FPGAUCIHost:
             response = self.connect().request(cmd_set_board(self.board.fen()))
             self._raise_on_error_response(response, "sync")
             self.position_synced = True
-            self.emit("info string fpga position synchronized")
+            self.emit("info string position synchronized")
             return
         if subcommand == "status":
             response = self.connect().request(cmd_get_status())
             if not isinstance(response, StatusResponse):
                 raise HostError(f"status returned unexpected response: {response}")
             self.emit(
-                "info string fpga status "
+                "info string status "
                 f"ready={int(response.ready)} search_active={int(response.search_active)} "
                 f"output_pending={int(response.output_pending)} error={self._enum_name(response.error)} "
                 f"operation={response.active_operation}"
@@ -318,20 +330,15 @@ class FPGAUCIHost:
                 reason = self._enum_name(response.end_reason)
                 move = self._format_bestmove(response.best_move, self.board)
                 self.emit(
-                    f"info string fpga result move={move} score={response.score} nodes={response.nodes} "
+                    f"info string result move={move} score={response.score} nodes={response.nodes} "
                     f"depth={response.completed_depth} end={reason}"
                 )
                 return
             if isinstance(response, ErrorResponse):
-                self.emit(f"info string fpga result error={self._enum_name(response.error)}")
+                self.emit(f"info string result error={self._enum_name(response.error)}")
                 return
             raise HostError(f"result returned unexpected response: {response}")
-        if subcommand == "perft":
-            if len(args) != 2:
-                raise HostError("usage: fpga perft <depth>")
-            self._handle_go(["perft", args[1]])
-            return
-        raise HostError(f"unknown fpga command '{args[0]}'; use 'fpga help'")
+        raise HostError(f"unknown debug command '{args[0]}'; use 'debug help'")
 
     def _handle_position(self, args: list[str]) -> None:
         if self._is_search_active():

@@ -39,6 +39,44 @@ class UCIHostSpecTests(unittest.TestCase):
         self.assertEqual(lines, [])
         self.assertTrue(host.debug)
 
+    def test_debug_board_uses_uci_debug_command_and_includes_coordinates(self):
+        host = self.make_host()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            host.handle_line("debug board")
+
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "-------------------",
+                "8 | r n b q k b n r",
+                "7 | p p p p p p p p",
+                "6 | . . . . . . . .",
+                "5 | . . . . . . . .",
+                "4 | . . . . . . . .",
+                "3 | . . . . . . . .",
+                "2 | P P P P P P P P",
+                "1 | R N B Q K B N R",
+                "  +----------------",
+                "    a b c d e f g h",
+                "FEN: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "-------------------",
+            ],
+        )
+
+    def test_help_and_unknown_commands_report_useful_output(self):
+        host = self.make_host()
+
+        self.assertEqual(
+            self.capture_lines(host, "help"),
+            [
+                "info string commands: uci, isready, setoption, ucinewgame, position, go, stop, quit, debug, help",
+                "info string use 'debug help' for diagnostics",
+            ],
+        )
+        self.assertEqual(self.capture_lines(host, "nonsense"), ["info string unknown command: nonsense"])
+
     def test_isready_does_not_query_hardware_while_searching(self):
         host = self.make_host()
         host._search_active = True
@@ -105,7 +143,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         self.assertEqual(host.client.command, cmd_get_status())
         self.assertEqual(
             lines,
-            ["info string fpga status ready=1 search_active=0 output_pending=0 error=internal operation=7"],
+            ["info string status ready=1 search_active=0 output_pending=0 error=internal operation=7"],
         )
 
 if __name__ == "__main__":
