@@ -2111,9 +2111,13 @@ module search_controller #(
                             search_tt_response_dispatch_cursor <= search_thread_after(lookup_thread_id);
                             search_tt_response_pending[lookup_thread_id] <= 1'b0;
 
-                            if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_ply)) begin
+                            // A matching TT move remains useful for ordering even when the
+                            // stored depth is too shallow for its score/bound to be usable.
+                            if (lookup_resp.hit) begin
                                 search_stack_top[lookup_thread_id].tt_move <= lookup_resp.best_move;
                                 search_stack_top[lookup_thread_id].has_tt_move <= !is_null_move(lookup_resp.best_move);
+                            end
+                            if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_ply)) begin
                                 if (lookup_resp.bound_type == TT_BOUND_EXACT) begin
                                     search_return_score[lookup_thread_id] <= lookup_resp.score;
                                     search_return_valid[lookup_thread_id] <= 1'b1;

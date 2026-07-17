@@ -38,6 +38,10 @@ module tb_search_controller;
     bit pipeline_overlap_seen;
     bit pvs_scout_seen;
     bit pvs_research_seen;
+    bit shallow_tt_hit_seen;
+    bit shallow_tt_target_seen;
+    bit shallow_tt_target_pending[0:THREAD_COUNT-1];
+    Move shallow_tt_target_move[0:THREAD_COUNT-1];
     bit thread_selected_active_seen[0:THREAD_COUNT-1];
     bit thread_rr_cursor_seen[0:THREAD_COUNT-1];
     bit thread_board_cursor_seen[0:THREAD_COUNT-1];
@@ -278,6 +282,22 @@ module tb_search_controller;
         check(second_score == first_score, {label, " second search same score"});
         check(second_move == first_move, {label, " second search same best move"});
     endtask : run_tt_reuse_test
+
+    task automatic run_shallow_tt_move_ordering_test(input string label);
+        automatic Move best_move;
+        automatic EvalScore score;
+        automatic NodeCountType nodes;
+
+        shallow_tt_hit_seen = 1'b0;
+        shallow_tt_target_seen = 1'b0;
+        for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+            shallow_tt_target_pending[idx] = 1'b0;
+            shallow_tt_target_move[idx] = NULL_MOVE;
+        end
+        run_search_depth_record(8'd2, label, best_move, score, nodes);
+        check(shallow_tt_hit_seen, {label, " received a TT hit too shallow for cutoff use"});
+        check(shallow_tt_target_seen, {label, " reused shallow TT best move in targeted generation"});
+    endtask : run_shallow_tt_move_ordering_test
 
     task automatic clear_tt_thread_seen();
         for (int idx = 0; idx < THREAD_COUNT; idx++) begin
@@ -887,6 +907,7 @@ module tb_search_controller;
 
         new_game();
         run_tt_reuse_test("startpos TT reuse");
+        run_shallow_tt_move_ordering_test("shallow TT move ordering");
 
         new_game();
         run_thread_id_usage_test("thread ID scheduled search");
@@ -1069,6 +1090,21 @@ module tb_search_controller;
             end
             if (dut.tt_lookup_resp_valid) begin
                 tt_response_thread_seen[int'(dut.tt_lookup_resp.thread_id)] = 1'b1;
+                if (dut.tt_lookup_resp.hit
+                        && dut.tt_lookup_resp.depth < dut.search_remaining_depth(
+                            dut.search_ply[int'(dut.tt_lookup_resp.thread_id)])
+                        && !is_null_move(dut.tt_lookup_resp.best_move)) begin
+                    shallow_tt_hit_seen = 1'b1;
+                    shallow_tt_target_pending[int'(dut.tt_lookup_resp.thread_id)] = 1'b1;
+                    shallow_tt_target_move[int'(dut.tt_lookup_resp.thread_id)] = dut.tt_lookup_resp.best_move;
+                end
+            end
+            if (dut.move_gen_op == move_generator_defs::MOVE_GEN_TARGETED_OP
+                    && shallow_tt_target_pending[int'(dut.move_gen_thread_id)]
+                    && dut.search_stack_top[int'(dut.move_gen_thread_id)].has_tt_move
+                    && dut.move_gen_target_move == shallow_tt_target_move[int'(dut.move_gen_thread_id)]) begin
+                shallow_tt_target_seen = 1'b1;
+                shallow_tt_target_pending[int'(dut.move_gen_thread_id)] = 1'b0;
             end
             if (dut.tt_store_req_valid && dut.tt_store_req_ready) begin
                 tt_store_count += 1;
