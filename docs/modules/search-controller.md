@@ -116,6 +116,6 @@ flowchart LR
 | `search_tt_response_dispatch_cursor` | `ThreadID` | Cursor used to choose among helper responses when no primary response is pending. |
 | `search_*_dispatch_cursor` | `ThreadID` | Per-pipeline cursors used to choose among helpers after ready primary work has been preferred. |
 | `search_*_tag_pipe` | Thread, operation, and ply tag arrays | Controller-local fixed-latency tags for board-update, move-generation, and static-evaluation completions. |
-| `repetition_checker.active_history` | 100-entry 64-bit key RAM | Active-game reversible positions used to construct the shared checker’s two root-parity static tables before a search. The current root sample is excluded from previous-occurrence counts. |
-| `repetition_checker` | Shared five-stage pipeline | Performs full-key static and per-thread line-history lookup with one request accepted per cycle, saturated occurrence reduction, irreversible-boundary masking, and tagged responses. |
+| `repetition_checker.active_history` | 100-entry 64-bit key RAM | Active-game reversible positions used to construct the shared checker’s parity-addressed static table before a search. The current root sample is excluded from previous-occurrence counts. |
+| `repetition_checker` | Shared two-stage pipeline | Performs full-key static and per-thread line-history lookup with one request accepted per cycle, saturated occurrence reduction, irreversible-boundary masking, and tagged responses. |
 | `repetition_checker.line_bank[]` | Banked 64-bit key RAM | Search-line history owned by the shared checker; stale entries are excluded by request-time ply and irreversible-boundary masks rather than cleared. |

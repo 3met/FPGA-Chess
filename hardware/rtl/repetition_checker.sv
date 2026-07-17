@@ -38,6 +38,8 @@ module repetition_checker #(
     localparam int LINE_ADDR_WORDS = 2 * SEARCH_THREAD_COUNT;
     localparam int LINE_ADDR_BITS = (LINE_ADDR_WORDS <= 1) ? 1 : $clog2(LINE_ADDR_WORDS);
     localparam int TABLE_BITS = $clog2(STATIC_TABLE_SIZE);
+    localparam int STATIC_ADDR_BITS = TABLE_BITS + 1;
+    localparam int STATIC_WORD_COUNT = 2 * STATIC_TABLE_SIZE;
     localparam int HISTORY_COUNT_BITS = $clog2(ACTIVE_HISTORY_DEPTH + 1);
     localparam int HISTORY_ADDR_BITS = (ACTIVE_HISTORY_DEPTH <= 1) ? 1 : $clog2(ACTIVE_HISTORY_DEPTH);
 
@@ -53,52 +55,49 @@ module repetition_checker #(
     } InitState;
 
     InitState init_state;
-    logic [15:0] init_seed, selected_seed;
-    logic [TABLE_BITS-1:0] clear_index, scan_table_index;
+    logic [15:0] init_seed;
+    logic [STATIC_ADDR_BITS-1:0] clear_index;
     logic [HISTORY_COUNT_BITS-1:0] active_history_count, scan_index;
-    logic scan_parity;
-    ZobristKey scan_key;
+    logic scan_odd_parity;
 
     logic active_history_rden, active_history_wren;
     logic [HISTORY_ADDR_BITS-1:0] active_history_rdaddr, active_history_wraddr;
     ZobristKey active_history_q;
 
     logic static_rden;
-    logic [TABLE_BITS-1:0] static_rdaddr, static_wraddr;
-    logic static_even_wren, static_odd_wren;
-    logic [STATIC_ENTRY_BITS-1:0] static_write_data, static_even_q_bits, static_odd_q_bits;
-    StaticEntry static_even_q, static_odd_q;
+    logic [STATIC_ADDR_BITS-1:0] static_rdaddr, static_wraddr;
+    logic static_wren;
+    logic [STATIC_ENTRY_BITS-1:0] static_write_data, static_q_bits;
+    StaticEntry static_q;
 
     logic [63:0] line_read_data [0:LINE_BANK_COUNT-1];
     logic [LINE_BANK_COUNT-1:0] line_wren;
     logic [LINE_ADDR_BITS-1:0] line_rdaddr, line_wraddr;
 
-    logic valid_pipe [0:4];
-    ThreadID thread_pipe [0:4];
-    logic [EPOCH_BITS-1:0] epoch_pipe [0:4];
-    ZobristKey key_pipe [0:1];
-    logic [LINE_BANK_COUNT-1:0] mask_pipe [0:1];
-    logic parity_pipe [0:1];
-    logic suppress_static_pipe [0:1];
-    logic [1:0] line_count_pipe [0:4];
-    logic [1:0] static_count_pipe [0:4];
+    logic valid_pipe [0:1];
+    ThreadID thread_pipe [0:1];
+    logic [EPOCH_BITS-1:0] epoch_pipe [0:1];
+    ZobristKey request_key;
+    logic [LINE_BANK_COUNT-1:0] request_mask;
+    logic request_suppress_static;
+    logic [1:0] line_count, static_count;
 
-    // Programmable index fold; full-key comparison remains authoritative.
+    // Four fixed rotations per byte provide a cheap programmable index fold;
+    // full-key comparison remains authoritative.
     function automatic logic [TABLE_BITS-1:0] hash_key(input ZobristKey key, input logic [15:0] seed);
         logic [7:0] rotated [0:7];
-        logic [7:0] pair_xor [0:3];
         for (int byte_index = 0; byte_index < 8; byte_index++) begin
-            automatic logic [2:0] amount;
-            automatic logic [15:0] doubled;
-            amount = (seed >> ((byte_index * 2) % 14)) + 3'(byte_index);
-            doubled = {key[byte_index*8 +: 8], key[byte_index*8 +: 8]};
-            rotated[byte_index] = (doubled >> amount);
+            automatic logic [7:0] value;
+            value = key[byte_index*8 +: 8];
+            case (seed[byte_index*2 +: 2])
+                2'd0: rotated[byte_index] = value;
+                2'd1: rotated[byte_index] = {value[0], value[7:1]};
+                2'd2: rotated[byte_index] = {value[1:0], value[7:2]};
+                default: rotated[byte_index] = {value[2:0], value[7:3]};
+            endcase
         end
-        pair_xor[0] = rotated[0] ^ rotated[1];
-        pair_xor[1] = rotated[2] ^ rotated[3];
-        pair_xor[2] = rotated[4] ^ rotated[5];
-        pair_xor[3] = rotated[6] ^ rotated[7];
-        return TABLE_BITS'((pair_xor[0] ^ pair_xor[1]) ^ (pair_xor[2] ^ pair_xor[3]));
+        return TABLE_BITS'(rotated[0] ^ rotated[1] ^ rotated[2] ^ rotated[3]
+            ^ rotated[4] ^ rotated[5] ^ rotated[6] ^ rotated[7]);
     endfunction
 
     function automatic logic [1:0] sat_add(input logic [1:0] lhs, input logic [1:0] rhs);
@@ -106,16 +105,16 @@ module repetition_checker #(
         return lhs + rhs;
     endfunction
 
-    assign static_even_q = StaticEntry'(static_even_q_bits);
-    assign static_odd_q = StaticEntry'(static_odd_q_bits);
+    assign static_q = StaticEntry'(static_q_bits);
+    assign scan_odd_parity = ((int'(active_history_count) - 1 - int'(scan_index)) & 1) != 0;
     assign init_busy = init_state == INIT_CLEAR || init_state == INIT_HISTORY_READ
         || init_state == INIT_STATIC_READ || init_state == INIT_STATIC_CHECK || init_state == INIT_RETRY;
     assign init_done = init_state == INIT_READY;
     assign init_failed = init_state == INIT_FAIL;
-    assign resp_valid = valid_pipe[4];
-    assign resp_thread = thread_pipe[4];
-    assign resp_epoch = epoch_pipe[4];
-    assign resp_previous_count = sat_add(line_count_pipe[4], static_count_pipe[4]);
+    assign resp_valid = valid_pipe[1];
+    assign resp_thread = thread_pipe[1];
+    assign resp_epoch = epoch_pipe[1];
+    assign resp_previous_count = sat_add(line_count, static_count);
     assign resp_is_draw = resp_previous_count >= 2;
 
     always_comb begin
@@ -126,26 +125,24 @@ module repetition_checker #(
         active_history_wraddr = active_history_reset ? '0 : HISTORY_ADDR_BITS'(active_history_count);
 
         static_rden = (init_state == INIT_STATIC_READ) || (req_valid && init_done);
-        static_rdaddr = (init_state == INIT_STATIC_READ)
-            ? hash_key(active_history_q, init_seed) : hash_key(req_key, selected_seed);
-        static_wraddr = (init_state == INIT_CLEAR) ? clear_index : scan_table_index;
-        static_even_wren = init_state == INIT_CLEAR;
-        static_odd_wren = init_state == INIT_CLEAR;
+        static_rdaddr = (init_state == INIT_STATIC_READ || init_state == INIT_STATIC_CHECK)
+            ? {scan_odd_parity, hash_key(active_history_q, init_seed)}
+            : {req_ply[0], hash_key(req_key, init_seed)};
+        static_wraddr = (init_state == INIT_CLEAR) ? clear_index : static_rdaddr;
+        static_wren = init_state == INIT_CLEAR;
         static_write_data = '0;
         if (init_state == INIT_STATIC_CHECK) begin
             automatic StaticEntry entry;
-            entry = scan_parity ? static_odd_q : static_even_q;
+            entry = static_q;
             if (!entry.valid) begin
                 entry.valid = 1'b1;
-                entry.key = scan_key;
+                entry.key = active_history_q;
                 entry.count = 2'd1;
-                static_even_wren = !scan_parity;
-                static_odd_wren = scan_parity;
+                static_wren = 1'b1;
                 static_write_data = entry;
-            end else if (entry.key == scan_key && entry.count < 2) begin
+            end else if (entry.key == active_history_q && entry.count < 2) begin
                 entry.count = entry.count + 1'b1;
-                static_even_wren = !scan_parity;
-                static_odd_wren = scan_parity;
+                static_wren = 1'b1;
                 static_write_data = entry;
             end
         end
@@ -163,13 +160,9 @@ module repetition_checker #(
         .clock(clk), .data(active_history_key), .rdaddress(active_history_rdaddr), .rden(active_history_rden),
         .wraddress(active_history_wraddr), .wren(active_history_wren), .q(active_history_q)
     );
-    synchronous_simple_dual_port_ram #(.NUM_WORDS(STATIC_TABLE_SIZE), .WORD_SIZE(STATIC_ENTRY_BITS)) static_even_ram (
+    synchronous_simple_dual_port_ram #(.NUM_WORDS(STATIC_WORD_COUNT), .WORD_SIZE(STATIC_ENTRY_BITS)) static_history_ram (
         .clock(clk), .data(static_write_data), .rdaddress(static_rdaddr), .rden(static_rden),
-        .wraddress(static_wraddr), .wren(static_even_wren), .q(static_even_q_bits)
-    );
-    synchronous_simple_dual_port_ram #(.NUM_WORDS(STATIC_TABLE_SIZE), .WORD_SIZE(STATIC_ENTRY_BITS)) static_odd_ram (
-        .clock(clk), .data(static_write_data), .rdaddress(static_rdaddr), .rden(static_rden),
-        .wraddress(static_wraddr), .wren(static_odd_wren), .q(static_odd_q_bits)
+        .wraddress(static_wraddr), .wren(static_wren), .q(static_q_bits)
     );
 
     genvar bank_gen;
@@ -187,17 +180,13 @@ module repetition_checker #(
             active_history_count <= '0;
             init_state <= INIT_IDLE;
             init_seed <= 16'h1;
-            selected_seed <= '0;
             clear_index <= '0;
             scan_index <= '0;
-            scan_table_index <= '0;
-            scan_parity <= 1'b0;
-            scan_key <= '0;
-            for (int stage = 0; stage < 5; stage++) begin
+            for (int stage = 0; stage < 2; stage++) begin
                 valid_pipe[stage] <= 1'b0;
-                line_count_pipe[stage] <= 2'd0;
-                static_count_pipe[stage] <= 2'd0;
             end
+            line_count <= 2'd0;
+            static_count <= 2'd0;
         end else begin
             if (active_history_reset) active_history_count <= 1;
             else if (active_history_write && active_history_count < ACTIVE_HISTORY_DEPTH)
@@ -210,27 +199,23 @@ module repetition_checker #(
                     init_state <= INIT_CLEAR;
                 end
                 INIT_CLEAR: begin
-                    if (clear_index == STATIC_TABLE_SIZE-1) begin
+                    if (clear_index == STATIC_WORD_COUNT-1) begin
                         scan_index <= '0;
                         init_state <= INIT_HISTORY_READ;
                     end else clear_index <= clear_index + 1'b1;
                 end
                 INIT_HISTORY_READ: begin
                     if (active_history_count <= 1 || scan_index == active_history_count-1) begin
-                        selected_seed <= init_seed;
                         init_state <= INIT_READY;
                     end else init_state <= INIT_STATIC_READ;
                 end
                 INIT_STATIC_READ: begin
-                    scan_parity <= ((int'(active_history_count) - 1 - int'(scan_index)) & 1) != 0;
-                    scan_table_index <= static_rdaddr;
-                    scan_key <= active_history_q;
                     init_state <= INIT_STATIC_CHECK;
                 end
                 INIT_STATIC_CHECK: begin
                     automatic StaticEntry entry;
-                    entry = scan_parity ? static_odd_q : static_even_q;
-                    if (!entry.valid || entry.key == scan_key) begin
+                    entry = static_q;
+                    if (!entry.valid || entry.key == active_history_q) begin
                         scan_index <= scan_index + 1'b1;
                         init_state <= INIT_HISTORY_READ;
                     end else init_state <= INIT_RETRY;
@@ -255,46 +240,35 @@ module repetition_checker #(
             valid_pipe[0] <= req_valid && init_done;
             thread_pipe[0] <= req_thread;
             epoch_pipe[0] <= req_epoch;
-            key_pipe[0] <= req_key;
-            parity_pipe[0] <= req_ply[0];
-            suppress_static_pipe[0] <= req_start_ply != 0;
-            mask_pipe[0] <= '0;
+            request_key <= req_key;
+            request_suppress_static <= req_start_ply != 0;
+            request_mask <= '0;
             if (req_valid && req_ply != 0) begin
                 automatic int current_bank = (int'(req_ply) - 1) >> 1;
                 automatic int first_ply = int'(req_start_ply);
                 if (first_ply < 1) first_ply = 1;
                 if ((first_ply & 1) != (int'(req_ply) & 1)) first_ply++;
                 for (int bank = 0; bank < LINE_BANK_COUNT; bank++)
-                    mask_pipe[0][bank] <= bank >= ((first_ply - 1) >> 1) && bank < current_bank;
+                    request_mask[bank] <= bank >= ((first_ply - 1) >> 1) && bank < current_bank;
             end
 
-            for (int stage = 1; stage < 5; stage++) begin
-                valid_pipe[stage] <= valid_pipe[stage-1];
-                thread_pipe[stage] <= thread_pipe[stage-1];
-                epoch_pipe[stage] <= epoch_pipe[stage-1];
-                line_count_pipe[stage] <= line_count_pipe[stage-1];
-                static_count_pipe[stage] <= static_count_pipe[stage-1];
-            end
-            key_pipe[1] <= key_pipe[0];
-            mask_pipe[1] <= mask_pipe[0];
-            parity_pipe[1] <= parity_pipe[0];
-            suppress_static_pipe[1] <= suppress_static_pipe[0];
-            line_count_pipe[0] <= 0;
-            static_count_pipe[0] <= 0;
+            valid_pipe[1] <= valid_pipe[0];
+            thread_pipe[1] <= thread_pipe[0];
+            epoch_pipe[1] <= epoch_pipe[0];
             begin
-                automatic logic [1:0] reduced_count = 0;
+                automatic logic [1:0] reduced_count = 2'd0;
                 for (int bank = 0; bank < LINE_BANK_COUNT; bank++)
-                    if (mask_pipe[0][bank] && line_read_data[bank] == key_pipe[0])
+                    if (request_mask[bank] && line_read_data[bank] == request_key)
                         reduced_count = sat_add(reduced_count, 2'd1);
-                line_count_pipe[1] <= reduced_count;
+                line_count <= reduced_count;
             end
             begin
                 automatic StaticEntry lookup;
-                lookup = parity_pipe[0] ? static_odd_q : static_even_q;
-                static_count_pipe[1] <= (valid_pipe[0] && !suppress_static_pipe[0]
-                    && lookup.valid && lookup.key == key_pipe[0]) ? lookup.count : 0;
+                lookup = static_q;
+                static_count <= (valid_pipe[0] && !request_suppress_static
+                    && lookup.valid && lookup.key == request_key) ? lookup.count : 0;
             end
-            if (flush) for (int stage = 0; stage < 5; stage++) valid_pipe[stage] <= 1'b0;
+            if (flush) for (int stage = 0; stage < 2; stage++) valid_pipe[stage] <= 1'b0;
 
 `ifndef SYNTHESIS
             if (req_valid) begin

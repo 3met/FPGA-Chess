@@ -67,6 +67,44 @@ module tb_repetition_checker;
         check(resp_is_draw == (expected_count >= 2), {label, " decision"});
     endtask
 
+    // Drive four consecutive requests and verify that no response bubble is introduced.
+    task automatic request_burst;
+        int received;
+        fork
+            begin
+                for (int index = 0; index < 4; index++) begin
+                    @(negedge clk);
+                    req_valid = 1;
+                    req_thread = ThreadID'(index & 1);
+                    req_ply = PlyIndex'((index >= 2) ? 1 : 0);
+                    req_start_ply = 0;
+                    req_key = (index == 0) ? 64'h1111
+                        : (index == 1) ? 64'h9999
+                        : (index == 2) ? 64'h2222 : 64'h1111;
+                    req_epoch = 4'(index + 1);
+                end
+                @(negedge clk);
+                req_valid = 0;
+            end
+            begin
+                received = 0;
+                while (received < 4) begin
+                    @(negedge clk);
+                    if (resp_valid && resp_epoch >= 1 && resp_epoch <= 4) begin
+                        received++;
+                        check(resp_epoch == 4'(received), "burst response order");
+                        case (received)
+                            1: check(resp_previous_count == 2, "burst root hit count");
+                            2: check(resp_previous_count == 0, "burst root miss count");
+                            3: check(resp_previous_count == 2, "burst odd-parity hit count");
+                            4: check(resp_previous_count == 0, "burst odd-parity miss count");
+                        endcase
+                    end
+                end
+            end
+        join
+    endtask
+
     initial begin
         history_reset = 0; history_write = 0; init_start = 0; line_write_valid = 0; req_valid = 0;
         history_key = 0; line_write_thread = 0; line_write_ply = 0; line_write_key = 0;
@@ -82,6 +120,7 @@ module tb_repetition_checker;
         initialize();
         request(0, 0, 0, 64'h1111, 2, "pre-root threefold");
         request(1, 0, 0, 64'h9999, 0, "no occurrence");
+        request_burst();
 
         line_sample(0, 1, 64'haaaa);
         line_sample(0, 2, 64'hbbbb);
