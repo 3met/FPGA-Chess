@@ -116,7 +116,7 @@ module de1_soc(input CLOCK_50,
 	engine #(
 		.CLOCK_FREQ(ENGINE_CLOCK_FREQ),
 		.SEARCH_THREAD_COUNT(1),
-		.SEARCH_STACK_DEPTH(16),
+		.SEARCH_STACK_DEPTH(24),
 		.EXTERNAL_TT(1'b1)
 	) engine (
 		.clk(clk),
