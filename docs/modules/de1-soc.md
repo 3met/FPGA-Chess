@@ -6,7 +6,7 @@ The DE1 build uses the FPGA-side 64 MiB, 32M-by-16 SDR SDRAM as the backing stor
 
 ## Clocking
 
-`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses the timing-closed 22.727273 MHz divide-by-22 output. The UART continues to use the undivided 50 MHz reference clock.
+`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses a 25 MHz engine clock. The UART continues to use the undivided 50 MHz reference clock.
 
 The same PLL produces a 100 MHz SDRAM-controller clock and a phase-adjusted 100 MHz `DRAM_CLK`. The TT path crosses between the engine and memory domains through shallow asynchronous FIFOs sized for their traffic: four commands, four write words, eight read words, and two completions. The read FIFO can hold a complete six-word burst because physical SDR SDRAM bursts cannot be paused. The board SDC declares the engine-to-memory and engine-to-UART synchronizer boundaries asynchronous while retaining timing between the related SDRAM clocks. These clocks are confined to the DE1 wrapper so another FPGA family can provide equivalents with its PLL or MMCM.
 
