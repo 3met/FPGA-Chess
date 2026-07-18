@@ -139,6 +139,7 @@ module search_controller #(
     MoveWaitCount move_wait_count;
 
     FullBoard active_board;
+    logic active_board_in_check;
     ZobristKey active_zobrist_key;
     EvalScore active_pst_eval;
 
@@ -183,6 +184,9 @@ module search_controller #(
 `endif
     Move search_pending_move[0:SEARCH_THREAD_COUNT-1];
     FullBoard search_board[0:SEARCH_THREAD_COUNT-1];
+    // Cache the side-to-move check status with each board so move dispatch does
+    // not put the round-robin board mux in front of the full attack scan.
+    logic search_board_in_check[0:SEARCH_THREAD_COUNT-1];
     ZobristKey search_zobrist_key[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_pst_eval[0:SEARCH_THREAD_COUNT-1];
     SearchStackEntry search_stack_top[0:SEARCH_THREAD_COUNT-1];
@@ -241,6 +245,9 @@ module search_controller #(
     ZobristKey board_update_zobrist_out;
     EvalScore board_update_pst_out;
     logic board_update_mover_in_check;
+    // Evaluate a completed board once, then retain its check status with the
+    // board context that accepts it instead of scanning during move dispatch.
+    logic board_update_side_in_check;
 
     MoveGenOp move_gen_op;
     logic move_gen_start_node;
@@ -355,6 +362,8 @@ module search_controller #(
         .pst_eval_out(board_update_pst_out),
         .mover_in_check_out(board_update_mover_in_check)
     );
+
+    assign board_update_side_in_check = side_in_check(board_update_out);
 
     repetition_checker #(
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT), .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
@@ -564,12 +573,18 @@ module search_controller #(
     endfunction : is_line_attacker
 
     function automatic Position find_king(input FullBoard board, input Color king_color);
+        automatic Position king_pos;
+
+        // A legal chess board has exactly one king of each colour. OR-ing the
+        // matching square indices lets synthesis use a balanced reduction
+        // instead of a 64-entry priority mux.
+        king_pos = Position'(0);
         for (int pos = 0; pos < 64; pos++) begin
             if (board.tiles[pos] == Tile'({king_color, KING})) begin
-                return Position'(pos);
+                king_pos |= Position'(pos);
             end
         end
-        return Position'('x);
+        return king_pos;
     endfunction : find_king
 
     function automatic logic square_attacked(input FullBoard board, input Position square, input Color attacker_color);
@@ -1287,6 +1302,7 @@ module search_controller #(
             board_wait_count <= BoardWaitCount'(0);
             move_wait_count <= MoveWaitCount'(0);
             active_board <= FullBoard'('0);
+            active_board_in_check <= 1'b0;
             active_zobrist_key <= ZobristKey'(0);
             active_pst_eval <= EvalScore'(0);
             repetition_epoch <= '0;
@@ -1366,6 +1382,7 @@ module search_controller #(
                 search_tt_response[tid] <= TTLookupResponse'('0);
                 search_pending_move[tid] <= NULL_MOVE;
                 search_board[tid] <= FullBoard'('0);
+                search_board_in_check[tid] <= 1'b0;
                 search_zobrist_key[tid] <= ZobristKey'(0);
                 search_pst_eval[tid] <= EvalScore'(0);
                 search_ply[tid] <= PlyIndex'(0);
@@ -1722,6 +1739,7 @@ module search_controller #(
                 ST_BOARD_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
                         active_board <= board_update_out;
+                        active_board_in_check <= board_update_side_in_check;
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         if (active_req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
@@ -1767,6 +1785,7 @@ module search_controller #(
                 ST_NEW_SETUP_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
                         active_board <= board_update_out;
+                        active_board_in_check <= board_update_side_in_check;
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         if (new_setup_index == 7'd67) begin
@@ -1898,6 +1917,7 @@ module search_controller #(
                         search_thread_status[tid] <= SEARCH_THREAD_ACTIVE;
                         search_thread_phase[tid] <= SEARCH_PHASE_READY;
                         search_board[tid] <= active_board;
+                        search_board_in_check[tid] <= active_board_in_check;
                         search_zobrist_key[tid] <= active_zobrist_key;
                         search_pst_eval[tid] <= active_pst_eval;
                         search_ply[tid] <= PlyIndex'(0);
@@ -1973,7 +1993,7 @@ module search_controller #(
                     search_move_tag_pipe[0] <= search_move_issue_thread;
                     search_move_tag_valid_pipe[0] <= search_move_issue_valid;
                     search_move_in_check_pipe[0] <= search_move_issue_valid
-                        ? side_in_check(search_board[search_move_issue_thread])
+                        ? search_board_in_check[search_move_issue_thread]
                         : 1'b0;
                     for (int idx = SEARCH_EVAL_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
                         search_eval_tag_pipe[idx] <= search_eval_tag_pipe[idx - 1];
@@ -2066,6 +2086,7 @@ module search_controller #(
                             search_board_inflight[board_thread_id] <= 1'b0;
                             if (reverse_complete) begin
                                 search_board[board_thread_id] <= board_update_out;
+                                search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_return_move[board_thread_id] <= search_stack_top[board_thread_id].move;
@@ -2085,6 +2106,7 @@ module search_controller #(
                                 nodes_next += NodeCountType'(1);
                                 search_thread_nodes[board_thread_id] <= search_thread_nodes[board_thread_id] + NodeCountType'(1);
                                 search_board[board_thread_id] <= board_update_out;
+                                search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 repetition_line_write_valid <= 1'b1;
