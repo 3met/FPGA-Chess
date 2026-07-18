@@ -10,27 +10,6 @@ from .common import BUILD_ROOT, BuildError, QUARTUS_ERROR_RE, REPO_ROOT, SYNTH_M
 from .manifest import load_manifest
 
 
-def collect_quartus_summary(build_dir: Path) -> list[str]:
-    summaries: list[str] = []
-    for pattern in ("*.map.summary", "*.fit.summary", "*.sta.summary", "*.sta.rpt"):
-        for path in sorted(build_dir.rglob(pattern)):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            for line in text.splitlines():
-                stripped = line.strip()
-                if (
-                    "Fmax" in stripped
-                    or "Total logic elements" in stripped
-                    or "Total registers" in stripped
-                    or "Total block memory bits" in stripped
-                    or "Slack" in stripped
-                    or "Timing requirements" in stripped
-                ):
-                    summaries.append(f"{rel(path)}: {stripped}")
-                    if len(summaries) >= 12:
-                        return summaries
-    return summaries
-
-
 def report_timestamp(build_dir: Path, metadata: dict | None) -> str:
     if metadata and metadata.get("started"):
         return str(metadata["started"])

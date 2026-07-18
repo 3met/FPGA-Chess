@@ -26,7 +26,6 @@ from .common import (
 )
 from .generated_data import command_gen_data
 from .manifest import ensure_existing, expand_source_set, load_manifest, repo_path
-from .reports import collect_quartus_summary
 
 
 def qsf_assignment_for_source(path: Path) -> str:
@@ -276,8 +275,6 @@ def synth_quartus(
             print(f"  {line}")
 
     finish_synth_metadata(build_dir, metadata, failed)
-    for line in collect_quartus_summary(build_dir):
-        print(f"  {line}")
     return 1 if failed else 0
 
 

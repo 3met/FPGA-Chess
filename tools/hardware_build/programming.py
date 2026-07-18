@@ -84,7 +84,7 @@ def flash_quartus(
 
     require_tool("quartus_pgm")
     log_path = BUILD_ROOT / target["synthesis_target"] / "quartus_pgm.log"
-    code, output, elapsed = run_command(command, REPO_ROOT, log_path, live_log=True, tee_stdout=True)
+    code, output, elapsed = run_command(command, REPO_ROOT, log_path, live_log=True)
     if code != 0:
         print(f"[FAIL] Quartus programming ({elapsed:.2f}s)")
         print(f"  log: {rel(log_path)}")
