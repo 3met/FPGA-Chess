@@ -8,7 +8,7 @@ The number of threads, allocated stack depth, external perft support, Zobrist ha
 
 Search uses side-to-move point-of-view scores internally. Raw evaluation inputs are White-relative, so the search controller normalizes leaf/static scores by negating them when Black is to move.
 
-The full/default search uses iterative deepening with principal variation search (PVS), transposition tables, and quiescence search with captures and promotions only. The first legal move at a main-search node uses the full alpha/beta window. Later moves use a null window and are searched again with the full window only when the scout result raises alpha without reaching beta. Qsearch inherits its caller's window but does not apply PVS to its own captures and promotions.
+The full/default search uses iterative deepening with aspiration windows, principal variation search (PVS), transposition tables, and quiescence search with captures and promotions only. Fixed-depth searches use a four-pawn root margin around the previous completed score from depth two onward; a fail-low or fail-high repeats that depth once with the full window. Timed and node-limited searches retain a full root window because a failed retry can consume their move deadline. The broad fixed-depth margin accommodates tactical score swings without giving up all root-window pruning. The first legal move at a main-search node uses the full alpha/beta window. Later moves use a null window and are searched again with the full window only when the scout result raises alpha without reaching beta. Qsearch inherits its caller's window but does not apply PVS to its own captures and promotions.
 
 ## Thread State
 

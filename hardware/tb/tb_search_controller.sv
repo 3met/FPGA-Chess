@@ -41,6 +41,7 @@ module tb_search_controller;
     bit pipeline_overlap_seen;
     bit pvs_scout_seen;
     bit pvs_research_seen;
+    bit aspiration_window_seen;
     bit shallow_tt_hit_seen;
     bit shallow_tt_target_seen;
     bit shallow_tt_target_pending[0:THREAD_COUNT-1];
@@ -876,6 +877,7 @@ module tb_search_controller;
         check_search_stats("startpos search statistics");
         check(pvs_scout_seen, "startpos depth 2 used a PVS scout window");
         check(pvs_research_seen, "startpos depth 2 re-searched a PVS scout fail-high");
+        check(aspiration_window_seen, "startpos depth 2 used an aspiration window");
 
         // Opposite-direction moves h2h4 and h5h3 must have distinct mask identities.
         new_game();
@@ -994,6 +996,14 @@ module tb_search_controller;
                 stats_reset_pending <= 1'b1;
             end
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+                if (dut.search_aspiration_active && !aspiration_window_seen) begin
+                    aspiration_window_seen = 1'b1;
+                    check(dut.search_root_beta - dut.search_root_alpha == EvalScore'(1024),
+                        "aspiration window is eight pawns wide");
+                    check(dut.search_root_alpha == dut.search_completed_score - EvalScore'(512)
+                            && dut.search_root_beta == dut.search_completed_score + EvalScore'(512),
+                        "aspiration window is centered on the previous score");
+                end
                 if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
                     pvs_scout_seen = 1'b1;
                     check(dut.search_stack_top[idx].beta == dut.search_stack_top[idx].alpha + EvalScore'(1),

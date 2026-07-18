@@ -57,7 +57,10 @@ module search_controller #(
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
-    localparam EvalScore SEARCH_INF = EvalScore'(32001);
+    localparam int SEARCH_INF_VALUE = 32001;
+    localparam int ASPIRATION_DELTA_VALUE = 512;
+    localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
+    localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_DELTA_VALUE);
 
     typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
     typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
@@ -194,6 +197,9 @@ module search_controller #(
     SearchDepth search_completed_depth;
     Move search_completed_best_move;
     EvalScore search_completed_score;
+    EvalScore search_root_alpha;
+    EvalScore search_root_beta;
+    logic search_aspiration_active;
 `ifndef SYNTHESIS
     logic [7:0] search_thread_completed_depth[0:SEARCH_THREAD_COUNT-1];
     Move search_thread_completed_best_move[0:SEARCH_THREAD_COUNT-1];
@@ -713,6 +719,19 @@ module search_controller #(
     function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
     endfunction : pov_eval
+
+    // Clamp aspiration bounds before narrowing them to the score representation.
+    function automatic EvalScore aspiration_lower_bound(input EvalScore score);
+        automatic integer bound;
+        bound = int'(score) - int'(ASPIRATION_DELTA);
+        return (bound <= -SEARCH_INF_VALUE) ? -SEARCH_INF : EvalScore'(bound);
+    endfunction : aspiration_lower_bound
+
+    function automatic EvalScore aspiration_upper_bound(input EvalScore score);
+        automatic integer bound;
+        bound = int'(score) + int'(ASPIRATION_DELTA);
+        return (bound >= SEARCH_INF_VALUE) ? SEARCH_INF : EvalScore'(bound);
+    endfunction : aspiration_upper_bound
 
     // Every newly entered node starts from the same empty search record.
     function automatic SearchStackEntry empty_search_stack_entry();
@@ -1291,6 +1310,9 @@ module search_controller #(
             search_completed_depth <= SearchDepth'(0);
             search_completed_best_move <= NULL_MOVE;
             search_completed_score <= EvalScore'(0);
+            search_root_alpha <= -SEARCH_INF;
+            search_root_beta <= SEARCH_INF;
+            search_aspiration_active <= 1'b0;
             search_thread_id <= ThreadID'(0);
             search_dispatch_cursor <= ThreadID'(0);
             search_board_dispatch_cursor <= ThreadID'(0);
@@ -1562,6 +1584,9 @@ module search_controller #(
                                     search_completed_depth <= SearchDepth'(0);
                                     search_completed_best_move <= NULL_MOVE;
                                     search_completed_score <= EvalScore'(0);
+                                    search_root_alpha <= -SEARCH_INF;
+                                    search_root_beta <= SEARCH_INF;
+                                    search_aspiration_active <= 1'b0;
                                     search_thread_id <= ThreadID'(0);
                                     search_dispatch_cursor <= ThreadID'(0);
                                     search_board_dispatch_cursor <= ThreadID'(0);
@@ -1885,6 +1910,9 @@ module search_controller #(
                         search_pvs_research[tid] <= 1'b0;
                         search_eval_is_stand_pat[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
+                        search_stack_top[tid].alpha <= search_root_alpha;
+                        search_stack_top[tid].orig_alpha <= search_root_alpha;
+                        search_stack_top[tid].beta <= search_root_beta;
                         search_return_move[tid] <= NULL_MOVE;
                     end
                     search_thread_id <= ThreadID'(0);
@@ -1958,15 +1986,19 @@ module search_controller #(
                         automatic Move stop_best_move;
                         automatic EvalScore stop_score;
 
-                        stop_best_move = search_best_move[0];
-                        stop_score = search_root_best_score[0];
-                        if (search_iteration_has_result) begin
-                            stop_best_move = search_iteration_best_move;
-                            stop_score = search_iteration_best_score;
-                        end
+                        stop_best_move = NULL_MOVE;
+                        stop_score = EvalScore'(0);
                         if (search_completed_depth != SearchDepth'(0)) begin
                             stop_best_move = search_completed_best_move;
                             stop_score = search_completed_score;
+                        end
+                        // A returned root child from the deeper in-progress iteration
+                        // is usable even though that iteration's depth is not complete.
+                        if (!is_null_move(search_best_move[0])
+                                && (search_completed_depth == SearchDepth'(0)
+                                    || search_root_best_score[0] > search_completed_score)) begin
+                            stop_best_move = search_best_move[0];
+                            stop_score = search_root_best_score[0];
                         end
 
                         resp_reg <= EngineControllerResponse'('0);
@@ -2483,42 +2515,78 @@ module search_controller #(
                         time_stop_next = (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
                             && elapsed_ms >= search_budget_ms;
                         if (active_count_next == ThreadCount'(0) && iteration_has_result_next) begin
-                            search_completed_depth <= search_target_depth;
-                            search_completed_best_move <= iteration_best_move_next;
-                            search_completed_score <= iteration_best_score_next;
-                            resp_reg <= EngineControllerResponse'('0);
-                            resp_reg.best_move <= iteration_best_move_next;
-                            resp_reg.score <= iteration_best_score_next;
-                            resp_reg.nodes_count <= nodes_next;
-                            resp_reg.completed_depth <= search_target_depth;
-                            if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH && search_target_depth >= search_max_depth) begin
-                                resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                state <= ST_RESPOND;
-                            end else if (node_stop_next) begin
-                                resp_reg.end_reason <= ENGINE_END_NODE_LIMIT;
-                                state <= ST_RESPOND;
-                            end else if (time_stop_next) begin
-                                resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
-                                state <= ST_RESPOND;
-                            end else if (search_target_depth >= search_max_depth) begin
-                                resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                state <= ST_RESPOND;
-                            end else begin
-                                search_target_depth <= search_target_depth + SearchDepth'(1);
-                                search_thread_id <= ThreadID'(0);
-                                search_dispatch_cursor <= ThreadID'(0);
-                                search_board_dispatch_cursor <= ThreadID'(0);
-                                search_move_dispatch_cursor <= ThreadID'(0);
-                                search_eval_dispatch_cursor <= ThreadID'(0);
-                                search_tt_lookup_dispatch_cursor <= ThreadID'(0);
-                                search_tt_store_dispatch_cursor <= ThreadID'(0);
-                                search_return_dispatch_cursor <= ThreadID'(0);
-                                search_tt_response_dispatch_cursor <= ThreadID'(0);
+                            if (search_aspiration_active
+                                    && (iteration_best_score_next <= search_root_alpha
+                                        || iteration_best_score_next >= search_root_beta)) begin
+                                // A failed narrow pass is only a bound. Retry the same
+                                // depth once with the full window before publishing it.
+                                search_root_alpha <= -SEARCH_INF;
+                                search_root_beta <= SEARCH_INF;
+                                search_aspiration_active <= 1'b0;
                                 search_active_thread_count <= ThreadCount'(0);
                                 search_iteration_has_result <= 1'b0;
                                 search_iteration_best_move <= NULL_MOVE;
                                 search_iteration_best_score <= -SEARCH_INF;
-                                state <= ST_SEARCH_ITER_START;
+                                if (node_stop_next || time_stop_next) begin
+                                    resp_reg <= EngineControllerResponse'('0);
+                                    resp_reg.best_move <= search_completed_best_move;
+                                    resp_reg.score <= search_completed_score;
+                                    resp_reg.nodes_count <= nodes_next;
+                                    resp_reg.completed_depth <= search_completed_depth;
+                                    resp_reg.end_reason <= node_stop_next ? ENGINE_END_NODE_LIMIT : ENGINE_END_TIME_LIMIT;
+                                    state <= ST_RESPOND;
+                                end else begin
+                                    state <= ST_SEARCH_ITER_START;
+                                end
+                            end else begin
+                                search_completed_depth <= search_target_depth;
+                                search_completed_best_move <= iteration_best_move_next;
+                                search_completed_score <= iteration_best_score_next;
+                                resp_reg <= EngineControllerResponse'('0);
+                                resp_reg.best_move <= iteration_best_move_next;
+                                resp_reg.score <= iteration_best_score_next;
+                                resp_reg.nodes_count <= nodes_next;
+                                resp_reg.completed_depth <= search_target_depth;
+                                if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH && search_target_depth >= search_max_depth) begin
+                                    resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                                    state <= ST_RESPOND;
+                                end else if (node_stop_next) begin
+                                    resp_reg.end_reason <= ENGINE_END_NODE_LIMIT;
+                                    state <= ST_RESPOND;
+                                end else if (time_stop_next) begin
+                                    resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
+                                    state <= ST_RESPOND;
+                                end else if (search_target_depth >= search_max_depth) begin
+                                    resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                                    state <= ST_RESPOND;
+                                end else begin
+                                    search_target_depth <= search_target_depth + SearchDepth'(1);
+                                    if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH) begin
+                                        search_root_alpha <= aspiration_lower_bound(iteration_best_score_next);
+                                        search_root_beta <= aspiration_upper_bound(iteration_best_score_next);
+                                        search_aspiration_active <= 1'b1;
+                                    end else begin
+                                        // A failed retry can consume a move deadline, so bounded
+                                        // searches retain the full root window.
+                                        search_root_alpha <= -SEARCH_INF;
+                                        search_root_beta <= SEARCH_INF;
+                                        search_aspiration_active <= 1'b0;
+                                    end
+                                    search_thread_id <= ThreadID'(0);
+                                    search_dispatch_cursor <= ThreadID'(0);
+                                    search_board_dispatch_cursor <= ThreadID'(0);
+                                    search_move_dispatch_cursor <= ThreadID'(0);
+                                    search_eval_dispatch_cursor <= ThreadID'(0);
+                                    search_tt_lookup_dispatch_cursor <= ThreadID'(0);
+                                    search_tt_store_dispatch_cursor <= ThreadID'(0);
+                                    search_return_dispatch_cursor <= ThreadID'(0);
+                                    search_tt_response_dispatch_cursor <= ThreadID'(0);
+                                    search_active_thread_count <= ThreadCount'(0);
+                                    search_iteration_has_result <= 1'b0;
+                                    search_iteration_best_move <= NULL_MOVE;
+                                    search_iteration_best_score <= -SEARCH_INF;
+                                    state <= ST_SEARCH_ITER_START;
+                                end
                             end
                         end else begin
                             state <= ST_SEARCH_RUN;
