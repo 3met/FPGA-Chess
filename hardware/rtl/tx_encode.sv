@@ -128,7 +128,8 @@ module tx_encode #(
 ) (
     input clk,
     input uart_clk,
-    input rst_n,
+    input engine_rst_n,
+    input uart_rst_n,
     input logic [7:0] tx_stream,
     input tx_stream_valid,
     output logic uart_tx,
@@ -145,12 +146,12 @@ module tx_encode #(
         .DEPTH(FIFO_DEPTH)
     ) tx_fifo (
         .wr_clk(clk),
-        .wr_rst_n(rst_n),
+        .wr_rst_n(engine_rst_n),
         .wr_en(tx_stream_valid && !full),
         .wr_data(tx_stream),
         .full(full),
         .rd_clk(uart_clk),
-        .rd_rst_n(rst_n),
+        .rd_rst_n(uart_rst_n),
         .rd_en(fifo_rd_en),
         .rd_data(fifo_tx_stream),
         .empty(fifo_empty)
@@ -163,7 +164,7 @@ module tx_encode #(
         .CLOCK_FREQ(UART_CLOCK_FREQ)
     ) engine_uart_transmitter (
         .clk(uart_clk),
-        .rst_n(rst_n),
+        .rst_n(uart_rst_n),
         .tx_stream(fifo_tx_stream),
         .tx_stream_valid(!fifo_empty),
         .ready(uart_ready),

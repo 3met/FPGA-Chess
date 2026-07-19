@@ -164,7 +164,8 @@ module rx_decode #(
 ) (
     input clk,
     input uart_clk,
-    input rst_n,
+    input engine_rst_n,
+    input uart_rst_n,
     input uart_rx,
     input mark_read,
     output logic [7:0] rx_stream,
@@ -190,8 +191,8 @@ module rx_decode #(
     logic break_engine_sync;
     logic break_engine_sync_prev;
 
-    wire engine_rst_n = rst_n && !break_engine_sync;
-    wire uart_rst_n = rst_n && !break_active_uart;
+    wire engine_fifo_rst_n = engine_rst_n && !break_engine_sync;
+    wire uart_fifo_rst_n = uart_rst_n && !break_active_uart;
 
     uart_receiver #(
         .BAUD_RATE(BAUD_RATE),
@@ -199,7 +200,7 @@ module rx_decode #(
         .BREAK_BIT_COUNT(BREAK_BIT_COUNT)
     ) engine_uart_receiver (
         .clk(uart_clk),
-        .rst_n(rst_n),
+        .rst_n(uart_rst_n),
         .uart_rx(uart_rx),
         .rx_stream(uart_rx_stream),
         .rx_stream_valid(uart_rx_valid),
@@ -215,19 +216,19 @@ module rx_decode #(
         .DEPTH(FIFO_DEPTH)
     ) rx_fifo (
         .wr_clk(uart_clk),
-        .wr_rst_n(uart_rst_n),
+        .wr_rst_n(uart_fifo_rst_n),
         .wr_en(rx_fifo_wr_en),
         .wr_data(uart_rx_stream),
         .full(rx_fifo_full),
         .rd_clk(clk),
-        .rd_rst_n(engine_rst_n),
+        .rd_rst_n(engine_fifo_rst_n),
         .rd_en(rx_fifo_rd_en),
         .rd_data(rx_stream),
         .empty(rx_fifo_empty)
     );
 
     always_ff @(posedge clk) begin
-        if (!rst_n) begin
+        if (!engine_rst_n) begin
             break_engine_meta <= 1'b0;
             break_engine_sync <= 1'b0;
             break_engine_sync_prev <= 1'b0;
@@ -243,7 +244,7 @@ module rx_decode #(
     end
 
     always_ff @(posedge uart_clk) begin
-        if (!rst_n || break_active_uart) begin
+        if (!uart_rst_n || break_active_uart) begin
             uart_error_latched <= 1'b0;
         end else if (uart_violation || (uart_rx_valid && rx_fifo_full)) begin
             uart_error_latched <= 1'b1;
@@ -251,7 +252,7 @@ module rx_decode #(
     end
 
     always_ff @(posedge clk) begin
-        if (!rst_n || break_engine_sync) begin
+        if (!engine_rst_n || break_engine_sync) begin
             error <= 1'b0;
         end else if (uart_error_engine_sync) begin
             error <= 1'b1;

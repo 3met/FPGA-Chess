@@ -96,6 +96,7 @@
     ],
     "quartus-de1-soc": [
       "@portable-rtl",
+      "hardware/rtl/reset_release.sv",
       "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
       "hardware/rtl/memory/sdr_sdram_controller.sv",
       "hardware/rtl/de1_soc.sv"

@@ -10,6 +10,8 @@ The DE1 wrapper enables search statistics by default through `ENABLE_SEARCH_STAT
 
 `CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses a 35.714286 MHz engine clock, the nearest supported integer-N PLL rate above 35 MHz while retaining the fixed 100 MHz SDRAM outputs. The UART continues to use the undivided 50 MHz reference clock.
 
+After configuration, a `CLOCK_50` startup controller asserts PLL reset for 1024 cycles, requires lock to remain asserted for 256 cycles, and retries automatically if lock is not acquired within 20 ms or is subsequently lost. Engine, SDRAM, and UART logic each release reset through a local-clock synchronizer only after the PLL reaches the running state. UART BREAK applies the same stretched local reset to the engine, SDRAM path, and UART transmitter, so normal remote recovery does not require either physical reset button.
+
 The same PLL produces a 100 MHz SDRAM-controller clock and a phase-adjusted 100 MHz `DRAM_CLK`. The TT path crosses between the engine and memory domains through shallow asynchronous FIFOs sized for their traffic: four commands, four write words, eight read words, and two completions. The read FIFO can hold a complete six-word burst because physical SDR SDRAM bursts cannot be paused. The board SDC declares the engine-to-memory and engine-to-UART synchronizer boundaries asynchronous while retaining timing between the related SDRAM clocks. These clocks are confined to the DE1 wrapper so another FPGA family can provide equivalents with its PLL or MMCM.
 
 To select another legal PLL rate, change `hardware/build/manifest.json`'s `quartus-de1-soc.engine_clock_mhz` and rerun synthesis. The integer-N PLL accepts only rates its VCO and output counters can realize; Quartus rejects unsupported values. The source PLL template remains unchanged; the configured vendor IP and engine timing include are generated under `work/build/quartus-de1-soc/` for that build.
@@ -21,8 +23,8 @@ The core does not depend on the Intel PLL: a new board wrapper should generate i
 | Resource | Required Behavior |
 | -------- | ----------------- |
 | Clock | Accept board reference clock and generate the engine clock through a vendor-specific PLL wrapper. |
-| Reset button | `KEY[3]` controls board logic reset; UART BREAK also resets the engine and TX path. |
-| PLL reset button | `KEY[2]` controls PLL reset. |
+| Reset button | `KEY[3]` forces the automatic startup controller and all logic domains back into reset. |
+| PLL reset button | `KEY[2]` forces a PLL reset; release starts the automatic lock-and-retry sequence. |
 | UART GPIO | Route host RX/TX pins to `rx_decode` and `tx_encode`. |
 | FPGA SDRAM | Route `DRAM_*` to the portable SDR SDRAM controller for the off-chip TT. |
 | LEDs | `LEDR[7:0]` show the most recently received byte, `LEDR[8]` indicates any RX, remote-reset, TX-full, or engine error, and `LEDR[9]` indicates PLL unlock. |

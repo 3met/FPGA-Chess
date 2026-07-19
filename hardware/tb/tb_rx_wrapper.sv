@@ -43,7 +43,8 @@ module tb_rx_decode();
     ) dut (
         .clk(clk),
         .uart_clk(uart_clk),
-        .rst_n(rst_n),
+        .engine_rst_n(rst_n),
+        .uart_rst_n(rst_n),
         .uart_rx(uart_rx),
         .mark_read(mark_read),
         .rx_stream(rx_stream),

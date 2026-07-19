@@ -18,7 +18,8 @@ The default UART side uses `UART_CLOCK_FREQ = 50_000_000` and `BAUD_RATE = 2_000
 | --------- | ----------------- | ---- | ---------------------------------------------------------------- |
 | Input     | `clk`             | 1    | Engine-side clock.                                               |
 | Input     | `uart_clk`        | 1    | UART-side clock.                                                 |
-| Input     | `rst_n`           | 1    | Synchronous active-low reset.                                    |
+| Input     | `engine_rst_n`    | 1    | Engine-domain synchronous active-low reset.                      |
+| Input     | `uart_rst_n`      | 1    | UART-domain synchronous active-low reset.                        |
 | Input     | `uart_rx`         | 1    | UART input signal.                                               |
 | Input     | `mark_read`       | 1    | Indicates that the current decoded byte has been consumed.       |
 | Output    | `rx_stream`       | 8    | Decoded UART command/data byte.                                  |

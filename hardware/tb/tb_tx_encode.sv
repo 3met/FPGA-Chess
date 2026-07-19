@@ -30,7 +30,8 @@ module tb_tx_encode();
     ) dut (
         .clk(clk),
         .uart_clk(uart_clk),
-        .rst_n(rst_n),
+        .engine_rst_n(rst_n),
+        .uart_rst_n(rst_n),
         .tx_stream(tx_stream),
         .tx_stream_valid(tx_stream_valid),
         .uart_tx(uart_tx),

@@ -37,13 +37,110 @@ module de1_soc(input CLOCK_50,
 	wire memory_output_clk;
 	wire memory_read_clk;
 	wire uart_clk;
-	wire pll_reset, pll_locked_status;
+	logic pll_reset;
+	wire pll_locked_status;
 	pll_ip pll_1(.refclk(CLOCK_50), .rst(pll_reset), .outclk_0(clk),
 		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(memory_read_clk),
 		.locked(pll_locked_status));
 	assign DRAM_CLK = memory_output_clk;
-	assign pll_reset = ~KEY[2];
 	assign uart_clk = CLOCK_50;
+
+	localparam int PLL_RESET_HOLD_CYCLES = 1024;
+	localparam int PLL_LOCK_STABLE_CYCLES = 256;
+	localparam int PLL_LOCK_TIMEOUT_CYCLES = 1_000_000;
+
+	typedef enum logic [1:0] {
+		PLL_HOLD_RESET,
+		PLL_WAIT_LOCK,
+		PLL_RUNNING
+	} PllStartupState;
+
+	PllStartupState pll_startup_state = PLL_HOLD_RESET;
+	logic [19:0] pll_timeout_count = '0;
+	logic [9:0] pll_reset_count = '0;
+	logic [7:0] pll_lock_count = '0;
+	logic pll_locked_meta = 1'b0;
+	logic pll_locked_sync = 1'b0;
+
+	// Automatically reset and retry the PLL so JTAG configuration never
+	// depends on either board reset button having been pressed.
+	always_ff @(posedge CLOCK_50) begin
+		if (!rst_n) begin
+			pll_locked_meta <= 1'b0;
+			pll_locked_sync <= 1'b0;
+		end else begin
+			pll_locked_meta <= pll_locked_status;
+			pll_locked_sync <= pll_locked_meta;
+		end
+	end
+
+	always_ff @(posedge CLOCK_50) begin
+		if (!rst_n || !KEY[2]) begin
+			pll_startup_state <= PLL_HOLD_RESET;
+			pll_timeout_count <= '0;
+			pll_reset_count <= '0;
+			pll_lock_count <= '0;
+			pll_reset <= 1'b1;
+		end else begin
+			case (pll_startup_state)
+				PLL_HOLD_RESET: begin
+					pll_reset <= 1'b1;
+					pll_timeout_count <= '0;
+					pll_lock_count <= '0;
+					if (pll_reset_count == 10'(PLL_RESET_HOLD_CYCLES - 1)) begin
+						pll_reset_count <= '0;
+						pll_reset <= 1'b0;
+						pll_startup_state <= PLL_WAIT_LOCK;
+					end else begin
+						pll_reset_count <= pll_reset_count + 10'd1;
+					end
+				end
+
+				PLL_WAIT_LOCK: begin
+					pll_reset <= 1'b0;
+					pll_timeout_count <= pll_timeout_count + 20'd1;
+					if (pll_locked_sync) begin
+						if (pll_lock_count == 8'(PLL_LOCK_STABLE_CYCLES - 1)) begin
+							pll_lock_count <= '0;
+							pll_startup_state <= PLL_RUNNING;
+						end else begin
+							pll_lock_count <= pll_lock_count + 8'd1;
+						end
+					end else begin
+						pll_lock_count <= '0;
+					end
+					if (pll_timeout_count == 20'(PLL_LOCK_TIMEOUT_CYCLES - 1)) begin
+						pll_startup_state <= PLL_HOLD_RESET;
+						pll_timeout_count <= '0;
+						pll_reset_count <= '0;
+						pll_lock_count <= '0;
+						pll_reset <= 1'b1;
+					end
+				end
+
+				PLL_RUNNING: begin
+					pll_reset <= 1'b0;
+					pll_timeout_count <= '0;
+					if (pll_locked_sync) begin
+						pll_lock_count <= '0;
+					end else if (pll_lock_count == 8'(PLL_LOCK_STABLE_CYCLES - 1)) begin
+						pll_startup_state <= PLL_HOLD_RESET;
+						pll_reset_count <= '0;
+						pll_lock_count <= '0;
+						pll_reset <= 1'b1;
+					end else begin
+						pll_lock_count <= pll_lock_count + 8'd1;
+					end
+				end
+
+				default: begin
+					pll_startup_state <= PLL_HOLD_RESET;
+					pll_reset_count <= '0;
+					pll_reset <= 1'b1;
+				end
+			endcase
+		end
+	end
 
 	// --- UART Input Decoding ---
 	wire [7:0] rx_stream;
@@ -52,7 +149,11 @@ module de1_soc(input CLOCK_50,
 
 	wire rx_error;
 	wire remote_reset;
+	wire engine_domain_rst_n;
+	wire uart_domain_rst_n;
 	wire engine_rst_n;
+	wire memory_rst_n;
+	wire uart_tx_rst_n;
 	wire engine_core_rst_n;
 	wire tx_full;
 	wire engine_ready;
@@ -77,8 +178,36 @@ module de1_soc(input CLOCK_50,
 	logic backend_read_valid, backend_read_ready, backend_read_last;
 	logic [15:0] backend_read_data;
 	logic backend_done_valid, backend_done_ready, backend_done_error;
-	assign engine_rst_n = rst_n && !remote_reset;
 	assign engine_core_rst_n = engine_rst_n && tt_memory_ready && !tt_memory_error;
+
+	// Each domain releases reset on its own clock only after PLL lock has
+	// remained stable. UART BREAK then applies the same stretched reset to
+	// the engine, memory bridge/controller, and transmit path.
+	reset_release engine_startup_reset (
+		.clk(clk),
+		.async_reset_n(rst_n && pll_startup_state == PLL_RUNNING),
+		.reset_n(engine_domain_rst_n)
+	);
+	reset_release uart_startup_reset (
+		.clk(uart_clk),
+		.async_reset_n(rst_n && pll_startup_state == PLL_RUNNING),
+		.reset_n(uart_domain_rst_n)
+	);
+	reset_release engine_operational_reset (
+		.clk(clk),
+		.async_reset_n(engine_domain_rst_n && !remote_reset),
+		.reset_n(engine_rst_n)
+	);
+	reset_release memory_operational_reset (
+		.clk(memory_clk),
+		.async_reset_n(rst_n && pll_startup_state == PLL_RUNNING && !remote_reset),
+		.reset_n(memory_rst_n)
+	);
+	reset_release uart_tx_operational_reset (
+		.clk(uart_clk),
+		.async_reset_n(uart_domain_rst_n && !remote_reset),
+		.reset_n(uart_tx_rst_n)
+	);
 
 	// Count engine response bytes accepted by the UART transmit path for board bring-up.
 	always_ff @(posedge clk) begin
@@ -95,7 +224,8 @@ module de1_soc(input CLOCK_50,
 	) rx_decode (
 		.clk(clk),
 		.uart_clk(uart_clk),
-		.rst_n(rst_n),
+		.engine_rst_n(engine_domain_rst_n),
+		.uart_rst_n(uart_domain_rst_n),
 		.uart_rx(GPIO_0[9]),
 		.mark_read(rx_stream_valid && engine_ready),
 		.rx_stream(rx_stream),
@@ -142,7 +272,7 @@ module de1_soc(input CLOCK_50,
 	);
 
 	tt_memory_cdc_bridge tt_memory_bridge (
-		.req_clk(clk), .req_rst_n(engine_rst_n), .mem_clk(memory_clk), .mem_rst_n(engine_rst_n && pll_locked_status),
+		.req_clk(clk), .req_rst_n(engine_rst_n), .mem_clk(memory_clk), .mem_rst_n(memory_rst_n),
 		.backend_ready(tt_memory_ready_backend), .backend_error(tt_memory_error_backend),
 		.req_memory_ready(tt_memory_ready), .req_memory_error(tt_memory_error),
 		.req_valid(tt_mem_req_valid), .req_ready(tt_mem_req_ready), .req_write(tt_mem_req_write),
@@ -160,7 +290,7 @@ module de1_soc(input CLOCK_50,
 
 	logic tt_memory_ready_backend, tt_memory_error_backend;
 	sdr_sdram_controller #(.CLOCK_FREQ(100_000_000)) tt_sdram (
-		.clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(engine_rst_n && pll_locked_status),
+		.clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(memory_rst_n),
 		.ready(tt_memory_ready_backend), .error(tt_memory_error_backend),
 		.req_valid(backend_req_valid), .req_ready(backend_req_ready), .req_write(backend_req_write),
 		.req_address(backend_req_address), .req_length(backend_req_length),
@@ -182,7 +312,8 @@ module de1_soc(input CLOCK_50,
 	) tx_encode (
 		.clk(clk),
 		.uart_clk(uart_clk),
-		.rst_n(engine_rst_n),
+		.engine_rst_n(engine_rst_n),
+		.uart_rst_n(uart_tx_rst_n),
 		.tx_stream(engine_data_out),
 		.tx_stream_valid(engine_data_out_valid),
 		.uart_tx(GPIO_0[7]),
