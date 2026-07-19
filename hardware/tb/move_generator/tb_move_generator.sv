@@ -900,6 +900,151 @@ module tb_move_generator;
             $sformatf("promotion order bishop fourth found promo=%0d legal=%0d", move.promo_piece, legal));
     endtask
 
+    // Queen promotions precede captures; tied underpromotions follow captures.
+    task automatic test_underpromotion_ordering();
+        automatic FullBoard board;
+        automatic Move move;
+        automatic logic legal;
+
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d41)] = WHITE_KNIGHT;
+        board.tiles[Position'('d48)] = WHITE_PAWN;
+        board.tiles[Position'('d58)] = BLACK_PAWN;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_QUEEN)) && legal,
+            $sformatf("queen promotion before capture found from=%0d to=%0d promo=%0d legal=%0d",
+                move.from_pos, move.to_pos, move.promo_piece, legal));
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d41), Position'('d58), PROMO_QUEEN)) && legal,
+            $sformatf("capture before underpromotion found from=%0d to=%0d promo=%0d legal=%0d",
+                move.from_pos, move.to_pos, move.promo_piece, legal));
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_KNIGHT)) && legal,
+            $sformatf("underpromotion after capture found from=%0d to=%0d promo=%0d legal=%0d",
+                move.from_pos, move.to_pos, move.promo_piece, legal));
+    endtask
+
+    // Exercise both visible-attacker SEE classes and en passant scoring.
+    task automatic test_see_ordering();
+        automatic FullBoard board;
+        automatic Move move;
+        automatic Move capture;
+        automatic logic legal;
+
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d27)] = WHITE_PAWN;
+        board.tiles[Position'('d36)] = BLACK_QUEEN;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+        capture = make_move(Position'('d27), Position'('d36), PROMO_QUEEN);
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("nonnegative visible SEE capture expected first found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        // A safe pawn capture precedes a higher-victim queen capture that loses
+        // to a visible pawn recapture on another central destination.
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d3)] = WHITE_QUEEN;
+        board.tiles[Position'('d30)] = WHITE_PAWN;
+        board.tiles[Position'('d35)] = BLACK_ROOK;
+        board.tiles[Position'('d37)] = BLACK_PAWN;
+        board.tiles[Position'('d42)] = BLACK_PAWN;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+        capture = make_move(Position'('d30), Position'('d37), PROMO_QUEEN);
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("nonnegative capture expected before higher-victim losing capture found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        // Bounded SEE deliberately stops after the first friendly reply, so a
+        // second enemy value class does not demote this higher-victim capture.
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d3)] = WHITE_QUEEN;
+        board.tiles[Position'('d30)] = WHITE_PAWN;
+        board.tiles[Position'('d32)] = WHITE_ROOK;
+        board.tiles[Position'('d35)] = BLACK_ROOK;
+        board.tiles[Position'('d37)] = BLACK_PAWN;
+        board.tiles[Position'('d44)] = BLACK_QUEEN;
+        board.tiles[Position'('d43)] = BLACK_ROOK;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+        capture = make_move(Position'('d3), Position'('d35), PROMO_QUEEN);
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("bounded exchange expected to stop after first defender found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d37)] = WHITE_PAWN;
+        board.tiles[Position'('d38)] = BLACK_PAWN;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+        board.has_ep = 1'b1;
+        board.ep_file = BoardFile'('d6);
+        capture = make_move(Position'('d37), Position'('d46), PROMO_QUEEN);
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("nonnegative en passant expected before quiets found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d3)] = WHITE_QUEEN;
+        board.tiles[Position'('d51)] = BLACK_PAWN;
+        board.tiles[Position'('d59)] = BLACK_ROOK;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+        capture = make_move(Position'('d3), Position'('d51), PROMO_QUEEN);
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("negative SEE capture expected before quiet moves found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        // A defender does not rescue an exchange whose three-ply balance is negative.
+        board.tiles[Position'('d48)] = WHITE_ROOK;
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("negative defended exchange expected before quiet moves found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        // A valuable recapturer still refutes an undefended queen capture.
+        init_empty_board(board);
+        board.tiles[Position'('d4)] = WHITE_KING;
+        board.tiles[Position'('d3)] = WHITE_QUEEN;
+        board.tiles[Position'('d51)] = BLACK_PAWN;
+        board.tiles[Position'('d59)] = BLACK_QUEEN;
+        board.tiles[Position'('d60)] = BLACK_KING;
+        board.turn = WHITE;
+        capture = make_move(Position'('d3), Position'('d51), PROMO_QUEEN);
+
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("undefended queen capture expected before quiet moves found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+
+        // A later-priority rook defender makes the same three-ply exchange safe.
+        board.tiles[Position'('d48)] = WHITE_ROOK;
+        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
+        expect_equal(same_move_exact(move, capture) && legal,
+            $sformatf("defended queen capture expected first found from=%0d to=%0d legal=%0d",
+                move.from_pos, move.to_pos, legal));
+    endtask
+
     task automatic test_no_legal_moves();
         automatic FullBoard board;
         automatic int candidates;
@@ -1016,6 +1161,8 @@ module tb_move_generator;
         test_thread_mask_isolation();
         test_qsearch_filtering();
         test_promotion_ordering();
+        test_underpromotion_ordering();
+        test_see_ordering();
         test_small_reference_perft();
 
         $display("Testbench run complete.");

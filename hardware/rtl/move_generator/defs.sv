@@ -55,7 +55,13 @@ package move_generator_defs;
 
     typedef logic [4:0] MoveScore;
     localparam MoveScore INVALID_MOVE_SCORE = MoveScore'(5'd0);
-    localparam MoveScore QUIET_MOVE_SCORE = MoveScore'(5'd1);
+    localparam MoveScore QUIET_MOVE_SCORE = MoveScore'(5'd2);
+    localparam MoveScore LOSING_CAPTURE_SCORE_BASE = MoveScore'(5'd3);
+    // Tactical scores reserve the high range for queen promotions and captures.
+    localparam MoveScore CAPTURE_SCORE_BASE = MoveScore'(5'd16);
+    localparam MoveScore CASTLE_MOVE_SCORE = MoveScore'(5'd13);
+    localparam MoveScore QUEEN_PROMOTION_SCORE = MoveScore'(5'd30);
+    localparam MoveScore UNDERPROMOTION_SCORE = MoveScore'(5'd15);
     localparam logic [2:0] KNIGHT_SOURCE_DISTANCE = 3'd7;
 
     typedef struct packed {
@@ -96,5 +102,4 @@ package move_generator_defs;
         1'bx,
         INVALID_MOVE_SCORE
     });
-
 endpackage : move_generator_defs

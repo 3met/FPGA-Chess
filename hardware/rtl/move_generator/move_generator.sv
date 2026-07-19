@@ -36,8 +36,6 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
     typedef logic [MASK_ADDR_BITS-1:0] MoveMaskAddr;
     typedef logic [2:0] RayDistance;
 
-    // Only the final legal stage needs result storage; earlier array entries
-    // were never read and therefore represented misleading pipeline state.
     Move candidate_move_pipe;
     logic candidate_move_legal_pipe;
     MoveMaskAddr mask_rd_addr;
@@ -389,7 +387,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     localparam Move KNIGHT_MOVE = Move'({KNIGHT_POS, Position'(tile_idx), PROMO_QUEEN});
                     localparam MoveMaskIndex KNIGHT_INDEX = MoveMaskIndex'(normal_edge_mask_index(KNIGHT_MOVE));
                     always_comb knight_tile[tile_idx][knight_idx] = board_pipe[PROP_STAGE_CNT-1][KNIGHT_POS];
-                    always_comb knight_consumed[tile_idx][knight_idx] = request_consumed_mask[KNIGHT_INDEX];
+                    always_comb knight_consumed[tile_idx][knight_idx] =
+                        request_consumed_mask[KNIGHT_INDEX];
                 end else begin
                     always_comb knight_tile[tile_idx][knight_idx] = EMPTY_TILE;
                     always_comb knight_consumed[tile_idx][knight_idx] = 1'b1;
@@ -405,7 +404,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     localparam int BLACK_PROMO_EDGE = promotion_edge_index(RAY_MOVE, BLACK);
                     always_comb king_vacated_ray[tile_idx][ray_idx] =
                         ray_pipe[PROP_STAGE_CNT-1][RAY_POS][ray_idx];
-                    always_comb ray_consumed[tile_idx][ray_idx] = request_consumed_mask[RAY_INDEX];
+                    always_comb ray_consumed[tile_idx][ray_idx] =
+                        request_consumed_mask[RAY_INDEX];
                     for (promo_valid_idx=0; promo_valid_idx<4; promo_valid_idx=promo_valid_idx+1) begin : gen_promo_mask
                         localparam MoveMaskIndex WHITE_PROMO_INDEX = MoveMaskIndex'(
                             PROMOTION_MASK_OFFSET + WHITE_PROMO_EDGE * 4 + promo_valid_idx);
@@ -488,7 +488,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             castle_proposal_in.promo_piece = move.promo_piece;
             castle_proposal_in.is_promotion = 1'b0;
             castle_proposal_in.is_castle = 1'b1;
-            castle_proposal_in.score = MoveScore'(5'd13);
+            castle_proposal_in.score = CASTLE_MOVE_SCORE;
             castle_proposal_in.king_safe =
                 !tile_enemy_attacked[move.from_pos]
                 && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 5 : 61)]
@@ -518,7 +518,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             queenside.promo_piece = move.promo_piece;
             queenside.is_promotion = 1'b0;
             queenside.is_castle = 1'b1;
-            queenside.score = MoveScore'(5'd13);
+            queenside.score = CASTLE_MOVE_SCORE;
             queenside.king_safe =
                 !tile_enemy_attacked[move.from_pos]
                 && !tile_king_move_attacked[Position'((turn_pipe[PROP_STAGE_CNT-1] == WHITE) ? 3 : 59)]
@@ -559,10 +559,13 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
         end
 
         next_consumed_mask = proposal_consumed_mask_pipe[REDUCE_STAGE_CNT];
-        if (selected_valid)
-            next_consumed_mask[candidate_mask_index(
+        if (selected_valid) begin
+            automatic MoveMaskIndex selected_mask_index;
+            selected_mask_index = candidate_mask_index(
                 selected_move, turn_pipe[REDUCE_1_STAGE],
-                selected_is_promotion, selected_is_castle)] = 1'b1;
+                selected_is_promotion, selected_is_castle);
+            next_consumed_mask[selected_mask_index] = 1'b1;
+        end
     end
 
 
@@ -746,8 +749,7 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             target_is_castle_pipe[2] <= target_is_castle_pipe[1];
             target_king_safe_pipe[2] <= target_king_safe_pipe[1];
 
-            if (request_valid_pipe[REDUCE_1_STAGE]
-                && selected_valid) begin
+            if (request_valid_pipe[REDUCE_1_STAGE] && selected_valid) begin
                 candidate_move_pipe <= selected_move;
                 candidate_move_legal_pipe <= reduced_proposal_legal;
             end else begin

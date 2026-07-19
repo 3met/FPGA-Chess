@@ -32,6 +32,10 @@ module move_generator_tile_PE #(
     localparam Position DEST_POS = Position'(POS);
     localparam BoardRank DEST_RANK = BoardRank'(POS / 8);
     localparam BoardFile DEST_FILE = BoardFile'(POS % 8);
+    // Concentrate SEE on the central 4x4 destinations where ordinary
+    // middlegame exchanges are most common.
+    localparam bit ENABLE_VISIBLE_SEE =
+        DEST_RANK >= 2 && DEST_RANK <= 5 && DEST_FILE >= 2 && DEST_FILE <= 5;
 
     // Reconstruct the nearest source square on a ray
     typedef logic [DIST_BITS-1:0] EncodedDistance;
@@ -86,11 +90,12 @@ module move_generator_tile_PE #(
         endcase
     endfunction
 
-    // Test whether a nearest ray source attacks this destination
-    function automatic logic ray_source_attacks(input Tile source, input Direction dir, input EncodedDistance distance);
-        if (source.piece_type == SPARE_PIECE) return 1'bx;
-        if (source.piece_type == NULL_PIECE || source.piece_color == turn) return 1'b0;
-
+    // Test piece geometry for an unobstructed source ray into this destination.
+    function automatic logic ray_piece_attacks(
+        input Tile source,
+        input Direction dir,
+        input EncodedDistance distance
+    );
         case (source.piece_type)
             PAWN: begin
                 if (source.piece_color == WHITE)
@@ -102,8 +107,100 @@ module move_generator_tile_PE #(
             ROOK: return isDirCardinal(dir);
             QUEEN: return 1'b1;
             KING: return distance == 0;
-            default: return 1'bx;
+            default: return 1'b0;
         endcase
+    endfunction
+
+    // Test whether a nearest enemy ray source attacks this destination.
+    function automatic logic ray_source_attacks(input Tile source, input Direction dir, input EncodedDistance distance);
+        if (source.piece_type == SPARE_PIECE) return 1'bx;
+        return source.piece_type != NULL_PIECE
+            && source.piece_color != turn
+            && ray_piece_attacks(source, dir, distance);
+    endfunction
+
+    // Coarse material values are sufficient for the bounded exchange threshold.
+    function automatic logic [3:0] exchange_piece_value(input PieceType piece);
+        case (piece)
+            PAWN:   return 4'd1;
+            KNIGHT,
+            BISHOP: return 4'd3;
+            ROOK:   return 4'd5;
+            QUEEN:  return 4'd9;
+            KING:   return 4'd15;
+            default:return 4'd0;
+        endcase
+    endfunction
+
+    // Bounded visible SEE stops after the opponent's least valuable recapture
+    // and one friendly defender reply. Removed pieces do not reveal sliders.
+    function automatic logic visible_see_ge_zero(
+        input Tile mover,
+        input logic mover_is_knight,
+        input Direction mover_lane,
+        input logic ep_move
+    );
+        automatic PieceType victim;
+        automatic logic [4:0] enemy_attacker_classes;
+        automatic logic friendly_defender;
+        automatic logic [3:0] enemy_attacker_value;
+
+        victim = ep_move ? PAWN : tile_data.piece_type;
+        if (exchange_piece_value(mover.piece_type) <= exchange_piece_value(victim))
+            return 1'b1;
+
+        enemy_attacker_classes = 5'b0;
+        friendly_defender = 1'b0;
+        for (int dir_idx=0; dir_idx<8; dir_idx++) begin
+            automatic Tile ray_tile = ray_in[dir_idx].tile;
+            automatic EncodedDistance ray_distance = EncodedDistance'(ray_in[dir_idx].distance);
+            if (!(mover_is_knight == 1'b0 && Direction'(dir_idx) == mover_lane)
+                && ray_tile.piece_type != NULL_PIECE
+                && ray_tile.piece_type != SPARE_PIECE
+                && ray_piece_attacks(ray_tile, Direction'(dir_idx), ray_distance)) begin
+                if (ray_tile.piece_color == turn) begin
+                    friendly_defender = 1'b1;
+                end else begin
+                    case (ray_tile.piece_type)
+                        PAWN: enemy_attacker_classes[0] = 1'b1;
+                        KNIGHT,
+                        BISHOP: enemy_attacker_classes[1] = 1'b1;
+                        ROOK: enemy_attacker_classes[2] = 1'b1;
+                        QUEEN: enemy_attacker_classes[3] = 1'b1;
+                        KING: enemy_attacker_classes[4] = 1'b1;
+                        default: begin end
+                    endcase
+                end
+            end
+        end
+        for (int knight_idx=0; knight_idx<8; knight_idx++) begin
+            automatic Tile knight_tile = knight_tile_in[knight_idx];
+            if (!(mover_is_knight && Direction'(knight_idx) == mover_lane)
+                && knight_tile.piece_type == KNIGHT) begin
+                if (knight_tile.piece_color == turn)
+                    friendly_defender = 1'b1;
+                else
+                    enemy_attacker_classes[1] = 1'b1;
+            end
+        end
+
+        if (enemy_attacker_classes == 5'b0)
+            return 1'b1;
+        if (!friendly_defender)
+            return 1'b0;
+
+        if (enemy_attacker_classes[0])
+            enemy_attacker_value = 4'd1;
+        else if (enemy_attacker_classes[1])
+            enemy_attacker_value = 4'd3;
+        else if (enemy_attacker_classes[2])
+            enemy_attacker_value = 4'd5;
+        else if (enemy_attacker_classes[3])
+            enemy_attacker_value = 4'd9;
+        else
+            enemy_attacker_value = 4'd15;
+        return 5'(exchange_piece_value(victim)) + 5'(enemy_attacker_value)
+            >= 5'(exchange_piece_value(mover.piece_type));
     endfunction
 
     // Test whether a ray source is an attacking slider
@@ -116,12 +213,15 @@ module move_generator_tile_PE #(
                 || (source.piece_type == BISHOP && isDirDiag(dir)));
     endfunction
 
-    // Compact MVV ordering avoids replicated source-piece arithmetic in every PE.
-    function automatic MoveScore move_order_score(input PieceType source_piece);
-        if (source_piece == SPARE_PIECE || tile_data.piece_type == SPARE_PIECE)
+    // Score captures by victim type; the moving piece intentionally does not
+    // affect this compact MVV-like ordering.
+    function automatic MoveScore destination_move_score(input logic ep_move);
+        if (tile_data.piece_type == SPARE_PIECE)
             return MoveScore'('x);
+        if (ep_move)
+            return CAPTURE_SCORE_BASE + MoveScore'(PAWN);
         if (tile_data.piece_type != NULL_PIECE)
-            return MoveScore'({2'b10, tile_data.piece_type});
+            return CAPTURE_SCORE_BASE + MoveScore'(tile_data.piece_type);
         return QUIET_MOVE_SCORE;
     endfunction
 
@@ -135,6 +235,11 @@ module move_generator_tile_PE #(
         automatic Tile source;
         automatic logic ep_move;
         automatic logic tactical;
+        automatic Tile ordinary_mover;
+        automatic logic ordinary_tactical;
+        automatic logic ordinary_ep;
+        automatic logic ordinary_is_knight;
+        automatic Direction ordinary_lane;
 
         ordinary_best = NULL_TILE_PROPOSAL;
         promotion_best = NULL_TILE_PROPOSAL;
@@ -147,6 +252,11 @@ module move_generator_tile_PE #(
         end
         enemy_attacked = 1'b0;
         king_move_attacked = 1'b0;
+        ordinary_mover = EMPTY_TILE;
+        ordinary_tactical = 1'b0;
+        ordinary_ep = 1'b0;
+        ordinary_is_knight = 1'b0;
+        ordinary_lane = Direction'('0);
 
         // Only the ten castling origin/transit/destination squares need attack outputs.
         if (ENABLE_CASTLE_ATTACKS) begin
@@ -216,7 +326,12 @@ module move_generator_tile_PE #(
                                 ordinary_best.source_distance = 3'(ray_distance);
                                 ordinary_best.promo_piece = PROMO_QUEEN;
                                 ordinary_best.is_promotion = 1'b0;
-                                ordinary_best.score = move_order_score(source.piece_type);
+                                ordinary_best.score = destination_move_score(ep_move);
+                                ordinary_mover = source;
+                                ordinary_tactical = tactical;
+                                ordinary_ep = ep_move;
+                                ordinary_is_knight = 1'b0;
+                                ordinary_lane = Direction'(dir_idx);
                             end
                             if (!ray_consumed[dir_idx] && target_destination
                                 && move.from_pos == target_move.from_pos) begin
@@ -244,7 +359,12 @@ module move_generator_tile_PE #(
                             ordinary_best.source_distance = KNIGHT_SOURCE_DISTANCE;
                             ordinary_best.promo_piece = PROMO_QUEEN;
                             ordinary_best.is_promotion = 1'b0;
-                            ordinary_best.score = move_order_score(KNIGHT);
+                            ordinary_best.score = destination_move_score(1'b0);
+                            ordinary_mover = source;
+                            ordinary_tactical = tactical;
+                            ordinary_ep = 1'b0;
+                            ordinary_is_knight = 1'b1;
+                            ordinary_lane = Direction'(knight_dir);
                         end
                         if (!knight_consumed[knight_dir] && target_destination
                             && move.from_pos == target_move.from_pos) begin
@@ -264,8 +384,14 @@ module move_generator_tile_PE #(
                 promotion_best.source_distance = promotion_distance[promo_idx];
                 promotion_best.promo_piece = PromoType'(promo_idx);
                 promotion_best.is_promotion = 1'b1;
-                promotion_best.score = MoveScore'(5'd30 - promo_idx);
+                promotion_best.score = (promo_idx == PROMO_QUEEN)
+                    ? QUEEN_PROMOTION_SCORE : UNDERPROMOTION_SCORE;
             end
+        if (ENABLE_VISIBLE_SEE && ordinary_tactical
+            && !visible_see_ge_zero(
+                ordinary_mover, ordinary_is_knight, ordinary_lane, ordinary_ep))
+            ordinary_best.score = LOSING_CAPTURE_SCORE_BASE
+                + MoveScore'(ordinary_ep ? PAWN : tile_data.piece_type);
         if (promotion_best.score == INVALID_MOVE_SCORE)
             proposal = ordinary_best;
         else
