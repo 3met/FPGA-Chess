@@ -173,7 +173,7 @@ Material values are available in two forms:
 
 | Array | Unit | Values by piece type |
 | ----- | ---- | -------------------- |
-| `PIECE_VALS_128` | 1/128 pawn | null `0`, pawn `128`, knight `416`, bishop `416`, rook `640`, queen `1152`, king `0`, spare `x`. |
+| `PIECE_VALS_128` | 1/128 pawn | Generated from `hardware/data/pst_values/pst_values.json`: null `0`, the six canonical material values, and spare `x`. |
 
 ### Time and Node Counts
 

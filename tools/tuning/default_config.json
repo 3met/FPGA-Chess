@@ -1,0 +1,50 @@
+{
+  "dataset": {
+    "path": "training-data/lichess_db_eval.jsonl.zst",
+    "max_positions": 50000000,
+    "rebuild_cache": false,
+    "num_workers": "auto",
+    "progress_interval_seconds": 60
+  },
+  "filters": {
+    "remove_mates": true,
+    "minimum_depth": 25,
+    "max_evaluation_cp": 1500,
+    "remove_in_check": true,
+    "remove_captures": true,
+    "remove_checks": true,
+    "mate_score_cp": 30000
+  },
+  "training": {
+    "seed": 1,
+    "batch_size": 8192,
+    "validation_size": 1000000,
+    "learning_rate": 0.1,
+    "scheduler": "cosine",
+    "minimum_learning_rate": 0.001,
+    "max_steps": 1000000,
+    "optimizer": "adamw",
+    "loss": "huber",
+    "huber_delta": 100.0,
+    "weight_decay": 0.0,
+    "gradient_clip": 1000.0,
+    "device": "auto",
+    "cpu_threads": "auto",
+    "shuffle_buffer": 262144,
+    "compile": true,
+    "amp": true,
+    "validation_interval_steps": 10000,
+    "checkpoint_interval_steps": 10000,
+    "early_stopping_patience": 25
+  },
+  "output": {
+    "root": "work/tuning"
+  },
+  "wandb": {
+    "enabled": false,
+    "required": false,
+    "project": "fpga-chess-tuning",
+    "entity": null,
+    "mode": "online"
+  }
+}

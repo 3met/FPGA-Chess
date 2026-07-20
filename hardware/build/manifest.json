@@ -177,7 +177,8 @@
       "script": "hardware/scripts/generate_pst_values.py",
       "outputs": [
         "hardware/data/pst_values/pst_values.hex",
-        "hardware/rtl/generated/pst_values_pkg.sv"
+        "hardware/rtl/generated/pst_values_pkg.sv",
+        "hardware/rtl/generated/evaluation_parameters.svh"
       ]
     },
     "zobrist-values": {

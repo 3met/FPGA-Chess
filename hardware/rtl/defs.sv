@@ -145,12 +145,8 @@ package general_chess_defs;
 	localparam EvalScore DRAW_EVAL_SCORE = EvalScore'(0);
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 
-	// Value of each type of piece in units of 128ths of a pawn
-	// Indexed by PieceType
-	// https://web.archive.org/web/20160314214435/http://www.danheisman.com/Articles/evaluation_of_material_imbalance.htm
-	localparam EvalScore PIECE_VALS_128[8] = '{
-		'd0, 'd128, 'd416, 'd416, 'd640, 'd1152, 'd0, 'dx
-	};
+	// Generated from the canonical material/PST parameter JSON.
+	`include "hardware/rtl/generated/evaluation_parameters.svh"
 
 
 	// -- Metric Tracking Definitions --

@@ -22,6 +22,7 @@ transcript
 *.vstf
 *.wlf
 /puzzles
+/training-data/
 /greybox_tmp
 *.ver
 *.qws

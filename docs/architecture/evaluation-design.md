@@ -6,7 +6,7 @@ Raw static evaluation is White-relative: positive scores favor White and negativ
 
 ## Material Valuation
 
-Material values are maintained incrementally. The base material unit is 1/128 pawn, using the values in `PIECE_VALS_128`.
+Material values are maintained incrementally. The base material unit is 1/128 pawn, using `PIECE_VALS_128` generated from the canonical evaluation-parameter JSON.
 
 ## Piece-Square Tables
 
