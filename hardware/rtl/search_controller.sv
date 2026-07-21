@@ -731,19 +731,23 @@ module search_controller #(
         automatic TimeType stm_time;
         automatic TimeType stm_inc;
         automatic TimeType usable;
-        automatic TimeType budget;
+        automatic logic [TIME_BITS+1:0] increment_scaled;
+        automatic logic [TIME_BITS:0] budget;
 
         stm_time = (active_board.turn == WHITE) ? request.wtime : request.btime;
         stm_inc = (active_board.turn == WHITE) ? request.winc : request.binc;
         usable = (stm_time > TimeType'(20)) ? (stm_time - TimeType'(20)) : TimeType'(0);
-        budget = (stm_inc >> 1) + (usable >> 6);
-        if (budget > usable) begin
+        // Spend the documented target share of both the increment and remaining
+        // clock so increment games do not consistently finish with excess time.
+        increment_scaled = {2'b00, stm_inc} * 2'd3;
+        budget = (increment_scaled >> 2) + {1'b0, (usable >> 5)};
+        if (budget > {1'b0, usable}) begin
             return usable;
         end
-        if (budget != TimeType'(0) && budget < TimeType'(10)) begin
+        if (budget != '0 && budget < TimeType'(10)) begin
             return (usable < TimeType'(10)) ? usable : TimeType'(10);
         end
-        return budget;
+        return TimeType'(budget);
     endfunction : clock_budget
 
     function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);

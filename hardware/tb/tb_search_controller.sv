@@ -12,6 +12,7 @@ module tb_search_controller;
     logic req_valid;
     logic req_ready;
     EngineControllerRequest req;
+    EngineControllerRequest clock_budget_request;
     logic resp_valid;
     EngineControllerResponse resp;
     logic [7:0] debug_stat_address;
@@ -906,6 +907,13 @@ module tb_search_controller;
             "LMR move/depth bucket upper boundaries");
         check(dut.floor_log2_8(8'd127) == 3'd6 && dut.floor_log2_8(8'd128) == 3'd7,
             "LMR 8-bit saturation bucket boundary");
+        clock_budget_request = zero_request();
+        clock_budget_request.wtime = TimeType'(180_000);
+        clock_budget_request.btime = TimeType'(180_000);
+        clock_budget_request.winc = TimeType'(2_000);
+        clock_budget_request.binc = TimeType'(2_000);
+        check(dut.clock_budget(clock_budget_request) == TimeType'(7_124),
+            "3+2 clock budget uses the target increment and remaining-clock share");
         check(!dut.lmr_eligible(PlyIndex'(0), 8'd8, 8'd2, 1'b0), "LMR excludes root moves");
         check(!dut.lmr_eligible(PlyIndex'(1), 8'd2, 8'd2, 1'b0), "LMR excludes shallow moves");
         check(!dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd1, 1'b0), "LMR excludes the first two legal moves");
