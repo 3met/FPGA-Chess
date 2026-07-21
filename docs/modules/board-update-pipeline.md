@@ -75,7 +75,7 @@ The pipeline always maintains Zobrist keys and incremental PST/material evaluati
 
 ## PST Tables
 
-Material and piece-square-table constants are maintained together in `hardware/data/pst_values/pst_values.json`. Generation produces `hardware/data/pst_values/pst_values.hex`, `hardware/rtl/generated/pst_values_pkg.sv`, and `hardware/rtl/generated/evaluation_parameters.svh`. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the three-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate them with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
+Material and piece-square-table constants are maintained together in `hardware/data/pst_values/pst_values.json`. Generation produces `hardware/data/pst_values/pst_values.hex`, `hardware/rtl/generated/pst_values_pkg.sv`, and `hardware/rtl/generated/evaluation_parameters.svh`. PST entries are signed 10-bit values and are sign-extended to the 16-bit incremental evaluation score before use. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the three-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate them with `python hardware/scripts/generate_pst_values.py`; a separate `.mif` file is not required by the current portable RTL flow.
 
 ## Move History
 

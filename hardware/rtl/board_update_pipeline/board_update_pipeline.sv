@@ -88,7 +88,7 @@ module board_update_pipeline #(
 
     PstReadPlan pst_read_plan;
     logic [PST_READ_PORTS-1:0] pst_read_enable_q;
-    EvalScore pst_read_data[PST_READ_PORTS];
+    PstScore pst_read_data[PST_READ_PORTS];
     EvalScore pst_start_out, pst_end_out, pst_killed_out, pst_castle_out;
     ZobristReadPlan zobrist_read_plan;
     logic [ZOBRIST_TILE_READ_PORTS-1:0] zobrist_read_enable_q;
@@ -152,7 +152,7 @@ module board_update_pipeline #(
         for (port_pair = 0; port_pair < PST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_pst_rom
             synchronous_dual_port_rom #(
                 .NUM_WORDS(PST_ENTRY_COUNT),
-                .WORD_SIZE($bits(EvalScore)),
+                .WORD_SIZE($bits(PstScore)),
                 .MEM_INIT_FILE(PST_MEM_INIT_FILE)
             ) pst_rom (
                 .clock(clk),
@@ -166,10 +166,11 @@ module board_update_pipeline #(
         end
     endgenerate
 
-    assign pst_start_out = pst_read_enable_q[0] ? pst_read_data[0] : EvalScore'(0);
-    assign pst_end_out = pst_read_enable_q[1] ? pst_read_data[1] : EvalScore'(0);
-    assign pst_killed_out = pst_read_enable_q[2] ? pst_read_data[2] : EvalScore'(0);
-    assign pst_castle_out = pst_read_enable_q[3] ? pst_read_data[3] : EvalScore'(0);
+    // Keep all accumulated evaluation state at 16 bits while the ROM uses compact entries.
+    assign pst_start_out = pst_read_enable_q[0] ? EvalScore'(pst_read_data[0]) : EvalScore'(0);
+    assign pst_end_out = pst_read_enable_q[1] ? EvalScore'(pst_read_data[1]) : EvalScore'(0);
+    assign pst_killed_out = pst_read_enable_q[2] ? EvalScore'(pst_read_data[2]) : EvalScore'(0);
+    assign pst_castle_out = pst_read_enable_q[3] ? EvalScore'(pst_read_data[3]) : EvalScore'(0);
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
         return MoveRecordAddr'((int'(tid) * MOVE_RECORD_PLY_COUNT) + int'(ply));

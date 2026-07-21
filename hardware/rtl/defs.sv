@@ -139,6 +139,8 @@ package general_chess_defs;
 
 	// -- Evaluation Related Definitions --
 	typedef logic signed [15:0] EvalScore;
+	// PST ROM entries are individually small; expand them before accumulating.
+	typedef logic signed [9:0] PstScore;
 
 	localparam EvalScore MAX_EVAL_SCORE = EvalScore'(2 ** ($bits(EvalScore)-1) - 1);
 	localparam EvalScore MIN_EVAL_SCORE = -MAX_EVAL_SCORE;

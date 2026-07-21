@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PST_WORD_BITS = 16
+PST_WORD_BITS = 10
 PST_JSON_PATH = ROOT / "hardware" / "data" / "pst_values" / "pst_values.json"
 PST_HEX_PATH = ROOT / "hardware" / "data" / "pst_values" / "pst_values.hex"
 PST_SV_PATH = ROOT / "hardware" / "rtl" / "generated" / "pst_values_pkg.sv"
@@ -28,6 +28,8 @@ def load_pst_words(json_path):
             raise ValueError(f"PST for {piece} has {len(table)} entries, expected 64")
 
         for square, value in enumerate(table):
+            if not isinstance(value, int) or not -(1 << (PST_WORD_BITS - 1)) <= value < (1 << (PST_WORD_BITS - 1)):
+                raise ValueError(f"PST value for {piece} square {square} does not fit signed {PST_WORD_BITS} bits: {value}")
             mem[(piece_idx << 6) | square] = value
 
     return mem
@@ -66,14 +68,14 @@ def write_sv_package(words, out_path, word_bits=PST_WORD_BITS):
         "",
         "    import general_chess_defs::*;",
         "",
-        "    function automatic EvalScore pst_value(input logic [8:0] addr);",
+        "    function automatic PstScore pst_value(input logic [8:0] addr);",
         "        case (addr)",
     ]
     for idx, word in enumerate(words):
-        lines.append(f"            9'd{idx}: return EvalScore'({word_bits}'sh{word & mask:0{hex_digits}X});")
+        lines.append(f"            9'd{idx}: return PstScore'({word_bits}'sh{word & mask:0{hex_digits}X});")
     lines.extend(
         [
-            "            default: return EvalScore'(0);",
+            "            default: return PstScore'(0);",
             "        endcase",
             "    endfunction : pst_value",
             "",

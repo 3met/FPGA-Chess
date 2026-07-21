@@ -20,10 +20,21 @@ GENERATED_PATHS = (
 )
 GENERATOR = REPO_ROOT / "hardware/scripts/generate_pst_values.py"
 FIXED_MATERIAL_128 = {"pawn": 128, "king": 0}
+PST_WORD_BITS = 10
+PST_MIN = -(1 << (PST_WORD_BITS - 1))
+PST_MAX = (1 << (PST_WORD_BITS - 1)) - 1
 
 
 def round_half_away(value: float) -> int:
     return math.floor(value + 0.5) if value >= 0 else math.ceil(value - 0.5)
+
+
+def validate_export_ranges(material: list[int], pst: dict[str, list[int]]) -> None:
+    """Ensure exported values fit their distinct hardware storage widths."""
+    if any(not -32768 <= value <= 32767 for value in material):
+        raise ValueError("exported material exceeds signed 16-bit range")
+    if any(not PST_MIN <= value <= PST_MAX for table in pst.values() for value in table):
+        raise ValueError(f"exported PST exceeds signed {PST_WORD_BITS}-bit range")
 
 
 def decompose(combined_cp: list[list[float]]) -> tuple[list[int], dict[str, list[int]]]:
@@ -49,9 +60,7 @@ def decompose(combined_cp: list[list[float]]) -> tuple[list[int], dict[str, list
         for square in reachable:
             if midpoint + offsets[square] != combined[piece_index][square]:
                 raise AssertionError("combined evaluation changed during decomposition")
-    for value in material + [value for table in pst.values() for value in table]:
-        if not -32768 <= value <= 32767:
-            raise ValueError("exported parameter exceeds signed 16-bit range")
+    validate_export_ranges(material, pst)
     return material, pst
 
 
@@ -78,9 +87,7 @@ def export_values(parameters: dict) -> tuple[list[int], dict[str, list[int]]]:
         pst[piece] = [round_half_away(float(value) * 128.0 / 100.0) for value in table]
     for square in (*range(8), *range(56, 64)):
         pst["pawn"][square] = 0
-    for value in material + [value for table in pst.values() for value in table]:
-        if not -32768 <= value <= 32767:
-            raise ValueError("exported parameter exceeds signed 16-bit range")
+    validate_export_ranges(material, pst)
     return material, pst
 
 

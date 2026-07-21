@@ -25,7 +25,7 @@ module tb_board_update_pipeline;
     ZobristKey zobrist_key_out;
     EvalScore pst_eval_out;
 
-    EvalScore pst_values[0:(6 * 64)-1];
+    PstScore pst_values[0:(6 * 64)-1];
     ZobristKey zobrist_values[0:ZOBRIST_ENTRY_CNT-1];
 
     FullBoard ref_board;
@@ -109,7 +109,7 @@ module tb_board_update_pipeline;
 
         pst_pos = (normalized.piece_color == BLACK) ? mirrorPos(pos) : pos;
         pst_idx = (int'(normalized.piece_type) - 1) * 64 + int'(pst_pos);
-        score = PIECE_VALS_128[normalized.piece_type] + pst_values[pst_idx];
+        score = PIECE_VALS_128[normalized.piece_type] + EvalScore'(pst_values[pst_idx]);
         return (normalized.piece_color == WHITE) ? score : -score;
     endfunction
 
