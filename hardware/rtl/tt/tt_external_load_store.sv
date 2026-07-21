@@ -5,7 +5,8 @@ import tt_defs::*;
 
 module tt_external_load_store #(
     parameter int CACHE_INDEX_BITS = 10,
-    parameter int ENTRY_COUNT = TT_EXTERNAL_ENTRY_COUNT
+    parameter int ENTRY_COUNT = TT_EXTERNAL_ENTRY_COUNT,
+    parameter int STORE_FIFO_DEPTH = 256
 ) (
     input logic clk,
     input logic rst_n,
@@ -24,8 +25,6 @@ module tt_external_load_store #(
     input logic store_req_valid,
     output logic store_req_ready,
     input TTStoreRequest store_req,
-    output logic store_resp_valid,
-    output TTStoreResponse store_resp,
     output logic mem_req_valid,
     input logic mem_req_ready,
     output logic mem_req_write,
@@ -48,6 +47,7 @@ module tt_external_load_store #(
     localparam int ENTRY_INDEX_BITS = $clog2(ENTRY_COUNT);
     typedef logic [ENTRY_INDEX_BITS-1:0] EntryIndex;
     typedef logic [CACHE_INDEX_BITS-1:0] CacheIndex;
+    typedef logic [$clog2(STORE_FIFO_DEPTH + 1)-1:0] StoreFifoCount;
 
     typedef enum logic [3:0] {
         S_IDLE, S_READ_REQ, S_READ_DATA, S_WRITE_REQ, S_WRITE_DATA, S_WRITE_DONE,
@@ -68,7 +68,19 @@ module tt_external_load_store #(
     TTAge generation;
     logic clear_prev;
     logic clear_pending;
-    EntryIndex lookup_index, store_index;
+    EntryIndex lookup_index;
+    StoreFifoCount store_fifo_count;
+    TTStoreRequest store_fifo_data;
+    logic store_fifo_valid;
+    logic store_fifo_push_ready;
+    logic store_accept;
+    logic store_pop;
+
+`ifndef SYNTHESIS
+    initial begin
+        if (STORE_FIFO_DEPTH < 2) $error("tt_external_load_store STORE_FIFO_DEPTH must be at least two");
+    end
+`endif
 
     (* ramstyle = "M10K" *) (* ram_style = "block" *) TTPhysicalEntry cache_data[0:CACHE_COUNT-1];
     (* ramstyle = "M10K" *) (* ram_style = "block" *) EntryIndex cache_tag[0:CACHE_COUNT-1];
@@ -159,9 +171,13 @@ module tt_external_load_store #(
 
     always_comb begin
         lookup_index = entry_index(lookup_req.zobrist_key);
-        store_index = entry_index(store_req.zobrist_key);
         lookup_req_ready = memory_ready && !memory_error && state == S_IDLE && !clear;
-        store_req_ready = lookup_req_ready && !lookup_req_valid;
+        // A full queue drops the incoming best-effort publication rather than
+        // stalling its search thread.
+        store_req_ready = !clear && !clear_busy;
+        store_accept = store_req_valid && store_req_ready;
+        store_pop = state == S_IDLE && !clear_pending && !lookup_req_valid
+            && store_fifo_valid;
         clear_busy = clear || clear_pending || state == S_CACHE_CLEAR
             || state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE;
         mem_req_valid = state == S_READ_REQ || state == S_WRITE_REQ || state == S_CLEAR_REQ;
@@ -188,9 +204,7 @@ module tt_external_load_store #(
             cache_access <= 1'b0;
             cache_hit <= 1'b0;
             cache_access_is_store <= 1'b0;
-            store_resp_valid <= 1'b0;
             lookup_resp <= TTLookupResponse'('0);
-            store_resp <= TTStoreResponse'('0);
             word_count <= 3'd0;
             clear_index <= '0;
             cache_clear_index <= '0;
@@ -199,15 +213,11 @@ module tt_external_load_store #(
             cache_access <= 1'b0;
             cache_hit <= 1'b0;
             cache_access_is_store <= 1'b0;
-            store_resp_valid <= 1'b0;
             clear_prev <= clear;
             if (clear && !clear_prev) clear_pending <= 1'b1;
 
             if (memory_error && state != S_IDLE) begin
                 if (operation_store) begin
-                    store_resp_valid <= 1'b1;
-                    store_resp.thread_id <= active_store.thread_id;
-                    store_resp.error <= 1'b1;
                 end else begin
                     drive_lookup_response(active_lookup, '0);
                 end
@@ -232,9 +242,6 @@ module tt_external_load_store #(
                             write_entry <= make_store_entry(active_store);
                             state <= S_WRITE_REQ;
                         end else begin
-                            store_resp_valid <= 1'b1;
-                            store_resp.thread_id <= active_store.thread_id;
-                            store_resp.error <= 1'b0;
                             state <= S_IDLE;
                         end
                     end else begin
@@ -250,11 +257,10 @@ module tt_external_load_store #(
                         end else begin
                             generation <= generation + TTAge'(1);
                         end
-                    end else if ((lookup_req_valid && lookup_req_ready)
-                            || (store_req_valid && store_req_ready)) begin
+                    end else if ((lookup_req_valid && lookup_req_ready) || store_pop) begin
                         EntryIndex idx;
                         CacheIndex cidx;
-                        idx = lookup_req_valid ? lookup_index : store_index;
+                        idx = lookup_req_valid ? lookup_index : entry_index(store_fifo_data.zobrist_key);
                         cidx = CacheIndex'(idx);
                         active_index <= idx;
                         cache_read_data <= cache_data[cidx];
@@ -264,7 +270,7 @@ module tt_external_load_store #(
                             active_lookup <= lookup_req;
                             operation_store <= 1'b0;
                         end else begin
-                            active_store <= store_req;
+                            active_store <= store_fifo_data;
                             operation_store <= 1'b1;
                         end
                         state <= S_CACHE_READ;
@@ -283,9 +289,6 @@ module tt_external_load_store #(
                 S_READ_DONE: if (mem_done_valid) begin
                     if (mem_done_error) begin
                         if (operation_store) begin
-                            store_resp_valid <= 1'b1;
-                            store_resp.thread_id <= active_store.thread_id;
-                            store_resp.error <= 1'b1;
                         end else begin
                             drive_lookup_response(active_lookup, '0);
                         end
@@ -303,9 +306,6 @@ module tt_external_load_store #(
                             write_entry <= make_store_entry(active_store);
                             state <= S_WRITE_REQ;
                         end else begin
-                            store_resp_valid <= 1'b1;
-                            store_resp.thread_id <= active_store.thread_id;
-                            store_resp.error <= 1'b0;
                             state <= S_IDLE;
                         end
                     end
@@ -323,9 +323,6 @@ module tt_external_load_store #(
                         cache_tag[cidx] <= active_index;
                         cache_valid[cidx] <= 1'b1;
                     end
-                    store_resp_valid <= 1'b1;
-                    store_resp.thread_id <= active_store.thread_id;
-                    store_resp.error <= mem_done_error;
                     state <= S_IDLE;
                 end
                 S_CLEAR_REQ: if (mem_req_valid && mem_req_ready) state <= S_CLEAR_DATA;
@@ -344,4 +341,20 @@ module tt_external_load_store #(
             endcase
         end
     end
+
+    synchronous_fifo #(
+        .DATA_WIDTH($bits(TTStoreRequest)),
+        .DEPTH(STORE_FIFO_DEPTH)
+    ) store_queue (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(clear && !clear_prev),
+        .push_valid(store_accept),
+        .push_ready(store_fifo_push_ready),
+        .push_data(store_req),
+        .pop_valid(store_fifo_valid),
+        .pop_ready(store_pop),
+        .pop_data(store_fifo_data),
+        .count(store_fifo_count)
+    );
 endmodule

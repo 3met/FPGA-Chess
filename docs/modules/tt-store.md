@@ -21,9 +21,9 @@ Each store request includes:
 
 The RTL implementation is the shared `tt_load_store` module under `hardware/rtl/tt/`. Stores update a portable synchronous-read simple-dual-port RAM backend with one logical entry per word. The RAM template carries Intel and Xilinx block-RAM inference hints. The default compact profile stores 94-bit entries, and `USE_FULL_KEY = 1` selects the 126-bit full-key profile. The external-memory wrapper preserves the same logical request, response, and compact entry format.
 
-Stores use `store_req_valid` and `store_req_ready`. Accepted stores enter a depth-4 FIFO by default. Stores are not dropped; when the FIFO is full, `store_req_ready` deasserts until queued stores drain.
+Stores use `store_req_valid` and `store_req_ready`. The FIFO is a portable synchronous-read block-RAM template with a parameterized depth of 256 entries by default, independently of the search-thread count. TT publication is best-effort: `store_req_ready` remains asserted while the frontend is operational, and an incoming store is dropped when the FIFO is full. Search correctness never depends on a store reaching memory.
 
-Queued stores drain only during lookup-free cycles. The store path reads the old entry, applies replacement policy, and writes the new compact entry only if replacement is allowed. If a lookup arrives while a store is ready to write, the lookup runs first and the store write is delayed.
+Queued stores drain only during lookup-free cycles. The store path reads the old entry, applies replacement policy, and writes the new compact entry only if replacement is allowed. If a lookup arrives while a store is ready to write, the lookup runs first and the store write is delayed. Backend completions are not part of the search-thread control path; asynchronous memory failures use the global TT memory-error status.
 
 The `clear` input starts one sequential invalidation pass on its rising edge and clears queued stores. Request readiness remains deasserted while `clear_busy` is asserted.
 

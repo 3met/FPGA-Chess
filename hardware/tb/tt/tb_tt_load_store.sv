@@ -111,7 +111,6 @@ module tb_tt_load_store;
     );
         automatic TTStoreRequest req;
 
-        req.thread_id = ThreadID'(0);
         req.zobrist_key = key;
         req.depth = depth;
         req.score = score;
@@ -228,10 +227,13 @@ module tb_tt_load_store;
 
     task automatic drain_stores(input int cycles = 3);
         do_clock(cycles);
+        while (dut.store_fifo_count != 0 || dut.store_fifo_valid || dut.store_state != dut.STORE_IDLE) do_clock(1);
     endtask
 
     task automatic full_drain_stores(input int cycles = 3);
         do_clock(cycles);
+        while (full_key_dut.store_fifo_count != 0 || full_key_dut.store_fifo_valid
+                || full_key_dut.store_state != full_key_dut.STORE_IDLE) do_clock(1);
     endtask
 
     task automatic issue_lookup(
@@ -460,7 +462,10 @@ module tb_tt_load_store;
             store_req_valid = 1'b1;
             do_clock(1);
         end
-        expect_equal(!store_req_ready, "store FIFO backpressure when full");
+        expect_equal(store_req_ready, "store FIFO consumes publication when full");
+        store_req = make_store_req(make_key(48'heeee_ffff_0000, 16'h00ff),
+            TTDepth'(9), EvalScore'(99), TT_BOUND_EXACT, move, TTAge'(1), PlyIndex'(0));
+        do_clock(1);
         lookup_req_valid = 1'b0;
         lookup_req = TTLookupRequest'('0);
         store_req_valid = 1'b0;
@@ -468,6 +473,7 @@ module tb_tt_load_store;
         drain_stores(12);
         expect_equal(store_req_ready, "store FIFO ready after drain");
         expect_lookup_hit(make_key(48'heeee_0000_0003, 16'h0003), PlyIndex'(0), EvalScore'(4), TTDepth'(4), TT_BOUND_EXACT, move, "FIFO stores eventually drain");
+        expect_lookup_miss(make_key(48'heeee_ffff_0000, 16'h00ff), "overflow store was safely dropped");
     endtask
 
     task automatic test_mate_scores();

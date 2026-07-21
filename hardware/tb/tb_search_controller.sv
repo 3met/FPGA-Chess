@@ -1132,7 +1132,7 @@ module tb_search_controller;
                 if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_EVAL_WAIT) begin
                     thread_eval_phase_seen[idx] = 1'b1;
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_WAIT) begin
+                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH) begin
                     thread_store_phase_seen[idx] = 1'b1;
                 end
                 if (dut.search_board_inflight[idx]) begin
@@ -1204,7 +1204,7 @@ module tb_search_controller;
             if (dut.state == dut.ST_SEARCH_RUN) begin
                 search_dispatch_state_seen = 1'b1;
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_WAIT
+                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH
                             && dut.search_tt_store_inflight[idx]) begin
                         store_wait_dispatch_seen = 1'b1;
                     end
@@ -1281,7 +1281,7 @@ module tb_search_controller;
             end
             if (dut.tt_store_req_valid && dut.tt_store_req_ready) begin
                 tt_store_count += 1;
-                check(dut.tt_store_req.depth == dut.search_stack_top[int'(dut.tt_store_req.thread_id)].remaining_depth,
+                check(dut.tt_store_req.depth == dut.search_stack_top[int'(dut.search_tt_store_issue_thread)].remaining_depth,
                     "TT store uses the node actual remaining depth");
             end
             if (dut.search_board_issue_valid

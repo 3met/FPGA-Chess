@@ -49,7 +49,6 @@ package tt_defs;
     } TTLookupResponse;
 
     typedef struct packed {
-        ThreadID thread_id;
         ZobristKey zobrist_key;
         TTDepth depth;
         EvalScore score;
@@ -58,11 +57,6 @@ package tt_defs;
         TTAge age;
         PlyIndex ply;
     } TTStoreRequest;
-
-    typedef struct packed {
-        ThreadID thread_id;
-        logic error;
-    } TTStoreResponse;
 
     localparam int TT_PHYSICAL_ENTRY_BITS = 96;
     localparam int TT_WORD_BITS = 16;

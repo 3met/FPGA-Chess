@@ -5,7 +5,7 @@ import tt_defs::*;
 
 module tt_load_store #(
     parameter int TT_INDEX_BITS = 10,
-    parameter int STORE_FIFO_DEPTH = 4,
+    parameter int STORE_FIFO_DEPTH = 256,
     parameter bit USE_FULL_KEY = 1'b0
 ) (
     input logic clk,
@@ -25,24 +25,18 @@ module tt_load_store #(
 
     input logic store_req_valid,
     output logic store_req_ready,
-    input var TTStoreRequest store_req,
-    output logic store_resp_valid,
-    output TTStoreResponse store_resp
+    input var TTStoreRequest store_req
 );
 
     localparam int TT_ENTRY_COUNT = 1 << TT_INDEX_BITS;
     localparam int STORAGE_ENTRY_BITS = USE_FULL_KEY ? $bits(TTFullEntry) : $bits(TTEntry);
-    localparam int FIFO_COUNT_BITS = $clog2(STORE_FIFO_DEPTH + 1);
-    localparam int FIFO_PTR_BITS = (STORE_FIFO_DEPTH > 1) ? $clog2(STORE_FIFO_DEPTH) : 1;
 
     typedef logic [TT_INDEX_BITS-1:0] TTIndex;
     typedef logic [STORAGE_ENTRY_BITS-1:0] TTStorageEntry;
-    typedef logic [FIFO_COUNT_BITS-1:0] StoreFifoCount;
-    typedef logic [FIFO_PTR_BITS-1:0] StoreFifoPtr;
+    typedef logic [$clog2(STORE_FIFO_DEPTH + 1)-1:0] StoreFifoCount;
 
     // Retain the publisher until the memory operation completes.
     typedef struct packed {
-        ThreadID thread_id;
         ZobristKey zobrist_key;
         TTDepth depth;
         EvalScore score;
@@ -63,10 +57,10 @@ module tt_load_store #(
     logic active_store_replace;
     TTLookupRequest active_lookup_req;
 
-    TTStorePayload store_fifo[0:STORE_FIFO_DEPTH-1];
+    TTStorePayload store_fifo_data;
     StoreFifoCount store_fifo_count;
-    StoreFifoPtr store_fifo_head;
-    StoreFifoPtr store_fifo_tail;
+    logic store_fifo_valid;
+    logic store_fifo_push_ready;
 
     logic clear_active;
     TTIndex clear_index;
@@ -74,13 +68,19 @@ module tt_load_store #(
     logic clear_start;
     logic lookup_accept;
     logic store_accept;
-    logic store_pop_frees_slot;
+    logic store_pop;
     logic mem_read_enable;
     logic mem_write_enable;
     TTIndex mem_read_address;
     TTIndex mem_write_address;
     TTStorageEntry mem_write_data;
     TTStorageEntry mem_read_data;
+
+`ifndef SYNTHESIS
+    initial begin
+        if (STORE_FIFO_DEPTH < 2) $error("tt_load_store STORE_FIFO_DEPTH must be at least two");
+    end
+`endif
 
     assign clear_start = clear && !clear_prev && !clear_active;
     // The inferred-RAM backend has no separate frontend cache.
@@ -90,27 +90,19 @@ module tt_load_store #(
     assign clear_busy = clear_start || clear_active;
     assign lookup_req_ready = !clear_start && !clear_active;
     assign lookup_accept = lookup_req_valid && lookup_req_ready;
-    assign store_pop_frees_slot = !lookup_accept && (store_state == STORE_IDLE) && (store_fifo_count != StoreFifoCount'(0));
-    assign store_req_ready = !clear_start && !clear_active
-        && ((store_fifo_count < StoreFifoCount'(STORE_FIFO_DEPTH)) || store_pop_frees_slot);
+    // TT publication is best-effort. Consume requests even when the queue is
+    // full so search threads never backpressure on a store.
+    assign store_req_ready = !clear_start && !clear_active;
     assign store_accept = store_req_valid && store_req_ready;
+    assign store_pop = !lookup_accept && store_state == STORE_IDLE && store_fifo_valid;
 
     function automatic TTIndex tt_index(input ZobristKey zobrist_key);
         return TTIndex'(zobrist_key[TT_INDEX_BITS-1:0]);
     endfunction : tt_index
 
-    function automatic StoreFifoPtr next_store_fifo_ptr(input StoreFifoPtr ptr);
-        if (ptr == StoreFifoPtr'(STORE_FIFO_DEPTH - 1)) begin
-            return StoreFifoPtr'(0);
-        end
-
-        return ptr + StoreFifoPtr'(1);
-    endfunction : next_store_fifo_ptr
-
     function automatic TTStorePayload store_payload(input TTStoreRequest req);
         automatic TTStorePayload payload;
 
-        payload.thread_id = req.thread_id;
         payload.zobrist_key = req.zobrist_key;
         payload.depth = req.depth;
         payload.score = req.score;
@@ -332,12 +324,9 @@ module tt_load_store #(
         end else begin
             case (store_state)
                 STORE_IDLE: begin
-                    if (store_fifo_count != StoreFifoCount'(0)) begin
+                    if (store_fifo_valid) begin
                         mem_read_enable = 1'b1;
-                        mem_read_address = tt_index(store_fifo[store_fifo_head].zobrist_key);
-                    end else if (store_accept) begin
-                        mem_read_enable = 1'b1;
-                        mem_read_address = tt_index(store_req.zobrist_key);
+                        mem_read_address = tt_index(store_fifo_data.zobrist_key);
                     end
                 end
 
@@ -379,27 +368,18 @@ module tt_load_store #(
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             lookup_resp_valid <= 1'b0;
-            store_resp_valid <= 1'b0;
-            store_resp <= TTStoreResponse'('0);
             store_state <= STORE_IDLE;
-            store_fifo_count <= StoreFifoCount'(0);
-            store_fifo_head <= StoreFifoPtr'(0);
-            store_fifo_tail <= StoreFifoPtr'(0);
             clear_active <= 1'b0;
             clear_index <= TTIndex'(0);
             clear_prev <= 1'b0;
         end else begin
             lookup_resp_valid <= 1'b0;
-            store_resp_valid <= 1'b0;
             clear_prev <= clear;
 
             if (clear_start) begin
                 clear_active <= 1'b1;
                 clear_index <= TTIndex'(0);
                 store_state <= STORE_IDLE;
-                store_fifo_count <= StoreFifoCount'(0);
-                store_fifo_head <= StoreFifoPtr'(0);
-                store_fifo_tail <= StoreFifoPtr'(0);
             end else if (clear_active) begin
                 if (clear_index == TTIndex'(TT_ENTRY_COUNT - 1)) begin
                     clear_active <= 1'b0;
@@ -419,61 +399,44 @@ module tt_load_store #(
                         store_state <= STORE_RETRY;
                     end
 
-                    if (store_accept) begin
-                        store_fifo[store_fifo_tail] <= store_payload(store_req);
-                        store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
-                        store_fifo_count <= store_fifo_count + StoreFifoCount'(1);
-                    end
                 end else begin
                     case (store_state)
                         STORE_IDLE: begin
-                            if (store_fifo_count != StoreFifoCount'(0)) begin
-                                active_store_req <= store_fifo[store_fifo_head];
-                                store_fifo_head <= next_store_fifo_ptr(store_fifo_head);
-
-                                if (store_accept) begin
-                                    store_fifo[store_fifo_tail] <= store_payload(store_req);
-                                    store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
-                                end else begin
-                                    store_fifo_count <= store_fifo_count - StoreFifoCount'(1);
-                                end
-
-                                store_state <= STORE_WRITE;
-                            end else if (store_accept) begin
-                                active_store_req <= store_payload(store_req);
+                            if (store_fifo_valid) begin
+                                active_store_req <= store_fifo_data;
                                 store_state <= STORE_WRITE;
                             end
                         end
 
                         STORE_WRITE: begin
-                            store_resp_valid <= 1'b1;
-                            store_resp.thread_id <= active_store_req.thread_id;
-                            store_resp.error <= 1'b0;
                             store_state <= STORE_IDLE;
 
-                            if (store_accept) begin
-                                store_fifo[store_fifo_tail] <= store_payload(store_req);
-                                store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
-                                store_fifo_count <= store_fifo_count + StoreFifoCount'(1);
-                            end
                         end
 
                         STORE_RETRY: begin
-                            store_resp_valid <= 1'b1;
-                            store_resp.thread_id <= active_store_req.thread_id;
-                            store_resp.error <= 1'b0;
                             store_state <= STORE_IDLE;
 
-                            if (store_accept) begin
-                                store_fifo[store_fifo_tail] <= store_payload(store_req);
-                                store_fifo_tail <= next_store_fifo_ptr(store_fifo_tail);
-                                store_fifo_count <= store_fifo_count + StoreFifoCount'(1);
-                            end
                         end
                     endcase
                 end
             end
         end
     end
+
+    synchronous_fifo #(
+        .DATA_WIDTH($bits(TTStorePayload)),
+        .DEPTH(STORE_FIFO_DEPTH)
+    ) store_queue (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(clear_start),
+        .push_valid(store_accept),
+        .push_ready(store_fifo_push_ready),
+        .push_data(store_payload(store_req)),
+        .pop_valid(store_fifo_valid),
+        .pop_ready(store_pop),
+        .pop_data(store_fifo_data),
+        .count(store_fifo_count)
+    );
 
 endmodule : tt_load_store

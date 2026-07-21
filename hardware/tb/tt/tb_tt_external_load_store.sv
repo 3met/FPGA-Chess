@@ -8,8 +8,7 @@ module tb_tt_external_load_store;
     always #5 clk = ~clk;
     TTLookupRequest lookup_req; logic lookup_req_valid, lookup_req_ready, lookup_resp_valid;
     TTLookupResponse lookup_resp;
-    TTStoreRequest store_req; logic store_req_valid, store_req_ready, store_resp_valid;
-    TTStoreResponse store_resp;
+    TTStoreRequest store_req; logic store_req_valid, store_req_ready;
     logic mem_req_valid, mem_req_ready, mem_req_write; TTWordAddress mem_req_address; logic [3:0] mem_req_length;
     logic mem_write_valid, mem_write_ready, mem_write_last; logic [15:0] mem_write_data;
     logic mem_read_valid, mem_read_ready, mem_read_last; logic [15:0] mem_read_data;
@@ -21,11 +20,11 @@ module tb_tt_external_load_store;
     int lookup_cache_access_count, lookup_cache_hit_count, store_cache_access_count;
     TTAge old_generation;
 
-    tt_external_load_store #(.CACHE_INDEX_BITS(2), .ENTRY_COUNT(16)) dut (
+    tt_external_load_store #(.CACHE_INDEX_BITS(2), .ENTRY_COUNT(16), .STORE_FIFO_DEPTH(2)) dut (
         .clk, .rst_n, .memory_ready(1'b1), .memory_error(1'b0), .clear, .clear_busy(),
         .lookup_req_valid, .lookup_req_ready, .lookup_req, .lookup_resp_valid, .lookup_resp,
         .cache_access, .cache_hit, .cache_access_is_store,
-        .store_req_valid, .store_req_ready, .store_req, .store_resp_valid, .store_resp,
+        .store_req_valid, .store_req_ready, .store_req,
         .mem_req_valid, .mem_req_ready, .mem_req_write, .mem_req_address, .mem_req_length,
         .mem_write_valid, .mem_write_ready, .mem_write_data, .mem_write_last,
         .mem_read_valid, .mem_read_ready, .mem_read_data, .mem_read_last,
@@ -82,16 +81,14 @@ module tb_tt_external_load_store;
     task automatic check(input logic condition, input string label);
         if (condition) pass_count++; else begin fail_count++; $error("[FAIL] %s", label); end
     endtask
-    task automatic do_store(input ZobristKey key, input ThreadID thread_id);
-        store_req = TTStoreRequest'('0); store_req.zobrist_key = key; store_req.thread_id = thread_id;
+    task automatic do_store(input ZobristKey key);
+        store_req = TTStoreRequest'('0); store_req.zobrist_key = key;
         store_req.depth = 6; store_req.score = 123; store_req.bound_type = TT_BOUND_EXACT;
         store_req.best_move.from_pos = 1; store_req.best_move.to_pos = 18;
         store_req_valid = 1;
         do @(posedge clk); while (!store_req_ready);
         store_req_valid = 0;
-        do @(posedge clk); while (!store_resp_valid);
-        check(!store_resp.error, "store completed");
-        check(store_resp.thread_id == thread_id, "store completion retained thread tag");
+        do @(posedge clk); while (dut.store_fifo_count != 0 || dut.state != dut.S_IDLE);
     endtask
     task automatic do_lookup(input ZobristKey key, input logic expected_hit, input ThreadID thread_id);
         lookup_req = TTLookupRequest'('0); lookup_req.zobrist_key = key; lookup_req.thread_id = thread_id;
@@ -109,9 +106,9 @@ module tb_tt_external_load_store;
         pass_count = 0; fail_count = 0;
         for (int i = 0; i < 96; i++) memory[i] = 0;
         repeat (3) @(posedge clk); rst_n = 1; repeat (8) @(posedge clk);
-        do_store(64'h0123_4567_89ab_cdef, ThreadID'(0));
+        do_store(64'h0123_4567_89ab_cdef);
         check(request_count == 2, "store used read and write bursts");
-        do_store(64'h0123_4567_89ab_cdef, ThreadID'(1));
+        do_store(64'h0123_4567_89ab_cdef);
         check(request_count == 3, "cache-resident store skipped replacement read");
         do_lookup(64'h0123_4567_89ab_cdef, 1'b1, ThreadID'(1));
         @(posedge clk);
@@ -119,6 +116,27 @@ module tb_tt_external_load_store;
         check(store_cache_access_count == 2, "store cache probes identified separately");
         check(lookup_cache_access_count == 1, "lookup cache probe counted");
         check(lookup_cache_hit_count == 1, "lookup cache hit counted");
+
+        // Stores are accepted while the backend is occupied. Once the queue
+        // fills, later publications are consumed and dropped without stalling.
+        lookup_req = TTLookupRequest'('0);
+        lookup_req.zobrist_key = 64'h1000_0000_0000_0001;
+        lookup_req_valid = 1;
+        do @(posedge clk); while (!lookup_req_ready);
+        lookup_req_valid = 0;
+        do @(posedge clk); while (!read_active);
+        for (int idx = 0; idx < 3; idx++) begin
+            store_req = TTStoreRequest'('0);
+            store_req.zobrist_key = 64'h2000_0000_0000_0000 + idx;
+            store_req.depth = TTDepth'(idx + 1);
+            store_req.bound_type = TT_BOUND_EXACT;
+            store_req_valid = 1;
+            @(posedge clk);
+            check(store_req_ready, "busy frontend consumed store publication");
+        end
+        store_req_valid = 0;
+        check(dut.store_fifo_count == 2, "external store FIFO bounded overflow by dropping");
+        do @(posedge clk); while (!lookup_resp_valid);
 
         // A New Game pulse must remain pending while another thread owns the
         // external-memory transaction, then invalidate it when the port idles.
