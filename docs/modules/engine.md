@@ -21,7 +21,7 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status of the selected TT memory backend. |
 | Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral TT memory command, write-data, read-data, and completion channels. |
 
-The engine parameters configure the controller clock frequency, thread count, stack depth, whether the TT uses the external-memory backend, and whether optional search statistics are synthesized. `ENABLE_SEARCH_STATS = 0` removes the debug counters. Each board wrapper must set `CLOCK_FREQ` to the exact frequency driven on `clk`; clock generation itself stays in the board wrapper so the core remains portable across Intel/Altera and Xilinx devices.
+The engine parameters configure the controller clock frequency, thread count, stack depth, unsigned-Q8 LMR constants `LMR_A_Q8` and `LMR_B_Q8`, whether the TT uses the external-memory backend, and whether optional search statistics are synthesized. `ENABLE_SEARCH_STATS = 0` removes the debug counters. Each board wrapper must set `CLOCK_FREQ` to the exact frequency driven on `clk`; clock generation itself stays in the board wrapper so the core remains portable across Intel/Altera and Xilinx devices.
 
 ## Commands
 

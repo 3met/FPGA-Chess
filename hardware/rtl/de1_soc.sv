@@ -25,6 +25,8 @@ module de1_soc(input CLOCK_50,
 	parameter UART_CLOCK_FREQ = 50_000_000;
 	parameter BAUD_RATE = 2_000_000;
 	parameter ENABLE_SEARCH_STATS = 1'b0;
+	parameter int unsigned LMR_A_Q8 = 192;
+	parameter int unsigned LMR_B_Q8 = 614;
 
 	// The build target generates this value from its engine_clock_mhz setting.
 	`include "engine_clock_config.svh"
@@ -248,6 +250,8 @@ module de1_soc(input CLOCK_50,
 		.CLOCK_FREQ(ENGINE_CLOCK_FREQ),
 		.SEARCH_THREAD_COUNT(1),
 		.SEARCH_STACK_DEPTH(24),
+		.LMR_A_Q8(LMR_A_Q8),
+		.LMR_B_Q8(LMR_B_Q8),
 		.EXTERNAL_TT(1'b1),
 		.ENABLE_SEARCH_STATS(ENABLE_SEARCH_STATS)
 	) engine (

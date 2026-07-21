@@ -8,6 +8,8 @@ module engine #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT,
+    parameter int unsigned LMR_A_Q8 = 192,
+    parameter int unsigned LMR_B_Q8 = 614,
     parameter bit EXTERNAL_TT = 1'b0,
     parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
@@ -63,6 +65,8 @@ module engine #(
         .CLOCK_FREQ(CLOCK_FREQ),
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
+        .LMR_A_Q8(LMR_A_Q8),
+        .LMR_B_Q8(LMR_B_Q8),
         .EXTERNAL_TT(EXTERNAL_TT),
         .ENABLE_SEARCH_STATS(ENABLE_SEARCH_STATS)
     ) controller (

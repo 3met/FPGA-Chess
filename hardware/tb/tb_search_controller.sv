@@ -42,6 +42,16 @@ module tb_search_controller;
     bit pvs_scout_seen;
     bit pvs_research_seen;
     bit aspiration_window_seen;
+    bit lmr_reduced_issue_seen;
+    bit lmr_illegal_candidate_seen;
+    bit lmr_recovery_issue_seen;
+    bit lmr_reduced_tt_depth_seen;
+    bit lmr_full_tt_depth_seen;
+    bit lmr_depth_check_pending[0:THREAD_COUNT-1];
+    bit lmr_recovery_check_pending[0:THREAD_COUNT-1];
+    bit lmr_full_tt_pending[0:THREAD_COUNT-1];
+    logic [7:0] lmr_expected_child_depth[0:THREAD_COUNT-1];
+    logic [7:0] lmr_issue_legal_count[0:THREAD_COUNT-1];
     bit shallow_tt_hit_seen;
     bit shallow_tt_target_seen;
     bit shallow_tt_target_pending[0:THREAD_COUNT-1];
@@ -579,6 +589,8 @@ module tb_search_controller;
                 $sformatf("%s thread %0d TT store in-flight canceled", label, tid));
             check(!dut.search_return_was_scout[tid],
                 $sformatf("%s thread %0d PVS scout return canceled", label, tid));
+            check(!dut.search_return_was_reduced[tid],
+                $sformatf("%s thread %0d reduced return canceled", label, tid));
             check(!dut.search_pvs_research[tid],
                 $sformatf("%s thread %0d PVS re-search canceled", label, tid));
             check(dut.search_thread_status[tid] == dut.SEARCH_THREAD_IDLE,
@@ -733,6 +745,15 @@ module tb_search_controller;
         set_turn(BLACK, "black to move");
     endtask : setup_black_rook_takes_queen
 
+    task automatic setup_pinned_rook_position();
+        clear_board("pinned-rook search");
+        set_tile(WHITE_KING, Position'(4), "pinned-rook white king e1");
+        set_tile(WHITE_ROOK, Position'(12), "pinned-rook white rook e2");
+        set_tile(BLACK_ROOK, Position'(60), "pinned-rook black rook e8");
+        set_tile(BLACK_KING, Position'(56), "pinned-rook black king a8");
+        set_turn(WHITE, "pinned-rook white to move");
+    endtask : setup_pinned_rook_position
+
     task automatic run_stalemate_search(input string label);
         automatic EngineControllerRequest request = zero_request();
 
@@ -869,6 +890,53 @@ module tb_search_controller;
     initial begin
         reset_dut();
 
+        check(dut.lmr_table_value(0, 0) == 8'd1, "LMR default constant rounds 0.75 to one ply");
+        check(dut.lmr_table_value(1, 1) == 8'd1, "LMR Q8 division and rounding at bucket 1/1");
+        check(dut.lmr_table_value(2, 2) == 8'd2, "LMR Q8 division and rounding at bucket 2/2");
+        check(dut.lmr_table_value_for_params(128, 256, 1, 1) == 8'd1,
+            "LMR non-default half-ply offset rounds the complete curve once");
+        check(dut.lmr_table_value_for_params(0, 256, 2, 2) == 8'd2,
+            "LMR non-default denominator preserves Q8 curve scaling");
+        check(dut.LMR_DEPTH_BUCKETS == 5, "LMR generates only reachable default depth buckets");
+        check(dut.LMR_TABLE_MAX_VALUE == 8'd6, "LMR default table maximum is six plies");
+        check(dut.LMR_TABLE_VALUE_BITS == 3, "LMR default table values require three significant bits");
+        check(dut.floor_log2_8(8'd1) == 3'd0 && dut.floor_log2_8(8'd2) == 3'd1,
+            "LMR move/depth bucket lower boundaries");
+        check(dut.floor_log2_8(8'd3) == 3'd1 && dut.floor_log2_8(8'd4) == 3'd2,
+            "LMR move/depth bucket upper boundaries");
+        check(dut.floor_log2_8(8'd127) == 3'd6 && dut.floor_log2_8(8'd128) == 3'd7,
+            "LMR 8-bit saturation bucket boundary");
+        check(!dut.lmr_eligible(PlyIndex'(0), 8'd8, 8'd2, 1'b0), "LMR excludes root moves");
+        check(!dut.lmr_eligible(PlyIndex'(1), 8'd2, 8'd2, 1'b0), "LMR excludes shallow moves");
+        check(!dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd1, 1'b0), "LMR excludes the first two legal moves");
+        check(dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd2, 1'b0), "LMR includes the third legal move");
+        check(dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd2, 1'b0),
+            "LMR all-moves policy includes captures and promotions");
+        check(dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd2, 1'b0),
+            "LMR all-moves policy includes checks and evasions");
+        check(!dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd2, 1'b1), "LMR excludes full-depth recovery");
+        check(dut.search_needs_research(1'b1, 1'b1, EvalScore'(20), EvalScore'(10), EvalScore'(20)),
+            "LMR verifies a reduced beta cutoff at full depth");
+        check(!dut.search_needs_research(1'b1, 1'b0, EvalScore'(20), EvalScore'(10), EvalScore'(20)),
+            "ordinary PVS beta cutoff does not require full-depth recovery");
+        force dut.search_stack_top[0].remaining_depth = 5'd3;
+        force dut.search_stack_top[0].legal_move_count = 8'hff;
+        check(dut.lmr_child_depth(ThreadID'(0)) <= 8'd2, "LMR clamps reduction to d-1 at saturated move count");
+        release dut.search_stack_top[0].remaining_depth;
+        release dut.search_stack_top[0].legal_move_count;
+        for (int depth_bucket = 0; depth_bucket < dut.LMR_DEPTH_BUCKETS; depth_bucket++) begin
+            for (int move_bucket = 1; move_bucket < 8; move_bucket++) begin
+                check(dut.LMR_TABLE[depth_bucket][move_bucket] >= dut.LMR_TABLE[depth_bucket][move_bucket - 1],
+                    $sformatf("LMR table move monotonic depth bucket %0d move bucket %0d", depth_bucket, move_bucket));
+            end
+        end
+        for (int depth_bucket = 1; depth_bucket < dut.LMR_DEPTH_BUCKETS; depth_bucket++) begin
+            for (int move_bucket = 0; move_bucket < 8; move_bucket++) begin
+                check(dut.LMR_TABLE[depth_bucket][move_bucket] >= dut.LMR_TABLE[depth_bucket - 1][move_bucket],
+                    $sformatf("LMR table depth monotonic depth bucket %0d move bucket %0d", depth_bucket, move_bucket));
+            end
+        end
+
         new_game();
         run_perft(8'd0, NodeCountType'(1), "startpos perft depth 0");
         run_perft(8'd1, NodeCountType'(20), "startpos perft depth 1");
@@ -890,6 +958,22 @@ module tb_search_controller;
         new_game();
         setup_kings_only();
         run_perft(8'd1, NodeCountType'(5), "kings-only perft depth 1");
+        run_search_depth(8'd4, "kings-only LMR search depth 4");
+        check(lmr_reduced_issue_seen, "LMR controller reduces an eligible third-or-later move");
+        check(lmr_recovery_issue_seen, "LMR alpha-raising scout is issued again at full depth");
+        check(lmr_reduced_tt_depth_seen, "LMR reduced child TT request uses reduced depth");
+        check(lmr_full_tt_depth_seen, "LMR recovery TT request uses restored full depth");
+
+        new_game();
+        setup_pinned_rook_position();
+        begin
+            automatic Move ignored_move;
+            automatic EvalScore ignored_score;
+            automatic NodeCountType ignored_nodes;
+            run_search_depth_record(8'd1, "pinned-rook illegal-candidate search",
+                ignored_move, ignored_score, ignored_nodes);
+        end
+        check(lmr_illegal_candidate_seen, "LMR controller observes an illegal candidate without advancing m");
 
         new_game();
         setup_castling_perft_position();
@@ -996,6 +1080,16 @@ module tb_search_controller;
                 stats_reset_pending <= 1'b1;
             end
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+                if (lmr_depth_check_pending[idx]) begin
+                    check(8'(dut.search_pending_child_depth[idx]) == lmr_expected_child_depth[idx],
+                        "LMR registers the expected reduced child depth before board completion");
+                    lmr_depth_check_pending[idx] = 1'b0;
+                end
+                if (lmr_recovery_check_pending[idx]) begin
+                    check(8'(dut.search_pending_child_depth[idx]) == lmr_expected_child_depth[idx],
+                        "LMR recovery restores full child depth without another reduction");
+                    lmr_recovery_check_pending[idx] = 1'b0;
+                end
                 if (dut.search_aspiration_active && !aspiration_window_seen) begin
                     aspiration_window_seen = 1'b1;
                     check(dut.search_root_beta - dut.search_root_alpha == EvalScore'(1024),
@@ -1154,12 +1248,24 @@ module tb_search_controller;
             if (dut.tt_lookup_req_valid && dut.tt_lookup_req_ready) begin
                 tt_lookup_count += 1;
                 tt_thread_seen[int'(dut.tt_lookup_req.thread_id)] = 1'b1;
+                check(dut.tt_lookup_req.depth == dut.search_stack_top[int'(dut.tt_lookup_req.thread_id)].remaining_depth,
+                    "TT lookup uses the node actual remaining depth");
+                if (dut.search_stack_top[int'(dut.tt_lookup_req.thread_id)].count_move_on_return) begin
+                    if (dut.search_stack_top[int'(dut.tt_lookup_req.thread_id)].remaining_depth
+                            < dut.search_target_depth - 5'(dut.search_ply[int'(dut.tt_lookup_req.thread_id)])) begin
+                        lmr_reduced_tt_depth_seen = 1'b1;
+                    end
+                end
+                if (lmr_full_tt_pending[int'(dut.tt_lookup_req.thread_id)]) begin
+                    lmr_full_tt_depth_seen = 1'b1;
+                    lmr_full_tt_pending[int'(dut.tt_lookup_req.thread_id)] = 1'b0;
+                end
             end
             if (dut.tt_lookup_resp_valid) begin
                 tt_response_thread_seen[int'(dut.tt_lookup_resp.thread_id)] = 1'b1;
                 if (dut.tt_lookup_resp.hit
                         && dut.tt_lookup_resp.depth < dut.search_remaining_depth(
-                            dut.search_ply[int'(dut.tt_lookup_resp.thread_id)])
+                            dut.tt_lookup_resp.thread_id)
                         && !is_null_move(dut.tt_lookup_resp.best_move)) begin
                     shallow_tt_hit_seen = 1'b1;
                     shallow_tt_target_pending[int'(dut.tt_lookup_resp.thread_id)] = 1'b1;
@@ -1175,6 +1281,39 @@ module tb_search_controller;
             end
             if (dut.tt_store_req_valid && dut.tt_store_req_ready) begin
                 tt_store_count += 1;
+                check(dut.tt_store_req.depth == dut.search_stack_top[int'(dut.tt_store_req.thread_id)].remaining_depth,
+                    "TT store uses the node actual remaining depth");
+            end
+            if (dut.search_board_issue_valid
+                    && dut.search_thread_phase[int'(dut.search_board_issue_thread)] != dut.SEARCH_PHASE_REVERSE_WAIT) begin
+                automatic int lmr_tid;
+                lmr_tid = int'(dut.search_board_issue_thread);
+                lmr_issue_legal_count[lmr_tid] = dut.search_stack_top[lmr_tid].legal_move_count;
+                if (dut.search_pvs_research[lmr_tid]) begin
+                    lmr_recovery_issue_seen = 1'b1;
+                    lmr_full_tt_pending[lmr_tid] = 1'b1;
+                    lmr_expected_child_depth[lmr_tid] = 8'(dut.search_stack_top[lmr_tid].remaining_depth - 1'b1);
+                    lmr_recovery_check_pending[lmr_tid] = 1'b1;
+                    check(dut.search_stack_top[lmr_tid].legal_move_count == lmr_issue_legal_count[lmr_tid],
+                        "LMR recovery does not increment the legal move index at issue");
+                end else if (dut.lmr_eligible(
+                        dut.search_ply[lmr_tid],
+                        dut.search_stack_top[lmr_tid].remaining_depth,
+                        dut.search_stack_top[lmr_tid].legal_move_count,
+                        dut.search_pvs_research[lmr_tid])) begin
+                    lmr_reduced_issue_seen = 1'b1;
+                    lmr_expected_child_depth[lmr_tid] = 8'(dut.lmr_child_depth(dut.search_board_issue_thread));
+                    lmr_depth_check_pending[lmr_tid] = 1'b1;
+                end
+            end
+            if (dut.search_board_result_valid
+                    && dut.search_board_op_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN - 1] != BOARD_REVERSE_MOVE_OP
+                    && dut.board_update_mover_in_check) begin
+                automatic int illegal_tid;
+                illegal_tid = int'(dut.search_board_result_thread_id);
+                lmr_illegal_candidate_seen = 1'b1;
+                check(dut.search_stack_top[illegal_tid].legal_move_count == lmr_issue_legal_count[illegal_tid],
+                    "illegal pseudo-legal candidate does not advance m");
             end
             if (dut.repetition_req_valid) begin
                 if (dut.repetition_req_ply == PlyIndex'(0)) repetition_root_request_seen = 1'b1;

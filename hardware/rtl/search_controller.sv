@@ -14,6 +14,8 @@ module search_controller #(
     parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
+    parameter int unsigned LMR_A_Q8 = 192,
+    parameter int unsigned LMR_B_Q8 = 614,
     parameter bit EXTERNAL_TT = 1'b0,
     parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
@@ -61,6 +63,11 @@ module search_controller #(
     localparam int ASPIRATION_DELTA_VALUE = 512;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_DELTA_VALUE);
+    localparam int LMR_LN2_Q8 = 177;
+    localparam int LMR_MAX_REMAINING_DEPTH = SEARCH_STACK_DEPTH - 1;
+    // Only floor-log2 buckets reachable by a legal configured search depth exist.
+    localparam int LMR_DEPTH_BUCKETS = (LMR_MAX_REMAINING_DEPTH <= 1)
+        ? 1 : $clog2(LMR_MAX_REMAINING_DEPTH + 1);
 
     typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
     typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
@@ -80,12 +87,15 @@ module search_controller #(
         EvalScore beta;
         Move tt_move;
         PlyIndex repetition_start;
+        SearchDepth remaining_depth;
+        logic [7:0] legal_move_count;
         logic first_request;
         logic has_legal;
         logic tt_checked;
         logic has_tt_move;
         logic stand_pat_done;
         logic scout_search;
+        logic count_move_on_return;
     } SearchStackEntry;
 
     typedef enum logic [4:0] {
@@ -226,7 +236,9 @@ module search_controller #(
     EvalScore search_return_score[0:SEARCH_THREAD_COUNT-1];
     logic search_return_valid[0:SEARCH_THREAD_COUNT-1];
     logic search_return_was_scout[0:SEARCH_THREAD_COUNT-1];
+    logic search_return_was_reduced[0:SEARCH_THREAD_COUNT-1];
     logic search_pvs_research[0:SEARCH_THREAD_COUNT-1];
+    SearchDepth search_pending_child_depth[0:SEARCH_THREAD_COUNT-1];
     logic search_eval_is_stand_pat[0:SEARCH_THREAD_COUNT-1];
     logic terminal_result_valid_pipe;
     ThreadID terminal_result_thread_pipe;
@@ -759,12 +771,15 @@ module search_controller #(
         entry.beta = SEARCH_INF;
         entry.tt_move = NULL_MOVE;
         entry.repetition_start = PlyIndex'(0);
+        entry.remaining_depth = SearchDepth'(0);
+        entry.legal_move_count = 8'd0;
         entry.first_request = 1'b1;
         entry.has_legal = 1'b0;
         entry.tt_checked = 1'b0;
         entry.has_tt_move = 1'b0;
         entry.stand_pat_done = 1'b0;
         entry.scout_search = 1'b0;
+        entry.count_move_on_return = 1'b0;
         return entry;
     endfunction : empty_search_stack_entry
 
@@ -779,9 +794,111 @@ module search_controller #(
         return 1'b0;
     endfunction : search_stop_requested
 
-    function automatic logic search_in_qsearch(input PlyIndex ply);
-        return SearchDepth'(ply) >= search_target_depth;
+    function automatic logic search_in_qsearch(input ThreadID thread);
+        return search_stack_top[thread].remaining_depth == SearchDepth'(0);
     endfunction : search_in_qsearch
+
+    // Constant-folded Q8 approximation used to populate the small LMR ROM.
+    function automatic logic [7:0] lmr_table_value_for_params(
+        input longint unsigned a_q8,
+        input longint unsigned b_q8,
+        input int depth_bucket,
+        input int move_bucket
+    );
+        automatic longint unsigned numerator;
+        automatic longint unsigned reduction_q8;
+        automatic longint unsigned rounded;
+        numerator = longint'(LMR_LN2_Q8) * longint'(LMR_LN2_Q8)
+            * longint'(depth_bucket) * longint'(move_bucket);
+        // Round the complete rational expression once, rather than rounding
+        // the logarithmic term separately before adding A.
+        if (b_q8 == 0) return 8'd0;
+        reduction_q8 = a_q8 * b_q8 + numerator;
+        rounded = (reduction_q8 + (longint'(128) * b_q8)) / (longint'(256) * b_q8);
+        return rounded > 255 ? 8'hff : 8'(rounded);
+    endfunction : lmr_table_value_for_params
+
+    function automatic logic [7:0] lmr_table_value(input int depth_bucket, input int move_bucket);
+        return lmr_table_value_for_params(LMR_A_Q8, LMR_B_Q8, depth_bucket, move_bucket);
+    endfunction : lmr_table_value
+
+    function automatic logic [2:0] floor_log2_8(input logic [7:0] value);
+        for (int bit_index = 7; bit_index >= 0; bit_index--)
+            if (value[bit_index]) return 3'(bit_index);
+        return 3'd0;
+    endfunction : floor_log2_8
+
+    function automatic logic [7:0] max_raw_lmr_table_value();
+        automatic logic [7:0] maximum;
+        maximum = 8'd0;
+        for (int depth_bucket = 0; depth_bucket < LMR_DEPTH_BUCKETS; depth_bucket++)
+            for (int move_bucket = 0; move_bucket < 8; move_bucket++)
+                if (lmr_table_value(depth_bucket, move_bucket) > maximum)
+                    maximum = lmr_table_value(depth_bucket, move_bucket);
+        return maximum;
+    endfunction : max_raw_lmr_table_value
+
+    localparam logic [7:0] LMR_TABLE_MAX_VALUE = max_raw_lmr_table_value();
+    localparam int LMR_TABLE_VALUE_BITS = (LMR_TABLE_MAX_VALUE <= 1)
+        ? 1 : $clog2(LMR_TABLE_MAX_VALUE + 1);
+    typedef SearchDepth LmrTable[0:LMR_DEPTH_BUCKETS-1][0:7];
+
+    function automatic LmrTable build_lmr_table();
+        automatic LmrTable result_table;
+        for (int depth_bucket = 0; depth_bucket < LMR_DEPTH_BUCKETS; depth_bucket++)
+            for (int move_bucket = 0; move_bucket < 8; move_bucket++)
+                result_table[depth_bucket][move_bucket]
+                    = SearchDepth'(lmr_table_value(depth_bucket, move_bucket));
+        return result_table;
+    endfunction : build_lmr_table
+
+    localparam LmrTable LMR_TABLE = build_lmr_table();
+    generate
+        if (LMR_B_Q8 == 0) begin : gen_invalid_lmr_denominator
+            initial $fatal(1, "LMR_B_Q8 must be nonzero");
+        end
+        if (LMR_TABLE_VALUE_BITS > SEARCH_DEPTH_BITS) begin : gen_oversized_lmr_table_value
+            initial $fatal(1, "LMR table value does not fit SearchDepth");
+        end
+    endgenerate
+
+    function automatic SearchDepth lmr_child_depth(input ThreadID thread);
+        automatic SearchDepth depth;
+        automatic logic [7:0] move_index;
+        automatic SearchDepth reduction;
+        automatic logic [2:0] depth_bucket;
+        depth = search_stack_top[thread].remaining_depth;
+        move_index = search_stack_top[thread].legal_move_count == 8'hff
+            ? 8'hff : search_stack_top[thread].legal_move_count + 8'd1;
+        depth_bucket = floor_log2_8(depth);
+        reduction = LMR_TABLE[depth_bucket][floor_log2_8(move_index)];
+        if (reduction >= depth) reduction = depth - SearchDepth'(1);
+        return depth - SearchDepth'(1) - reduction;
+    endfunction : lmr_child_depth
+
+    // LMR deliberately has no tactical move classification: every main-search
+    // move follows the same eligibility policy.
+    function automatic logic lmr_eligible(
+        input PlyIndex ply,
+        input SearchDepth remaining_depth,
+        input logic [7:0] legal_move_count,
+        input logic is_research
+    );
+        return ply != PlyIndex'(0) && remaining_depth >= SearchDepth'(3)
+            && legal_move_count >= 8'd2 && !is_research;
+    endfunction : lmr_eligible
+
+    function automatic logic search_needs_research(
+        input logic was_scout,
+        input logic was_reduced,
+        input EvalScore score,
+        input EvalScore alpha,
+        input EvalScore beta
+    );
+        // Every alpha-raising reduced scout is verified at full depth, including
+        // apparent beta cutoffs. Ordinary PVS scouts retain cutoff behavior.
+        return was_scout && score > alpha && (score < beta || was_reduced);
+    endfunction : search_needs_research
 
     function automatic int search_wrap_thread_index(input int index);
         if (index >= SEARCH_THREAD_COUNT) begin
@@ -886,7 +1003,7 @@ module search_controller #(
         return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
             && search_thread_phase[thread_index] == SEARCH_PHASE_READY
             && !search_thread_terminal_draw_ready(thread_index)
-            && !search_in_qsearch(search_ply[thread_index])
+            && !search_in_qsearch(ThreadID'(thread_index))
             && !search_stack_top[thread_index].tt_checked
             && should_probe_search_tt(ThreadID'(thread_index), search_ply[thread_index])
             && !search_tt_lookup_inflight[thread_index];
@@ -898,7 +1015,7 @@ module search_controller #(
             && !search_thread_terminal_draw_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
             && !search_eval_inflight[thread_index]
-            && ((search_in_qsearch(search_ply[thread_index])
+            && ((search_in_qsearch(ThreadID'(thread_index))
                     && !search_stack_top[thread_index].stand_pat_done)
                 || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1);
     endfunction : search_thread_eval_ready
@@ -1078,7 +1195,7 @@ module search_controller #(
     endfunction : should_probe_search_tt
 
     function automatic logic should_store_search_tt(input ThreadID thread, input PlyIndex ply);
-        return !search_in_qsearch(ply);
+        return !search_in_qsearch(thread);
     endfunction : should_store_search_tt
 
     function automatic Move root_hint_for_thread(input ThreadID thread);
@@ -1114,11 +1231,8 @@ module search_controller #(
             || (candidate_score == current_score && move_tiebreak_less(candidate_move, current_move)));
     endfunction : root_result_better
 
-    function automatic TTDepth search_remaining_depth(input PlyIndex ply);
-        if (SearchDepth'(ply) >= search_target_depth) begin
-            return TTDepth'(0);
-        end
-        return TTDepth'(search_target_depth - SearchDepth'(ply));
+    function automatic TTDepth search_remaining_depth(input ThreadID thread);
+        return TTDepth'(search_stack_top[thread].remaining_depth);
     endfunction : search_remaining_depth
 
     function automatic TTBoundType tt_bound_for_score(
@@ -1224,18 +1338,18 @@ module search_controller #(
                 move_gen_tiles[pos] = search_board[0].tiles[pos];
             end
         end else if (search_move_issue_valid) begin
-            if (!search_in_qsearch(search_ply[search_move_issue_thread])
+            if (!search_in_qsearch(search_move_issue_thread)
                     && search_stack_top[search_move_issue_thread].has_tt_move
                     && search_stack_top[search_move_issue_thread].first_request) begin
                 move_gen_op = MOVE_GEN_TARGETED_OP;
                 move_gen_target_move = search_stack_top[search_move_issue_thread].tt_move;
             end else if (search_ply[search_move_issue_thread] == PlyIndex'(0)
                     && search_stack_top[search_move_issue_thread].first_request
-                    && !search_in_qsearch(search_ply[search_move_issue_thread])) begin
+                    && !search_in_qsearch(search_move_issue_thread)) begin
                 move_gen_op = MOVE_GEN_TARGETED_OP;
                 move_gen_target_move = root_hint_for_thread(search_move_issue_thread);
             end else begin
-                move_gen_op = search_in_qsearch(search_ply[search_move_issue_thread]) ? MOVE_GEN_QSEARCH_OP : MOVE_GEN_NORMAL_OP;
+                move_gen_op = search_in_qsearch(search_move_issue_thread) ? MOVE_GEN_QSEARCH_OP : MOVE_GEN_NORMAL_OP;
             end
             move_gen_start_node = search_stack_top[search_move_issue_thread].first_request;
             move_gen_ply = search_ply[search_move_issue_thread];
@@ -1262,7 +1376,7 @@ module search_controller #(
         tt_lookup_req = TTLookupRequest'('0);
         tt_lookup_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
         tt_lookup_req.zobrist_key = search_zobrist_key[tt_lookup_req.thread_id];
-        tt_lookup_req.depth = search_remaining_depth(search_ply[tt_lookup_req.thread_id]);
+        tt_lookup_req.depth = search_remaining_depth(tt_lookup_req.thread_id);
         tt_lookup_req.alpha = search_stack_top[tt_lookup_req.thread_id].alpha;
         tt_lookup_req.beta = search_stack_top[tt_lookup_req.thread_id].beta;
         tt_lookup_req.ply = search_ply[tt_lookup_req.thread_id];
@@ -1271,7 +1385,7 @@ module search_controller #(
         tt_store_req = TTStoreRequest'('0);
         tt_store_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_store_issue_thread : search_thread_id;
         tt_store_req.zobrist_key = search_zobrist_key[tt_store_req.thread_id];
-        tt_store_req.depth = search_remaining_depth(search_ply[tt_store_req.thread_id]);
+        tt_store_req.depth = search_remaining_depth(tt_store_req.thread_id);
         tt_store_req.score = search_return_score[tt_store_req.thread_id];
         tt_store_req.bound_type = tt_bound_for_score(
             search_return_score[tt_store_req.thread_id],
@@ -1389,6 +1503,7 @@ module search_controller #(
                 search_return_score[tid] <= EvalScore'(0);
                 search_return_valid[tid] <= 1'b0;
                 search_return_was_scout[tid] <= 1'b0;
+                search_return_was_reduced[tid] <= 1'b0;
                 search_pvs_research[tid] <= 1'b0;
                 search_eval_is_stand_pat[tid] <= 1'b0;
                 search_stack_top[tid] <= empty_search_stack_entry();
@@ -1470,6 +1585,7 @@ module search_controller #(
                     search_tt_response_pending[tid] <= 1'b0;
                     search_repetition_pending[tid] <= 1'b0;
                     search_return_was_scout[tid] <= 1'b0;
+                    search_return_was_reduced[tid] <= 1'b0;
                     search_pvs_research[tid] <= 1'b0;
                     search_thread_status[tid] <= SEARCH_THREAD_IDLE;
                     search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
@@ -1623,6 +1739,7 @@ module search_controller #(
                                     search_return_score[search_thread_id] <= EvalScore'(0);
                                     search_return_valid[search_thread_id] <= 1'b0;
                                     search_return_was_scout[search_thread_id] <= 1'b0;
+                                    search_return_was_reduced[search_thread_id] <= 1'b0;
                                     search_pvs_research[search_thread_id] <= 1'b0;
                                     search_eval_is_stand_pat[search_thread_id] <= 1'b0;
                                     tt_age <= tt_age + TTAge'(1);
@@ -1652,6 +1769,7 @@ module search_controller #(
                                         search_tt_response_pending[tid] <= 1'b0;
                                         search_repetition_pending[tid] <= 1'b0;
                                         search_return_was_scout[tid] <= 1'b0;
+                                        search_return_was_reduced[tid] <= 1'b0;
                                         search_pvs_research[tid] <= 1'b0;
                                     end
                                     for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
@@ -1927,9 +2045,11 @@ module search_controller #(
                         search_return_score[tid] <= EvalScore'(0);
                         search_return_valid[tid] <= 1'b0;
                         search_return_was_scout[tid] <= 1'b0;
+                        search_return_was_reduced[tid] <= 1'b0;
                         search_pvs_research[tid] <= 1'b0;
                         search_eval_is_stand_pat[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
+                        search_stack_top[tid].remaining_depth <= search_target_depth;
                         search_stack_top[tid].alpha <= search_root_alpha;
                         search_stack_top[tid].orig_alpha <= search_root_alpha;
                         search_stack_top[tid].beta <= search_root_beta;
@@ -2091,7 +2211,15 @@ module search_controller #(
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_return_move[board_thread_id] <= search_stack_top[board_thread_id].move;
                                 search_return_was_scout[board_thread_id] <= search_stack_top[board_thread_id].scout_search;
+                                search_return_was_reduced[board_thread_id]
+                                    <= search_stack_top[board_thread_id].remaining_depth + SearchDepth'(1)
+                                        < search_stack_parent_q[board_thread_id].remaining_depth;
                                 search_stack_top[board_thread_id] <= search_stack_parent_q[board_thread_id];
+                                if (search_stack_top[board_thread_id].count_move_on_return
+                                        && search_stack_parent_q[board_thread_id].legal_move_count != 8'hff) begin
+                                    search_stack_top[board_thread_id].legal_move_count
+                                        <= search_stack_parent_q[board_thread_id].legal_move_count + 8'd1;
+                                end
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
                             end else if (board_update_mover_in_check) begin
@@ -2128,7 +2256,7 @@ module search_controller #(
                                 // window. Later main-search children use a one-point PVS scout window.
                                 if (!search_pvs_research[board_thread_id]
                                         && search_stack_top[board_thread_id].has_legal
-                                        && !search_in_qsearch(board_ply)) begin
+                                        && !search_in_qsearch(board_thread_id)) begin
                                     search_stack_top[board_thread_id].alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
                                     search_stack_top[board_thread_id].orig_alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
@@ -2140,6 +2268,9 @@ module search_controller #(
                                     search_stack_top[board_thread_id].scout_search <= 1'b0;
                                 end
                                 search_pvs_research[board_thread_id] <= 1'b0;
+                                search_stack_top[board_thread_id].remaining_depth <= search_pending_child_depth[board_thread_id];
+                                search_stack_top[board_thread_id].legal_move_count <= 8'd0;
+                                search_stack_top[board_thread_id].count_move_on_return <= !search_pvs_research[board_thread_id];
                                 search_stack_top[board_thread_id].tt_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].repetition_start <= committed_move_is_irreversible(
                                     search_board[board_thread_id],
@@ -2177,7 +2308,7 @@ module search_controller #(
                                 terminal_result_valid_pipe <= 1'b1;
                                 terminal_result_thread_pipe <= move_thread_id;
                                 terminal_result_ply_pipe <= move_ply;
-                                terminal_result_score_pipe <= search_in_qsearch(move_ply)
+                                terminal_result_score_pipe <= search_in_qsearch(move_thread_id)
                                     ? search_stack_top[move_thread_id].best_score
                                     : search_stack_top[move_thread_id].has_legal
                                     ? search_stack_top[move_thread_id].best_score
@@ -2290,7 +2421,7 @@ module search_controller #(
                                 search_stack_top[lookup_thread_id].tt_move <= lookup_resp.best_move;
                                 search_stack_top[lookup_thread_id].has_tt_move <= !is_null_move(lookup_resp.best_move);
                             end
-                            if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_ply)) begin
+                            if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_thread_id)) begin
                                 if (lookup_resp.bound_type == TT_BOUND_EXACT) begin
                                     search_return_score[lookup_thread_id] <= lookup_resp.score;
                                     search_return_valid[lookup_thread_id] <= 1'b1;
@@ -2350,15 +2481,23 @@ module search_controller #(
                             parent_score = -search_return_score[return_thread_id];
                             search_thread_id <= return_thread_id;
                             search_return_dispatch_cursor <= search_thread_after(return_thread_id);
-                            if (search_return_was_scout[return_thread_id]
-                                    && parent_score > search_stack_top[return_thread_id].alpha
-                                    && parent_score < search_stack_top[return_thread_id].beta) begin
+                            if (search_needs_research(
+                                    search_return_was_scout[return_thread_id],
+                                    search_return_was_reduced[return_thread_id],
+                                    parent_score,
+                                    search_stack_top[return_thread_id].alpha,
+                                    search_stack_top[return_thread_id].beta)) begin
                                 // A scout fail-high that does not cut off must be searched again
                                 // with the parent's original full window before it can be folded.
                                 search_pending_move[return_thread_id] <= search_return_move[return_thread_id];
                                 search_return_valid[return_thread_id] <= 1'b0;
                                 search_return_was_scout[return_thread_id] <= 1'b0;
+                                search_return_was_reduced[return_thread_id] <= 1'b0;
                                 search_pvs_research[return_thread_id] <= 1'b1;
+                                search_pending_child_depth[return_thread_id]
+                                    <= search_stack_top[return_thread_id].remaining_depth == SearchDepth'(0)
+                                        ? SearchDepth'(0)
+                                        : search_stack_top[return_thread_id].remaining_depth - SearchDepth'(1);
                                 search_thread_phase[return_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
                                 if (!search_stack_top[return_thread_id].has_legal
@@ -2376,6 +2515,7 @@ module search_controller #(
                                 end
                                 search_return_valid[return_thread_id] <= 1'b0;
                                 search_return_was_scout[return_thread_id] <= 1'b0;
+                                search_return_was_reduced[return_thread_id] <= 1'b0;
                                 if (parent_score >= search_stack_top[return_thread_id].beta) begin
                                     search_return_score[return_thread_id] <= parent_score;
                                     search_return_valid[return_thread_id] <= 1'b1;
@@ -2469,7 +2609,7 @@ module search_controller #(
                             search_eval_wait_count[search_eval_issue_thread] <= EvalWaitCount'(EVAL_WAIT_CYCLES);
                             search_thread_phase[search_eval_issue_thread] <= SEARCH_PHASE_EVAL_WAIT;
                             search_eval_inflight[search_eval_issue_thread] <= 1'b1;
-                            search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_ply[search_eval_issue_thread])
+                            search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_eval_issue_thread)
                                 && !search_stack_top[search_eval_issue_thread].stand_pat_done;
                             search_eval_dispatch_cursor <= search_thread_after(search_eval_issue_thread);
                         end
@@ -2487,6 +2627,31 @@ module search_controller #(
                             search_board_wait_count[search_board_issue_thread] <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
                             search_thread_phase[search_board_issue_thread] <= SEARCH_PHASE_BOARD_WAIT;
                             search_board_inflight[search_board_issue_thread] <= 1'b1;
+                            if (search_thread_phase[search_board_issue_thread] != SEARCH_PHASE_REVERSE_WAIT) begin
+                                if (search_pvs_research[search_board_issue_thread]) begin
+                                    search_pending_child_depth[search_board_issue_thread]
+                                        <= search_stack_top[search_board_issue_thread].remaining_depth == SearchDepth'(0)
+                                            ? SearchDepth'(0)
+                                            : search_stack_top[search_board_issue_thread].remaining_depth - SearchDepth'(1);
+                                end else if (lmr_eligible(
+                                        search_ply[search_board_issue_thread],
+                                        search_stack_top[search_board_issue_thread].remaining_depth,
+                                        search_stack_top[search_board_issue_thread].legal_move_count,
+                                        search_pvs_research[search_board_issue_thread])) begin
+                                    search_pending_child_depth[search_board_issue_thread] <= lmr_child_depth(search_board_issue_thread);
+`ifndef SYNTHESIS
+                                    assert (floor_log2_8(8'(search_stack_top[search_board_issue_thread].remaining_depth))
+                                            < LMR_DEPTH_BUCKETS);
+                                    assert (lmr_child_depth(search_board_issue_thread)
+                                            < search_stack_top[search_board_issue_thread].remaining_depth);
+`endif
+                                end else begin
+                                    search_pending_child_depth[search_board_issue_thread]
+                                        <= search_stack_top[search_board_issue_thread].remaining_depth == SearchDepth'(0)
+                                            ? SearchDepth'(0)
+                                            : search_stack_top[search_board_issue_thread].remaining_depth - SearchDepth'(1);
+                                end
+                            end
                             search_board_dispatch_cursor <= search_thread_after(search_board_issue_thread);
                         end
 
