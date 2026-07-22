@@ -15,7 +15,6 @@ from .model import PIECE_ORDER, PST_PATH
 
 GENERATED_PATHS = (
     REPO_ROOT / "hardware/data/pst_values/pst_values.hex",
-    REPO_ROOT / "hardware/rtl/generated/pst_values_pkg.sv",
     REPO_ROOT / "hardware/rtl/generated/evaluation_parameters.svh",
 )
 GENERATOR = REPO_ROOT / "hardware/scripts/generate_pst_values.py"
@@ -163,7 +162,7 @@ def commit_parameters(run: Path, dry_run: bool = False) -> None:
             temporary.write_bytes(contents)
             os.replace(temporary, path)
         raise
-    print("Updated evaluation parameter JSON, PST HEX, and generated SystemVerilog files.")
+    print("Updated evaluation parameter JSON, PST ROM image, and material include.")
 
 
 def _atomic_text(path: Path, contents: str) -> None:
