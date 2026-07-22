@@ -351,16 +351,18 @@ module de1_soc(input CLOCK_50,
 		HEX1 = 7'h7f;
 		HEX2 = 7'h7f;
 		HEX3 = 7'h7f;
-		HEX4 = hex_digit(tx_response_byte_count[3:0]);
-		HEX5 = hex_digit(tx_response_byte_count[7:4]);
+		HEX4 = 7'h7f;
+		HEX5 = 7'h7f;
 		if (!SW[9]) begin
 			LEDR[7:0] = mem;
-		LEDR[8] = rx_error | remote_reset | tx_full | engine_error | tt_memory_error;
+			LEDR[8] = rx_error | remote_reset | tx_full | engine_error | tt_memory_error;
 			LEDR[9] = ~pll_locked_status;
 			HEX0 = hex_digit(mem[3:0]);
 			HEX1 = hex_digit(mem[7:4]);
 			HEX2 = hex_digit({1'b0, engine_error, tx_full, rx_error});
 			HEX3 = hex_digit({1'b0, remote_reset, engine_ready, pll_locked_status});
+			HEX4 = hex_digit(tx_response_byte_count[3:0]);
+			HEX5 = hex_digit(tx_response_byte_count[7:4]);
 		end
 	end
 
