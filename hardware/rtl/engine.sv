@@ -13,8 +13,8 @@ module engine #(
     parameter bit EXTERNAL_TT = 1'b0,
     parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
-    input wire clk,
-    input wire rst_n,
+    input logic clk,
+    input logic rst_n,
     input logic [7:0] data_in,
     input logic data_in_valid,
     input logic kill,
@@ -23,14 +23,24 @@ module engine #(
     output logic ready,
     output logic [7:0] data_out,
     output logic data_out_valid,
-    input logic tt_memory_ready, input logic tt_memory_error,
-    output logic tt_mem_req_valid, input logic tt_mem_req_ready,
-    output logic tt_mem_req_write, output TTWordAddress tt_mem_req_address, output logic [3:0] tt_mem_req_length,
-    output logic tt_mem_write_valid, input logic tt_mem_write_ready,
-    output logic [15:0] tt_mem_write_data, output logic tt_mem_write_last,
-    input logic tt_mem_read_valid, output logic tt_mem_read_ready,
-    input logic [15:0] tt_mem_read_data, input logic tt_mem_read_last,
-    input logic tt_mem_done_valid, output logic tt_mem_done_ready, input logic tt_mem_done_error
+    input logic tt_memory_ready,
+    input logic tt_memory_error,
+    output logic tt_mem_req_valid,
+    input logic tt_mem_req_ready,
+    output logic tt_mem_req_write,
+    output TTWordAddress tt_mem_req_address,
+    output logic [3:0] tt_mem_req_length,
+    output logic tt_mem_write_valid,
+    input logic tt_mem_write_ready,
+    output logic [15:0] tt_mem_write_data,
+    output logic tt_mem_write_last,
+    input logic tt_mem_read_valid,
+    output logic tt_mem_read_ready,
+    input logic [15:0] tt_mem_read_data,
+    input logic tt_mem_read_last,
+    input logic tt_mem_done_valid,
+    output logic tt_mem_done_ready,
+    input logic tt_mem_done_error
 );
 
     logic controller_req_valid;

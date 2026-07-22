@@ -19,8 +19,8 @@ module search_controller #(
     parameter bit EXTERNAL_TT = 1'b0,
     parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
-    input wire clk,
-    input wire rst_n,
+    input logic clk,
+    input logic rst_n,
     input logic req_valid,
     output logic req_ready,
     input EngineControllerRequest req,
@@ -53,7 +53,8 @@ module search_controller #(
     localparam int MOVE_WAIT_BITS = $clog2(MOVE_WAIT_CYCLES + 1);
     localparam int EVAL_WAIT_CYCLES = STATIC_EVAL_PIPELINE_STAGE_CNT;
     localparam int EVAL_WAIT_BITS = $clog2(EVAL_WAIT_CYCLES + 1);
-    localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1) ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
+    localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1)
+        ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
     localparam int SEARCH_MOVE_TAG_PIPE_LEN = (MOVE_WAIT_CYCLES <= 1) ? 1 : MOVE_WAIT_CYCLES;
     localparam int SEARCH_EVAL_TAG_PIPE_LEN = EVAL_WAIT_CYCLES + 1;
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
@@ -149,6 +150,7 @@ module search_controller #(
         SEARCH_PHASE_DONE
     } SearchThreadPhase;
 
+    // Controller-level request, response, and active-position state.
     SearchControllerState state;
     EngineControllerRequest active_req;
     EngineControllerResponse resp_reg;
@@ -159,12 +161,12 @@ module search_controller #(
     logic active_board_in_check;
     ZobristKey active_zobrist_key;
     EvalScore active_pst_eval;
-
-
     logic [6:0] new_setup_index;
 
+    // Perft borrows search context zero and tracks whether each ply starts a node.
     logic perft_first_request[0:SEARCH_STACK_DEPTH-1];
 
+    // Per-thread search context and shared-pipeline bookkeeping.
     Move search_best_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
     NodeCountType search_nodes;
@@ -197,6 +199,7 @@ module search_controller #(
     logic search_move_result_valid;
     logic search_eval_result_valid;
 `endif
+    // Position and stack state owned by each search context.
     Move search_pending_move[0:SEARCH_THREAD_COUNT-1];
     FullBoard search_board[0:SEARCH_THREAD_COUNT-1];
     // Cache the side-to-move check status with each board so move dispatch does
@@ -223,6 +226,7 @@ module search_controller #(
     logic [7:0] search_thread_completed_depth[0:SEARCH_THREAD_COUNT-1];
     Move search_thread_completed_best_move[0:SEARCH_THREAD_COUNT-1];
 `endif
+    // Scheduler cursors select helper work after giving ready primary work priority.
     ThreadID search_thread_id;
     ThreadID search_dispatch_cursor;
     ThreadID search_board_dispatch_cursor;
@@ -250,6 +254,7 @@ module search_controller #(
     PlyIndex terminal_result_ply_pipe;
     EvalScore terminal_result_score_pipe;
 
+    // Shared board-update pipeline request and result signals.
     BoardOp board_update_op;
     FullBoard board_update_in;
     ZobristKey board_update_zobrist_in;
@@ -266,6 +271,7 @@ module search_controller #(
     // board context that accepts it instead of scanning during move dispatch.
     logic board_update_side_in_check;
 
+    // Shared move-generator pipeline request and result signals.
     MoveGenOp move_gen_op;
     logic move_gen_start_node;
     ThreadID move_gen_thread_id;
@@ -279,10 +285,12 @@ module search_controller #(
     Move candidate_move;
     logic move_is_legal;
 
+    // Shared static-evaluator pipeline request and result signals.
     Tile eval_board_tiles[64];
     EvalScore eval_base;
     EvalScore static_eval_out;
 
+    // Shared transposition-table frontend request and result signals.
     logic tt_clear;
     logic tt_clear_busy;
     logic tt_lookup_req_valid;
@@ -298,6 +306,7 @@ module search_controller #(
     TTStoreRequest tt_store_req;
     TTAge tt_age;
 
+    // Operation timer and scheduler-selected pipeline issues.
     logic timer_rst;
     logic timer_run;
     TimeType elapsed_ms;
@@ -314,16 +323,27 @@ module search_controller #(
     ThreadID search_tt_lookup_issue_thread;
     ThreadID search_tt_store_issue_thread;
 
+    // Repetition checker request, response, and epoch state.
     localparam int REPETITION_EPOCH_BITS = 4;
     logic [REPETITION_EPOCH_BITS-1:0] repetition_epoch;
-    logic repetition_init_start, repetition_init_busy, repetition_init_done, repetition_init_failed;
-    logic repetition_history_reset, repetition_history_write;
+    logic repetition_init_start;
+    logic repetition_init_busy;
+    logic repetition_init_done;
+    logic repetition_init_failed;
+    logic repetition_history_reset;
+    logic repetition_history_write;
     ZobristKey repetition_history_key;
-    logic repetition_line_write_valid, repetition_req_valid;
-    ThreadID repetition_line_write_thread, repetition_req_thread;
-    PlyIndex repetition_line_write_ply, repetition_req_ply, repetition_req_start_ply;
-    ZobristKey repetition_line_write_key, repetition_req_key;
-    logic repetition_resp_valid, repetition_resp_is_draw;
+    logic repetition_line_write_valid;
+    logic repetition_req_valid;
+    ThreadID repetition_line_write_thread;
+    ThreadID repetition_req_thread;
+    PlyIndex repetition_line_write_ply;
+    PlyIndex repetition_req_ply;
+    PlyIndex repetition_req_start_ply;
+    ZobristKey repetition_line_write_key;
+    ZobristKey repetition_req_key;
+    logic repetition_resp_valid;
+    logic repetition_resp_is_draw;
     ThreadID repetition_resp_thread;
     logic [REPETITION_EPOCH_BITS-1:0] repetition_resp_epoch;
     logic [1:0] repetition_resp_count;
@@ -393,7 +413,9 @@ module search_controller #(
         .req_valid(repetition_req_valid), .req_thread(repetition_req_thread), .req_ply(repetition_req_ply),
         .req_start_ply(repetition_req_start_ply), .req_epoch(repetition_epoch), .req_key(repetition_req_key),
         .resp_valid(repetition_resp_valid), .resp_thread(repetition_resp_thread),
-        .resp_epoch(repetition_resp_epoch), .resp_previous_count(repetition_resp_count), .resp_is_draw(repetition_resp_is_draw)
+        .resp_epoch(repetition_resp_epoch),
+        .resp_previous_count(repetition_resp_count),
+        .resp_is_draw(repetition_resp_is_draw)
     );
 
     move_generator #(
@@ -427,12 +449,17 @@ module search_controller #(
                 .cache_access_is_store(tt_cache_access_is_store),
                 .store_req_valid(tt_store_req_valid), .store_req_ready(tt_store_req_ready), .store_req(tt_store_req),
                 .mem_req_valid(tt_mem_req_valid), .mem_req_ready(tt_mem_req_ready),
-                .mem_req_write(tt_mem_req_write), .mem_req_address(tt_mem_req_address), .mem_req_length(tt_mem_req_length),
+                .mem_req_write(tt_mem_req_write),
+                .mem_req_address(tt_mem_req_address),
+                .mem_req_length(tt_mem_req_length),
                 .mem_write_valid(tt_mem_write_valid), .mem_write_ready(tt_mem_write_ready),
                 .mem_write_data(tt_mem_write_data), .mem_write_last(tt_mem_write_last),
                 .mem_read_valid(tt_mem_read_valid), .mem_read_ready(tt_mem_read_ready),
                 .mem_read_data(tt_mem_read_data), .mem_read_last(tt_mem_read_last),
-                .mem_done_valid(tt_mem_done_valid), .mem_done_ready(tt_mem_done_ready), .mem_done_error(tt_mem_done_error));
+                .mem_done_valid(tt_mem_done_valid),
+                .mem_done_ready(tt_mem_done_ready),
+                .mem_done_error(tt_mem_done_error)
+            );
         end else begin : internal_tt_gen
             tt_load_store #(
                 .TT_INDEX_BITS(TT_INDEX_BITS)
@@ -649,7 +676,11 @@ module search_controller #(
         return square_attacked(board, find_king(board, board.turn), Color'(~board.turn));
     endfunction : side_in_check
 
-    function automatic logic committed_move_is_irreversible(input FullBoard before_board, input FullBoard after_board, input Move move);
+    function automatic logic committed_move_is_irreversible(
+        input FullBoard before_board,
+        input FullBoard after_board,
+        input Move move
+    );
         automatic Tile start_tile;
         automatic Tile end_tile;
 
@@ -1266,11 +1297,16 @@ module search_controller #(
 
     always_comb begin
         setup_req_comb = new_game_setup_request(new_setup_index);
-        search_board_issue_valid = (state == ST_SEARCH_RUN) && search_has_board_thread_from(search_board_dispatch_cursor);
-        search_move_issue_valid = (state == ST_SEARCH_RUN) && search_has_move_issue_thread_from(search_move_dispatch_cursor);
-        search_eval_issue_valid = (state == ST_SEARCH_RUN) && search_has_eval_issue_thread_from(search_eval_dispatch_cursor);
-        search_tt_lookup_issue_valid = (state == ST_SEARCH_RUN) && search_has_tt_lookup_issue_thread_from(search_tt_lookup_dispatch_cursor);
-        search_tt_store_issue_valid = (state == ST_SEARCH_RUN) && search_has_store_thread_from(search_tt_store_dispatch_cursor);
+        search_board_issue_valid = (state == ST_SEARCH_RUN)
+            && search_has_board_thread_from(search_board_dispatch_cursor);
+        search_move_issue_valid = (state == ST_SEARCH_RUN)
+            && search_has_move_issue_thread_from(search_move_dispatch_cursor);
+        search_eval_issue_valid = (state == ST_SEARCH_RUN)
+            && search_has_eval_issue_thread_from(search_eval_dispatch_cursor);
+        search_tt_lookup_issue_valid = (state == ST_SEARCH_RUN)
+            && search_has_tt_lookup_issue_thread_from(search_tt_lookup_dispatch_cursor);
+        search_tt_store_issue_valid = (state == ST_SEARCH_RUN)
+            && search_has_store_thread_from(search_tt_store_dispatch_cursor);
         search_board_issue_thread = search_board_issue_valid
             ? search_next_board_thread_from(search_board_dispatch_cursor)
             : ThreadID'(0);

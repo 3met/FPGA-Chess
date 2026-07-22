@@ -1,15 +1,15 @@
-// By Emet Behrendt
+// Portable combinational-read dual-port ROM.
 
 module inferred_dual_port_rom #(
-    parameter NUM_WORDS = 1,
-    parameter WORD_SIZE = 1,
+    parameter int NUM_WORDS = 1,
+    parameter int WORD_SIZE = 1,
     parameter MEM_INIT_FILE = ""
 ) (
-    input  logic [$clog2(NUM_WORDS)-1:0] address_a,
-    input  logic [$clog2(NUM_WORDS)-1:0] address_b,
-    input  logic clock,
-    input  logic rden_a,
-    input  logic rden_b,
+    input logic [$clog2(NUM_WORDS)-1:0] address_a,
+    input logic [$clog2(NUM_WORDS)-1:0] address_b,
+    input logic clock,
+    input logic rden_a,
+    input logic rden_b,
     output logic [WORD_SIZE-1:0] q_a,
     output logic [WORD_SIZE-1:0] q_b
 );

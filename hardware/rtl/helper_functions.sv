@@ -1,14 +1,13 @@
 
 // By Emet Behrendt
 
-// This file contains the chess_helper_funcs package which holds
-// many helper functions in deadling with chess data types.
+// Shared helper functions for the chess data types.
 
 package chess_helper_funcs;
 
     import general_chess_defs::*;
 
-	// Returns true if a given piece type is a real piece (not NULL or SPARE)
+	// Returns true when a piece type is real (not NULL or SPARE).
 	function logic isRealPiece(PieceType piece_type);
 		return (piece_type != NULL_PIECE && piece_type != SPARE_PIECE);
 	endfunction
@@ -60,9 +59,8 @@ package chess_helper_funcs;
 		return Position'(shifted_pos[5:0]);
 	endfunction : shiftPos
 
-    // Takes a position, direaction, and distance as input
-	// Outputs if shifting starting from pos in the given dir for the given distance
-	// will still be on the board
+	// Returns whether shifting a position by the requested direction and distance
+	// remains on the board.
 	function bit isShiftOnBoard(Position pos, Direction dir, logic [2:0] distance);
 		automatic Position new_pos = shiftPos(pos, dir, distance);
 		automatic BoardRank old_rank = getRank(pos);

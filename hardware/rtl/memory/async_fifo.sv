@@ -41,12 +41,17 @@ module async_fifo #(
     logic [PTR_WIDTH-1:0] wr_gray_rdclk_meta, wr_gray_rdclk_sync;
     logic [PTR_WIDTH-1:0] full_compare_gray;
 
-    wire wr_accept = wr_en && !full;
-    wire rd_accept = rd_en && !empty;
+    // Each side advances only after accepting its local ready/valid transfer.
+    // The Gray-coded pointers are the only state synchronized across domains.
+    logic wr_accept;
+    logic rd_accept;
 
     function automatic logic [PTR_WIDTH-1:0] bin_to_gray(input logic [PTR_WIDTH-1:0] value);
         bin_to_gray = (value >> 1) ^ value;
     endfunction : bin_to_gray
+
+    assign wr_accept = wr_en && !full;
+    assign rd_accept = rd_en && !empty;
 
     always_comb begin
         wr_bin_next = wr_bin + PTR_WIDTH'(wr_accept);

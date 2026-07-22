@@ -3,7 +3,8 @@
 import tt_defs::*;
 
 module tb_sdr_sdram_controller;
-    logic clk = 0, rst_n = 0;
+    logic clk = 1'b0;
+    logic rst_n = 1'b0;
     always #5 clk = ~clk;
     logic ready, error, req_valid, req_ready, req_write;
     TTWordAddress req_address; logic [3:0] req_length;
@@ -72,7 +73,12 @@ module tb_sdr_sdram_controller;
     end
 
     task automatic check(input logic condition, input string label);
-        if (condition) pass_count++; else begin fail_count++; $error("[FAIL] %s", label); end
+        if (condition) begin
+            pass_count += 1;
+        end else begin
+            fail_count += 1;
+            $error("[FAIL] %s", label);
+        end
     endtask
 
     initial begin
@@ -120,8 +126,15 @@ module tb_sdr_sdram_controller;
 
         repeat (20) @(posedge clk);
         check(refresh_count >= 3, "distributed refresh continued after initialization");
-        $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);
-        if (fail_count) $fatal(1, "SDRAM controller test failed");
+        $display("Pass Count: %0d", pass_count);
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "SDRAM controller test failed");
         $finish;
+    end
+
+    // Bound ready/valid waits so a stalled controller fails promptly in CI.
+    initial begin
+        #1_000_000;
+        $fatal(1, "SDRAM controller testbench timed out");
     end
 endmodule

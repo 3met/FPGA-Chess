@@ -1,8 +1,11 @@
 `timescale 1ns/1ps
+
 import general_chess_defs::*;
 
 module tb_repetition_checker;
-    logic clk = 0, rst_n = 0, flush = 0;
+    logic clk = 1'b0;
+    logic rst_n = 1'b0;
+    logic flush = 1'b0;
     logic history_reset, history_write, init_start;
     ZobristKey history_key;
     logic init_busy, init_done, init_failed;
@@ -20,7 +23,8 @@ module tb_repetition_checker;
     logic [3:0] resp_epoch;
     logic [1:0] resp_previous_count;
     logic resp_is_draw;
-    int pass_count = 0, fail_count = 0;
+    int pass_count = 0;
+    int fail_count = 0;
 
     always #5 clk = ~clk;
 
@@ -34,8 +38,12 @@ module tb_repetition_checker;
     );
 
     task automatic check(input logic condition, input string label);
-        if (condition) begin pass_count++; $display("PASS: %s", label); end
-        else begin fail_count++; $display("FAIL: %s", label); end
+        if (condition) begin
+            pass_count += 1;
+        end else begin
+            fail_count += 1;
+            $error("[FAIL] %s", label);
+        end
     endtask
 
     task automatic history_sample(input ZobristKey key, input logic reset_history);
@@ -106,10 +114,22 @@ module tb_repetition_checker;
     endtask
 
     initial begin
-        history_reset = 0; history_write = 0; init_start = 0; line_write_valid = 0; req_valid = 0;
-        history_key = 0; line_write_thread = 0; line_write_ply = 0; line_write_key = 0;
-        req_thread = 0; req_ply = 0; req_start_ply = 0; req_epoch = 0; req_key = 0;
-        repeat (3) @(negedge clk); rst_n = 1;
+        history_reset = 1'b0;
+        history_write = 1'b0;
+        init_start = 1'b0;
+        line_write_valid = 1'b0;
+        req_valid = 1'b0;
+        history_key = '0;
+        line_write_thread = '0;
+        line_write_ply = '0;
+        line_write_key = '0;
+        req_thread = '0;
+        req_ply = '0;
+        req_start_ply = '0;
+        req_epoch = '0;
+        req_key = '0;
+        repeat (3) @(negedge clk);
+        rst_n = 1'b1;
 
         // A,B,A,B,A(root): excluding the root leaves two prior root-parity A positions.
         history_sample(64'h1111, 1);
@@ -136,7 +156,13 @@ module tb_repetition_checker;
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
-        if (fail_count) $fatal(1, "repetition checker failures");
+        if (fail_count != 0) $fatal(1, "repetition checker testbench failed");
         $finish;
+    end
+
+    // Bound protocol waits so a missing response cannot stall the test run.
+    initial begin
+        #1_000_000;
+        $fatal(1, "repetition checker testbench timed out");
     end
 endmodule

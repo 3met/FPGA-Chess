@@ -1,6 +1,6 @@
-`timescale 1ns / 1ps
+`timescale 1ns/1ps
 
-module tb_async_fifo();
+module tb_async_fifo;
 
     logic wr_clk = 1'b0;
     logic rd_clk = 1'b0;
@@ -13,8 +13,8 @@ module tb_async_fifo();
     logic full;
     logic empty;
 
-    int passCount = 0;
-    int failCount = 0;
+    int pass_count = 0;
+    int fail_count = 0;
 
     always #3 wr_clk = ~wr_clk;
     always #5 rd_clk = ~rd_clk;
@@ -37,9 +37,9 @@ module tb_async_fifo();
 
     task automatic check(input logic condition, input string label);
         if (condition) begin
-            passCount += 1;
+            pass_count += 1;
         end else begin
-            failCount += 1;
+            fail_count += 1;
             $error("[FAIL] %s", label);
         end
     endtask : check
@@ -132,18 +132,16 @@ module tb_async_fifo();
         write_byte(8'hc3);
         read_byte(8'hc3);
 
-        $display("Pass Count: %0d", passCount);
-        $display("Fail Count: %0d", failCount);
-        $stop();
+        $display("Pass Count: %0d", pass_count);
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "tb_async_fifo failed");
+        $finish;
     end
 
     initial begin
         #200_000;
-        failCount += 1;
-        $error("[FAIL] tb_async_fifo timeout");
-        $display("Pass Count: %0d", passCount);
-        $display("Fail Count: %0d", failCount);
-        $stop();
+        fail_count += 1;
+        $fatal(1, "tb_async_fifo timed out (pass=%0d fail=%0d)", pass_count, fail_count);
     end
 
 endmodule : tb_async_fifo

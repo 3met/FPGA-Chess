@@ -5,8 +5,8 @@ module uart_transmitter #(
     parameter int BAUD_RATE = 2_000_000,
     parameter int CLOCK_FREQ = 50_000_000
 ) (
-    input clk,
-    input rst_n,
+    input logic clk,
+    input logic rst_n,
     input logic [7:0] tx_stream,
     input tx_stream_valid,
     output logic ready,
@@ -126,10 +126,10 @@ module tx_encode #(
     parameter int UART_CLOCK_FREQ = 50_000_000,
     parameter int FIFO_DEPTH = 1024
 ) (
-    input clk,
-    input uart_clk,
-    input engine_rst_n,
-    input uart_rst_n,
+    input logic clk,
+    input logic uart_clk,
+    input logic engine_rst_n,
+    input logic uart_rst_n,
     input logic [7:0] tx_stream,
     input tx_stream_valid,
     output logic uart_tx,
@@ -162,7 +162,7 @@ module tx_encode #(
     uart_transmitter #(
         .BAUD_RATE(BAUD_RATE),
         .CLOCK_FREQ(UART_CLOCK_FREQ)
-    ) engine_uart_transmitter (
+    ) uart_transmitter_inst (
         .clk(uart_clk),
         .rst_n(uart_rst_n),
         .tx_stream(fifo_tx_stream),

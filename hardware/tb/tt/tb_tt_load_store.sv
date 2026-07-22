@@ -539,13 +539,14 @@ module tb_tt_load_store;
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", error_count);
 
-        if (error_count == 0) begin
-            $display("TT load/store testbench passed");
-        end else begin
-            $fatal(1, "TT load/store testbench failed");
-        end
-
+        if (error_count != 0) $fatal(1, "TT load/store testbench failed");
         $finish;
+    end
+
+    // Bound clear and lookup waits so a stalled table fails promptly in CI.
+    initial begin
+        #1_000_000;
+        $fatal(1, "TT load/store testbench timed out");
     end
 
 endmodule : tb_tt_load_store

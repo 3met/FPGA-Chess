@@ -354,11 +354,14 @@ module tb_static_evaluator;
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", error_count);
 
-        if (error_count == 0) begin
-            $finish;
-        end else begin
-            $fatal(1, "static_evaluator testbench failed");
-        end
+        if (error_count != 0) $fatal(1, "static_evaluator testbench failed");
+        $finish;
+    end
+
+    // Bound all event waits so a broken pipeline fails promptly in CI.
+    initial begin
+        #1_000_000;
+        $fatal(1, "static_evaluator testbench timed out");
     end
 
 endmodule : tb_static_evaluator

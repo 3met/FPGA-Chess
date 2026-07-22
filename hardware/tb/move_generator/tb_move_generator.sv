@@ -1169,15 +1169,12 @@ module tb_move_generator;
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", error_count);
 
-        if (error_count == 0) begin
-            $finish;
-        end else begin
-            $fatal(1, "move_generator testbench failed");
-        end
+        if (error_count != 0) $fatal(1, "move_generator testbench failed");
+        $finish;
     end
 
     initial begin
-        #1000000;
+        #1_000_000;
         $fatal(1, "move_generator testbench timed out");
     end
 

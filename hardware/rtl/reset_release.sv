@@ -12,8 +12,9 @@ module reset_release #(
     logic [COUNTER_BITS-1:0] release_count = '0;
 
     initial begin
-        if (RELEASE_CYCLES < 2)
+        if (RELEASE_CYCLES < 2) begin
             $error("reset_release RELEASE_CYCLES must be at least two");
+        end
     end
 
     always_ff @(posedge clk or negedge async_reset_n) begin

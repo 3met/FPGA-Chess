@@ -1,15 +1,15 @@
-// By Emet Behrendt
+// Portable combinational-read, synchronous-write dual-port RAM.
 
 module simple_dual_port_ram #(
-    parameter NUM_WORDS = 1,
-    parameter WORD_SIZE = 1
+    parameter int NUM_WORDS = 1,
+    parameter int WORD_SIZE = 1
 ) (
-    input  logic clock,
-    input  logic [WORD_SIZE-1:0] data,
-    input  logic [$clog2(NUM_WORDS)-1:0] rdaddress,
-    input  logic rden,
-    input  logic [$clog2(NUM_WORDS)-1:0] wraddress,
-    input  logic wren,
+    input logic clock,
+    input logic [WORD_SIZE-1:0] data,
+    input logic [$clog2(NUM_WORDS)-1:0] rdaddress,
+    input logic rden,
+    input logic [$clog2(NUM_WORDS)-1:0] wraddress,
+    input logic wren,
     output logic [WORD_SIZE-1:0] q
 );
 

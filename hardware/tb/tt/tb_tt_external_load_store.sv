@@ -4,7 +4,9 @@ import general_chess_defs::*;
 import tt_defs::*;
 
 module tb_tt_external_load_store;
-    logic clk = 0, rst_n = 0, clear = 0;
+    logic clk = 1'b0;
+    logic rst_n = 1'b0;
+    logic clear = 1'b0;
     always #5 clk = ~clk;
     TTLookupRequest lookup_req; logic lookup_req_valid, lookup_req_ready, lookup_resp_valid;
     TTLookupResponse lookup_resp;
@@ -79,7 +81,12 @@ module tb_tt_external_load_store;
     end
 
     task automatic check(input logic condition, input string label);
-        if (condition) pass_count++; else begin fail_count++; $error("[FAIL] %s", label); end
+        if (condition) begin
+            pass_count += 1;
+        end else begin
+            fail_count += 1;
+            $error("[FAIL] %s", label);
+        end
     endtask
     task automatic do_store(input ZobristKey key);
         store_req = TTStoreRequest'('0); store_req.zobrist_key = key;
@@ -156,8 +163,15 @@ module tb_tt_external_load_store;
         clear = 1; @(posedge clk); clear = 0; repeat (2) @(posedge clk);
         do_lookup(64'h0123_4567_89ab_cdef, 1'b0, ThreadID'(0));
         check(mem_req_address < 96 && mem_req_length == 6, "bounded aligned burst mapping");
-        $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);
-        if (fail_count) $fatal(1, "external TT test failed");
+        $display("Pass Count: %0d", pass_count);
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "external TT test failed");
         $finish;
+    end
+
+    // Bound frontend and memory-model waits so a stalled transaction fails promptly in CI.
+    initial begin
+        #1_000_000;
+        $fatal(1, "external TT testbench timed out");
     end
 endmodule

@@ -1,6 +1,6 @@
-`timescale 1ns / 1ps
+`timescale 1ns/1ps
 
-module tb_rx_decode();
+module tb_rx_decode;
 
     localparam int UART_CLOCK_FREQ = 50_000_000;
     localparam int ENGINE_CLOCK_FREQ = 100_000_000;
@@ -21,8 +21,8 @@ module tb_rx_decode();
     logic error;
     logic remote_reset_seen;
 
-    int passCount = 0;
-    int failCount = 0;
+    int pass_count = 0;
+    int fail_count = 0;
 
     always #(ENGINE_CLK_NS / 2.0) clk = ~clk;
     always #(UART_CLK_NS / 2.0) uart_clk = ~uart_clk;
@@ -56,9 +56,9 @@ module tb_rx_decode();
 
     task automatic check(input logic condition, input string label);
         if (condition) begin
-            passCount += 1;
+            pass_count += 1;
         end else begin
-            failCount += 1;
+            fail_count += 1;
             $error("[FAIL] %s", label);
         end
     endtask : check
@@ -160,18 +160,16 @@ module tb_rx_decode();
         wait (error);
         check(error, "RX overflow latches error");
 
-        $display("Pass Count: %0d", passCount);
-        $display("Fail Count: %0d", failCount);
-        $stop();
+        $display("Pass Count: %0d", pass_count);
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "tb_rx_decode failed");
+        $finish;
     end
 
     initial begin
         #200_000;
-        failCount += 1;
-        $error("[FAIL] tb_rx_decode timeout");
-        $display("Pass Count: %0d", passCount);
-        $display("Fail Count: %0d", failCount);
-        $stop();
+        fail_count += 1;
+        $fatal(1, "tb_rx_decode timed out (pass=%0d fail=%0d)", pass_count, fail_count);
     end
 
 endmodule : tb_rx_decode

@@ -1,6 +1,6 @@
-`timescale 1ns / 1ps
+`timescale 1ns/1ps
 
-module tb_uart_primitives();
+module tb_uart_primitives;
 
     localparam int CLOCK_FREQ = 50_000_000;
     localparam int BAUD_RATE = 2_000_000;
@@ -23,8 +23,8 @@ module tb_uart_primitives();
     logic rx_error_seen;
     logic [7:0] last_rx_stream;
 
-    int passCount = 0;
-    int failCount = 0;
+    int pass_count = 0;
+    int fail_count = 0;
 
     always #(CLK_NS / 2.0) clk = ~clk;
 
@@ -72,9 +72,9 @@ module tb_uart_primitives();
 
     task automatic check(input logic condition, input string label);
         if (condition) begin
-            passCount += 1;
+            pass_count += 1;
         end else begin
-            failCount += 1;
+            fail_count += 1;
             $error("[FAIL] %s", label);
         end
     endtask : check
@@ -193,18 +193,16 @@ module tb_uart_primitives();
             end
         join
 
-        $display("Pass Count: %0d", passCount);
-        $display("Fail Count: %0d", failCount);
-        $stop();
+        $display("Pass Count: %0d", pass_count);
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "tb_uart_primitives failed");
+        $finish;
     end
 
     initial begin
         #200_000;
-        failCount += 1;
-        $error("[FAIL] tb_uart_primitives timeout");
-        $display("Pass Count: %0d", passCount);
-        $display("Fail Count: %0d", failCount);
-        $stop();
+        fail_count += 1;
+        $fatal(1, "tb_uart_primitives timed out (pass=%0d fail=%0d)", pass_count, fail_count);
     end
 
 endmodule : tb_uart_primitives

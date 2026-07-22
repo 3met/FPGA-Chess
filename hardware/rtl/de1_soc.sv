@@ -180,6 +180,7 @@ module de1_soc(input CLOCK_50,
 	logic backend_read_valid, backend_read_ready, backend_read_last;
 	logic [15:0] backend_read_data;
 	logic backend_done_valid, backend_done_ready, backend_done_error;
+	logic tt_memory_ready_backend, tt_memory_error_backend;
 	assign engine_core_rst_n = engine_rst_n && tt_memory_ready && !tt_memory_error;
 
 	// Each domain releases reset on its own clock only after PLL lock has
@@ -292,7 +293,6 @@ module de1_soc(input CLOCK_50,
 		.backend_read_data(backend_read_data), .backend_read_last(backend_read_last),
 		.backend_done_valid(backend_done_valid), .backend_done_ready(backend_done_ready), .backend_done_error(backend_done_error));
 
-	logic tt_memory_ready_backend, tt_memory_error_backend;
 	sdr_sdram_controller #(.CLOCK_FREQ(100_000_000)) tt_sdram (
 		.clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(memory_rst_n),
 		.ready(tt_memory_ready_backend), .error(tt_memory_error_backend),

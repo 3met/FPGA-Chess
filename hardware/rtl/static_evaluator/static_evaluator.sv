@@ -9,8 +9,11 @@ module static_evaluator (
     output EvalScore static_eval
 );
 
-    // Three propagation stages inspect up to three statically selected squares
-    // per ray; the following evaluation register supplies the fourth stage.
+    // Each propagation stage consumes this many consecutive squares per ray.
+    localparam int RAY_SQUARES_PER_STAGE = 3;
+
+    // The propagation stages inspect statically selected squares per ray; the
+    // following evaluation register supplies the final pipeline stage.
     Tile board_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1][0:63];
     EvalScore base_eval_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1];
     DirectionScan scan_pipe[0:STATIC_EVAL_PROP_STAGE_CNT-1][0:63][0:7];
@@ -120,12 +123,15 @@ module static_evaluator (
             for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
                 automatic Direction dir = Direction'(dir_idx);
                 automatic int max_distance = ray_max_distance(Position'(pos), dir);
-                automatic int active_stage_count = (max_distance + 2) / 3;
+                    automatic int active_stage_count = (max_distance + RAY_SQUARES_PER_STAGE - 1)
+                        / RAY_SQUARES_PER_STAGE;
                 automatic int start_stage = STATIC_EVAL_PROP_STAGE_CNT - active_stage_count;
 
                 if (start_stage == 0) begin
-                    automatic int scan_end = max_distance - 3 * (STATIC_EVAL_PROP_STAGE_CNT - 1);
-                    automatic int scan_start = (scan_end > 2) ? scan_end - 2 : 1;
+                    automatic int scan_end = max_distance
+                        - RAY_SQUARES_PER_STAGE * (STATIC_EVAL_PROP_STAGE_CNT - 1);
+                    automatic int scan_start = (scan_end > RAY_SQUARES_PER_STAGE - 1)
+                        ? scan_end - (RAY_SQUARES_PER_STAGE - 1) : 1;
                     automatic Position first_pos = shiftPos(
                         Position'(pos), dir, RayDistance'(scan_start));
                     automatic DirectionScan scan = scan_next_square(initial_scan(), board_tiles[first_pos]);
@@ -155,15 +161,17 @@ module static_evaluator (
                 for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
                     automatic Direction dir = Direction'(dir_idx);
                     automatic int max_distance = ray_max_distance(Position'(pos), dir);
-                    automatic int active_stage_count = (max_distance + 2) / 3;
+                automatic int active_stage_count = (max_distance + RAY_SQUARES_PER_STAGE - 1)
+                    / RAY_SQUARES_PER_STAGE;
                     automatic int start_stage = STATIC_EVAL_PROP_STAGE_CNT - active_stage_count;
 
                     if (stage < start_stage) begin
                         next_scan_pipe[stage][pos][dir_idx] = initial_scan();
                     end else begin
                         automatic int scan_end = max_distance
-                            - 3 * (STATIC_EVAL_PROP_STAGE_CNT - 1 - stage);
-                        automatic int scan_start = (scan_end > 2) ? scan_end - 2 : 1;
+                            - RAY_SQUARES_PER_STAGE * (STATIC_EVAL_PROP_STAGE_CNT - 1 - stage);
+                        automatic int scan_start = (scan_end > RAY_SQUARES_PER_STAGE - 1)
+                            ? scan_end - (RAY_SQUARES_PER_STAGE - 1) : 1;
                         automatic Position first_pos = shiftPos(
                             Position'(pos), dir, RayDistance'(scan_start));
                         automatic DirectionScan scan = (stage == start_stage)

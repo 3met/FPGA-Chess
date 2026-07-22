@@ -1,8 +1,7 @@
 
 // By Emet Behrendt
 
-// A module that take a move as input and outputs the direction of the move.
-// Assumes the move is non-NULL and pseudo-legal.
+// Decodes a non-null, pseudo-legal move into its movement direction.
 
 import general_chess_defs::*;
 import chess_helper_funcs::*;

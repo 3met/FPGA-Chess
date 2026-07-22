@@ -5,7 +5,7 @@ import general_chess_defs::*;
 module timer #(
     parameter int CLOCK_FREQ = 100_000_000
 ) (
-    input wire clk,
+    input logic clk,
     input logic rst,
     input logic run,
     output TimeType time_ms
@@ -19,6 +19,7 @@ module timer #(
 
     assign time_ms = time_ms_reg;
 
+    // The timer deliberately holds its partial millisecond count while paused.
     always_ff @(posedge clk) begin
         if (rst) begin
             clk_count <= '0;

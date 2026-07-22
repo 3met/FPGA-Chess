@@ -6,9 +6,9 @@ module uart_receiver #(
     parameter int CLOCK_FREQ = 50_000_000,
     parameter int BREAK_BIT_COUNT = 20
 ) (
-    input clk,
-    input rst_n,
-    input uart_rx,
+    input logic clk,
+    input logic rst_n,
+    input logic uart_rx,
     output logic [7:0] rx_stream,
     output logic rx_stream_valid,
     output logic uart_violation,
@@ -162,12 +162,12 @@ module rx_decode #(
     parameter int FIFO_DEPTH = 1024,
     parameter int BREAK_BIT_COUNT = 20
 ) (
-    input clk,
-    input uart_clk,
-    input engine_rst_n,
-    input uart_rst_n,
-    input uart_rx,
-    input mark_read,
+    input logic clk,
+    input logic uart_clk,
+    input logic engine_rst_n,
+    input logic uart_rst_n,
+    input logic uart_rx,
+    input logic mark_read,
     output logic [7:0] rx_stream,
     output logic rx_stream_valid,
     output logic kill,
@@ -191,14 +191,19 @@ module rx_decode #(
     logic break_engine_sync;
     logic break_engine_sync_prev;
 
-    wire engine_fifo_rst_n = engine_rst_n && !break_engine_sync;
-    wire uart_fifo_rst_n = uart_rst_n && !break_active_uart;
+    logic engine_fifo_rst_n;
+    logic uart_fifo_rst_n;
+
+    // A BREAK clears both sides of the byte FIFO before the reset event is
+    // reported to the engine clock domain.
+    assign engine_fifo_rst_n = engine_rst_n && !break_engine_sync;
+    assign uart_fifo_rst_n = uart_rst_n && !break_active_uart;
 
     uart_receiver #(
         .BAUD_RATE(BAUD_RATE),
         .CLOCK_FREQ(UART_CLOCK_FREQ),
         .BREAK_BIT_COUNT(BREAK_BIT_COUNT)
-    ) engine_uart_receiver (
+    ) uart_receiver_inst (
         .clk(uart_clk),
         .rst_n(uart_rst_n),
         .uart_rx(uart_rx),

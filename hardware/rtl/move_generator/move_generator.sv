@@ -32,6 +32,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
 
     localparam int MASK_ENTRY_COUNT = THREAD_COUNT * MAX_PLY_COUNT;
     localparam int MASK_ADDR_BITS = $clog2(MASK_ENTRY_COUNT);
+    // Each ray-propagation stage inspects this many consecutive squares.
+    localparam int RAY_SQUARES_PER_STAGE = 3;
 
     typedef logic [MASK_ADDR_BITS-1:0] MoveMaskAddr;
     typedef logic [2:0] RayDistance;
@@ -621,17 +623,20 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
             ep_file_pipe[0] <= ep_file;
             for (int pos=0; pos<64; pos++) board_pipe[0][pos] <= board_tiles[pos];
 
-            // Start each ray only early enough to inspect up to three reachable squares per stage.
+            // Start each ray only early enough to inspect its stage-local squares.
             for (int pos=0; pos<64; pos++) begin
                 for (int dir_idx=0; dir_idx<8; dir_idx++) begin
                     automatic Direction dir = Direction'(dir_idx);
                     automatic int max_distance = ray_max_distance(Position'(pos), dir);
-                    automatic int active_stage_count = (max_distance + 2) / 3;
+                    automatic int active_stage_count = (max_distance + RAY_SQUARES_PER_STAGE - 1)
+                        / RAY_SQUARES_PER_STAGE;
                     automatic int start_stage = PROP_STAGE_CNT - active_stage_count;
 
                     if (start_stage == 0) begin
-                        automatic int scan_end = max_distance - 3 * (PROP_STAGE_CNT - 1);
-                        automatic int scan_start = (scan_end > 2) ? scan_end - 2 : 1;
+                        automatic int scan_end = max_distance
+                            - RAY_SQUARES_PER_STAGE * (PROP_STAGE_CNT - 1);
+                        automatic int scan_start = (scan_end > RAY_SQUARES_PER_STAGE - 1)
+                            ? scan_end - (RAY_SQUARES_PER_STAGE - 1) : 1;
                         automatic Position first_pos = shiftPos(
                             Position'(pos), dir, RayDistance'(scan_start));
                         if (board_tiles[first_pos].piece_type != NULL_PIECE || scan_start == scan_end) begin
@@ -660,7 +665,8 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                     for (int dir_idx=0; dir_idx<8; dir_idx++) begin
                         automatic Direction dir = Direction'(dir_idx);
                         automatic int max_distance = ray_max_distance(Position'(pos), dir);
-                        automatic int active_stage_count = (max_distance + 2) / 3;
+                        automatic int active_stage_count = (max_distance + RAY_SQUARES_PER_STAGE - 1)
+                            / RAY_SQUARES_PER_STAGE;
                         automatic int start_stage = PROP_STAGE_CNT - active_stage_count;
 
                         if (stage < start_stage) begin
@@ -669,8 +675,9 @@ module move_generator #(parameter MAX_PLY_COUNT, parameter THREAD_COUNT) (
                             ray_pipe[stage][pos][dir_idx] <= ray_pipe[stage-1][pos][dir_idx];
                         end else begin
                             automatic int scan_end = max_distance
-                                - 3 * (PROP_STAGE_CNT - 1 - stage);
-                            automatic int scan_start = (scan_end > 2) ? scan_end - 2 : 1;
+                                - RAY_SQUARES_PER_STAGE * (PROP_STAGE_CNT - 1 - stage);
+                            automatic int scan_start = (scan_end > RAY_SQUARES_PER_STAGE - 1)
+                                ? scan_end - (RAY_SQUARES_PER_STAGE - 1) : 1;
                             automatic Position first_pos = shiftPos(
                                 Position'(pos), dir, RayDistance'(scan_start));
                             if (board_pipe[stage-1][first_pos].piece_type != NULL_PIECE
