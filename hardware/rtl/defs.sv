@@ -126,9 +126,8 @@ package general_chess_defs;
 	};
 
 
-	// Maximum search depth
-	// Ideally a power of two
-	localparam MAX_PLY_COUNT = 32;
+	// Maximum supported search depth. Target builds may allocate a smaller stack.
+	localparam MAX_PLY_COUNT = 64;
 
 	// Data type to index search plies
 	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] PlyIndex;
@@ -199,9 +198,9 @@ package general_chess_defs;
 
 	// -- Evaluation Related Definitions --
 
-	localparam THREAD_COUNT = 8;
+	localparam THREAD_COUNT = 16;
 
-	localparam THREAD_ID_BITS = (THREAD_COUNT > 1) ? $clog2(THREAD_COUNT) : 1;
+	localparam THREAD_ID_BITS = $clog2(THREAD_COUNT);
 
 	typedef logic [THREAD_ID_BITS-1:0] ThreadID;
 

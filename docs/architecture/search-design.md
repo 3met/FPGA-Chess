@@ -34,7 +34,7 @@ Pipeline arbitration prioritizes captured TT lookup responses, parent-return fol
 
 ## Move Generation and Legality
 
-The move generator accepts a legal input position and emits one ordered pseudo-legal candidate per dispatch. It cheaply rejects invalid castling paths; ordinary strict legality is checked after speculative board update. Every candidate is consumed for the node even when the updated result is rejected.
+The move generator accepts tagged variable-latency commands, serially generates explicit pseudo-legal candidates into eight LIFO bucket RAMs, and returns moves through a tagged pop interface. It cheaply rejects invalid castling paths; ordinary strict legality is checked after speculative board update. Popping a move consumes it regardless of whether board update later rejects it, and an attempted direct TT/root move is suppressed by exact encoded equality.
 
 After a search push completes, the controller tests whether the side that moved left its king attacked. If so, it ignores the updated board, hash, and evaluation and requests another candidate from the unchanged node. The stateless board pipeline needs no reverse operation, and its unused history entry is overwritten by the next push at the same ply. Castling through check remains an early move-generator rejection because its origin and transit conditions are not visible in the final board. Checkmate-versus-stalemate scoring registers the terminal check result before root selection and return-state updates so the full-board scan does not share their timing path.
 

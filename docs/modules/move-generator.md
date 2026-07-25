@@ -1,109 +1,74 @@
 # Move Generator (`move_generator`)
 
-The move generator accepts a legal input position and emits one ordered pseudo-legal candidate per dispatch. It cheaply rejects invalid castling paths, while ordinary king-safety legality is checked after the candidate is applied by the board-update path. A candidate is consumed for the current node whether or not it is later accepted.
+`move_generator` is a shared, variable-latency destination-centric generator, move-ordering datapath, and eight-bucket move store. It emits pseudo-legal moves; `board_update_pipeline` remains responsible for ordinary king safety, pins, discovered checks, and en-passant discovered checks. Castling origin, transit, and destination safety are checked in the generator because those conditions cannot be reconstructed from only the final board.
 
-## Ports
+## Commands
 
-| Direction | Port Name | Description |
-| --------- | --------- | ----------- |
-| Input | `clk` | Clock. |
-| Input | `rst_n` | Synchronous active-low reset. |
-| Input | `move_gen_op` | Move-generation operation. |
-| Input | `start_node` | Assert with the first generation request for a new search node to clear that node's consumed-candidate mask. |
-| Input | `thread_id` | Thread whose per-node searched-move mask should be read or written. |
-| Input | `ply` | Current search ply. |
-| Input | `board_tiles` | 64 x 4-bit tiles. |
-| Input | `turn` | Side to move. |
-| Input | `castle_perms` | Castling permissions. |
-| Input | `has_ep` | Whether the position has an en passant target. |
-| Input | `ep_file` | En passant file if `has_ep` is asserted. |
-| Input | `target_move` | Move that should receive highest priority if legal and unsearched. |
-| Output | `candidate_move` | Next ordered candidate move, or `NULL_MOVE` if no remaining candidate exists. |
-| Output | `move_is_legal` | Early legality indicator. Ordinary pseudo-legal moves assert it; castling deasserts it when the origin, transit, or destination is attacked. |
+The ready/valid command interface captures one `FullBoard`, `thread`, `ply`, suppression move, and eight current bucket tops.
 
-## Operations
+| Command | Behavior |
+| --- | --- |
+| `MOVE_GEN_VALIDATE_DIRECT` | Pseudo-legally validates the supplied TT/root move and returns it directly without writing a bucket. |
+| `MOVE_GEN_GENERATE_NOISY` | Generates captures, en passant, and all promotion choices. |
+| `MOVE_GEN_GENERATE_QUIET` | Generates ordinary non-captures and standard castling. |
 
-| Operation | Inputs Required | Description |
-| --------- | --------------- | ----------- |
-| Idle | None | Does not update internal move masks. |
-| Normal Generation | None | Generates the next ordered candidate move. |
-| Targeted Generation | `target_move` | Returns `target_move` if legal and unsearched; otherwise returns the next ordered candidate. Promotion targets match on `promo_piece`; non-promotion targets ignore `promo_piece`. |
-| QSearch Generation | None | Generates the next quiescence-search candidate, limited to captures and promotions. Checking non-captures are not generated for qsearch. |
+The response is tagged with thread and ply. Generation completion is produced only from the final state after the last candidate has been classified and its RAM write has committed; there is no fixed-latency assumption.
 
-## Pipeline
+An attempted direct move is passed as the exact 14-bit suppression move on later generation commands. Equality includes source, destination, and promotion encoding, so promotion variants remain distinct. A failed direct pseudo-legality validation is not suppressed.
 
-| Pipeline Stage | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0              | Capture the request and board. Destination/direction ray scans inspect their first one or two statically selected board squares; shorter scans remain constant NULL until their later start stage.                                                                                                                                                                                                                                                                                            |
-| 1-3            | Each active destination-local ray scan inspects the next one or two successive squares from the matching delayed board copy until it finds the nearest occupied tile, then carries that result to stage 3. Geometry-specific start stages avoid storing short rays before they are needed while preserving request alignment and one-request-per-cycle throughput. The consumed-mask RAM read is issued late in this window so the selected node mask is available when proposals are formed. |
-| 4              | Sixty-four destination-local processing elements register one proposal each using the propagated rays, statically connected knight sources, selective bounded SEE on the central 16 destinations, qsearch filtering, and only the consumed-mask bits belonging to that tile. Each PE first selects the highest-priority eligible source and constructs only that proposal; a separate fixed-order selector handles queen, knight, rook, and bishop promotions. Each PE compares a destination-free local proposal, and the fixed destination is added only at its output register. A narrow targeted-move result bypasses the ordinary proposal tree. A small dedicated proposal handles castling. |
-| 5              | First registered comparator level reduces 64 tile proposals plus castling to eight proposals.                                                                                                                                                                                                                                                                                                                                                                                                 |
-| 6              | Final registered comparator level reduces eight proposals to one.                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| 7              | Register the selected fixed-latency result and update the consumed mask.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+## Destination Context and Generation
 
-```mermaid
-flowchart LR
-    Input["Legal board input\nplus generation mode"]
-    Output["Outputs:\ncandidate_move, move_is_legal"]
-    MaskMemory["Per-thread, per-ply\nconsumed-candidate mask memory"]
+One 64-bit priority selector schedules only destinations in the active phase. The noisy destination mask contains enemy-occupied squares, the en-passant target, and empty rank-8 promotion squares for White or rank-1 promotion squares for Black. The quiet mask contains empty squares, with pawn promotions filtered into the noisy phase.
 
-    subgraph Gen["Candidate-generation pipeline"]
-        Nearest["Propagate nearest sources\nalong rays"]
-        MaskLoad["Late synchronous\nmask RAM read"]
-        Specials["Add promotions\nand castling"]
-        Score["Score one proposal\nper destination tile"]
-        Reduce["Comparator tree selects\nbest proposal"]
-        Target["Validate target and\nbypass comparator tree"]
-        LegalCheck["Cheap castling\nlegality check"]
-        MaskSave["Mark candidate consumed"]
-    end
+For each selected destination, shared combinational geometry constructs a context containing the 6-bit destination, 4-bit destination tile, eight nearest occupied ray records `{Tile, distance_minus_one[2:0]}`, and eight fixed knight-source tiles. One destination-indexed 8-by-7 first-occupant network computes the rays. The same selection cycle constructs the 16-bit source mask; pawn bits include the exact single-push, starting-rank double-push, capture, en-passant, and promotion distance constraints. A zero mask consumes the destination without entering candidate expansion. For a nonzero mask, the context is registered and the generator emits at most one explicit candidate per cycle. Candidate expansion retains defensive geometry validation and carries whether it removed the final source, allowing the scoring/write return path to select the next destination directly instead of spending an empty expansion cycle. A promotion source is retained while bishop, rook, knight, and queen encodings are emitted; LIFO storage makes queen the first returned promotion.
 
-    Input --> Nearest --> MaskLoad --> Specials --> Score --> Reduce --> LegalCheck --> Output
-    MaskLoad --> Target --> LegalCheck
-    MaskMemory --> MaskLoad
-    LegalCheck -->|"Legal or illegal candidate"| MaskSave --> MaskMemory
-```
+Castling is sequenced separately for the two standard-chess destinations. Permission, king and rook placement, empty path, and attacks on the origin, transit, and final virtual board are checked before storage or direct validation.
 
-## Ordered Move Generation
+## Pipeline and Paths
 
-The current ordering uses a five-bit unsigned `MoveScore` to score destination-tile proposals for the requested node and selects the highest score. Each destination considers the nearest piece on each ray, legal knight sources, pawn forward/capture lanes, promotion variants, and castling candidates. Queen promotions score 30; captures with SEE greater than or equal to zero score 16 plus victim piece type; knight, rook, and bishop promotions tie at 15; castling scores 13; negative-SEE captures score three plus victim piece type; and quiet moves score two. En passant uses pawn as its victim in both capture classes. Exact ordering among equal scores is deterministic but otherwise an implementation detail; valid unsearched targeted moves bypass SEE and the scorer.
+| Stage | Common work | Next path |
+| --- | --- | --- |
+| Command capture | Registers board, thread, ply, suppression move, and bucket tops; constructs the phase destination mask. | Direct validation or destination selection. |
+| Destination select/context | Priority-selects one destination, removes it from the mask, computes destination tile, eight nearest rays, eight knight tiles, and the plausible-source mask. A zero-source destination remains in this stage for the next selection. | Candidate expansion only for a nonzero source mask. |
+| Candidate expansion | Priority-selects and clears one source bit, reconstructs the explicit move, and attaches attacker/victim/class and last-source data. Empty and irrelevant lanes consume no cycles. | Noisy score, early quiet-history read, next source, or next destination. |
+| Noisy score/write | Runs shared bounded SEE, maps the move to bucket 7/6/1/0, writes the move RAM, and advances the selected top. Promotion variants repeat this stage. | Next source, or next destination after the last source. |
+| Quiet history return/write | Receives the synchronous history result launched directly by expansion, applies the castling bonus when applicable, maps to bucket 5–2, writes RAM, and advances the top. | Next source, next destination after the last source, or castle sequencer. |
+| Castle sequencer | Checks each standard castling side and routes a valid castle through quiet scoring. | Finish after both sides. |
+| Finish fence | Returns final tagged tops only after the last write state has completed. | Idle/next command. |
 
-The central 16 destination PEs perform bounded visible SEE from their eight nearest ray occupants and eight statically connected knight sources; other captures retain ordinary victim ordering to avoid replicating this relatively expensive logic in the other 48 PEs. Captures by a piece no more valuable than the victim pass immediately. Otherwise SEE removes the initiating attacker, finds the opponent's least valuable visible recapturer, and checks whether another visible friendly attacker can answer that recapture. An undefended recapture is losing; a defended exchange is nonnegative when the victim plus recapturer values cover the initiating attacker. The calculation uses coarse pawn/minor/rook/queen/king values of 1/3/5/9/15. It deliberately stops after the friendly defender reply and does not reveal a second rook, bishop, or queen behind a removed piece. The combinational classification is part of proposal formation, so the move-generator interface retains fixed latency and one-request-per-cycle throughput.
+The pop path is independent of generation: eligible-bucket comparison and highest-bucket selection issue a synchronous RAM read, and the following cycle returns the tagged move and decremented top. Search control forwards a found response directly into board update during that response cycle instead of inserting a separate issue bubble. A pop for one thread can overlap generation writes for another thread.
 
-Targeted Generation supports TT move ordering and root move forcing. Each PE validates whether its selected target source can reach the requested destination, while a narrow valid/promotion/castling/safety result is reduced separately; a valid unsearched target bypasses the ordinary scored-proposal comparator tree.
+## Ordering
 
-Promotion ordering emits queen, knight, rook, and bishop promotion identities separately, with queen promotions preferred first.
+Quiet candidates issue a synchronous read from shared signed nine-bit `history[color][from][to]` RAM. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff adds `min(63, remaining_depth * 4)` with saturation at +255; no malus is applied. Update read-modify-write has priority over a same-bank candidate lookup, and controller-side one-entry records retain pending per-thread updates.
 
-## Move Mask Memory
+Captures use one shared bounded visible SEE calculation. The classifier compares the immediate attacker and victim, the least valuable visible enemy recapturer, and one visible friendly defender. Removed pieces do not reveal a second slider. En passant uses a pawn victim. The coarse piece values are pawn 1, minor 3, rook 5, queen 9, and king 15.
 
-Each generated candidate must be marked as searched for the current `thread_id` and `ply`, even when `move_is_legal` is false. This prevents repeated emission of the same illegal pseudo-move.
+| Bucket | Meaning |
+| --- | --- |
+| 7 | Queen promotions; nonnegative captures of rooks or queens. |
+| 6 | Other nonnegative captures; underpromotions. |
+| 5 | Quiet history score at least 128. |
+| 4 | Quiet history score at least 64. |
+| 3 | Quiet history score at least 16, including the fixed +16 castling term. |
+| 2 | Remaining quiet moves. |
+| 1 | Negative-SEE captures of rooks or queens. |
+| 0 | Other negative-SEE captures, including losing en passant. |
 
-The consumed-candidate mask stores 588 bits for ordinary non-promotion candidates, comprising 420 directed sliding edges and 168 knight edges, plus 88 side-relative exact promotion bits for 22 promotion edges times four promotion pieces and two side-relative exact castling bits. Sliding edges must be directed because two same-color pieces can legally cross the same edge in opposite directions, such as `h2h4` and `h5h3`. The mask width is 678 bits per `thread_id`/`ply` node state.
+Only the 14-bit `Move` is stored. Scores, links, classes, and consumed masks are not retained. Ordering within a bucket is deterministic LIFO.
 
-The mask state is stored in a synchronous-read BRAM. The read address is issued shortly before proposal generation, and the loaded mask is carried only through proposal reduction. Proposals do not carry a redundant nine-bit mask index through the comparator tree; the selected move's index is reconstructed once at the mask update boundary. A `start_node` request bypasses the RAM read data with an all-zero mask for that request.
+## Bucket RAMs and Stack-Arena Semantics
 
-The search controller must assert `start_node` with the first request for every new node, including same-ply sibling nodes. Reusing a `thread_id` and `ply` without `start_node` continues consuming candidates from the existing node mask.
+Each bucket is a synchronous simple-dual-port 14-bit RAM with an independent compile-time power-of-two per-thread capacity, defaulting to 512 moves. Addresses concatenate the configured thread region with the bucket offset. Generation uses the write port while a pop for another thread may use the read port.
 
-## Legality Filtering
+For every node the search stack stores eight tops. A push writes at `top` and increments it. A pop decrements the selected top and synchronously reads the move at that address. The node's lower bounds are the parent's current tops, or zero at the root; the node is empty in a bucket when its current top equals that lower bound.
 
-The input position is assumed legal. The move generator performs pseudo-legal movement checks and rejects castling through check because the origin and transit conditions cannot be reconstructed from the final board alone. Ordinary candidates that expose or move the king into check are rejected after speculative board update.
+The parent move is popped before descent, and the child copies the resulting parent tops as both its initial tops and lower bounds. Descendants can therefore reuse the released slot while still-unsearched ancestor moves below the parent's current tops remain protected. Restoring the packed parent search-stack entry restores its remaining move state. No allocator, free list, per-move link, overflow bucket, or move-consumed mask exists.
 
-Legality filtering must cover:
+Before a write that would exceed a thread region, the module suppresses both the RAM write and top increment, sets sticky overflow, captures bucket and thread, increments a saturating overflow counter, and reports a simulation error when overflow assertions are enabled. Correct search operation assumes overflow never occurs.
 
-| Case         | Required Behavior                                                                                                                          |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Pinned piece | A pinned piece may move only along the pin line when that preserves king safety.                                                           |
-| King move    | A king may not move to an attacked square.                                                                                                 |
-| Check        | If in check, non-king moves must capture the checker, block the checking line, or otherwise remove the check.                              |
-| Double check | Only king moves can be legal.                                                                                                              |
-| En passant   | En passant must reject discovered checks created by removing the captured pawn.                                                            |
-| Castling     | Castling requires clear path squares, castling permission, king not currently in check, and king transit/destination squares not attacked. |
+## Initialization, Flush, and Instrumentation
 
-The search controller ignores a speculative updated board when the moving king is attacked and dispatches move generation again. The board-update pipeline is stateless, so no reverse operation is required; the next push at the same ply overwrites the unused history entry.
+Move RAM contents are never cleared. Reset and New Game serialize history clearing; bucket storage is reclaimed by resetting node tops. Flush cancels active variable-latency command and pop state on Kill or New Game.
 
-## Current RTL Notes
-
-A ray message contains only the nearest source `Tile` and its three-bit distance; a NULL piece type represents an empty ray, and the source position is reconstructed from destination, direction, and distance. Destination-local ray scans start at a geometry-specific point in the three-stage propagation window and inspect up to three statically selected squares from each matching delayed board copy, choosing the nearest occupied square, so every final ray remains aligned at stage 2 without storing short rays during earlier stages. Sixty-four `move_generator_tile_PE` instances each consume only local ray data, statically connected knight sources, request controls, and the relevant consumed-mask bits from the late RAM read. An ordinary-move eligibility scan selects the first source in fixed score order before constructing one packed destination-free proposal, and a four-bit promotion eligibility vector feeds a dedicated queen/knight/rook/bishop selector. Score zero encodes an invalid proposal, valid quiet moves use score two, and valid negative-SEE captures use scores four through nine according to victim type. Proposal sources use direction plus a three-bit encoded distance, with values zero through six denoting ray distance minus one and value seven denoting a knight source. The fixed destination is attached after each PE's local comparison, and the selected source position is reconstructed only after global reduction. Only the ten standard-chess castling origin, transit, and destination PEs instantiate enemy-attack output logic. A two-level registered comparator tree selects one ordinary proposal, while targeted generation carries only narrow validity and classification data beside the tree and selects the original requested move at the final boundary. A dedicated path contributes castling. The proposal's king-safety bit is a don't-care for ordinary moves and carries the castling result through the tree. Castling uses the same attack information for the origin, transit, and destination squares. Board, operation, castling, and en-passant payloads stop after proposal formation; only request identity, target, turn, compact proposals, target flags, and the consumed mask continue through reduction.
-
-The current RTL uses the 678-bit per-node consumed-candidate mask and supports normal, targeted, and qsearch generation, including en passant, castling, and all promotion variants. Capture ordering uses the victim type without replicated attacker-value arithmetic; target moves bypass normal scoring, while promotions have dedicated higher scores. The PE array is the only ordinary-move pseudo-legality implementation. The ten PEs relevant to standard castling derive enemy attacks from the propagated nearest-piece rays and statically connected knight sources, including the slider exposed when a king vacates its origin. Pipeline payload and invalid-proposal fields are reset to don't-care values because the separately reset request-valid pipeline suppresses their use until valid request data has traversed the pipeline.
- 
+Optional counters record noisy and quiet moves, analyzed destinations, emitted candidates, history lookups, generation cycles, per-bucket writes, and per-bucket high-water tops. Overflow status and identification remain present when optional statistics are disabled.

@@ -155,7 +155,7 @@ The total packed width is 272 bits.
 
 | Name | Value | Description                                                |
 | ---- | ----- | ----------- |
-| `MAX_PLY_COUNT` | `32` | Maximum number of plies tracked by ply-indexed structures. |
+| `MAX_PLY_COUNT` | `64` | Supported ply-index capacity and width source for ply-indexed structures. |
 | `PlyIndex` | `log2(MAX_PLY_COUNT)` bits | Search ply index.                                          |
 
 ### Evaluation Scores
@@ -191,7 +191,7 @@ Material values are available in two forms:
 | Name               | Value                         | Description                                                                                             |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `ZobristKey`       | `64` bits                     | Zobrist-style position key.                                                                             |
-| `THREAD_COUNT`     | Package parameter             | Maximum/default hardware search-thread count. Current RTL test default is 8. |
+| `THREAD_COUNT`     | `16`                          | Supported thread-ID capacity and default instantiated search-thread count. |
 | `SEARCH_THREAD_COUNT` | Controller parameter       | Number of active search contexts configured for a `search_controller` instance. Defaults to `THREAD_COUNT`. |
 | `SEARCH_STACK_DEPTH` | Controller parameter       | Number of plies allocated in a `search_controller` instance. Defaults to `MAX_PLY_COUNT`. |
 | `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |

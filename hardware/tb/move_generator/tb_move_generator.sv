@@ -1,1181 +1,458 @@
-// Run in Questa/ModelSim from the repository root after compiling RTL and this file:
-// vsim -t ns work.tb_move_generator
-// run -all
-
 `timescale 1ns/1ns
 
 import general_chess_defs::*;
-import chess_helper_funcs::*;
 import move_generator_defs::*;
 
 module tb_move_generator;
 
-    localparam int DUT_OUTPUT_LATENCY = MOVE_GEN_STAGE_CNT + 1;
-    localparam int MAX_DUT_CANDIDATES = 512;
-
     logic clk;
     logic rst_n;
+    logic clear;
+    logic flush;
+    logic init_busy;
+    logic cmd_valid;
+    logic cmd_ready;
+    MoveGenCommand cmd;
+    ThreadID cmd_thread;
+    PlyIndex cmd_ply;
+    FullBoard cmd_board;
+    logic cmd_suppress_valid;
+    Move cmd_suppress_move;
+    MoveBucketTops cmd_bucket_tops;
+    logic cmd_resp_valid;
+    ThreadID cmd_resp_thread;
+    PlyIndex cmd_resp_ply;
+    logic cmd_resp_direct_valid;
+    Move cmd_resp_direct_move;
+    MoveBucketTops cmd_resp_bucket_tops;
+    logic pop_valid;
+    logic pop_ready;
+    ThreadID pop_thread;
+    PlyIndex pop_ply;
+    MoveBucketMask pop_eligible;
+    MoveBucketTops pop_current_tops;
+    MoveBucketTops pop_lower_tops;
+    logic pop_resp_valid;
+    ThreadID pop_resp_thread;
+    PlyIndex pop_resp_ply;
+    logic pop_resp_found;
+    Move pop_resp_move;
+    MoveBucketIndex pop_resp_bucket;
+    MoveBucketTop pop_resp_new_top;
+    logic history_update_valid;
+    logic history_update_ready;
+    Color history_update_color;
+    Position history_update_from;
+    Position history_update_to;
+    logic [5:0] history_update_depth;
+    logic overflow_sticky;
+    ThreadID overflow_thread;
+    MoveBucketIndex overflow_bucket;
+    logic [15:0] overflow_count;
+    logic [39:0] stat_noisy_count;
+    logic [39:0] stat_quiet_count;
+    logic [39:0] stat_destination_count;
+    logic [39:0] stat_candidate_count;
+    logic [39:0] stat_history_lookup_count;
+    logic [39:0] stat_generation_cycles;
+    logic [39:0] stat_bucket_count[MOVE_BUCKET_COUNT];
+    MoveBucketTop stat_bucket_high_water[MOVE_BUCKET_COUNT];
 
-    MoveGenOp move_gen_op;
-    logic start_node;
-    ThreadID thread_id;
-    PlyIndex ply;
-    Move target_move;
-
-    Tile board_tiles[64];
-    Color turn;
-    CastlePerms castle_perms;
-    logic has_ep;
-    BoardFile ep_file;
-
-    Move candidate_move;
-    logic move_is_legal;
-
-    int pass_count = 0;
-    int error_count = 0;
+    int pass_count;
+    int fail_count;
 
     move_generator #(
-        .MAX_PLY_COUNT(MAX_PLY_COUNT),
-        .THREAD_COUNT(THREAD_COUNT)
+        .THREAD_COUNT(2),
+        .BUCKET_0_CAPACITY(32),
+        .BUCKET_1_CAPACITY(32),
+        .BUCKET_2_CAPACITY(32),
+        .BUCKET_3_CAPACITY(32),
+        .BUCKET_4_CAPACITY(32),
+        .BUCKET_5_CAPACITY(32),
+        .BUCKET_6_CAPACITY(32),
+        .BUCKET_7_CAPACITY(32),
+        .ASSERT_ON_OVERFLOW(1'b0),
+        .ENABLE_STATS(1'b1)
     ) dut (
-        .clk(clk),
-        .rst_n(rst_n),
-        .move_gen_op(move_gen_op),
-        .start_node(start_node),
-        .thread_id(thread_id),
-        .ply(ply),
-        .target_move(target_move),
-        .board_tiles(board_tiles),
-        .turn(turn),
-        .castle_perms(castle_perms),
-        .has_ep(has_ep),
-        .ep_file(ep_file),
-        .candidate_move(candidate_move),
-        .move_is_legal(move_is_legal)
+        .*
     );
 
-    task automatic do_clock(input int cnt = 1);
-        for (int i = 0; i < cnt; i++) begin
-            clk = 1'b0; #5;
-            clk = 1'b1; #5;
-        end
-    endtask
-
-    function automatic Move make_move(input Position from_pos, input Position to_pos, input PromoType promo);
+    function automatic Move make_move(
+        input Position from_pos,
+        input Position to_pos,
+        input PromoType promo = PROMO_QUEEN
+    );
         automatic Move move;
-
         move.from_pos = from_pos;
         move.to_pos = to_pos;
         move.promo_piece = promo;
         return move;
     endfunction
 
-    function automatic int abs_int(input int value);
-        return (value < 0) ? -value : value;
+    function automatic logic same_move(input Move left, input Move right);
+        return left.from_pos == right.from_pos && left.to_pos == right.to_pos
+            && left.promo_piece == right.promo_piece;
     endfunction
 
-    function automatic logic [2:0] dist_to_shift(input int distance);
-        return distance[2:0];
-    endfunction
-
-    function automatic Tile norm_tile(input Tile tile);
-        if (tile.piece_type == NULL_PIECE) begin
-            return EMPTY_TILE;
+    task automatic tick(input int count = 1);
+        repeat (count) begin
+            clk = 1'b0; #5;
+            clk = 1'b1; #5;
         end
+    endtask
 
-        return tile;
-    endfunction
-
-    task automatic init_empty_board(output FullBoard board);
-        for (int pos = 0; pos < 64; pos++) begin
-            board.tiles[pos] = EMPTY_TILE;
+    task automatic check(input logic condition, input string label);
+        if (condition) begin
+            pass_count++;
+        end else begin
+            fail_count++;
+            $error("FAIL: %s", label);
         end
+    endtask
 
-        board.turn = WHITE;
-        board.castle_perms = CastlePerms'(4'b0000);
+    task automatic empty_board(output FullBoard board, input Color turn = WHITE);
+        board = FullBoard'('0);
+        for (int pos = 0; pos < 64; pos++) board.tiles[pos] = EMPTY_TILE;
+        board.turn = turn;
+        board.castle_perms = CastlePerms'(0);
         board.has_ep = 1'b0;
         board.ep_file = BoardFile'(0);
         board.halfmove_clock = HalfmoveClock'(0);
     endtask
 
-    function automatic Position ref_castle_rook_from(input Position king_to);
-        case (king_to)
-            Position'('d2):  return Position'('d0);
-            Position'('d6):  return Position'('d7);
-            Position'('d58): return Position'('d56);
-            Position'('d62): return Position'('d63);
-            default:         return Position'('dx);
-        endcase
-    endfunction
-
-    function automatic Position ref_castle_rook_to(input Position king_to);
-        case (king_to)
-            Position'('d2):  return Position'('d3);
-            Position'('d6):  return Position'('d5);
-            Position'('d58): return Position'('d59);
-            Position'('d62): return Position'('d61);
-            default:         return Position'('dx);
-        endcase
-    endfunction
-
-    function automatic PieceType ref_promo_to_piece(input PromoType promo);
-        case (promo)
-            PROMO_QUEEN:  return QUEEN;
-            PROMO_KNIGHT: return KNIGHT;
-            PROMO_ROOK:   return ROOK;
-            PROMO_BISHOP: return BISHOP;
-            default:      return QUEEN;
-        endcase
-    endfunction
-
-    function automatic bit ref_tile_empty(input FullBoard board, input Position pos);
-        return (norm_tile(board.tiles[pos]).piece_type == NULL_PIECE);
-    endfunction
-
-    function automatic Position ref_find_king(input FullBoard board, input Color color);
-        for (int pos = 0; pos < 64; pos++) begin
-            if (norm_tile(board.tiles[pos]) == Tile'({color, KING})) begin
-                return Position'(pos);
-            end
-        end
-
-        return Position'('dx);
-    endfunction
-
-    function automatic bit ref_same_abs_delta(input Position from_pos, input Position to_pos);
-        automatic int rank_delta = int'(getRank(to_pos)) - int'(getRank(from_pos));
-        automatic int file_delta = int'(getFile(to_pos)) - int'(getFile(from_pos));
-
-        return (abs_int(rank_delta) == abs_int(file_delta));
-    endfunction
-
-    function automatic bit ref_line_move(input Position from_pos, input Position to_pos);
-        return (from_pos != to_pos && (getRank(from_pos) == getRank(to_pos) || getFile(from_pos) == getFile(to_pos)));
-    endfunction
-
-    function automatic bit ref_diag_move(input Position from_pos, input Position to_pos);
-        return (from_pos != to_pos && ref_same_abs_delta(from_pos, to_pos));
-    endfunction
-
-    function automatic Direction ref_move_dir(input Position from_pos, input Position to_pos);
-        automatic BoardRank from_rank = getRank(from_pos);
-        automatic BoardRank to_rank = getRank(to_pos);
-        automatic BoardFile from_file = getFile(from_pos);
-        automatic BoardFile to_file = getFile(to_pos);
-
-        if (from_file == to_file) begin
-            return (from_rank < to_rank) ? NORTH : SOUTH;
-        end else if (from_rank == to_rank) begin
-            return (from_file < to_file) ? EAST : WEST;
-        end else if ((from_rank < to_rank) && (from_file < to_file)) begin
-            return NORTH_EAST;
-        end else if ((from_rank < to_rank) && (from_file > to_file)) begin
-            return NORTH_WEST;
-        end else if ((from_rank > to_rank) && (from_file < to_file)) begin
-            return SOUTH_EAST;
-        end else begin
-            return SOUTH_WEST;
-        end
-    endfunction
-
-    function automatic bit ref_path_clear(input FullBoard board, input Position from_pos, input Position to_pos);
-        automatic Direction dir;
-        automatic Position pos;
-
-        if (!(ref_line_move(from_pos, to_pos) || ref_diag_move(from_pos, to_pos))) begin
-            return 1'b0;
-        end
-
-        dir = ref_move_dir(from_pos, to_pos);
-        for (int distance = 1; distance < 8; distance++) begin
-            pos = shiftPos(from_pos, dir, dist_to_shift(distance));
-            if (pos == to_pos) begin
-                return 1'b1;
-            end
-            if (!ref_tile_empty(board, pos)) begin
-                return 1'b0;
-            end
-        end
-
-        return 1'b0;
-    endfunction
-
-    function automatic bit ref_is_castle_move(input FullBoard board, input Move move);
-        automatic Tile start_tile = norm_tile(board.tiles[move.from_pos]);
-
-        return (start_tile.piece_type == KING
-            && start_tile.piece_color == board.turn
-            && (   (board.turn == WHITE && move.from_pos == Position'('d4)  && (move.to_pos == Position'('d2)  || move.to_pos == Position'('d6)))
-                || (board.turn == BLACK && move.from_pos == Position'('d60) && (move.to_pos == Position'('d58) || move.to_pos == Position'('d62)))));
-    endfunction
-
-    function automatic bit ref_move_is_promotion(input FullBoard board, input Move move);
-        automatic Tile start_tile = norm_tile(board.tiles[move.from_pos]);
-
-        return (start_tile.piece_type == PAWN
-            && start_tile.piece_color == board.turn
-            && (getRank(move.to_pos) == BoardRank'('d0) || getRank(move.to_pos) == BoardRank'('d7)));
-    endfunction
-
-    function automatic int ref_promotion_edge_index(input Move move, input Color moving_color);
-        automatic int from_file = int'(getFile(move.from_pos));
-        automatic int to_file = int'(getFile(move.to_pos));
-        automatic int edge_idx = from_file;
-
-        if (to_file < from_file) begin
-            edge_idx = 8 + to_file;
-        end else if (to_file > from_file) begin
-            edge_idx = 15 + from_file;
-        end
-
-        return edge_idx;
-    endfunction
-
-    function automatic int ref_normal_edge_mask_index(input Move move);
-        automatic int from_rank = int'(getRank(move.from_pos));
-        automatic int to_rank = int'(getRank(move.to_pos));
-        automatic int from_file = int'(getFile(move.from_pos));
-        automatic int to_file = int'(getFile(move.to_pos));
-        automatic int rank_delta = to_rank - from_rank;
-        automatic int file_delta = to_file - from_file;
-        automatic Direction dir;
-
-        if (rank_delta == 2 && file_delta == 1) begin
-            return NNE_SSW_KNIGHT_MASK_OFFSET + (from_file * 6) + from_rank;
-        end else if (rank_delta == -2 && file_delta == -1) begin
-            return NNE_SSW_KNIGHT_MASK_OFFSET + (to_file * 6) + to_rank;
-        end else if (rank_delta == 1 && file_delta == 2) begin
-            return NEE_SWW_KNIGHT_MASK_OFFSET + (from_file * 7) + from_rank;
-        end else if (rank_delta == -1 && file_delta == -2) begin
-            return NEE_SWW_KNIGHT_MASK_OFFSET + (to_file * 7) + to_rank;
-        end else if (rank_delta == -1 && file_delta == 2) begin
-            return SEE_NWW_KNIGHT_MASK_OFFSET + (from_file * 7) + to_rank;
-        end else if (rank_delta == 1 && file_delta == -2) begin
-            return SEE_NWW_KNIGHT_MASK_OFFSET + (to_file * 7) + from_rank;
-        end else if (rank_delta == -2 && file_delta == 1) begin
-            return SSE_NNW_KNIGHT_MASK_OFFSET + (from_file * 6) + to_rank;
-        end else if (rank_delta == 2 && file_delta == -1) begin
-            return SSE_NNW_KNIGHT_MASK_OFFSET + (to_file * 6) + from_rank;
-        end
-
-        dir = ref_move_dir(move.from_pos, move.to_pos);
-        case (dir)
-            NORTH:      return NS_MASK_OFFSET + (to_file * 7) + (to_rank - 1);
-            SOUTH:      return NS_MASK_OFFSET + 56 + (to_file * 7) + to_rank;
-            EAST:       return EW_MASK_OFFSET + ((to_file - 1) * 8) + to_rank;
-            WEST:       return EW_MASK_OFFSET + 56 + (to_file * 8) + to_rank;
-            NORTH_EAST: return POS_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + (to_rank - 1);
-            SOUTH_WEST: return POS_DIAG_MASK_OFFSET + 49 + (to_file * 7) + to_rank;
-            SOUTH_EAST: return NEG_DIAG_MASK_OFFSET + ((to_file - 1) * 7) + to_rank;
-            NORTH_WEST: return NEG_DIAG_MASK_OFFSET + 49 + (to_file * 7) + (to_rank - 1);
-            default:    return 0;
-        endcase
-    endfunction
-
-    function automatic int ref_castling_mask_index(input Move move, input Color moving_color);
-        if (moving_color == WHITE) begin
-            return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d6)) ? 0 : 1);
-        end
-
-        return CASTLING_MASK_OFFSET + ((move.to_pos == Position'('d62)) ? 0 : 1);
-    endfunction
-
-    function automatic MoveMaskIndex ref_candidate_index(input FullBoard board, input Move move);
-        automatic int index;
-
-        if (ref_move_is_promotion(board, move)) begin
-            index = PROMOTION_MASK_OFFSET + (ref_promotion_edge_index(move, board.turn) * 4) + int'(move.promo_piece);
-        end else if (ref_is_castle_move(board, move)) begin
-            index = ref_castling_mask_index(move, board.turn);
-        end else begin
-            index = ref_normal_edge_mask_index(move);
-        end
-
-        return MoveMaskIndex'(index);
-    endfunction
-
-    function automatic bit ref_is_ep_move(input FullBoard board, input Move move);
-        automatic Tile start_tile = norm_tile(board.tiles[move.from_pos]);
-        automatic Tile end_tile = norm_tile(board.tiles[move.to_pos]);
-
-        return (start_tile.piece_type == PAWN
-            && start_tile.piece_color == board.turn
-            && board.has_ep
-            && board.ep_file == getFile(move.to_pos)
-            && end_tile.piece_type == NULL_PIECE
-            && (   (board.turn == WHITE && getRank(move.to_pos) == BoardRank'('d5) && getRank(move.from_pos) == BoardRank'('d4))
-                || (board.turn == BLACK && getRank(move.to_pos) == BoardRank'('d2) && getRank(move.from_pos) == BoardRank'('d3))));
-    endfunction
-
-    function automatic bit ref_is_capture_or_promotion(input FullBoard board, input Move move);
-        automatic Tile end_tile = norm_tile(board.tiles[move.to_pos]);
-
-        return ref_move_is_promotion(board, move)
-            || (end_tile.piece_type != NULL_PIECE && end_tile.piece_color != board.turn)
-            || ref_is_ep_move(board, move);
-    endfunction
-
-    function automatic bit ref_square_attacked(input FullBoard board, input Position square, input Color attacker_color);
-        automatic Position test_pos;
-        automatic Tile test_tile;
-        automatic bit ray_done;
-
-        if (attacker_color == WHITE) begin
-            if (isShiftOnBoard(square, SOUTH_WEST, 3'd1) && norm_tile(board.tiles[shiftPos(square, SOUTH_WEST, 3'd1)]) == WHITE_PAWN) return 1'b1;
-            if (isShiftOnBoard(square, SOUTH_EAST, 3'd1) && norm_tile(board.tiles[shiftPos(square, SOUTH_EAST, 3'd1)]) == WHITE_PAWN) return 1'b1;
-        end else begin
-            if (isShiftOnBoard(square, NORTH_WEST, 3'd1) && norm_tile(board.tiles[shiftPos(square, NORTH_WEST, 3'd1)]) == BLACK_PAWN) return 1'b1;
-            if (isShiftOnBoard(square, NORTH_EAST, 3'd1) && norm_tile(board.tiles[shiftPos(square, NORTH_EAST, 3'd1)]) == BLACK_PAWN) return 1'b1;
-        end
-
-        for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
-            if (isKnightShiftOnBoard(square, KnightDirection'(knight_dir))) begin
-                test_pos = shiftKnightPos(square, KnightDirection'(knight_dir));
-                if (norm_tile(board.tiles[test_pos]) == Tile'({attacker_color, KNIGHT})) return 1'b1;
-            end
-        end
-
-        for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
-            automatic Direction dir = Direction'(dir_idx);
-            ray_done = 1'b0;
-            for (int distance = 1; distance < 8; distance++) begin
-                if (!ray_done && isShiftOnBoard(square, dir, dist_to_shift(distance))) begin
-                    test_pos = shiftPos(square, dir, dist_to_shift(distance));
-                    test_tile = norm_tile(board.tiles[test_pos]);
-                    if (test_tile.piece_type != NULL_PIECE) begin
-                        if (test_tile.piece_color == attacker_color) begin
-                            if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
-                            if (test_tile.piece_type == QUEEN) return 1'b1;
-                            if (test_tile.piece_type == ROOK && isDirCardinal(dir)) return 1'b1;
-                            if (test_tile.piece_type == BISHOP && isDirDiag(dir)) return 1'b1;
-                        end
-                        ray_done = 1'b1;
-                    end
-                end
-            end
-        end
-
-        return 1'b0;
-    endfunction
-
-    function automatic bit ref_is_pseudo_legal(input FullBoard board, input Move move);
-        automatic Tile start_tile = norm_tile(board.tiles[move.from_pos]);
-        automatic Tile end_tile = norm_tile(board.tiles[move.to_pos]);
-        automatic int rank_delta = int'(getRank(move.to_pos)) - int'(getRank(move.from_pos));
-        automatic int file_delta = int'(getFile(move.to_pos)) - int'(getFile(move.from_pos));
-        automatic Position mid_pos;
-
-        if (move.from_pos == move.to_pos) return 1'b0;
-        if (start_tile.piece_type == NULL_PIECE || start_tile.piece_color != board.turn) return 1'b0;
-        if (end_tile.piece_type != NULL_PIECE && end_tile.piece_color == board.turn) return 1'b0;
-
-        case (start_tile.piece_type)
-            PAWN: begin
-                if (board.turn == WHITE) begin
-                    if (file_delta == 0 && rank_delta == 1 && end_tile.piece_type == NULL_PIECE) return 1'b1;
-                    if (file_delta == 0 && rank_delta == 2 && getRank(move.from_pos) == BoardRank'('d1) && end_tile.piece_type == NULL_PIECE) begin
-                        mid_pos = getPosition(BoardRank'(getRank(move.from_pos) + 1'b1), getFile(move.from_pos));
-                        return ref_tile_empty(board, mid_pos);
-                    end
-                    if (abs_int(file_delta) == 1 && rank_delta == 1 && end_tile.piece_type != NULL_PIECE && end_tile.piece_color == BLACK) return 1'b1;
-                    return ref_is_ep_move(board, move);
-                end else begin
-                    if (file_delta == 0 && rank_delta == -1 && end_tile.piece_type == NULL_PIECE) return 1'b1;
-                    if (file_delta == 0 && rank_delta == -2 && getRank(move.from_pos) == BoardRank'('d6) && end_tile.piece_type == NULL_PIECE) begin
-                        mid_pos = getPosition(BoardRank'(getRank(move.from_pos) - 1'b1), getFile(move.from_pos));
-                        return ref_tile_empty(board, mid_pos);
-                    end
-                    if (abs_int(file_delta) == 1 && rank_delta == -1 && end_tile.piece_type != NULL_PIECE && end_tile.piece_color == WHITE) return 1'b1;
-                    return ref_is_ep_move(board, move);
-                end
-            end
-
-            KNIGHT: return ((abs_int(rank_delta) == 2 && abs_int(file_delta) == 1) || (abs_int(rank_delta) == 1 && abs_int(file_delta) == 2));
-            BISHOP: return ref_diag_move(move.from_pos, move.to_pos) && ref_path_clear(board, move.from_pos, move.to_pos);
-            ROOK:   return ref_line_move(move.from_pos, move.to_pos) && ref_path_clear(board, move.from_pos, move.to_pos);
-            QUEEN:  return (ref_line_move(move.from_pos, move.to_pos) || ref_diag_move(move.from_pos, move.to_pos)) && ref_path_clear(board, move.from_pos, move.to_pos);
-
-            KING: begin
-                if (abs_int(rank_delta) <= 1 && abs_int(file_delta) <= 1) return 1'b1;
-                if (!ref_is_castle_move(board, move)) return 1'b0;
-                if (board.turn == WHITE && move.to_pos == Position'('d6)) begin
-                    return board.castle_perms.white_kingside && ref_tile_empty(board, Position'('d5)) && ref_tile_empty(board, Position'('d6)) && norm_tile(board.tiles[Position'('d7)]) == WHITE_ROOK;
-                end
-                if (board.turn == WHITE && move.to_pos == Position'('d2)) begin
-                    return board.castle_perms.white_queenside && ref_tile_empty(board, Position'('d1)) && ref_tile_empty(board, Position'('d2)) && ref_tile_empty(board, Position'('d3)) && norm_tile(board.tiles[Position'('d0)]) == WHITE_ROOK;
-                end
-                if (board.turn == BLACK && move.to_pos == Position'('d62)) begin
-                    return board.castle_perms.black_kingside && ref_tile_empty(board, Position'('d61)) && ref_tile_empty(board, Position'('d62)) && norm_tile(board.tiles[Position'('d63)]) == BLACK_ROOK;
-                end
-                if (board.turn == BLACK && move.to_pos == Position'('d58)) begin
-                    return board.castle_perms.black_queenside && ref_tile_empty(board, Position'('d57)) && ref_tile_empty(board, Position'('d58)) && ref_tile_empty(board, Position'('d59)) && norm_tile(board.tiles[Position'('d56)]) == BLACK_ROOK;
-                end
-                return 1'b0;
-            end
-
-            default: return 1'b0;
-        endcase
-    endfunction
-
-    function automatic FullBoard ref_apply_move(input FullBoard board, input Move move);
-        automatic FullBoard next_board = board;
-        automatic Tile start_tile = norm_tile(board.tiles[move.from_pos]);
-        automatic Tile end_tile = norm_tile(board.tiles[move.to_pos]);
-        automatic bit is_ep = ref_is_ep_move(board, move);
-        automatic bit is_castle = ref_is_castle_move(board, move);
-        automatic Position ep_capture_pos = getPosition(getRank(move.from_pos), getFile(move.to_pos));
-        automatic Position rook_from = ref_castle_rook_from(move.to_pos);
-        automatic Position rook_to = ref_castle_rook_to(move.to_pos);
-        automatic PieceType placed_piece = (start_tile.piece_type == PAWN && (getRank(move.to_pos) == BoardRank'('d0) || getRank(move.to_pos) == BoardRank'('d7)))
-            ? ref_promo_to_piece(move.promo_piece)
-            : start_tile.piece_type;
-
-        next_board.tiles[move.from_pos] = EMPTY_TILE;
-        next_board.tiles[move.to_pos] = Tile'({start_tile.piece_color, placed_piece});
-
-        if (is_ep) begin
-            next_board.tiles[ep_capture_pos] = EMPTY_TILE;
-        end
-
-        if (is_castle) begin
-            next_board.tiles[rook_from] = EMPTY_TILE;
-            next_board.tiles[rook_to] = Tile'({start_tile.piece_color, ROOK});
-        end
-
-        if (move.from_pos == Position'('d4)  || move.from_pos == Position'('d7)  || move.to_pos == Position'('d7))  next_board.castle_perms.white_kingside = 1'b0;
-        if (move.from_pos == Position'('d4)  || move.from_pos == Position'('d0)  || move.to_pos == Position'('d0))  next_board.castle_perms.white_queenside = 1'b0;
-        if (move.from_pos == Position'('d60) || move.from_pos == Position'('d63) || move.to_pos == Position'('d63)) next_board.castle_perms.black_kingside = 1'b0;
-        if (move.from_pos == Position'('d60) || move.from_pos == Position'('d56) || move.to_pos == Position'('d56)) next_board.castle_perms.black_queenside = 1'b0;
-
-        next_board.has_ep = (start_tile.piece_type == PAWN
-            && (   (start_tile.piece_color == WHITE && getRank(move.from_pos) == BoardRank'('d1) && getRank(move.to_pos) == BoardRank'('d3))
-                || (start_tile.piece_color == BLACK && getRank(move.from_pos) == BoardRank'('d6) && getRank(move.to_pos) == BoardRank'('d4))));
-        next_board.ep_file = getFile(move.to_pos);
-        next_board.turn = Color'(~board.turn);
-        next_board.halfmove_clock = (start_tile.piece_type == PAWN || end_tile.piece_type != NULL_PIECE || is_ep) ? HalfmoveClock'(0) : board.halfmove_clock + HalfmoveClock'(1);
-
-        return next_board;
-    endfunction
-
-    function automatic bit ref_is_legal(input FullBoard board, input Move move);
-        automatic FullBoard next_board;
-        automatic Move transit_move;
-        automatic Position transit_pos;
-
-        if (!ref_is_pseudo_legal(board, move)) begin
-            return 1'b0;
-        end
-
-        if (ref_is_castle_move(board, move)) begin
-            if (ref_square_attacked(board, move.from_pos, Color'(~board.turn))) begin
-                return 1'b0;
-            end
-
-            transit_pos = (getFile(move.to_pos) == BoardFile'('d6))
-                ? getPosition(getRank(move.from_pos), BoardFile'('d5))
-                : getPosition(getRank(move.from_pos), BoardFile'('d3));
-            transit_move = move;
-            transit_move.to_pos = transit_pos;
-            next_board = ref_apply_move(board, transit_move);
-            if (ref_square_attacked(next_board, transit_pos, Color'(~board.turn))) begin
-                return 1'b0;
-            end
-        end
-
-        next_board = ref_apply_move(board, move);
-        return !ref_square_attacked(next_board, ref_find_king(next_board, board.turn), Color'(~board.turn));
-    endfunction
-
-    function automatic int ref_perft(input FullBoard board, input int depth);
-        automatic int nodes = 0;
-        automatic Move move;
-        automatic FullBoard child;
-        automatic bit is_promotion;
-
-        if (depth == 0) begin
-            return 1;
-        end
-
-        for (int from_pos = 0; from_pos < 64; from_pos++) begin
-            if (norm_tile(board.tiles[from_pos]).piece_color == board.turn && norm_tile(board.tiles[from_pos]).piece_type != NULL_PIECE) begin
-                for (int to_pos = 0; to_pos < 64; to_pos++) begin
-                    for (int promo_idx = 0; promo_idx < 4; promo_idx++) begin
-                        move = make_move(Position'(from_pos), Position'(to_pos), PromoType'(promo_idx));
-                        is_promotion = ref_move_is_promotion(board, move);
-                        if (is_promotion || promo_idx == 0) begin
-                            if (ref_is_legal(board, move)) begin
-                                child = ref_apply_move(board, move);
-                                nodes += ref_perft(child, depth - 1);
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        return nodes;
-    endfunction
-
-    function automatic int ref_qsearch_count(input FullBoard board);
-        automatic int nodes = 0;
-        automatic Move move;
-        automatic bit is_promotion;
-
-        for (int from_pos = 0; from_pos < 64; from_pos++) begin
-            if (norm_tile(board.tiles[from_pos]).piece_color == board.turn && norm_tile(board.tiles[from_pos]).piece_type != NULL_PIECE) begin
-                for (int to_pos = 0; to_pos < 64; to_pos++) begin
-                    for (int promo_idx = 0; promo_idx < 4; promo_idx++) begin
-                        move = make_move(Position'(from_pos), Position'(to_pos), PromoType'(promo_idx));
-                        is_promotion = ref_move_is_promotion(board, move);
-                        if ((is_promotion || promo_idx == 0)
-                            && ref_is_capture_or_promotion(board, move)
-                            && ref_is_legal(board, move)) begin
-                            nodes += 1;
-                        end
-                    end
-                end
-            end
-        end
-
-        return nodes;
-    endfunction
-
-    task automatic record_pass();
-        pass_count += 1;
+    task automatic start_board(output FullBoard board);
+        empty_board(board);
+        board.tiles[0] = WHITE_ROOK;
+        board.tiles[1] = WHITE_KNIGHT;
+        board.tiles[2] = WHITE_BISHOP;
+        board.tiles[3] = WHITE_QUEEN;
+        board.tiles[4] = WHITE_KING;
+        board.tiles[5] = WHITE_BISHOP;
+        board.tiles[6] = WHITE_KNIGHT;
+        board.tiles[7] = WHITE_ROOK;
+        for (int pos = 8; pos < 16; pos++) board.tiles[pos] = WHITE_PAWN;
+        for (int pos = 48; pos < 56; pos++) board.tiles[pos] = BLACK_PAWN;
+        board.tiles[56] = BLACK_ROOK;
+        board.tiles[57] = BLACK_KNIGHT;
+        board.tiles[58] = BLACK_BISHOP;
+        board.tiles[59] = BLACK_QUEEN;
+        board.tiles[60] = BLACK_KING;
+        board.tiles[61] = BLACK_BISHOP;
+        board.tiles[62] = BLACK_KNIGHT;
+        board.tiles[63] = BLACK_ROOK;
+        board.castle_perms = CastlePerms'('1);
     endtask
 
-    task automatic record_fail(input string message);
-        error_count += 1;
-        $error("[%6t] %s", $time, message);
+    task automatic idle_inputs();
+        clear = 1'b0;
+        flush = 1'b0;
+        cmd_valid = 1'b0;
+        cmd = MOVE_GEN_GENERATE_NOISY;
+        cmd_thread = ThreadID'(0);
+        cmd_ply = PlyIndex'(0);
+        cmd_board = FullBoard'('0);
+        cmd_suppress_valid = 1'b0;
+        cmd_suppress_move = NULL_MOVE;
+        cmd_bucket_tops = '0;
+        pop_valid = 1'b0;
+        pop_thread = ThreadID'(0);
+        pop_ply = PlyIndex'(0);
+        pop_eligible = '0;
+        pop_current_tops = '0;
+        pop_lower_tops = '0;
+        history_update_valid = 1'b0;
+        history_update_color = WHITE;
+        history_update_from = Position'(0);
+        history_update_to = Position'(0);
+        history_update_depth = 6'd0;
     endtask
 
-    task automatic expect_equal(input bit condition, input string message);
-        if (condition) begin
-            record_pass();
-        end else begin
-            record_fail(message);
-        end
-    endtask
-
-    task automatic drive_idle();
-        move_gen_op = MOVE_GEN_IDLE_OP;
-        start_node = 1'b0;
-        thread_id = ThreadID'(0);
-        ply = PlyIndex'(0);
-        target_move = NULL_MOVE;
-        turn = WHITE;
-        castle_perms = CastlePerms'(4'b0000);
-        has_ep = 1'b0;
-        ep_file = BoardFile'(0);
-        for (int pos = 0; pos < 64; pos++) begin
-            board_tiles[pos] = EMPTY_TILE;
-        end
-    endtask
-
-    task automatic drive_board(input FullBoard board);
-        for (int pos = 0; pos < 64; pos++) begin
-            board_tiles[pos] = board.tiles[pos];
-        end
-
-        turn = board.turn;
-        castle_perms = board.castle_perms;
-        has_ep = board.has_ep;
-        ep_file = board.ep_file;
-    endtask
-
-    function automatic bit is_null_move_value(input Move move);
-        return (move.from_pos == 6'd0 && move.to_pos == 6'd0);
-    endfunction
-
-    function automatic bit same_move_exact(input Move left, input Move right);
-        return (left.from_pos == right.from_pos
-            && left.to_pos == right.to_pos
-            && left.promo_piece == right.promo_piece);
-    endfunction
-
-    task automatic dispatch_dut_candidate_for_thread(
+    task automatic run_command(
+        input MoveGenCommand operation,
         input FullBoard board,
-        input MoveGenOp op,
-        input bit is_first_request,
-        input Move target,
-        input ThreadID request_thread_id,
+        input logic suppress_valid,
+        input Move suppress_move,
+        input MoveBucketTops tops_in,
+        output logic direct_valid,
+        output Move direct_move,
+        output MoveBucketTops tops_out
+    );
+        while (!cmd_ready) tick();
+        cmd = operation;
+        cmd_board = board;
+        cmd_suppress_valid = suppress_valid;
+        cmd_suppress_move = suppress_move;
+        cmd_bucket_tops = tops_in;
+        cmd_valid = 1'b1;
+        tick();
+        cmd_valid = 1'b0;
+        while (!cmd_resp_valid) tick();
+        direct_valid = cmd_resp_direct_valid;
+        direct_move = cmd_resp_direct_move;
+        tops_out = cmd_resp_bucket_tops;
+        tick();
+    endtask
+
+    task automatic pop_one(
+        input MoveBucketMask eligible,
+        inout MoveBucketTops tops,
+        input MoveBucketTops lower,
+        output logic found,
         output Move move,
-        output logic legal
+        output MoveBucketIndex bucket
     );
-        automatic bit captured = 1'b0;
-
-        drive_board(board);
-        move_gen_op = op;
-        start_node = is_first_request;
-        thread_id = request_thread_id;
-        ply = PlyIndex'(0);
-        target_move = target;
-        do_clock(1);
-        drive_idle();
-        move = NULL_MOVE;
-        legal = 1'b0;
-        for (int wait_cycle = 0; wait_cycle < DUT_OUTPUT_LATENCY + 4; wait_cycle++) begin
-            do_clock(1);
-            if (!captured && !is_null_move_value(candidate_move)) begin
-                move = candidate_move;
-                legal = move_is_legal;
-                captured = 1'b1;
-            end
-        end
+        while (!pop_ready) tick();
+        pop_eligible = eligible;
+        pop_current_tops = tops;
+        pop_lower_tops = lower;
+        pop_valid = 1'b1;
+        tick();
+        pop_valid = 1'b0;
+        check(pop_resp_valid, "pop response has synchronous valid");
+        found = pop_resp_found;
+        move = pop_resp_move;
+        bucket = pop_resp_bucket;
+        if (found) tops[bucket] = pop_resp_new_top;
+        tick();
     endtask
 
-    task automatic dispatch_dut_candidate(
-        input FullBoard board,
-        input MoveGenOp op,
-        input bit is_first_request,
-        input Move target,
-        output Move move,
-        output logic legal
+    task automatic collect(
+        input MoveBucketMask eligible,
+        inout MoveBucketTops tops,
+        input MoveBucketTops lower,
+        output int count,
+        output logic [16383:0] seen
     );
-        dispatch_dut_candidate_for_thread(board, op, is_first_request, target, ThreadID'(0), move, legal);
-    endtask
-
-    task automatic collect_dut_candidates(
-        input string test_name,
-        input FullBoard board,
-        input MoveGenOp op,
-        output int candidate_count,
-        output int legal_count
-    );
+        automatic logic found;
         automatic Move move;
-        automatic logic legal;
-        automatic MoveMask seen = MoveMask'('0);
-        automatic MoveMaskIndex idx;
-        automatic bit done = 1'b0;
-
-        candidate_count = 0;
-        legal_count = 0;
-
-        for (int iter = 0; iter < MAX_DUT_CANDIDATES; iter++) begin
-            dispatch_dut_candidate(board, op, iter == 0, NULL_MOVE, move, legal);
-            if (is_null_move_value(move)) begin
-                done = 1'b1;
-                break;
-            end
-
-            idx = ref_candidate_index(board, move);
-            expect_equal(!seen[idx], $sformatf("%s duplicate candidate %0d->%0d promo=%0d", test_name, move.from_pos, move.to_pos, move.promo_piece));
-            seen[idx] = 1'b1;
-            candidate_count += 1;
-            if (legal) begin
-                legal_count += 1;
-            end
+        automatic MoveBucketIndex bucket;
+        count = 0;
+        seen = '0;
+        for (int iteration = 0; iteration < 512; iteration++) begin
+            pop_one(eligible, tops, lower, found, move, bucket);
+            if (!found) return;
+            check(!seen[14'(move)], $sformatf("move %0d->%0d/%0d returned once",
+                move.from_pos, move.to_pos, move.promo_piece));
+            seen[14'(move)] = 1'b1;
+            count++;
         end
-
-        expect_equal(done, {test_name, " reached NULL_MOVE"});
+        check(1'b0, "bucket collection terminated");
     endtask
 
-    task automatic run_legality_case(input string test_name, input FullBoard board, input Move move, input bit expected_legal);
-        automatic bit ref_legal = ref_is_legal(board, move);
-
-        expect_equal(ref_legal == expected_legal,
-            $sformatf("%s reference legality expected=%0d found=%0d", test_name, expected_legal, ref_legal));
-    endtask
-
-    task automatic setup_kings(output FullBoard board, input Color side_to_move);
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = side_to_move;
-    endtask
-
-    task automatic setup_start_position(output FullBoard board);
-        init_empty_board(board);
-        board.tiles[Position'(0)] = WHITE_ROOK;
-        board.tiles[Position'(1)] = WHITE_KNIGHT;
-        board.tiles[Position'(2)] = WHITE_BISHOP;
-        board.tiles[Position'(3)] = WHITE_QUEEN;
-        board.tiles[Position'(4)] = WHITE_KING;
-        board.tiles[Position'(5)] = WHITE_BISHOP;
-        board.tiles[Position'(6)] = WHITE_KNIGHT;
-        board.tiles[Position'(7)] = WHITE_ROOK;
-        for (int pos = 8; pos < 16; pos++) begin
-            board.tiles[pos] = WHITE_PAWN;
-        end
-        for (int pos = 48; pos < 56; pos++) begin
-            board.tiles[pos] = BLACK_PAWN;
-        end
-        board.tiles[Position'(56)] = BLACK_ROOK;
-        board.tiles[Position'(57)] = BLACK_KNIGHT;
-        board.tiles[Position'(58)] = BLACK_BISHOP;
-        board.tiles[Position'(59)] = BLACK_QUEEN;
-        board.tiles[Position'(60)] = BLACK_KING;
-        board.tiles[Position'(61)] = BLACK_BISHOP;
-        board.tiles[Position'(62)] = BLACK_KNIGHT;
-        board.tiles[Position'(63)] = BLACK_ROOK;
-        board.turn = WHITE;
-        board.castle_perms = CastlePerms'(4'b1111);
-    endtask
-
-    task automatic test_pins_and_checks();
-        automatic FullBoard board;
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d12)] = WHITE_ROOK;
-        board.tiles[Position'('d60)] = BLACK_ROOK;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        run_legality_case("pinned rook off pin line", board, make_move(Position'('d12), Position'('d11), PROMO_QUEEN), 1'b0);
-        run_legality_case("pinned rook along pin line", board, make_move(Position'('d12), Position'('d20), PROMO_QUEEN), 1'b1);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d60)] = BLACK_ROOK;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        board.tiles[Position'('d11)] = WHITE_BISHOP;
-        board.tiles[Position'('d6)] = WHITE_KNIGHT;
-        run_legality_case("single check unrelated knight move", board, make_move(Position'('d6), Position'('d21), PROMO_QUEEN), 1'b0);
-        run_legality_case("single check bishop block", board, make_move(Position'('d11), Position'('d20), PROMO_QUEEN), 1'b1);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d60)] = BLACK_ROOK;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        board.tiles[Position'('d31)] = BLACK_BISHOP;
-        board.tiles[Position'('d11)] = WHITE_BISHOP;
-        run_legality_case("double check non-king block", board, make_move(Position'('d11), Position'('d20), PROMO_QUEEN), 1'b0);
-    endtask
-
-    task automatic test_king_castle_and_ep();
-        automatic FullBoard board;
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d60)] = BLACK_ROOK;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        run_legality_case("king moves onto attacked file", board, make_move(Position'('d4), Position'('d12), PROMO_QUEEN), 1'b0);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d7)] = WHITE_ROOK;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.castle_perms.white_kingside = 1'b1;
-        run_legality_case("legal white kingside castle", board, make_move(Position'('d4), Position'('d6), PROMO_QUEEN), 1'b1);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d7)] = WHITE_ROOK;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.tiles[Position'('d61)] = BLACK_ROOK;
-        board.castle_perms.white_kingside = 1'b1;
-        run_legality_case("castle through attacked transit", board, make_move(Position'('d4), Position'('d6), PROMO_QUEEN), 1'b0);
-
-        init_empty_board(board);
-        board.tiles[Position'('d36)] = WHITE_KING;
-        board.tiles[Position'('d37)] = WHITE_PAWN;
-        board.tiles[Position'('d38)] = BLACK_PAWN;
-        board.tiles[Position'('d39)] = BLACK_ROOK;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.turn = WHITE;
-        board.has_ep = 1'b1;
-        board.ep_file = BoardFile'('d6);
-        run_legality_case("en passant discovered check", board, make_move(Position'('d37), Position'('d46), PROMO_QUEEN), 1'b0);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d0)] = WHITE_ROOK;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.castle_perms.white_queenside = 1'b1;
-        run_legality_case("legal white queenside castle", board, make_move(Position'('d4), Position'('d2), PROMO_QUEEN), 1'b1);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d0)] = WHITE_ROOK;
-        board.tiles[Position'('d1)] = WHITE_KNIGHT;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.castle_perms.white_queenside = 1'b1;
-        run_legality_case("queenside castle blocked path", board, make_move(Position'('d4), Position'('d2), PROMO_QUEEN), 1'b0);
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d0)] = WHITE_ROOK;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.tiles[Position'('d20)] = BLACK_ROOK;
-        board.castle_perms.white_queenside = 1'b1;
-        run_legality_case("castle while in check", board, make_move(Position'('d4), Position'('d2), PROMO_QUEEN), 1'b0);
-
-        setup_kings(board, BLACK);
-        board.tiles[Position'('d63)] = BLACK_ROOK;
-        board.castle_perms.black_kingside = 1'b1;
-        run_legality_case("legal black kingside castle", board, make_move(Position'('d60), Position'('d62), PROMO_QUEEN), 1'b1);
-
-        setup_kings(board, BLACK);
-        board.tiles[Position'('d56)] = BLACK_ROOK;
-        board.castle_perms.black_queenside = 1'b1;
-        run_legality_case("legal black queenside castle", board, make_move(Position'('d60), Position'('d58), PROMO_QUEEN), 1'b1);
-    endtask
-
-    task automatic test_targeted_generation();
-        automatic FullBoard board;
-        automatic Move move;
-        automatic Move target;
-        automatic logic legal;
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d1)] = WHITE_KNIGHT;
-        board.tiles[Position'('d17)] = BLACK_QUEEN;
-
-        target = make_move(Position'('d1), Position'('d18), PROMO_QUEEN);
-        dispatch_dut_candidate(board, MOVE_GEN_TARGETED_OP, 1'b1, target, move, legal);
-        expect_equal(same_move_exact(move, target) && legal,
-            $sformatf("targeted legal move first expected %0d->%0d found %0d->%0d legal=%0d", target.from_pos, target.to_pos, move.from_pos, move.to_pos, legal));
-
-        dispatch_dut_candidate(board, MOVE_GEN_TARGETED_OP, 1'b0, target, move, legal);
-        expect_equal(!same_move_exact(move, target),
-            "targeted already-consumed move skipped");
-
-        target = make_move(Position'('d1), Position'('d17), PROMO_QUEEN);
-        dispatch_dut_candidate(board, MOVE_GEN_TARGETED_OP, 1'b1, target, move, legal);
-        expect_equal(!same_move_exact(move, target) && legal,
-            $sformatf("targeted illegal move skipped found %0d->%0d legal=%0d", move.from_pos, move.to_pos, legal));
-    endtask
-
-    task automatic test_thread_mask_isolation();
-        automatic FullBoard board;
-        automatic Move thread0_first;
-        automatic Move thread0_second;
-        automatic Move thread1_first;
-        automatic logic legal0_first;
-        automatic logic legal0_second;
-        automatic logic legal1_first;
-
-        setup_start_position(board);
-        dispatch_dut_candidate_for_thread(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, ThreadID'(0), thread0_first, legal0_first);
-        dispatch_dut_candidate_for_thread(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, ThreadID'(0), thread0_second, legal0_second);
-        dispatch_dut_candidate_for_thread(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, ThreadID'(1), thread1_first, legal1_first);
-
-        expect_equal(legal0_first && legal0_second && legal1_first, "thread mask isolation generated legal candidates");
-        expect_equal(!same_move_exact(thread0_first, thread0_second), "thread 0 consumed first candidate");
-        expect_equal(same_move_exact(thread0_first, thread1_first), "thread 1 candidate mask starts independently");
-    endtask
-
-    task automatic test_qsearch_filtering();
-        automatic FullBoard board;
-        automatic int candidates;
-        automatic int legal;
-        automatic Move quiet_check;
-        automatic Move ep_capture;
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d8)] = WHITE_ROOK;
-        quiet_check = make_move(Position'('d8), Position'('d12), PROMO_QUEEN);
-        run_legality_case("quiet checking move is legal", board, quiet_check, 1'b1);
-        collect_dut_candidates("quiet-check qsearch", board, MOVE_GEN_QSEARCH_OP, candidates, legal);
-        expect_equal(candidates == 0 && legal == 0 && ref_qsearch_count(board) == 0,
-            $sformatf("quiet-check qsearch expected=0/0 found=%0d/%0d ref=%0d", candidates, legal, ref_qsearch_count(board)));
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d37)] = WHITE_PAWN;
-        board.tiles[Position'('d38)] = BLACK_PAWN;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.turn = WHITE;
-        board.has_ep = 1'b1;
-        board.ep_file = BoardFile'('d6);
-        ep_capture = make_move(Position'('d37), Position'('d46), PROMO_QUEEN);
-        run_legality_case("legal en passant qsearch candidate", board, ep_capture, 1'b1);
-        collect_dut_candidates("en passant qsearch", board, MOVE_GEN_QSEARCH_OP, candidates, legal);
-        expect_equal(legal == ref_qsearch_count(board),
-            $sformatf("en passant qsearch legal count expected=%0d found=%0d", ref_qsearch_count(board), legal));
-    endtask
-
-    task automatic test_promotion_ordering();
-        automatic FullBoard board;
-        automatic Move move;
-        automatic logic legal;
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d48)] = WHITE_PAWN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_QUEEN)) && legal,
-            $sformatf("promotion order queen first found promo=%0d legal=%0d", move.promo_piece, legal));
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_KNIGHT)) && legal,
-            $sformatf("promotion order knight second found promo=%0d legal=%0d", move.promo_piece, legal));
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_ROOK)) && legal,
-            $sformatf("promotion order rook third found promo=%0d legal=%0d", move.promo_piece, legal));
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_BISHOP)) && legal,
-            $sformatf("promotion order bishop fourth found promo=%0d legal=%0d", move.promo_piece, legal));
-    endtask
-
-    // Queen promotions precede captures; tied underpromotions follow captures.
-    task automatic test_underpromotion_ordering();
-        automatic FullBoard board;
-        automatic Move move;
-        automatic logic legal;
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d41)] = WHITE_KNIGHT;
-        board.tiles[Position'('d48)] = WHITE_PAWN;
-        board.tiles[Position'('d58)] = BLACK_PAWN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_QUEEN)) && legal,
-            $sformatf("queen promotion before capture found from=%0d to=%0d promo=%0d legal=%0d",
-                move.from_pos, move.to_pos, move.promo_piece, legal));
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d41), Position'('d58), PROMO_QUEEN)) && legal,
-            $sformatf("capture before underpromotion found from=%0d to=%0d promo=%0d legal=%0d",
-                move.from_pos, move.to_pos, move.promo_piece, legal));
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b0, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, make_move(Position'('d48), Position'('d56), PROMO_KNIGHT)) && legal,
-            $sformatf("underpromotion after capture found from=%0d to=%0d promo=%0d legal=%0d",
-                move.from_pos, move.to_pos, move.promo_piece, legal));
-    endtask
-
-    // Exercise both visible-attacker SEE classes and en passant scoring.
-    task automatic test_see_ordering();
-        automatic FullBoard board;
-        automatic Move move;
-        automatic Move capture;
-        automatic logic legal;
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d27)] = WHITE_PAWN;
-        board.tiles[Position'('d36)] = BLACK_QUEEN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        capture = make_move(Position'('d27), Position'('d36), PROMO_QUEEN);
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("nonnegative visible SEE capture expected first found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        // A safe pawn capture precedes a higher-victim queen capture that loses
-        // to a visible pawn recapture on another central destination.
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d3)] = WHITE_QUEEN;
-        board.tiles[Position'('d30)] = WHITE_PAWN;
-        board.tiles[Position'('d35)] = BLACK_ROOK;
-        board.tiles[Position'('d37)] = BLACK_PAWN;
-        board.tiles[Position'('d42)] = BLACK_PAWN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        capture = make_move(Position'('d30), Position'('d37), PROMO_QUEEN);
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("nonnegative capture expected before higher-victim losing capture found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        // Bounded SEE deliberately stops after the first friendly reply, so a
-        // second enemy value class does not demote this higher-victim capture.
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d3)] = WHITE_QUEEN;
-        board.tiles[Position'('d30)] = WHITE_PAWN;
-        board.tiles[Position'('d32)] = WHITE_ROOK;
-        board.tiles[Position'('d35)] = BLACK_ROOK;
-        board.tiles[Position'('d37)] = BLACK_PAWN;
-        board.tiles[Position'('d44)] = BLACK_QUEEN;
-        board.tiles[Position'('d43)] = BLACK_ROOK;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        capture = make_move(Position'('d3), Position'('d35), PROMO_QUEEN);
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("bounded exchange expected to stop after first defender found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d37)] = WHITE_PAWN;
-        board.tiles[Position'('d38)] = BLACK_PAWN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        board.has_ep = 1'b1;
-        board.ep_file = BoardFile'('d6);
-        capture = make_move(Position'('d37), Position'('d46), PROMO_QUEEN);
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("nonnegative en passant expected before quiets found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d3)] = WHITE_QUEEN;
-        board.tiles[Position'('d51)] = BLACK_PAWN;
-        board.tiles[Position'('d59)] = BLACK_ROOK;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        capture = make_move(Position'('d3), Position'('d51), PROMO_QUEEN);
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("negative SEE capture expected before quiet moves found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        // A defender does not rescue an exchange whose three-ply balance is negative.
-        board.tiles[Position'('d48)] = WHITE_ROOK;
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("negative defended exchange expected before quiet moves found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        // A valuable recapturer still refutes an undefended queen capture.
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d3)] = WHITE_QUEEN;
-        board.tiles[Position'('d51)] = BLACK_PAWN;
-        board.tiles[Position'('d59)] = BLACK_QUEEN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        capture = make_move(Position'('d3), Position'('d51), PROMO_QUEEN);
-
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("undefended queen capture expected before quiet moves found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-
-        // A later-priority rook defender makes the same three-ply exchange safe.
-        board.tiles[Position'('d48)] = WHITE_ROOK;
-        dispatch_dut_candidate(board, MOVE_GEN_NORMAL_OP, 1'b1, NULL_MOVE, move, legal);
-        expect_equal(same_move_exact(move, capture) && legal,
-            $sformatf("defended queen capture expected first found from=%0d to=%0d legal=%0d",
-                move.from_pos, move.to_pos, legal));
-    endtask
-
-    task automatic test_no_legal_moves();
-        automatic FullBoard board;
-        automatic int candidates;
-        automatic int legal;
-
-        init_empty_board(board);
-        board.tiles[Position'('d53)] = WHITE_KING;
-        board.tiles[Position'('d46)] = WHITE_QUEEN;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        board.turn = BLACK;
-        collect_dut_candidates("stalemate normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(legal == 0 && ref_perft(board, 1) == 0,
-            $sformatf("stalemate expected no legal moves found candidates=%0d legal=%0d ref=%0d", candidates, legal, ref_perft(board, 1)));
-
-        init_empty_board(board);
-        board.tiles[Position'('d45)] = WHITE_KING;
-        board.tiles[Position'('d54)] = WHITE_QUEEN;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        board.turn = BLACK;
-        collect_dut_candidates("checkmate normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(legal == 0 && ref_perft(board, 1) == 0,
-            $sformatf("checkmate expected no legal moves found candidates=%0d legal=%0d ref=%0d", candidates, legal, ref_perft(board, 1)));
-    endtask
-
-    task automatic test_small_reference_perft();
-        automatic FullBoard board;
-        automatic int depth1;
-        automatic int depth2;
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-
-        depth1 = ref_perft(board, 1);
-        depth2 = ref_perft(board, 2);
-
-        $display("Reference perft kings-only depth 1: %0d", depth1);
-        $display("Reference perft kings-only depth 2: %0d", depth2);
-        expect_equal(depth1 == 5, $sformatf("kings-only perft depth 1 expected=5 found=%0d", depth1));
-        expect_equal(depth2 == 25, $sformatf("kings-only perft depth 2 expected=25 found=%0d", depth2));
-    endtask
-
-    task automatic test_dut_streaming_perft();
-        automatic FullBoard board;
-        automatic int candidates;
-        automatic int legal;
-        automatic int ref_nodes;
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        collect_dut_candidates("kings-only normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(legal == ref_perft(board, 1), $sformatf("kings-only DUT legal count expected=%0d found=%0d", ref_perft(board, 1), legal));
-        expect_equal(ref_perft(board, 2) == 25, $sformatf("kings-only reference depth 2 expected=25 found=%0d", ref_perft(board, 2)));
-
-        setup_start_position(board);
-        collect_dut_candidates("initial normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(legal == 20, $sformatf("initial DUT legal count expected=20 found=%0d", legal));
-        collect_dut_candidates("initial qsearch", board, MOVE_GEN_QSEARCH_OP, candidates, legal);
-        expect_equal(candidates == 0 && legal == 0, $sformatf("initial qsearch expected=0/0 found=%0d/%0d", candidates, legal));
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d7)] = WHITE_ROOK;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.castle_perms.white_kingside = 1'b1;
-        collect_dut_candidates("castling normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(legal == ref_perft(board, 1), $sformatf("castling DUT legal count expected=%0d found=%0d", ref_perft(board, 1), legal));
-
-        init_empty_board(board);
-        board.tiles[Position'('d36)] = WHITE_KING;
-        board.tiles[Position'('d37)] = WHITE_PAWN;
-        board.tiles[Position'('d38)] = BLACK_PAWN;
-        board.tiles[Position'('d56)] = BLACK_KING;
-        board.turn = WHITE;
-        board.has_ep = 1'b1;
-        board.ep_file = BoardFile'('d6);
-        collect_dut_candidates("en passant normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(legal == ref_perft(board, 1), $sformatf("en passant DUT legal count expected=%0d found=%0d", ref_perft(board, 1), legal));
-
-        init_empty_board(board);
-        board.tiles[Position'('d4)] = WHITE_KING;
-        board.tiles[Position'('d48)] = WHITE_PAWN;
-        board.tiles[Position'('d60)] = BLACK_KING;
-        board.turn = WHITE;
-        collect_dut_candidates("promotion normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        ref_nodes = ref_perft(board, 1);
-        expect_equal(legal == ref_nodes, $sformatf("promotion DUT legal count expected=%0d found=%0d", ref_nodes, legal));
-        collect_dut_candidates("promotion qsearch", board, MOVE_GEN_QSEARCH_OP, candidates, legal);
-        expect_equal(legal == 4, $sformatf("promotion qsearch legal count expected=4 found=%0d", legal));
-
-        setup_kings(board, WHITE);
-        board.tiles[Position'('d12)] = WHITE_ROOK;
-        board.tiles[Position'('d60)] = BLACK_ROOK;
-        board.tiles[Position'('d63)] = BLACK_KING;
-        collect_dut_candidates("pinned normal", board, MOVE_GEN_NORMAL_OP, candidates, legal);
-        expect_equal(candidates > legal, $sformatf("pinned normal expected at least one illegal consumed candidate found candidates=%0d legal=%0d", candidates, legal));
-        expect_equal(legal == ref_perft(board, 1), $sformatf("pinned DUT legal count expected=%0d found=%0d", ref_perft(board, 1), legal));
+    task automatic history_update(input Move move, input logic [5:0] depth);
+        while (!history_update_ready) tick();
+        history_update_color = WHITE;
+        history_update_from = move.from_pos;
+        history_update_to = move.to_pos;
+        history_update_depth = depth;
+        history_update_valid = 1'b1;
+        tick();
+        history_update_valid = 1'b0;
+        while (!history_update_ready) tick();
     endtask
 
     initial begin
+        automatic FullBoard board;
+        automatic MoveBucketTops tops;
+        automatic MoveBucketTops adjacent_tops;
+        automatic MoveBucketTops parent_tops;
+        automatic MoveBucketTops child_tops;
+        automatic logic [39:0] generation_cycles_before;
+        automatic MoveBucketTops lower;
+        automatic logic direct_valid;
+        automatic Move direct_move;
+        automatic int count;
+        automatic logic [16383:0] seen;
+        automatic Move target;
+        automatic logic found;
+        automatic Move popped;
+        automatic MoveBucketIndex popped_bucket;
+
         clk = 1'b0;
         rst_n = 1'b0;
-        drive_idle();
-        do_clock(2);
+        pass_count = 0;
+        fail_count = 0;
+        idle_inputs();
+        tick(2);
         rst_n = 1'b1;
-        do_clock(2);
+        while (init_busy) tick();
 
-        $display("=== Move generator testbench ===");
-        test_pins_and_checks();
-        test_king_castle_and_ep();
-        test_targeted_generation();
-        test_thread_mask_isolation();
-        test_qsearch_filtering();
-        test_promotion_ordering();
-        test_underpromotion_ordering();
-        test_see_ordering();
-        test_small_reference_perft();
+        start_board(board);
+        tops = '0;
+        lower = '0;
+        generation_cycles_before = stat_generation_cycles;
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        $display("Start-position noisy generation cycles: %0d",
+            stat_generation_cycles - generation_cycles_before);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(count == 0, "start position has no noisy moves");
+        generation_cycles_before = stat_generation_cycles;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        $display("Start-position quiet generation cycles: %0d",
+            stat_generation_cycles - generation_cycles_before);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(count == 20, $sformatf("start position has 20 moves, found %0d", count));
 
-        $display("Testbench run complete.");
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[48] = WHITE_PAWN;
+        board.tiles[60] = BLACK_KING;
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(count == 4, "all four promotion encodings generated");
+        for (int promo = 0; promo < 4; promo++)
+            check(seen[14'(make_move(Position'(48), Position'(56), PromoType'(promo)))],
+                $sformatf("promotion %0d present", promo));
+
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[37] = WHITE_PAWN;
+        board.tiles[38] = BLACK_PAWN;
+        board.tiles[60] = BLACK_KING;
+        board.has_ep = 1'b1;
+        board.ep_file = BoardFile'(6);
+        target = make_move(Position'(37), Position'(46));
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(seen[14'(target)], "en-passant move generated");
+
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[7] = WHITE_ROOK;
+        board.tiles[56] = BLACK_KING;
+        board.castle_perms.white_kingside = 1'b1;
+        target = make_move(Position'(4), Position'(6));
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(seen[14'(target)], "safe castling generated");
+
+        run_command(MOVE_GEN_VALIDATE_DIRECT, board, 1'b1, target,
+            '0, direct_valid, direct_move, tops);
+        check(direct_valid && same_move(direct_move, target), "direct castling validation");
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b1, target,
+            tops, direct_valid, direct_move, tops);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(!seen[14'(target)], "attempted direct move suppressed exactly");
+
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[1] = WHITE_KNIGHT;
+        board.tiles[60] = BLACK_KING;
+        target = make_move(Position'(1), Position'(18));
+        repeat (16) history_update(target, 6'd1);
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        pop_one(MoveBucketMask'(8'b0011_0000), tops, lower, found, popped, popped_bucket);
+        check(found && same_move(popped, target) && popped_bucket == QUIET_HIGH_BUCKET,
+            "positive history update raises quiet move bucket");
+        repeat (8) history_update(target, 6'd63);
+        check($signed(dut.gen_history[0].history_ram.mem[{target.from_pos, target.to_pos}])
+                == 9'sd255,
+            "history update saturates at signed nine-bit maximum");
+
+        // Pins are deliberately left to board update: the sideways rook move
+        // must remain in the pseudo-legal stream even though it exposes e1.
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[12] = WHITE_ROOK;
+        board.tiles[60] = BLACK_ROOK;
+        board.tiles[56] = BLACK_KING;
+        target = make_move(Position'(12), Position'(11));
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(seen[14'(target)], "pinned rook move remains pseudo-legal");
+
+        // Exercise the depth-first arena invariant independently of search.
+        start_board(board);
+        parent_tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            parent_tops, direct_valid, direct_move, parent_tops);
+        pop_one(ALL_BUCKET_MASK, parent_tops, lower, found, popped, popped_bucket);
+        check(found, "parent move popped before descent");
+        child_tops = parent_tops;
+        empty_board(board);
+        board.tiles[0] = WHITE_KING;
+        board.tiles[1] = WHITE_KNIGHT;
+        board.tiles[63] = BLACK_KING;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            child_tops, direct_valid, direct_move, child_tops);
+        collect(ALL_BUCKET_MASK, child_tops, parent_tops, count, seen);
+        check(count != 0, "child pushes and pops above inherited lower bounds");
+        check(child_tops == parent_tops, "child exhaustion returns to inherited tops");
+        tops = parent_tops;
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        check(count == 19, "return preserves all unsearched parent moves");
+        child_tops = parent_tops;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            child_tops, direct_valid, direct_move, child_tops);
+        collect(ALL_BUCKET_MASK, child_tops, parent_tops, count, seen);
+        check(count != 0 && child_tops == parent_tops,
+            "sibling reuses released descendant slots");
+
+        check(!overflow_sticky, "normal tests do not overflow buckets");
+        check(stat_candidate_count != 0 && stat_destination_count != 0
+            && stat_history_lookup_count != 0, "generation instrumentation increments");
+
+        // Preserve moves in thread region one while overflowing thread zero.
+        empty_board(board);
+        board.tiles[0] = WHITE_KING;
+        board.tiles[1] = WHITE_KNIGHT;
+        board.tiles[63] = BLACK_KING;
+        cmd_thread = ThreadID'(1);
+        pop_thread = ThreadID'(1);
+        adjacent_tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            adjacent_tops, direct_valid, direct_move, adjacent_tops);
+        check(adjacent_tops != MoveBucketTops'(0), "adjacent thread region receives moves");
+
+        empty_board(board);
+        board.tiles[0] = WHITE_KING;
+        board.tiles[7] = WHITE_ROOK;
+        board.tiles[27] = WHITE_QUEEN;
+        board.tiles[63] = BLACK_KING;
+        cmd_thread = ThreadID'(0);
+        pop_thread = ThreadID'(0);
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        check(overflow_sticky && overflow_thread == ThreadID'(0)
+            && overflow_bucket == QUIET_LOW_BUCKET && overflow_count != 16'd0,
+            "overflow identifies bucket and thread");
+        check(tops[QUIET_LOW_BUCKET] == MoveBucketTop'(32),
+            "overflow suppresses out-of-region top increment");
+        check(stat_bucket_high_water[QUIET_LOW_BUCKET] == MoveBucketTop'(32),
+            "high-water telemetry reaches the configured bucket capacity");
+
+        pop_thread = ThreadID'(1);
+        pop_one(ALL_BUCKET_MASK, adjacent_tops, lower, found, popped, popped_bucket);
+        check(found, "overflow leaves adjacent thread region intact");
+
+        $display("Bucket high-water tops: %0d %0d %0d %0d %0d %0d %0d %0d",
+            stat_bucket_high_water[0], stat_bucket_high_water[1],
+            stat_bucket_high_water[2], stat_bucket_high_water[3],
+            stat_bucket_high_water[4], stat_bucket_high_water[5],
+            stat_bucket_high_water[6], stat_bucket_high_water[7]);
         $display("Pass Count: %0d", pass_count);
-        $display("Fail Count: %0d", error_count);
-
-        if (error_count != 0) $fatal(1, "move_generator testbench failed");
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "move generator tests failed");
         $finish;
     end
 
     initial begin
-        #1_000_000;
-        $fatal(1, "move_generator testbench timed out");
+        #5_000_000;
+        $fatal(1, "move generator test timed out");
     end
 
 endmodule : tb_move_generator

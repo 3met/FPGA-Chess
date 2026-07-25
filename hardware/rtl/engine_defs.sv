@@ -33,6 +33,16 @@ package engine_defs;
     localparam logic [7:0] ENGINE_STAT_TT_CACHE_LOOKUPS = 8'd5;
     localparam logic [7:0] ENGINE_STAT_TT_CACHE_HITS    = 8'd6;
     localparam logic [7:0] ENGINE_STAT_PHASE_BASE       = 8'd16;
+    localparam logic [7:0] ENGINE_STAT_MOVE_NOISY       = 8'd176;
+    localparam logic [7:0] ENGINE_STAT_MOVE_QUIET       = 8'd177;
+    localparam logic [7:0] ENGINE_STAT_MOVE_DESTINATIONS = 8'd178;
+    localparam logic [7:0] ENGINE_STAT_MOVE_CANDIDATES  = 8'd179;
+    localparam logic [7:0] ENGINE_STAT_HISTORY_LOOKUPS  = 8'd180;
+    localparam logic [7:0] ENGINE_STAT_MOVE_GEN_CYCLES  = 8'd181;
+    localparam logic [7:0] ENGINE_STAT_MOVE_OVERFLOWS   = 8'd182;
+    localparam logic [7:0] ENGINE_STAT_MOVE_OVERFLOW_ID = 8'd183;
+    localparam logic [7:0] ENGINE_STAT_BUCKET_COUNT_BASE = 8'd200;
+    localparam logic [7:0] ENGINE_STAT_BUCKET_HIGH_BASE = 8'd208;
     localparam int ENGINE_STAT_PHASE_COUNT_VALUE = 10;
 
     localparam logic [7:0] ENGINE_ERR_NONE              = 8'd0;
