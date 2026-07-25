@@ -395,8 +395,8 @@ module tb_move_generator;
             "positive history update raises quiet move bucket");
         repeat (8) history_update(target, 6'd63);
         check($signed(dut.gen_history[0].history_ram.mem[{target.from_pos, target.to_pos}])
-                == 9'sd255,
-            "history update saturates at signed nine-bit maximum");
+                == 9'sd238,
+            "history gravity reduces bonuses as history approaches its limit");
 
         // Pins are deliberately left to board update: the sideways rook move
         // must remain in the pseudo-legal stream even though it exposes e1.

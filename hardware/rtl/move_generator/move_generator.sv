@@ -78,6 +78,7 @@ module move_generator #(
 
     localparam int HISTORY_BITS = 9;
     localparam int HISTORY_WORDS = 4096;
+    localparam int HISTORY_LIMIT_SHIFT = HISTORY_BITS - 1;
 
     typedef enum logic [3:0] {
         GEN_IDLE,
@@ -858,12 +859,18 @@ module move_generator #(
         end
         if (!init_busy && history_update_state == HISTORY_UPDATE_WRITE) begin
             automatic logic [7:0] bonus;
-            automatic logic signed [10:0] sum;
+            automatic logic signed [16:0] gravity_product;
+            automatic logic signed [10:0] updated_history;
             bonus = (update_depth >= 6'd16) ? 8'd63 : {update_depth, 2'b00};
-            sum = $signed(history_q[update_color]) + $signed({1'b0, bonus});
+            // Gravity makes established history progressively harder to change:
+            // H' = H + B - H*|B|/256. Search currently supplies positive bonuses.
+            gravity_product = $signed(history_q[update_color]) * $signed({1'b0, bonus});
+            updated_history = $signed(history_q[update_color]) + $signed({1'b0, bonus})
+                - (gravity_product >>> HISTORY_LIMIT_SHIFT);
             history_wr_en[update_color] = 1'b1;
             history_wr_addr[update_color] = update_address;
-            history_wr_data[update_color] = sum > 11'sd255 ? 9'sd255 : sum[8:0];
+            history_wr_data[update_color]
+                = updated_history > 11'sd255 ? 9'sd255 : updated_history[8:0];
         end
     end
 

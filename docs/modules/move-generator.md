@@ -40,7 +40,7 @@ The pop path is independent of generation: eligible-bucket comparison and highes
 
 ## Ordering
 
-Quiet candidates issue a synchronous read from shared signed nine-bit `history[color][from][to]` RAM. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff adds `min(63, remaining_depth * 4)` with saturation at +255; no malus is applied. Update read-modify-write has priority over a same-bank candidate lookup, and controller-side one-entry records retain pending per-thread updates.
+Quiet candidates issue a synchronous read from shared signed nine-bit `history[color][from][to]` RAM. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff produces bonus `B = min(63, remaining_depth * 4)` and applies the gravity update `H' = H + B - H * |B| / 256`, with the division implemented as a shift and the result limited to +255; no malus is currently applied. Update read-modify-write has priority over a same-bank candidate lookup, and controller-side one-entry records retain pending per-thread updates.
 
 Captures use one shared bounded visible SEE calculation. The classifier compares the immediate attacker and victim, the least valuable visible enemy recapturer, and one visible friendly defender. Removed pieces do not reveal a second slider. En passant uses a pawn victim. The coarse piece values are pawn 1, minor 3, rook 5, queen 9, and king 15.
 
