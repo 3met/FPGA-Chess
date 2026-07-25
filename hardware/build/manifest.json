@@ -101,6 +101,13 @@
     ],
     "vivado-generic": [
       "@portable-rtl"
+    ],
+    "engine-profile": [
+      "@portable-rtl",
+      "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
+      "hardware/rtl/memory/sdr_sdram_controller.sv",
+      "hardware/tb/profile/sdram_chip_model.sv",
+      "hardware/tb/profile/tb_engine_profile.sv"
     ]
   },
   "tests": {

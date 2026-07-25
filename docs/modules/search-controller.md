@@ -24,6 +24,8 @@ The capacity constants are singular: `THREAD_COUNT = 16` defines the supported t
 
 When `ENABLE_SEARCH_STATS` is set, 40-bit counters record TT lookups and hits, frontend TT-cache lookup probes and hits, cycles spent in each non-idle per-thread search phase, noisy and quiet generation, destinations, candidates, history lookups, generation cycles, per-bucket writes, and bucket high-water tops. Overflow count and packed sticky/bucket/thread identity are also exposed. The values are serialized byte-wise through the narrow addressed debug port only after the search. Disabled builds elaborate constant-zero optional counters while retaining overflow status.
 
+The engine profiling build defines `FPGA_CHESS_PROFILE` to expose one-cycle simulator-only terminal-classification and beta-cutoff events used by the external profiler. The events and their storage are absent from normal simulation and synthesis builds.
+
 The `quartus-de1-soc` synthesis target uses one search context and 24 allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
 
 The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.

@@ -35,4 +35,5 @@ These docs describe the RTL architecture.
 | [development/build-test-synthesis.md](development/build-test-synthesis.md) | Unified Python CLI, manifests, simulator tests, generated-data checks, and synthesis flows. |
 | [development/notes.md](development/notes.md) | Open questions, speculative ideas, and low-commitment design notes. |
 | [development/testing-metrics.md](development/testing-metrics.md) | Metrics worth tracking for correctness, performance, and hardware utilization. |
+| [development/engine-profiling.md](development/engine-profiling.md) | Cycle-accurate engine-only runtime profiling, metrics, and report artifacts. |
 | [development/evaluation-tuning.md](development/evaluation-tuning.md) | PyTorch material/PST tuning commands, configuration, and artifacts. |

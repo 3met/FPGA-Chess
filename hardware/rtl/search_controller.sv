@@ -256,6 +256,16 @@ module search_controller #(
     ThreadID terminal_result_thread_pipe;
     PlyIndex terminal_result_ply_pipe;
     EvalScore terminal_result_score_pipe;
+`ifdef FPGA_CHESS_PROFILE
+    // One-cycle semantic event used only by the external simulation profiler.
+    logic profile_terminal_event;
+    logic [1:0] profile_terminal_kind;
+    logic profile_beta_cutoff_event;
+    ThreadID profile_beta_cutoff_thread;
+    PlyIndex profile_beta_cutoff_ply;
+    logic [7:0] profile_beta_cutoff_rank;
+    Move profile_beta_cutoff_move;
+`endif
 
     // Shared board-update pipeline request and result signals.
     BoardOp board_update_op;
@@ -960,8 +970,8 @@ module search_controller #(
     localparam logic [7:0] LMR_TABLE_MAX_VALUE = max_raw_lmr_table_value();
     localparam int LMR_TABLE_VALUE_BITS = (LMR_TABLE_MAX_VALUE <= 1)
         ? 1 : $clog2(LMR_TABLE_MAX_VALUE + 1);
+`ifndef VERILATOR
     typedef SearchDepth LmrTable[0:LMR_DEPTH_BUCKETS-1][0:7];
-
     function automatic LmrTable build_lmr_table();
         automatic LmrTable result_table;
         for (int depth_bucket = 0; depth_bucket < LMR_DEPTH_BUCKETS; depth_bucket++)
@@ -972,6 +982,7 @@ module search_controller #(
     endfunction : build_lmr_table
 
     localparam LmrTable LMR_TABLE = build_lmr_table();
+`endif
     generate
         if (LMR_B_Q8 == 0) begin : gen_invalid_lmr_denominator
             initial $fatal(1, "LMR_B_Q8 must be nonzero");
@@ -990,7 +1001,13 @@ module search_controller #(
         move_index = search_stack_top[thread].legal_move_count == 8'hff
             ? 8'hff : search_stack_top[thread].legal_move_count + 8'd1;
         depth_bucket = floor_log2_8(depth);
+`ifdef VERILATOR
+        // The fast simulator cannot constant-fold a function that constructs
+        // an unpacked array. The scalar function produces the identical entry.
+        reduction = SearchDepth'(lmr_table_value(depth_bucket, floor_log2_8(move_index)));
+`else
         reduction = LMR_TABLE[depth_bucket][floor_log2_8(move_index)];
+`endif
         if (reduction >= depth) reduction = depth - SearchDepth'(1);
         return depth - SearchDepth'(1) - reduction;
     endfunction : lmr_child_depth
@@ -1690,6 +1707,15 @@ module search_controller #(
             terminal_result_thread_pipe <= ThreadID'(0);
             terminal_result_ply_pipe <= PlyIndex'(0);
             terminal_result_score_pipe <= EvalScore'(0);
+`ifdef FPGA_CHESS_PROFILE
+            profile_terminal_event <= 1'b0;
+            profile_terminal_kind <= 2'd0;
+            profile_beta_cutoff_event <= 1'b0;
+            profile_beta_cutoff_thread <= ThreadID'(0);
+            profile_beta_cutoff_ply <= PlyIndex'(0);
+            profile_beta_cutoff_rank <= 8'd0;
+            profile_beta_cutoff_move <= NULL_MOVE;
+`endif
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 search_best_move[tid] <= NULL_MOVE;
                 search_root_best_score[tid] <= -SEARCH_INF;
@@ -1755,6 +1781,10 @@ module search_controller #(
             search_move_result_valid <= 1'b0;
             search_eval_result_valid <= 1'b0;
             terminal_result_valid_pipe <= 1'b0;
+`ifdef FPGA_CHESS_PROFILE
+            profile_terminal_event <= 1'b0;
+            profile_beta_cutoff_event <= 1'b0;
+`endif
 
             if (move_history_update_valid && move_history_update_ready) begin
                 automatic logic cleared_history_update;
@@ -2757,6 +2787,14 @@ module search_controller #(
                                 search_return_was_scout[return_thread_id] <= 1'b0;
                                 search_return_was_reduced[return_thread_id] <= 1'b0;
                                 if (parent_score >= search_stack_top[return_thread_id].beta) begin
+`ifdef FPGA_CHESS_PROFILE
+                                    profile_beta_cutoff_event <= 1'b1;
+                                    profile_beta_cutoff_thread <= return_thread_id;
+                                    profile_beta_cutoff_ply <= return_ply;
+                                    profile_beta_cutoff_rank
+                                        <= search_stack_top[return_thread_id].legal_move_count;
+                                    profile_beta_cutoff_move <= search_return_move[return_thread_id];
+`endif
                                     if (is_quiet_move(
                                             search_board[return_thread_id],
                                             search_return_move[return_thread_id]
@@ -2835,6 +2873,17 @@ module search_controller #(
                                 search_thread_id <= terminal_thread_id;
                                 search_dispatch_cursor <= search_thread_after(terminal_thread_id);
                                 if (terminal_is_no_move) begin
+`ifdef FPGA_CHESS_PROFILE
+                                    profile_terminal_event <= 1'b1;
+                                    if (search_in_qsearch(terminal_thread_id))
+                                        profile_terminal_kind <= 2'd1;
+                                    else if (search_stack_top[terminal_thread_id].has_legal)
+                                        profile_terminal_kind <= 2'd0;
+                                    else if (search_board_in_check[terminal_thread_id])
+                                        profile_terminal_kind <= 2'd2;
+                                    else
+                                        profile_terminal_kind <= 2'd3;
+`endif
                                     terminal_result_valid_pipe <= 1'b1;
                                     terminal_result_thread_pipe <= terminal_thread_id;
                                     terminal_result_ply_pipe <= search_ply[terminal_thread_id];

@@ -4,10 +4,13 @@ import argparse
 import signal
 import sys
 
+from software.engine.protocol import STARTPOS_FEN
+
 from .common import BuildError, RTL_TEST_TIMEOUT_SECONDS
 from .generated_data import command_check, command_gen_data
 from .manifest import command_list, command_validate
 from .programming import command_flash
+from .profiling import command_profile
 from .reports import command_synth_report, command_timing_paths
 from .simulation import command_compile, command_test
 from .synthesis import command_synth
@@ -46,6 +49,38 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Wall-clock seconds allowed per RTL simulation; defaults to {RTL_TEST_TIMEOUT_SECONDS}",
     )
     test_parser.set_defaults(func=command_test)
+
+    profile_parser = subparsers.add_parser(
+        "profile", help="Profile one position in the cycle-accurate engine simulation"
+    )
+    profile_parser.add_argument("--fen", default=STARTPOS_FEN)
+    limits = profile_parser.add_mutually_exclusive_group()
+    limits.add_argument("--depth", type=int, help="Fixed search depth")
+    limits.add_argument("--nodes", type=int, help="Node-limited search")
+    limits.add_argument("--time-ms", type=int, help="Fixed simulated search time; defaults to 50 ms")
+    profile_parser.add_argument("--threads", type=int, default=1, help="Search threads; defaults to the DE1 value 1")
+    profile_parser.add_argument("--stack-depth", type=int, default=24, help="Stack plies; defaults to the DE1 value 24")
+    profile_parser.add_argument(
+        "--engine-clock-hz", type=int, default=35_714_286,
+        help="Engine clock frequency; defaults to the DE1 value 35714286",
+    )
+    profile_parser.add_argument("--timeout", type=float, default=600, help="Simulator wall-clock timeout")
+    profile_parser.add_argument("--output", help="Artifact directory; defaults to a timestamped build directory")
+    profile_parser.add_argument(
+        "--simulator", choices=("auto", "verilator", "modelsim"), default="auto",
+        help="Simulation backend; auto prefers Verilator when installed",
+    )
+    profile_parser.add_argument(
+        "--simulator-threads", type=int, default=1,
+        help="Verilator execution threads; defaults to 1 because this design partitions poorly",
+    )
+    profile_parser.add_argument("--force-rebuild", action="store_true", help="Rebuild the profiling simulator")
+    profile_parser.add_argument("--event-trace", action="store_true", help="Retain a JSONL event trace")
+    profile_parser.add_argument(
+        "--waveform", action="store_true",
+        help="Retain a complete FST (Verilator) or WLF (ModelSim) waveform",
+    )
+    profile_parser.set_defaults(func=command_profile)
 
     check_parser = subparsers.add_parser("check", help="Check generated data and run Python and RTL tests")
     check_parser.add_argument("--jobs", type=int, help="Number of RTL tests to run concurrently; defaults to 1")

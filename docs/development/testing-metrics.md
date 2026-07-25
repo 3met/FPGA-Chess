@@ -13,3 +13,5 @@ These metrics are useful for validating correctness, comparing search quality, a
 | TT lookup/store stalls         | Measure external-memory pressure.                                                                                  |
 | Search end reason distribution | Confirm time, depth, node, kill, and error endings behave as expected.                                             |
 | Perft correctness              | Validate legal move generation and board update/reverse behavior.                                                  |
+
+The engine-only runtime profiler described in [engine-profiling.md](engine-profiling.md) measures these search-time behaviors through the production external-memory path without adding synthesized counters.
