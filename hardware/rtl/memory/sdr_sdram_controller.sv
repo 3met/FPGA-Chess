@@ -5,7 +5,10 @@ import tt_defs::*;
 module sdr_sdram_controller #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int ENTRY_COUNT = TT_EXTERNAL_ENTRY_COUNT,
-    parameter int CAS_LATENCY = 2
+    parameter int CAS_LATENCY = 2,
+    // Simulation profiles may skip the serial validity-word sweep when the
+    // attached memory model is guaranteed to start cleared.
+    parameter bit SKIP_INITIAL_CLEAR = 1'b0
 ) (
     input logic clk, input logic read_capture_clk, input logic rst_n,
     output logic ready, output logic error,
@@ -26,7 +29,9 @@ module sdr_sdram_controller #(
     endfunction
     localparam int POWERUP_CYCLES = cycles_ns(200_000);
     localparam int TRP = cycles_ns(20), TRCD = cycles_ns(20), TRFC = cycles_ns(70), TMRD = 2;
-    localparam int REFRESH_CYCLES = cycles_ns(7_800); // 7.8 us, slightly conservative.
+    // Start refresh service early enough that precharge/command latency still
+    // keeps successive AUTO REFRESH commands within the 7.8125 us requirement.
+    localparam int REFRESH_CYCLES = cycles_ns(7_200);
     localparam int WAIT_COUNT_BITS = $clog2(POWERUP_CYCLES + 1);
     localparam int REFRESH_COUNT_BITS = $clog2(REFRESH_CYCLES + 1);
 
@@ -36,7 +41,8 @@ module sdr_sdram_controller #(
         S_CLEAR_CHECK, S_CLEAR_PRE, S_CLEAR_PRE_WAIT, S_CLEAR_ACT, S_CLEAR_ACT_WAIT,
         S_CLEAR_WRITE, S_CLEAR_TERM,
         S_IDLE, S_PRE, S_PRE_WAIT, S_ACT, S_ACT_WAIT, S_READ_CMD, S_READ_WAIT,
-        S_READ_DATA, S_WRITE_COLLECT, S_WRITE_CMD, S_WRITE_DATA, S_BURST_TERM, S_COMPLETE,
+        S_READ_DATA, S_READ_SERVE, S_WRITE_COLLECT, S_WRITE_CMD, S_WRITE_DATA,
+        S_BURST_TERM, S_COMPLETE,
         S_REFRESH_PRE, S_REFRESH_PRE_WAIT, S_REFRESH, S_REFRESH_WAIT
     } State;
     State state;
@@ -50,6 +56,9 @@ module sdr_sdram_controller #(
     logic transaction_write;
     logic [15:0] write_buffer[0:5];
     logic [2:0] write_collect_count, write_emit_count;
+    logic [15:0] read_buffer[0:5];
+    logic [2:0] read_capture_count, read_emit_count;
+    logic [3:0] transaction_length;
     logic [12:0] open_row[0:3];
     logic open_valid[0:3];
     logic [15:0] dq_out;
@@ -70,7 +79,7 @@ module sdr_sdram_controller #(
     function automatic logic [3:0] segment_len(input logic [24:0] word, input logic [3:0] count);
         int room;
         room = 1024 - int'(col_of(word));
-        return (room < int'(count)) ? logic'(room[3:0]) : count;
+        return (room < int'(count)) ? 4'(room) : count;
     endfunction
 
     always_comb begin
@@ -79,7 +88,9 @@ module sdr_sdram_controller #(
         dram_cas_n_next = 1'b1; dram_we_n_next = 1'b1;
         dram_ldqm_next = 1'b0; dram_udqm_next = 1'b0; dq_out_next = '0; dq_oe_next = 1'b0;
         req_ready = ready && state == S_IDLE && !((refresh_count == 0));
-        write_ready = 1'b0; read_valid = 1'b0; read_data = dq_read_capture; read_last = remaining == 4'd1;
+        write_ready = 1'b0; read_valid = 1'b0;
+        read_data = read_buffer[read_emit_count];
+        read_last = read_emit_count == 3'(transaction_length - 1'b1);
         done_valid = state == S_COMPLETE; done_error = error;
 
         case (state)
@@ -96,7 +107,7 @@ module sdr_sdram_controller #(
                 dram_addr_next[10] = 1'b0; dq_out_next = 16'h0000; dq_oe_next = 1'b1;
             end
             S_READ_CMD: begin dram_cas_n_next = 1'b0; dram_addr_next[9:0] = col_of(address); dram_addr_next[10] = 1'b0; end
-            S_READ_DATA: begin read_valid = 1'b1; end
+            S_READ_SERVE: begin read_valid = 1'b1; end
             S_WRITE_COLLECT: write_ready = 1'b1;
             S_WRITE_CMD, S_WRITE_DATA: begin
                 if (state == S_WRITE_CMD) begin
@@ -122,6 +133,7 @@ module sdr_sdram_controller #(
             wait_count <= POWERUP_CYCLES; refresh_count <= REFRESH_CYCLES;
             clear_word <= 25'd5; address <= '0; remaining <= '0; segment_remaining <= '0;
             write_collect_count <= '0; write_emit_count <= '0;
+            read_capture_count <= '0; read_emit_count <= '0; transaction_length <= '0;
             invalidate_rows();
             dram_addr <= '0; dram_ba <= '0; dram_cas_n <= 1'b1; dram_cke <= 1'b0;
             dram_cs_n <= 1'b1; dram_ldqm <= 1'b0; dram_ras_n <= 1'b1;
@@ -145,7 +157,14 @@ module sdr_sdram_controller #(
                 S_INIT_REF2_WAIT: if (wait_count == 0) state <= S_INIT_MODE; else wait_count <= wait_count-1;
                 S_INIT_MODE: begin wait_count <= TMRD-1; state <= S_INIT_MODE_WAIT; end
                 S_INIT_MODE_WAIT: if (wait_count == 0) begin
-                    address <= clear_word; refresh_count <= REFRESH_CYCLES; state <= S_CLEAR_CHECK;
+                    address <= clear_word;
+                    refresh_count <= REFRESH_CYCLES;
+                    if (SKIP_INITIAL_CLEAR) begin
+                        ready <= 1'b1;
+                        state <= S_IDLE;
+                    end else begin
+                        state <= S_CLEAR_CHECK;
+                    end
                 end else wait_count <= wait_count-1;
                 S_CLEAR_CHECK: begin
                     address <= clear_word;
@@ -153,9 +172,9 @@ module sdr_sdram_controller #(
                     else if (open_valid[bank_of(clear_word)]) state <= S_CLEAR_PRE;
                     else state <= S_CLEAR_ACT;
                 end
-                S_CLEAR_PRE: begin open_valid[bank_of(address)] <= 1'b0; wait_count <= TRP-1; state <= S_CLEAR_PRE_WAIT; end
+                S_CLEAR_PRE: begin open_valid[address[24:23]] <= 1'b0; wait_count <= TRP-1; state <= S_CLEAR_PRE_WAIT; end
                 S_CLEAR_PRE_WAIT: if (wait_count == 0) state <= S_CLEAR_ACT; else wait_count <= wait_count-1;
-                S_CLEAR_ACT: begin open_valid[bank_of(address)] <= 1'b1; open_row[bank_of(address)] <= row_of(address); wait_count <= TRCD-1; state <= S_CLEAR_ACT_WAIT; end
+                S_CLEAR_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= TRCD-1; state <= S_CLEAR_ACT_WAIT; end
                 S_CLEAR_ACT_WAIT: if (wait_count == 0) state <= S_CLEAR_WRITE; else wait_count <= wait_count-1;
                 S_CLEAR_WRITE: state <= S_CLEAR_TERM;
                 S_CLEAR_TERM: begin
@@ -168,19 +187,30 @@ module sdr_sdram_controller #(
                 S_IDLE: begin
                     if (refresh_count == 0) state <= S_REFRESH_PRE;
                     else if (req_valid && req_ready) begin
-                        address <= req_address; remaining <= req_length; transaction_write <= req_write;
-                        segment_remaining <= segment_len(req_address, req_length);
-                        if (req_write) begin
+                        address <= req_address; remaining <= req_length;
+                        transaction_length <= req_length; transaction_write <= req_write;
+                        if (req_length == 0 || req_length > 6) begin
+                            error <= 1'b1;
+                            state <= S_COMPLETE;
+                        end else if (req_write) begin
+                            segment_remaining <= segment_len(req_address, req_length);
                             write_collect_count <= '0;
                             state <= S_WRITE_COLLECT;
-                        end else if (open_valid[bank_of(req_address)] && open_row[bank_of(req_address)] == row_of(req_address))
-                            state <= S_READ_CMD;
-                        else if (open_valid[bank_of(req_address)]) state <= S_PRE;
-                        else state <= S_ACT;
+                        end else begin
+                            segment_remaining <= segment_len(req_address, req_length);
+                            read_capture_count <= '0;
+                            if (open_valid[bank_of(req_address)]
+                                    && open_row[bank_of(req_address)] == row_of(req_address))
+                                state <= S_READ_CMD;
+                            else if (open_valid[bank_of(req_address)]) state <= S_PRE;
+                            else state <= S_ACT;
+                        end
                     end
                 end
                 S_WRITE_COLLECT: if (write_valid && write_ready) begin
                     write_buffer[write_collect_count] <= write_data;
+                    if (write_last != (write_collect_count == 3'(remaining - 1'b1)))
+                        error <= 1'b1;
                     if (write_collect_count == 3'(remaining - 1'b1)) begin
                         write_emit_count <= '0;
                         if (open_valid[bank_of(address)] && open_row[bank_of(address)] == row_of(address))
@@ -189,16 +219,22 @@ module sdr_sdram_controller #(
                         else state <= S_ACT;
                     end else write_collect_count <= write_collect_count + 3'd1;
                 end
-                S_PRE: begin open_valid[bank_of(address)] <= 1'b0; wait_count <= TRP-1; state <= S_PRE_WAIT; end
+                S_PRE: begin open_valid[address[24:23]] <= 1'b0; wait_count <= TRP-1; state <= S_PRE_WAIT; end
                 S_PRE_WAIT: if (wait_count == 0) state <= S_ACT; else wait_count <= wait_count-1;
-                S_ACT: begin open_valid[bank_of(address)] <= 1'b1; open_row[bank_of(address)] <= row_of(address); wait_count <= TRCD-1; state <= S_ACT_WAIT; end
+                S_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= TRCD-1; state <= S_ACT_WAIT; end
                 S_ACT_WAIT: if (wait_count == 0) state <= transaction_write ? S_WRITE_CMD : S_READ_CMD; else wait_count <= wait_count-1;
-                S_READ_CMD: begin wait_count <= CAS_LATENCY + 2; state <= S_READ_WAIT; end
+                S_READ_CMD: begin wait_count <= CAS_LATENCY; state <= S_READ_WAIT; end
                 S_READ_WAIT: if (wait_count == 0) state <= S_READ_DATA; else wait_count <= wait_count-1;
-                S_READ_DATA: if (read_valid && read_ready) begin
+                S_READ_DATA: begin
+                    read_buffer[read_capture_count] <= dq_read_capture;
+                    read_capture_count <= read_capture_count + 3'd1;
                     address <= address + 25'd1; remaining <= remaining-1; segment_remaining <= segment_remaining-1;
                     if (remaining == 1) state <= S_BURST_TERM;
                     else if (segment_remaining == 1) state <= S_BURST_TERM;
+                end
+                S_READ_SERVE: if (read_valid && read_ready) begin
+                    if (read_last) state <= S_COMPLETE;
+                    else read_emit_count <= read_emit_count + 3'd1;
                 end
                 S_WRITE_CMD, S_WRITE_DATA: begin
                     address <= address + 25'd1; remaining <= remaining-1; segment_remaining <= segment_remaining-1;
@@ -207,7 +243,14 @@ module sdr_sdram_controller #(
                     else state <= S_WRITE_DATA;
                 end
                 S_BURST_TERM: begin
-                    if (remaining == 0) state <= S_COMPLETE;
+                    if (remaining == 0) begin
+                        if (transaction_write) begin
+                            state <= S_COMPLETE;
+                        end else begin
+                            read_emit_count <= '0;
+                            state <= S_READ_SERVE;
+                        end
+                    end
                     else begin
                         segment_remaining <= segment_len(address, remaining);
                         if (open_valid[bank_of(address)] && open_row[bank_of(address)] == row_of(address))
@@ -229,8 +272,8 @@ module sdr_sdram_controller #(
         end
     end
 
-    // Capture with the same phase-shifted clock forwarded to the SDRAM. The
-    // controller consumes this source-synchronous sample on its next edge.
+    // Capture near the middle of the SDRAM read-data window. The controller
+    // consumes this sample on its next 100 MHz edge.
     always_ff @(posedge read_capture_clk) begin
         dq_read_capture <= dq_in;
     end

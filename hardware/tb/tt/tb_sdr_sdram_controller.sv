@@ -17,6 +17,9 @@ module tb_sdr_sdram_controller;
     logic dq_drive_enable; logic [15:0] dq_drive_data; integer read_delay, read_drive_count;
     assign dram_dq = dq_drive_enable ? dq_drive_data : 16'hzzzz;
     int precharge_count, refresh_count, mode_count, activate_count, write_count;
+    int crossing_write_base;
+    logic [12:0] mode_address;
+    logic [9:0] write_columns[0:15];
     logic physical_write_active;
     int physical_write_words;
     logic [15:0] physical_write_data[0:7];
@@ -35,9 +38,12 @@ module tb_sdr_sdram_controller;
             case ({dram_ras_n, dram_cas_n, dram_we_n})
                 3'b010: precharge_count++;
                 3'b001: refresh_count++;
-                3'b000: mode_count++;
+                3'b000: begin mode_count++; mode_address <= dram_addr; end
                 3'b011: activate_count++;
-                3'b100: write_count++;
+                3'b100: begin
+                    write_columns[write_count] <= dram_addr[9:0];
+                    write_count++;
+                end
                 default: begin end
             endcase
             // SDR SDRAM advances a write burst on every clock, independent of
@@ -55,7 +61,7 @@ module tb_sdr_sdram_controller;
                 end
             end
             if ({dram_ras_n, dram_cas_n, dram_we_n} == 3'b101) begin
-                read_delay <= 3;
+                read_delay <= 1;
                 read_drive_count <= 0;
             end
         end
@@ -94,6 +100,8 @@ module tb_sdr_sdram_controller;
         check(precharge_count >= 1, "initialization precharged SDRAM");
         check(refresh_count >= 2, "initialization issued refreshes");
         check(mode_count == 1, "mode register programmed once");
+        check(mode_address == 13'b000_0_00_010_0_111,
+            "mode register selected full-page sequential CAS-2 bursts");
         check(write_count >= 2, "metadata sweep invalidated every test entry");
 
         physical_write_words = 0;
@@ -115,14 +123,41 @@ module tb_sdr_sdram_controller;
         check(physical_write_data[0] == 16'h1234 && physical_write_data[1] == 16'h5678,
             "gapped input retained consecutive physical write data");
 
+        read_ready = 0;
         req_write = 0; req_address = 20; req_length = 2; req_valid = 1;
         do @(posedge clk); while (!req_ready);
         req_valid = 0;
         do @(posedge clk); while (!read_valid);
         check(read_data == 16'h9abc && !read_last, "first read word captured on safe edge");
-        @(posedge clk);
+        repeat (3) begin
+            @(posedge clk);
+            check(read_valid && read_data == 16'h9abc && !read_last,
+                "staged read data remained stable under backpressure");
+        end
+        read_ready = 1;
+        @(posedge clk); @(negedge clk);
         check(read_valid && read_data == 16'hdef0 && read_last, "second read word completed burst");
         do @(posedge clk); while (!done_valid);
+
+        // A six-word TT entry can start two words before a 1024-word row
+        // boundary. It must be split rather than wrapping within the old row.
+        crossing_write_base = write_count;
+        req_write = 1; req_address = 1022; req_length = 6; req_valid = 1;
+        do @(posedge clk); while (!req_ready);
+        req_valid = 0;
+        for (int word = 0; word < 6; word++) begin
+            write_valid = 1;
+            write_data = 16'(16'h8000 + word);
+            write_last = word == 5;
+            do @(posedge clk); while (!write_ready);
+        end
+        write_valid = 0; write_last = 0;
+        do @(posedge clk); while (!done_valid);
+        check(write_count == crossing_write_base + 2,
+            "row-crossing write split into two physical bursts");
+        check(write_columns[crossing_write_base] == 10'd1022
+                && write_columns[crossing_write_base + 1] == 10'd0,
+            "row-crossing write restarted at column zero of the next row");
 
         repeat (20) @(posedge clk);
         check(refresh_count >= 3, "distributed refresh continued after initialization");

@@ -16,8 +16,9 @@ if {[get_collection_size $engine_clock] > 0} {
 }
 
 # The DE1 SDRAM samples commands and write data on the phase-shifted memory
-# clock. These conservative values cover the SDRAM setup/hold requirements;
-# board routing margin is provided by the PLL's delayed output clock.
+# clock. The pin clock leads the controller by 3 ns, while the read register
+# captures 8 ns after the SDRAM edge. These values cover the SDRAM setup/hold
+# requirements and retain board-routing margin.
 set sdram_clock_source [get_pins {pll_1|pll_ip_inst|altera_pll_i|outclk_wire[2]~CLKENA0|outclk}]
 if {[get_collection_size $sdram_clock_source] > 0} {
     create_generated_clock -name SDRAM_PIN_CLK -source $sdram_clock_source -divide_by 1 [get_ports DRAM_CLK]
