@@ -190,10 +190,11 @@ module tb_engine_profile #(
     longint unsigned move_operation_cycles[0:MOVE_OPERATION_COUNT-1];
     longint unsigned move_operation_max_cycles[0:MOVE_OPERATION_COUNT-1];
     longint unsigned move_operation_aborted[0:MOVE_OPERATION_COUNT-1];
-    longint unsigned move_command_start_cycle, move_pop_start_cycle;
-    logic move_command_active, move_pop_active;
-    logic [1:0] move_command_operation;
-    logic [3:0] previous_generator_state;
+    longint unsigned move_command_start_cycle[0:SEARCH_THREAD_COUNT-1], move_pop_start_cycle;
+    logic move_command_active[0:SEARCH_THREAD_COUNT-1];
+    logic move_pop_active;
+    logic [1:0] move_command_operation[0:SEARCH_THREAD_COUNT-1];
+    logic [3:0] previous_generator_state[0:1];
     longint unsigned noisy_destinations_examined, quiet_destinations_examined;
     longint unsigned noisy_destinations_with_sources, quiet_destinations_with_sources;
     longint unsigned noisy_candidates_emitted, quiet_candidates_emitted;
@@ -303,8 +304,10 @@ module tb_engine_profile #(
                 engine_state_cycles[int'(dut.command_layer.state)] + 1;
             controller_state_cycles[int'(dut.controller.state)] =
                 controller_state_cycles[int'(dut.controller.state)] + 1;
-            generator_state_cycles[int'(dut.controller.move_generator.state)] =
-                generator_state_cycles[int'(dut.controller.move_generator.state)] + 1;
+            generator_state_cycles[int'(dut.controller.move_generator.noisy_pipeline.state)] =
+                generator_state_cycles[int'(dut.controller.move_generator.noisy_pipeline.state)] + 1;
+            generator_state_cycles[int'(dut.controller.move_generator.quiet_pipeline.state)] =
+                generator_state_cycles[int'(dut.controller.move_generator.quiet_pipeline.state)] + 1;
             tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] =
                 tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] + 1;
 
@@ -388,20 +391,40 @@ module tb_engine_profile #(
             // Measure the complete request-to-response latency seen by the
             // search controller, rather than inferring it from thread waits.
             if (dut.controller.move_cmd_resp_valid) begin
+                automatic int tid = int'(dut.controller.move_cmd_resp_thread);
                 automatic longint unsigned operation_cycles =
-                    search_cycles - move_command_start_cycle;
-                if (!move_command_active)
+                    search_cycles - move_command_start_cycle[tid];
+                if (!move_command_active[tid])
                     $fatal(1, "move-generator response without a profiled command");
-                record_move_operation(move_command_operation, operation_cycles, 1'b0);
-                move_command_active = 1'b0;
+                record_move_operation(move_command_operation[tid], operation_cycles, 1'b0);
+                move_command_active[tid] = 1'b0;
+            end
+            if (dut.controller.move_quiet_resp_valid) begin
+                automatic int tid = int'(dut.controller.move_quiet_resp_thread);
+                automatic longint unsigned operation_cycles =
+                    search_cycles - move_command_start_cycle[tid];
+                if (!move_command_active[tid])
+                    $fatal(1, "quiet move-generator response without a profiled command");
+                record_move_operation(move_command_operation[tid], operation_cycles, 1'b0);
+                move_command_active[tid] = 1'b0;
             end
             if (dut.controller.move_cmd_valid && dut.controller.move_cmd_ready) begin
-                if (move_command_active)
-                    $fatal(1, "overlapping serialized move-generator commands");
-                move_commands <= move_commands + 1;
-                move_command_active = 1'b1;
-                move_command_operation = dut.controller.move_cmd;
-                move_command_start_cycle = search_cycles;
+                automatic int tid = int'(dut.controller.move_cmd_thread);
+                if (move_command_active[tid])
+                    $fatal(1, "thread accepted more than one outstanding move command");
+                move_commands = move_commands + 1;
+                move_command_active[tid] = 1'b1;
+                move_command_operation[tid] = dut.controller.move_cmd;
+                move_command_start_cycle[tid] = search_cycles;
+            end
+            if (dut.controller.move_quiet_cmd_valid && dut.controller.move_quiet_cmd_ready) begin
+                automatic int tid = int'(dut.controller.move_quiet_cmd_thread);
+                if (move_command_active[tid])
+                    $fatal(1, "thread accepted more than one outstanding move command");
+                move_commands = move_commands + 1;
+                move_command_active[tid] = 1'b1;
+                move_command_operation[tid] = MOVE_GEN_GENERATE_QUIET;
+                move_command_start_cycle[tid] = search_cycles;
             end
 
             // Bucket pops are pipelined and may accept a new request on the
@@ -427,21 +450,20 @@ module tb_engine_profile #(
             // Destination/source events are classified by the active
             // generation command. Candidate emission is counted below at the
             // common ordering-bucket write interface.
-            if (dut.controller.move_generator.state == 2
-                    && dut.controller.move_generator.destination_mask != 0) begin
-                if (dut.controller.move_generator.job_cmd == MOVE_GEN_GENERATE_NOISY)
-                    noisy_destinations_examined = noisy_destinations_examined + 1;
-                else if (dut.controller.move_generator.job_cmd == MOVE_GEN_GENERATE_QUIET)
-                    quiet_destinations_examined = quiet_destinations_examined + 1;
-            end
-            if (dut.controller.move_generator.state == 3
-                    && previous_generator_state == 2) begin
-                if (dut.controller.move_generator.job_cmd == MOVE_GEN_GENERATE_NOISY)
-                    noisy_destinations_with_sources = noisy_destinations_with_sources + 1;
-                else if (dut.controller.move_generator.job_cmd == MOVE_GEN_GENERATE_QUIET)
-                    quiet_destinations_with_sources = quiet_destinations_with_sources + 1;
-            end
-            previous_generator_state = dut.controller.move_generator.state;
+            if (dut.controller.move_generator.noisy_pipeline.state == 2
+                    && dut.controller.move_generator.noisy_pipeline.destination_mask != 0)
+                noisy_destinations_examined = noisy_destinations_examined + 1;
+            if (dut.controller.move_generator.quiet_pipeline.state == 2
+                    && dut.controller.move_generator.quiet_pipeline.destination_mask != 0)
+                quiet_destinations_examined = quiet_destinations_examined + 1;
+            if (dut.controller.move_generator.noisy_pipeline.state == 3
+                    && previous_generator_state[0] == 2)
+                noisy_destinations_with_sources = noisy_destinations_with_sources + 1;
+            if (dut.controller.move_generator.quiet_pipeline.state == 3
+                    && previous_generator_state[1] == 2)
+                quiet_destinations_with_sources = quiet_destinations_with_sources + 1;
+            previous_generator_state[0] = dut.controller.move_generator.noisy_pipeline.state;
+            previous_generator_state[1] = dut.controller.move_generator.quiet_pipeline.state;
             if (dut.controller.move_pop_resp_valid) begin
                 if (dut.controller.move_pop_resp_found) begin
                     bucket_pops[int'(dut.controller.move_pop_resp_bucket)] <=
@@ -456,14 +478,16 @@ module tb_engine_profile #(
                     move_pop_misses <= move_pop_misses + 1;
                 end
             end
-            for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++)
-                if (dut.controller.move_generator.bucket_wr_en[bucket]) begin
+            for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+                if (dut.controller.move_generator.noisy_pipeline.bucket_wr_en[bucket]) begin
                     bucket_writes[bucket] <= bucket_writes[bucket] + 1;
-                    if (dut.controller.move_generator.job_cmd == MOVE_GEN_GENERATE_NOISY)
-                        noisy_candidates_emitted = noisy_candidates_emitted + 1;
-                    else if (dut.controller.move_generator.job_cmd == MOVE_GEN_GENERATE_QUIET)
-                        quiet_candidates_emitted = quiet_candidates_emitted + 1;
+                    noisy_candidates_emitted = noisy_candidates_emitted + 1;
                 end
+                if (dut.controller.move_generator.quiet_pipeline.bucket_wr_en[bucket]) begin
+                    bucket_writes[bucket] <= bucket_writes[bucket] + 1;
+                    quiet_candidates_emitted = quiet_candidates_emitted + 1;
+                end
+            end
             if (dut.controller.search_eval_issue_valid) eval_issues <= eval_issues + 1;
             if (dut.controller.search_eval_result_valid) eval_completions <= eval_completions + 1;
             if (dut.controller.repetition_req_valid) repetition_requests <= repetition_requests + 1;
@@ -510,7 +534,10 @@ module tb_engine_profile #(
             if (dut.controller.external_tt_gen.tt_load_store.store_accept
                     && !dut.controller.external_tt_gen.tt_load_store.store_fifo_push_ready)
                 tt_store_drops <= tt_store_drops + 1;
-            if (dut.controller.move_cmd_valid && !dut.controller.move_cmd_ready) move_stall_cycles <= move_stall_cycles + 1;
+            if ((dut.controller.move_cmd_valid && !dut.controller.move_cmd_ready)
+                    || (dut.controller.move_quiet_cmd_valid
+                        && !dut.controller.move_quiet_cmd_ready))
+                move_stall_cycles <= move_stall_cycles + 1;
             if (dut.controller.tt_lookup_req_valid && !dut.controller.tt_lookup_req_ready)
                 tt_request_stall_cycles <= tt_request_stall_cycles + 1;
             if (tt_mem_req_valid && !tt_mem_req_ready) cdc_command_stalls <= cdc_command_stalls + 1;
@@ -551,14 +578,15 @@ module tb_engine_profile #(
             end
         end
         if (dut.controller_resp_valid && profile_active) begin
-            if (move_command_active) begin
-                record_move_operation(
-                    move_command_operation,
-                    search_cycles - move_command_start_cycle,
-                    1'b1
-                );
-                move_command_active = 1'b0;
-            end
+            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                if (move_command_active[tid]) begin
+                    record_move_operation(
+                        move_command_operation[tid],
+                        search_cycles - move_command_start_cycle[tid],
+                        1'b1
+                    );
+                    move_command_active[tid] = 1'b0;
+                end
             if (move_pop_active) begin
                 record_move_operation(
                     MOVE_OPERATION_BUCKET_POP,
@@ -768,12 +796,15 @@ module tb_engine_profile #(
         drain_cycles = 0;
         previous_nodes = 0;
         deepest_search_ply = PlyIndex'(0);
-        move_command_active = 1'b0;
         move_pop_active = 1'b0;
-        move_command_operation = '0;
-        move_command_start_cycle = 0;
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+            move_command_active[tid] = 1'b0;
+            move_command_operation[tid] = '0;
+            move_command_start_cycle[tid] = 0;
+        end
         move_pop_start_cycle = 0;
-        previous_generator_state = 0;
+        previous_generator_state[0] = 0;
+        previous_generator_state[1] = 0;
         noisy_destinations_examined = 0;
         quiet_destinations_examined = 0;
         noisy_destinations_with_sources = 0;

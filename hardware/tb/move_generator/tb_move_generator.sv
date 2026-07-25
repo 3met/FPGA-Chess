@@ -12,6 +12,8 @@ module tb_move_generator;
     logic init_busy;
     logic cmd_valid;
     logic cmd_ready;
+    logic noisy_cmd_ready;
+    logic quiet_cmd_ready;
     MoveGenCommand cmd;
     ThreadID cmd_thread;
     PlyIndex cmd_ply;
@@ -25,6 +27,10 @@ module tb_move_generator;
     logic cmd_resp_direct_valid;
     Move cmd_resp_direct_move;
     MoveBucketTops cmd_resp_bucket_tops;
+    logic quiet_resp_valid;
+    ThreadID quiet_resp_thread;
+    PlyIndex quiet_resp_ply;
+    MoveBucketTops quiet_resp_bucket_tops;
     logic pop_valid;
     logic pop_ready;
     ThreadID pop_thread;
@@ -74,8 +80,43 @@ module tb_move_generator;
         .ASSERT_ON_OVERFLOW(1'b0),
         .ENABLE_STATS(1'b1)
     ) dut (
-        .*
+        .clk, .rst_n, .clear, .flush, .init_busy,
+        .noisy_cmd_valid(cmd_valid && cmd != MOVE_GEN_GENERATE_QUIET),
+        .noisy_cmd_ready, .noisy_cmd(cmd),
+        .noisy_cmd_thread(cmd_thread), .noisy_cmd_ply(cmd_ply),
+        .noisy_cmd_board(cmd_board),
+        .noisy_cmd_suppress_valid(cmd_suppress_valid),
+        .noisy_cmd_suppress_move(cmd_suppress_move),
+        .noisy_cmd_bucket_tops(cmd_bucket_tops),
+        .noisy_resp_valid(cmd_resp_valid), .noisy_resp_thread(cmd_resp_thread),
+        .noisy_resp_ply(cmd_resp_ply),
+        .noisy_resp_direct_valid(cmd_resp_direct_valid),
+        .noisy_resp_direct_move(cmd_resp_direct_move),
+        .noisy_resp_bucket_tops(cmd_resp_bucket_tops),
+        .quiet_cmd_valid(cmd_valid && cmd == MOVE_GEN_GENERATE_QUIET),
+        .quiet_cmd_ready,
+        .quiet_cmd_thread(cmd_thread), .quiet_cmd_ply(cmd_ply),
+        .quiet_cmd_board(cmd_board),
+        .quiet_cmd_suppress_valid(cmd_suppress_valid),
+        .quiet_cmd_suppress_move(cmd_suppress_move),
+        .quiet_cmd_bucket_tops(cmd_bucket_tops),
+        .quiet_resp_valid, .quiet_resp_thread, .quiet_resp_ply,
+        .quiet_resp_bucket_tops,
+        .pop_valid, .pop_ready, .pop_thread, .pop_ply, .pop_eligible,
+        .pop_current_tops, .pop_lower_tops,
+        .pop_resp_valid, .pop_resp_thread, .pop_resp_ply, .pop_resp_found,
+        .pop_resp_move, .pop_resp_bucket, .pop_resp_new_top,
+        .history_update_valid, .history_update_ready,
+        .history_update_color, .history_update_from, .history_update_to,
+        .history_update_depth,
+        .overflow_sticky, .overflow_thread, .overflow_bucket, .overflow_count,
+        .stat_noisy_count, .stat_quiet_count, .stat_destination_count,
+        .stat_candidate_count, .stat_history_lookup_count, .stat_generation_cycles,
+        .stat_bucket_count, .stat_bucket_high_water
     );
+
+    assign cmd_ready = cmd == MOVE_GEN_GENERATE_QUIET
+        ? quiet_cmd_ready : noisy_cmd_ready;
 
     function automatic Move make_move(
         input Position from_pos,
@@ -186,10 +227,17 @@ module tb_move_generator;
         cmd_valid = 1'b1;
         tick();
         cmd_valid = 1'b0;
-        while (!cmd_resp_valid) tick();
-        direct_valid = cmd_resp_direct_valid;
-        direct_move = cmd_resp_direct_move;
-        tops_out = cmd_resp_bucket_tops;
+        if (operation == MOVE_GEN_GENERATE_QUIET) begin
+            while (!quiet_resp_valid) tick();
+            direct_valid = 1'b0;
+            direct_move = NULL_MOVE;
+            tops_out = quiet_resp_bucket_tops;
+        end else begin
+            while (!cmd_resp_valid) tick();
+            direct_valid = cmd_resp_direct_valid;
+            direct_move = cmd_resp_direct_move;
+            tops_out = cmd_resp_bucket_tops;
+        end
         tick();
     endtask
 
@@ -268,6 +316,7 @@ module tb_move_generator;
         automatic logic found;
         automatic Move popped;
         automatic MoveBucketIndex popped_bucket;
+        automatic logic concurrent_response_seen[0:1];
 
         clk = 1'b0;
         rst_n = 1'b0;
@@ -279,6 +328,32 @@ module tb_move_generator;
         while (init_busy) tick();
 
         start_board(board);
+        concurrent_response_seen[0] = 1'b0;
+        concurrent_response_seen[1] = 1'b0;
+        cmd = MOVE_GEN_GENERATE_NOISY;
+        cmd_thread = ThreadID'(0);
+        cmd_board = board;
+        cmd_bucket_tops = '0;
+        cmd_valid = 1'b1;
+        check(cmd_ready, "noisy pipeline accepts first concurrent job");
+        tick();
+        cmd = MOVE_GEN_GENERATE_QUIET;
+        cmd_thread = ThreadID'(1);
+        check(quiet_cmd_ready, "quiet pipeline is available while noisy pipeline is busy");
+        tick();
+        cmd_valid = 1'b0;
+        check(!noisy_cmd_ready && !quiet_cmd_ready, "both generation pipelines operate concurrently");
+        while (!concurrent_response_seen[0] || !concurrent_response_seen[1]) begin
+            if (cmd_resp_valid)
+                concurrent_response_seen[int'(cmd_resp_thread)] = 1'b1;
+            if (quiet_resp_valid)
+                concurrent_response_seen[int'(quiet_resp_thread)] = 1'b1;
+            tick();
+        end
+        check(concurrent_response_seen[0] && concurrent_response_seen[1],
+            "both concurrent generation jobs complete");
+        cmd_thread = ThreadID'(0);
+
         tops = '0;
         lower = '0;
         generation_cycles_before = stat_generation_cycles;
@@ -394,7 +469,8 @@ module tb_move_generator;
         check(found && same_move(popped, target) && popped_bucket == QUIET_HIGH_BUCKET,
             "positive history update raises quiet move bucket");
         repeat (8) history_update(target, 6'd63);
-        check($signed(dut.gen_history[0].history_ram.mem[{target.from_pos, target.to_pos}])
+        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+                {target.from_pos, target.to_pos}])
                 == 9'sd238,
             "history gravity reduces bonuses as history approaches its limit");
 

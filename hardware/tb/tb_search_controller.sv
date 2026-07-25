@@ -1399,6 +1399,9 @@ module tb_search_controller;
             if (dut.search_move_result_valid) begin
                 thread_move_tag_seen[int'(dut.search_move_result_thread_id)] = 1'b1;
             end
+            if (dut.move_quiet_resp_valid) begin
+                thread_move_tag_seen[int'(dut.move_quiet_resp_thread)] = 1'b1;
+            end
             if (dut.search_eval_result_valid) begin
                 thread_eval_tag_seen[int'(dut.search_eval_result_thread_id)] = 1'b1;
             end

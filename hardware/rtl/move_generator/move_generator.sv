@@ -1,10 +1,10 @@
-// Shared, serialized destination-centric move generation and bucket storage.
+// One specialized destination-centric move-generation and bucket-storage pipeline.
 
 import general_chess_defs::*;
 import chess_helper_funcs::*;
 import move_generator_defs::*;
 
-module move_generator #(
+module move_generator_pipeline #(
     parameter int THREAD_COUNT = 1,
     parameter int BUCKET_0_CAPACITY = 512,
     parameter int BUCKET_1_CAPACITY = 512,
@@ -14,6 +14,9 @@ module move_generator #(
     parameter int BUCKET_5_CAPACITY = 512,
     parameter int BUCKET_6_CAPACITY = 512,
     parameter int BUCKET_7_CAPACITY = 512,
+    parameter MoveGenCommand GENERATION_COMMAND = MOVE_GEN_GENERATE_NOISY,
+    parameter MoveBucketMask OWNED_BUCKETS =
+        GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK,
     parameter bit ASSERT_ON_OVERFLOW = 1'b1,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -22,6 +25,7 @@ module move_generator #(
     input logic clear,
     input logic flush,
     output logic init_busy,
+    output logic path_ready,
 
     input logic cmd_valid,
     output logic cmd_ready,
@@ -118,6 +122,9 @@ module move_generator #(
     initial begin
         if (THREAD_COUNT < 1 || THREAD_COUNT > general_chess_defs::THREAD_COUNT)
             $fatal(1, "move_generator THREAD_COUNT exceeds ThreadID capacity");
+        if (GENERATION_COMMAND != MOVE_GEN_GENERATE_NOISY
+                && GENERATION_COMMAND != MOVE_GEN_GENERATE_QUIET)
+            $fatal(1, "move-generator pipeline must be noisy or quiet");
         for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
             if (!is_power_of_two(bucket_capacity(bucket))
                     || bucket_capacity(bucket) > (1 << (MOVE_BUCKET_TOP_BITS - 1)))
@@ -127,7 +134,6 @@ module move_generator #(
 `endif
 
     GeneratorState state;
-    MoveGenCommand job_cmd;
     ThreadID job_thread;
     PlyIndex job_ply;
     FullBoard job_board;
@@ -229,14 +235,11 @@ module move_generator #(
         return 1'b0;
     endfunction
 
-    function automatic logic [63:0] generation_destination_mask(
-        input FullBoard board,
-        input MoveGenCommand operation
-    );
+    function automatic logic [63:0] generation_destination_mask(input FullBoard board);
         automatic logic [63:0] mask;
         mask = '0;
         for (int pos = 0; pos < 64; pos++) begin
-            if (operation == MOVE_GEN_GENERATE_NOISY) begin
+            if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY) begin
                 // Capturing a king is never a chess move; check detection
                 // determines mate without presenting its square as a capture.
                 if ((board.tiles[pos].piece_type != NULL_PIECE
@@ -247,12 +250,12 @@ module move_generator #(
                                 == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))
                             && noisy_pawn_destination_has_source(board, Position'(pos))))
                     mask[pos] = 1'b1;
-            end else if (operation == MOVE_GEN_GENERATE_QUIET
+            end else if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
                     && board.tiles[pos].piece_type == NULL_PIECE) begin
                 mask[pos] = 1'b1;
             end
         end
-        if (operation == MOVE_GEN_GENERATE_NOISY && board.has_ep) begin
+        if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY && board.has_ep) begin
             automatic Position ep_destination = Position'({
                 board.turn == WHITE ? BoardRank'(5) : BoardRank'(2), board.ep_file
             });
@@ -609,7 +612,6 @@ module move_generator #(
     // destination so the shared expander never serially visits empty lanes.
     function automatic logic potential_ray_source(
         input FullBoard board,
-        input MoveGenCommand operation,
         input Position destination,
         input Tile destination_tile,
         input Direction dir,
@@ -626,7 +628,7 @@ module move_generator #(
             && getFile(destination) == board.ep_file
             && ((board.turn == WHITE && getRank(destination) == BoardRank'(5))
                 || (board.turn == BLACK && getRank(destination) == BoardRank'(2)));
-        automatic logic phase_matches = operation == MOVE_GEN_GENERATE_NOISY
+        automatic logic phase_matches = GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
             ? destination_occupied : !destination_occupied;
 
         if (source.piece_type == NULL_PIECE || source.piece_color != board.turn)
@@ -634,7 +636,7 @@ module move_generator #(
         case (source.piece_type)
             PAWN: begin
                 if (board.turn == WHITE) begin
-                    if (operation == MOVE_GEN_GENERATE_NOISY)
+                    if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                         return (!destination_occupied && promotion_destination
                                 && dir == SOUTH && ray.distance == 3'd0)
                             || ((destination_occupied || ep_destination)
@@ -645,7 +647,7 @@ module move_generator #(
                             || (ray.distance == 3'd1
                                 && getRank(destination) == BoardRank'(3)));
                 end
-                if (operation == MOVE_GEN_GENERATE_NOISY)
+                if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                     return (!destination_occupied && promotion_destination
                             && dir == NORTH && ray.distance == 3'd0)
                         || ((destination_occupied || ep_destination)
@@ -666,13 +668,12 @@ module move_generator #(
 
     function automatic logic potential_knight_source(
         input FullBoard board,
-        input MoveGenCommand operation,
         input Tile destination_tile,
         input Tile source
     );
         return source.piece_type == KNIGHT
             && source.piece_color == board.turn
-            && ((operation == MOVE_GEN_GENERATE_NOISY)
+            && ((GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                 == (destination_tile.piece_type != NULL_PIECE));
     endfunction
 
@@ -749,7 +750,7 @@ module move_generator #(
                     && (getRank(context_destination) == BoardRank'(0)
                         || getRank(context_destination) == BoardRank'(7));
                 source_lane = Direction'(source_select_index);
-                source_valid = (job_cmd == MOVE_GEN_GENERATE_NOISY)
+                source_valid = (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                     ? source_is_capture || source_is_promotion
                     : !source_is_capture && !source_is_promotion;
             end
@@ -763,7 +764,7 @@ module move_generator #(
                 source_is_capture = context_destination_tile.piece_type != NULL_PIECE;
                 source_is_knight = 1'b1;
                 source_lane = Direction'(knight_index);
-                source_valid = (job_cmd == MOVE_GEN_GENERATE_NOISY)
+                source_valid = (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                     ? source_is_capture : !source_is_capture;
             end
         end
@@ -783,9 +784,14 @@ module move_generator #(
         end
     end
 
-    assign cmd_ready = state == GEN_IDLE && !init_busy;
+    assign path_ready = state == GEN_IDLE && !init_busy;
+    assign cmd_ready = path_ready
+        && (cmd == GENERATION_COMMAND
+            || (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
+                && cmd == MOVE_GEN_VALIDATE_DIRECT));
     assign pop_ready = !init_busy && !pop_pending;
-    assign history_update_ready = !init_busy && history_update_state == HISTORY_UPDATE_IDLE;
+    assign history_update_ready = GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
+        && !init_busy && history_update_state == HISTORY_UPDATE_IDLE;
     assign pop_resp_valid = pop_pending;
     assign pop_resp_thread = pop_thread_q;
     assign pop_resp_ply = pop_ply_q;
@@ -877,18 +883,22 @@ module move_generator #(
     genvar history_color;
     generate
         for (history_color = 0; history_color < 2; history_color++) begin : gen_history
-            synchronous_simple_dual_port_ram #(
-                .NUM_WORDS(HISTORY_WORDS),
-                .WORD_SIZE(HISTORY_BITS)
-            ) history_ram (
-                .clock(clk),
-                .data(history_wr_data[history_color]),
-                .rdaddress(history_rd_addr[history_color]),
-                .rden(history_rd_en[history_color]),
-                .wraddress(history_wr_addr[history_color]),
-                .wren(history_wr_en[history_color]),
-                .q(history_q[history_color])
-            );
+            if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET) begin : gen_ram
+                synchronous_simple_dual_port_ram #(
+                    .NUM_WORDS(HISTORY_WORDS),
+                    .WORD_SIZE(HISTORY_BITS)
+                ) history_ram (
+                    .clock(clk),
+                    .data(history_wr_data[history_color]),
+                    .rdaddress(history_rd_addr[history_color]),
+                    .rden(history_rd_en[history_color]),
+                    .wraddress(history_wr_addr[history_color]),
+                    .wren(history_wr_en[history_color]),
+                    .q(history_q[history_color])
+                );
+            end else begin : gen_no_ram
+                assign history_q[history_color] = '0;
+            end
         end
     endgenerate
 
@@ -898,38 +908,42 @@ module move_generator #(
             localparam int CAPACITY = bucket_capacity(bucket_gen);
             localparam int WORDS = THREAD_COUNT * CAPACITY;
             localparam int ADDR_BITS = (WORDS <= 1) ? 1 : $clog2(WORDS);
-            logic [ADDR_BITS-1:0] rd_addr;
-            logic [ADDR_BITS-1:0] wr_addr;
-            always_comb begin
-                rd_addr = ADDR_BITS'(int'(bucket_rd_thread) * CAPACITY + int'(bucket_rd_top));
-                wr_addr = ADDR_BITS'(int'(bucket_wr_thread) * CAPACITY + int'(bucket_wr_top));
-            end
-            synchronous_simple_dual_port_ram #(
-                .NUM_WORDS(WORDS),
-                .WORD_SIZE($bits(Move))
-            ) move_ram (
-                .clock(clk),
-                .data(bucket_wr_data),
-                .rdaddress(rd_addr),
-                .rden(bucket_rd_en[bucket_gen]),
-                .wraddress(wr_addr),
-                .wren(bucket_wr_en[bucket_gen]),
-                .q(bucket_q[bucket_gen])
-            );
+            if (OWNED_BUCKETS[bucket_gen]) begin : gen_ram
+                logic [ADDR_BITS-1:0] rd_addr;
+                logic [ADDR_BITS-1:0] wr_addr;
+                always_comb begin
+                    rd_addr = ADDR_BITS'(int'(bucket_rd_thread) * CAPACITY + int'(bucket_rd_top));
+                    wr_addr = ADDR_BITS'(int'(bucket_wr_thread) * CAPACITY + int'(bucket_wr_top));
+                end
+                synchronous_simple_dual_port_ram #(
+                    .NUM_WORDS(WORDS),
+                    .WORD_SIZE($bits(Move))
+                ) move_ram (
+                    .clock(clk),
+                    .data(bucket_wr_data),
+                    .rdaddress(rd_addr),
+                    .rden(bucket_rd_en[bucket_gen]),
+                    .wraddress(wr_addr),
+                    .wren(bucket_wr_en[bucket_gen]),
+                    .q(bucket_q[bucket_gen])
+                );
 `ifndef SYNTHESIS
-            always_ff @(posedge clk) begin
-                if (bucket_wr_en[bucket_gen] && bucket_rd_en[bucket_gen])
-                    assert (wr_addr != rd_addr)
-                        else $error("simultaneous move-bucket read/write address collision");
-            end
+                always_ff @(posedge clk) begin
+                    if (bucket_wr_en[bucket_gen] && bucket_rd_en[bucket_gen])
+                        assert (wr_addr != rd_addr)
+                            else $error("simultaneous move-bucket read/write address collision");
+                end
 `endif
+            end else begin : gen_no_ram
+                assign bucket_q[bucket_gen] = NULL_MOVE;
+            end
         end
     endgenerate
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             state <= GEN_IDLE;
-            init_busy <= 1'b1;
+            init_busy <= GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET;
             history_clear_addr <= 12'd0;
             history_update_state <= HISTORY_UPDATE_IDLE;
             pop_pending <= 1'b0;
@@ -965,7 +979,7 @@ module move_generator #(
             end
 
             if (clear) begin
-                init_busy <= 1'b1;
+                init_busy <= GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET;
                 history_clear_addr <= 12'd0;
                 overflow_sticky <= 1'b0;
                 overflow_count <= 16'd0;
@@ -1002,17 +1016,17 @@ module move_generator #(
                 case (state)
                     GEN_IDLE: begin
                         if (cmd_valid && cmd_ready) begin
-                            job_cmd <= cmd;
                             job_thread <= cmd_thread;
                             job_ply <= cmd_ply;
                             job_board <= cmd_board;
                             job_suppress_valid <= cmd_suppress_valid;
                             job_suppress_move <= cmd_suppress_move;
                             job_tops <= cmd_bucket_tops;
-                            if (cmd == MOVE_GEN_VALIDATE_DIRECT) begin
+                            if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
+                                    && cmd == MOVE_GEN_VALIDATE_DIRECT) begin
                                 state <= GEN_DIRECT;
                             end else begin
-                                destination_mask <= generation_destination_mask(cmd_board, cmd);
+                                destination_mask <= generation_destination_mask(cmd_board);
                                 state <= GEN_SELECT_DEST;
                             end
                         end
@@ -1041,10 +1055,10 @@ module move_generator #(
                                     ? job_board.tiles[shiftKnightPos(destination, KnightDirection'(dir))]
                                     : EMPTY_TILE;
                                 next_source_mask[dir] = potential_ray_source(
-                                    job_board, job_cmd, destination,
+                                    job_board, destination,
                                     job_board.tiles[destination], Direction'(dir), ray);
                                 next_source_mask[dir + 8] = potential_knight_source(
-                                    job_board, job_cmd, job_board.tiles[destination], knight);
+                                    job_board, job_board.tiles[destination], knight);
                                 context_ray[dir] <= ray;
                                 context_knight[dir] <= knight;
                             end
@@ -1055,7 +1069,7 @@ module move_generator #(
                                 source_mask <= next_source_mask;
                                 state <= GEN_EXPAND_SOURCE;
                             end
-                        end else if (job_cmd == MOVE_GEN_GENERATE_QUIET) begin
+                        end else if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET) begin
                             castle_index <= 1'b0;
                             state <= GEN_CASTLE;
                         end else begin
@@ -1228,5 +1242,258 @@ module move_generator #(
             end
         end
     end
+
+endmodule : move_generator_pipeline
+
+// Dual-class frontend. Noisy and quiet jobs occupy independent pipelines while
+// retaining the original single-command and single-pop controller contracts.
+module move_generator #(
+    parameter int THREAD_COUNT = 1,
+    parameter int BUCKET_0_CAPACITY = 512,
+    parameter int BUCKET_1_CAPACITY = 512,
+    parameter int BUCKET_2_CAPACITY = 512,
+    parameter int BUCKET_3_CAPACITY = 512,
+    parameter int BUCKET_4_CAPACITY = 512,
+    parameter int BUCKET_5_CAPACITY = 512,
+    parameter int BUCKET_6_CAPACITY = 512,
+    parameter int BUCKET_7_CAPACITY = 512,
+    parameter bit ASSERT_ON_OVERFLOW = 1'b1,
+    parameter bit ENABLE_STATS = 1'b0
+) (
+    input logic clk,
+    input logic rst_n,
+    input logic clear,
+    input logic flush,
+    output logic init_busy,
+
+    input logic noisy_cmd_valid,
+    output logic noisy_cmd_ready,
+    input MoveGenCommand noisy_cmd,
+    input ThreadID noisy_cmd_thread,
+    input PlyIndex noisy_cmd_ply,
+    input FullBoard noisy_cmd_board,
+    input logic noisy_cmd_suppress_valid,
+    input Move noisy_cmd_suppress_move,
+    input MoveBucketTops noisy_cmd_bucket_tops,
+    output logic noisy_resp_valid,
+    output ThreadID noisy_resp_thread,
+    output PlyIndex noisy_resp_ply,
+    output logic noisy_resp_direct_valid,
+    output Move noisy_resp_direct_move,
+    output MoveBucketTops noisy_resp_bucket_tops,
+
+    input logic quiet_cmd_valid,
+    output logic quiet_cmd_ready,
+    input ThreadID quiet_cmd_thread,
+    input PlyIndex quiet_cmd_ply,
+    input FullBoard quiet_cmd_board,
+    input logic quiet_cmd_suppress_valid,
+    input Move quiet_cmd_suppress_move,
+    input MoveBucketTops quiet_cmd_bucket_tops,
+    output logic quiet_resp_valid,
+    output ThreadID quiet_resp_thread,
+    output PlyIndex quiet_resp_ply,
+    output MoveBucketTops quiet_resp_bucket_tops,
+
+    input logic pop_valid,
+    output logic pop_ready,
+    input ThreadID pop_thread,
+    input PlyIndex pop_ply,
+    input MoveBucketMask pop_eligible,
+    input MoveBucketTops pop_current_tops,
+    input MoveBucketTops pop_lower_tops,
+    output logic pop_resp_valid,
+    output ThreadID pop_resp_thread,
+    output PlyIndex pop_resp_ply,
+    output logic pop_resp_found,
+    output Move pop_resp_move,
+    output MoveBucketIndex pop_resp_bucket,
+    output MoveBucketTop pop_resp_new_top,
+
+    input logic history_update_valid,
+    output logic history_update_ready,
+    input Color history_update_color,
+    input Position history_update_from,
+    input Position history_update_to,
+    input logic [5:0] history_update_depth,
+
+    output logic overflow_sticky,
+    output ThreadID overflow_thread,
+    output MoveBucketIndex overflow_bucket,
+    output logic [15:0] overflow_count,
+    output logic [39:0] stat_noisy_count,
+    output logic [39:0] stat_quiet_count,
+    output logic [39:0] stat_destination_count,
+    output logic [39:0] stat_candidate_count,
+    output logic [39:0] stat_history_lookup_count,
+    output logic [39:0] stat_generation_cycles,
+    output logic [39:0] stat_bucket_count [MOVE_BUCKET_COUNT],
+    output MoveBucketTop stat_bucket_high_water [MOVE_BUCKET_COUNT]
+);
+
+    localparam MoveBucketMask NOISY_BUCKET_MASK =
+        GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK;
+
+    logic noisy_init_busy, quiet_init_busy;
+    logic noisy_pop_ready, quiet_pop_ready;
+    logic noisy_pop_resp_valid, quiet_pop_resp_valid;
+    ThreadID noisy_pop_resp_thread, quiet_pop_resp_thread;
+    PlyIndex noisy_pop_resp_ply, quiet_pop_resp_ply;
+    logic noisy_pop_resp_found, quiet_pop_resp_found;
+    Move noisy_pop_resp_move, quiet_pop_resp_move;
+    MoveBucketIndex noisy_pop_resp_bucket, quiet_pop_resp_bucket;
+    MoveBucketTop noisy_pop_resp_new_top, quiet_pop_resp_new_top;
+    logic quiet_history_update_ready;
+    logic noisy_overflow_sticky, quiet_overflow_sticky;
+    ThreadID noisy_overflow_thread, quiet_overflow_thread;
+    MoveBucketIndex noisy_overflow_bucket, quiet_overflow_bucket;
+    logic [15:0] noisy_overflow_count, quiet_overflow_count;
+    logic [39:0] noisy_stat_noisy_count, quiet_stat_noisy_count;
+    logic [39:0] noisy_stat_quiet_count, quiet_stat_quiet_count;
+    logic [39:0] noisy_stat_destination_count, quiet_stat_destination_count;
+    logic [39:0] noisy_stat_candidate_count, quiet_stat_candidate_count;
+    logic [39:0] noisy_stat_history_lookup_count, quiet_stat_history_lookup_count;
+    logic [39:0] noisy_stat_generation_cycles, quiet_stat_generation_cycles;
+    logic [39:0] noisy_stat_bucket_count[MOVE_BUCKET_COUNT];
+    logic [39:0] quiet_stat_bucket_count[MOVE_BUCKET_COUNT];
+    MoveBucketTop noisy_stat_bucket_high_water[MOVE_BUCKET_COUNT];
+    MoveBucketTop quiet_stat_bucket_high_water[MOVE_BUCKET_COUNT];
+
+    logic pop_use_quiet;
+    logic noisy_good_available, quiet_available, noisy_bad_available;
+
+    always_comb begin
+        noisy_good_available = 1'b0;
+        quiet_available = 1'b0;
+        noisy_bad_available = 1'b0;
+        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+            automatic logic available = pop_eligible[bucket]
+                && pop_current_tops[bucket] != pop_lower_tops[bucket];
+            if (bucket >= int'(GOOD_NOISY_LOW_BUCKET)) noisy_good_available |= available;
+            else if (bucket >= int'(QUIET_LOW_BUCKET)) quiet_available |= available;
+            else noisy_bad_available |= available;
+        end
+        // Preserve global bucket priority even when a caller supplies ALL_BUCKET_MASK.
+        pop_use_quiet = !noisy_good_available
+            && (quiet_available
+                || (!noisy_bad_available
+                    && (pop_eligible & QUIET_BUCKET_MASK) != MoveBucketMask'(0)));
+    end
+
+    assign init_busy = noisy_init_busy || quiet_init_busy;
+    assign pop_ready = pop_use_quiet ? quiet_pop_ready : noisy_pop_ready;
+    assign history_update_ready = quiet_history_update_ready;
+
+    assign pop_resp_valid = noisy_pop_resp_valid || quiet_pop_resp_valid;
+    assign pop_resp_thread = noisy_pop_resp_valid ? noisy_pop_resp_thread : quiet_pop_resp_thread;
+    assign pop_resp_ply = noisy_pop_resp_valid ? noisy_pop_resp_ply : quiet_pop_resp_ply;
+    assign pop_resp_found = noisy_pop_resp_valid ? noisy_pop_resp_found : quiet_pop_resp_found;
+    assign pop_resp_move = noisy_pop_resp_valid ? noisy_pop_resp_move : quiet_pop_resp_move;
+    assign pop_resp_bucket = noisy_pop_resp_valid ? noisy_pop_resp_bucket : quiet_pop_resp_bucket;
+    assign pop_resp_new_top = noisy_pop_resp_valid
+        ? noisy_pop_resp_new_top : quiet_pop_resp_new_top;
+
+    assign overflow_sticky = noisy_overflow_sticky || quiet_overflow_sticky;
+    assign overflow_thread = noisy_overflow_sticky ? noisy_overflow_thread : quiet_overflow_thread;
+    assign overflow_bucket = noisy_overflow_sticky ? noisy_overflow_bucket : quiet_overflow_bucket;
+    assign overflow_count = noisy_overflow_count + quiet_overflow_count;
+    assign stat_noisy_count = noisy_stat_noisy_count + quiet_stat_noisy_count;
+    assign stat_quiet_count = noisy_stat_quiet_count + quiet_stat_quiet_count;
+    assign stat_destination_count =
+        noisy_stat_destination_count + quiet_stat_destination_count;
+    assign stat_candidate_count = noisy_stat_candidate_count + quiet_stat_candidate_count;
+    assign stat_history_lookup_count =
+        noisy_stat_history_lookup_count + quiet_stat_history_lookup_count;
+    assign stat_generation_cycles =
+        noisy_stat_generation_cycles + quiet_stat_generation_cycles;
+    always_comb begin
+        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+            stat_bucket_count[bucket] = NOISY_BUCKET_MASK[bucket]
+                ? noisy_stat_bucket_count[bucket] : quiet_stat_bucket_count[bucket];
+            stat_bucket_high_water[bucket] = NOISY_BUCKET_MASK[bucket]
+                ? noisy_stat_bucket_high_water[bucket] : quiet_stat_bucket_high_water[bucket];
+        end
+    end
+
+    move_generator_pipeline #(
+        .THREAD_COUNT(THREAD_COUNT),
+        .BUCKET_0_CAPACITY(BUCKET_0_CAPACITY), .BUCKET_1_CAPACITY(BUCKET_1_CAPACITY),
+        .BUCKET_2_CAPACITY(BUCKET_2_CAPACITY), .BUCKET_3_CAPACITY(BUCKET_3_CAPACITY),
+        .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
+        .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
+        .GENERATION_COMMAND(MOVE_GEN_GENERATE_NOISY), .OWNED_BUCKETS(NOISY_BUCKET_MASK),
+        .ASSERT_ON_OVERFLOW(ASSERT_ON_OVERFLOW), .ENABLE_STATS(ENABLE_STATS)
+    ) noisy_pipeline (
+        .clk, .rst_n, .clear, .flush, .init_busy(noisy_init_busy),
+        .path_ready(),
+        .cmd_valid(noisy_cmd_valid), .cmd_ready(noisy_cmd_ready), .cmd(noisy_cmd),
+        .cmd_thread(noisy_cmd_thread), .cmd_ply(noisy_cmd_ply), .cmd_board(noisy_cmd_board),
+        .cmd_suppress_valid(noisy_cmd_suppress_valid),
+        .cmd_suppress_move(noisy_cmd_suppress_move),
+        .cmd_bucket_tops(noisy_cmd_bucket_tops),
+        .cmd_resp_valid(noisy_resp_valid), .cmd_resp_thread(noisy_resp_thread),
+        .cmd_resp_ply(noisy_resp_ply), .cmd_resp_direct_valid(noisy_resp_direct_valid),
+        .cmd_resp_direct_move(noisy_resp_direct_move),
+        .cmd_resp_bucket_tops(noisy_resp_bucket_tops),
+        .pop_valid(pop_valid && !pop_use_quiet), .pop_ready(noisy_pop_ready),
+        .pop_thread, .pop_ply, .pop_eligible(pop_eligible & NOISY_BUCKET_MASK),
+        .pop_current_tops, .pop_lower_tops,
+        .pop_resp_valid(noisy_pop_resp_valid), .pop_resp_thread(noisy_pop_resp_thread),
+        .pop_resp_ply(noisy_pop_resp_ply), .pop_resp_found(noisy_pop_resp_found),
+        .pop_resp_move(noisy_pop_resp_move), .pop_resp_bucket(noisy_pop_resp_bucket),
+        .pop_resp_new_top(noisy_pop_resp_new_top),
+        .history_update_valid(1'b0), .history_update_ready(),
+        .history_update_color, .history_update_from, .history_update_to, .history_update_depth,
+        .overflow_sticky(noisy_overflow_sticky), .overflow_thread(noisy_overflow_thread),
+        .overflow_bucket(noisy_overflow_bucket), .overflow_count(noisy_overflow_count),
+        .stat_noisy_count(noisy_stat_noisy_count), .stat_quiet_count(noisy_stat_quiet_count),
+        .stat_destination_count(noisy_stat_destination_count),
+        .stat_candidate_count(noisy_stat_candidate_count),
+        .stat_history_lookup_count(noisy_stat_history_lookup_count),
+        .stat_generation_cycles(noisy_stat_generation_cycles),
+        .stat_bucket_count(noisy_stat_bucket_count),
+        .stat_bucket_high_water(noisy_stat_bucket_high_water)
+    );
+
+    move_generator_pipeline #(
+        .THREAD_COUNT(THREAD_COUNT),
+        .BUCKET_0_CAPACITY(BUCKET_0_CAPACITY), .BUCKET_1_CAPACITY(BUCKET_1_CAPACITY),
+        .BUCKET_2_CAPACITY(BUCKET_2_CAPACITY), .BUCKET_3_CAPACITY(BUCKET_3_CAPACITY),
+        .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
+        .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
+        .GENERATION_COMMAND(MOVE_GEN_GENERATE_QUIET), .OWNED_BUCKETS(QUIET_BUCKET_MASK),
+        .ASSERT_ON_OVERFLOW(ASSERT_ON_OVERFLOW), .ENABLE_STATS(ENABLE_STATS)
+    ) quiet_pipeline (
+        .clk, .rst_n, .clear, .flush, .init_busy(quiet_init_busy),
+        .path_ready(),
+        .cmd_valid(quiet_cmd_valid), .cmd_ready(quiet_cmd_ready),
+        .cmd(MOVE_GEN_GENERATE_QUIET),
+        .cmd_thread(quiet_cmd_thread), .cmd_ply(quiet_cmd_ply), .cmd_board(quiet_cmd_board),
+        .cmd_suppress_valid(quiet_cmd_suppress_valid),
+        .cmd_suppress_move(quiet_cmd_suppress_move),
+        .cmd_bucket_tops(quiet_cmd_bucket_tops),
+        .cmd_resp_valid(quiet_resp_valid), .cmd_resp_thread(quiet_resp_thread),
+        .cmd_resp_ply(quiet_resp_ply), .cmd_resp_direct_valid(),
+        .cmd_resp_direct_move(),
+        .cmd_resp_bucket_tops(quiet_resp_bucket_tops),
+        .pop_valid(pop_valid && pop_use_quiet), .pop_ready(quiet_pop_ready),
+        .pop_thread, .pop_ply, .pop_eligible(pop_eligible & QUIET_BUCKET_MASK),
+        .pop_current_tops, .pop_lower_tops,
+        .pop_resp_valid(quiet_pop_resp_valid), .pop_resp_thread(quiet_pop_resp_thread),
+        .pop_resp_ply(quiet_pop_resp_ply), .pop_resp_found(quiet_pop_resp_found),
+        .pop_resp_move(quiet_pop_resp_move), .pop_resp_bucket(quiet_pop_resp_bucket),
+        .pop_resp_new_top(quiet_pop_resp_new_top),
+        .history_update_valid, .history_update_ready(quiet_history_update_ready),
+        .history_update_color, .history_update_from, .history_update_to, .history_update_depth,
+        .overflow_sticky(quiet_overflow_sticky), .overflow_thread(quiet_overflow_thread),
+        .overflow_bucket(quiet_overflow_bucket), .overflow_count(quiet_overflow_count),
+        .stat_noisy_count(quiet_stat_noisy_count), .stat_quiet_count(quiet_stat_quiet_count),
+        .stat_destination_count(quiet_stat_destination_count),
+        .stat_candidate_count(quiet_stat_candidate_count),
+        .stat_history_lookup_count(quiet_stat_history_lookup_count),
+        .stat_generation_cycles(quiet_stat_generation_cycles),
+        .stat_bucket_count(quiet_stat_bucket_count),
+        .stat_bucket_high_water(quiet_stat_bucket_high_water)
+    );
 
 endmodule : move_generator

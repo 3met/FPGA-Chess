@@ -234,6 +234,7 @@ module search_controller #(
     ThreadID search_dispatch_cursor;
     ThreadID search_board_dispatch_cursor;
     ThreadID search_move_dispatch_cursor;
+    ThreadID search_quiet_dispatch_cursor;
     ThreadID search_eval_dispatch_cursor;
     ThreadID search_tt_lookup_dispatch_cursor;
     ThreadID search_tt_store_dispatch_cursor;
@@ -300,6 +301,18 @@ module search_controller #(
     logic move_cmd_resp_direct_valid;
     Move move_cmd_resp_direct_move;
     MoveBucketTops move_cmd_resp_tops;
+    logic move_quiet_cmd_valid;
+    logic move_quiet_cmd_ready;
+    ThreadID move_quiet_cmd_thread;
+    PlyIndex move_quiet_cmd_ply;
+    FullBoard move_quiet_cmd_board;
+    logic move_quiet_cmd_suppress_valid;
+    Move move_quiet_cmd_suppress_move;
+    MoveBucketTops move_quiet_cmd_tops;
+    logic move_quiet_resp_valid;
+    ThreadID move_quiet_resp_thread;
+    PlyIndex move_quiet_resp_ply;
+    MoveBucketTops move_quiet_resp_tops;
     logic move_pop_valid;
     logic move_pop_ready;
     ThreadID move_pop_thread;
@@ -368,11 +381,13 @@ module search_controller #(
     EngineControllerRequest setup_req_comb;
     logic search_board_issue_valid;
     logic search_move_issue_valid;
+    logic search_quiet_issue_valid;
     logic search_eval_issue_valid;
     logic search_tt_lookup_issue_valid;
     logic search_tt_store_issue_valid;
     ThreadID search_board_issue_thread;
     ThreadID search_move_issue_thread;
+    ThreadID search_quiet_issue_thread;
     ThreadID search_eval_issue_thread;
     ThreadID search_tt_lookup_issue_thread;
     ThreadID search_tt_store_issue_thread;
@@ -485,13 +500,27 @@ module search_controller #(
         .flush((req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
             || state == ST_NEW_CLEAR_START),
         .init_busy(move_init_busy),
-        .cmd_valid(move_cmd_valid), .cmd_ready(move_cmd_ready), .cmd(move_cmd),
-        .cmd_thread(move_cmd_thread), .cmd_ply(move_cmd_ply), .cmd_board(move_cmd_board),
-        .cmd_suppress_valid(move_cmd_suppress_valid), .cmd_suppress_move(move_cmd_suppress_move),
-        .cmd_bucket_tops(move_cmd_tops),
-        .cmd_resp_valid(move_cmd_resp_valid), .cmd_resp_thread(move_cmd_resp_thread),
-        .cmd_resp_ply(move_cmd_resp_ply), .cmd_resp_direct_valid(move_cmd_resp_direct_valid),
-        .cmd_resp_direct_move(move_cmd_resp_direct_move), .cmd_resp_bucket_tops(move_cmd_resp_tops),
+        .noisy_cmd_valid(move_cmd_valid), .noisy_cmd_ready(move_cmd_ready),
+        .noisy_cmd(move_cmd),
+        .noisy_cmd_thread(move_cmd_thread), .noisy_cmd_ply(move_cmd_ply),
+        .noisy_cmd_board(move_cmd_board),
+        .noisy_cmd_suppress_valid(move_cmd_suppress_valid),
+        .noisy_cmd_suppress_move(move_cmd_suppress_move),
+        .noisy_cmd_bucket_tops(move_cmd_tops),
+        .noisy_resp_valid(move_cmd_resp_valid), .noisy_resp_thread(move_cmd_resp_thread),
+        .noisy_resp_ply(move_cmd_resp_ply),
+        .noisy_resp_direct_valid(move_cmd_resp_direct_valid),
+        .noisy_resp_direct_move(move_cmd_resp_direct_move),
+        .noisy_resp_bucket_tops(move_cmd_resp_tops),
+        .quiet_cmd_valid(move_quiet_cmd_valid), .quiet_cmd_ready(move_quiet_cmd_ready),
+        .quiet_cmd_thread(move_quiet_cmd_thread), .quiet_cmd_ply(move_quiet_cmd_ply),
+        .quiet_cmd_board(move_quiet_cmd_board),
+        .quiet_cmd_suppress_valid(move_quiet_cmd_suppress_valid),
+        .quiet_cmd_suppress_move(move_quiet_cmd_suppress_move),
+        .quiet_cmd_bucket_tops(move_quiet_cmd_tops),
+        .quiet_resp_valid(move_quiet_resp_valid),
+        .quiet_resp_thread(move_quiet_resp_thread), .quiet_resp_ply(move_quiet_resp_ply),
+        .quiet_resp_bucket_tops(move_quiet_resp_tops),
         .pop_valid(move_pop_valid), .pop_ready(move_pop_ready),
         .pop_thread(move_pop_thread), .pop_ply(move_pop_ply), .pop_eligible(move_pop_eligible),
         .pop_current_tops(move_pop_current_tops), .pop_lower_tops(move_pop_lower_tops),
@@ -1158,14 +1187,30 @@ module search_controller #(
     endfunction : search_thread_eval_ready
 
     function automatic logic search_thread_move_issue_ready(input int thread_index);
+        automatic MoveOrderState order_state = search_stack_top[thread_index].move_order_state;
         return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
             && search_thread_phase[thread_index] == SEARCH_PHASE_READY
             && !search_thread_terminal_draw_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
             && !search_thread_eval_ready(thread_index)
             && search_stack_top[thread_index].move_order_state != MOVE_ORDER_DONE
+            && order_state != MOVE_ORDER_GENERATE_QUIET
+            && ((order_state != MOVE_ORDER_DIRECT
+                    && order_state != MOVE_ORDER_GENERATE_NOISY)
+                || move_cmd_ready)
             && !search_move_inflight[thread_index];
     endfunction : search_thread_move_issue_ready
+
+    function automatic logic search_thread_quiet_issue_ready(input int thread_index);
+        return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
+            && search_thread_phase[thread_index] == SEARCH_PHASE_READY
+            && !search_thread_terminal_draw_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && !search_thread_eval_ready(thread_index)
+            && search_stack_top[thread_index].move_order_state == MOVE_ORDER_GENERATE_QUIET
+            && move_quiet_cmd_ready
+            && !search_move_inflight[thread_index];
+    endfunction : search_thread_quiet_issue_ready
 
     function automatic logic search_has_store_thread_from(input ThreadID cursor);
         for (int offset = 0; offset < SEARCH_THREAD_COUNT; offset++) begin
@@ -1235,6 +1280,25 @@ module search_controller #(
         end
         return ThreadID'(0);
     endfunction : search_next_move_issue_thread_from
+
+    function automatic logic search_has_quiet_issue_thread_from(input ThreadID cursor);
+        for (int offset = 0; offset < SEARCH_THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_quiet_issue_ready(idx)) return 1'b1;
+        end
+        return 1'b0;
+    endfunction : search_has_quiet_issue_thread_from
+
+    function automatic ThreadID search_next_quiet_issue_thread_from(input ThreadID cursor);
+        if (search_thread_quiet_issue_ready(0)) return ThreadID'(0);
+        for (int offset = 0; offset < SEARCH_THREAD_COUNT; offset++) begin
+            automatic int idx = search_wrap_thread_index(int'(cursor) + offset);
+
+            if (search_thread_quiet_issue_ready(idx)) return ThreadID'(idx);
+        end
+        return ThreadID'(0);
+    endfunction : search_next_quiet_issue_thread_from
 
     function automatic logic search_has_eval_issue_thread_from(input ThreadID cursor);
         for (int offset = 0; offset < SEARCH_THREAD_COUNT; offset++) begin
@@ -1439,6 +1503,8 @@ module search_controller #(
                 || search_has_board_thread_from(search_board_dispatch_cursor));
         search_move_issue_valid = (state == ST_SEARCH_RUN)
             && search_has_move_issue_thread_from(search_move_dispatch_cursor);
+        search_quiet_issue_valid = (state == ST_SEARCH_RUN)
+            && search_has_quiet_issue_thread_from(search_quiet_dispatch_cursor);
         search_eval_issue_valid = (state == ST_SEARCH_RUN)
             && search_has_eval_issue_thread_from(search_eval_dispatch_cursor);
         search_tt_lookup_issue_valid = (state == ST_SEARCH_RUN)
@@ -1452,6 +1518,9 @@ module search_controller #(
             : ThreadID'(0);
         search_move_issue_thread = search_move_issue_valid
             ? search_next_move_issue_thread_from(search_move_dispatch_cursor)
+            : ThreadID'(0);
+        search_quiet_issue_thread = search_quiet_issue_valid
+            ? search_next_quiet_issue_thread_from(search_quiet_dispatch_cursor)
             : ThreadID'(0);
         search_eval_issue_thread = search_eval_issue_valid
             ? search_next_eval_issue_thread_from(search_eval_dispatch_cursor)
@@ -1515,6 +1584,13 @@ module search_controller #(
         move_cmd_suppress_valid = 1'b0;
         move_cmd_suppress_move = NULL_MOVE;
         move_cmd_tops = MoveBucketTops'(0);
+        move_quiet_cmd_valid = 1'b0;
+        move_quiet_cmd_thread = ThreadID'(0);
+        move_quiet_cmd_ply = PlyIndex'(0);
+        move_quiet_cmd_board = active_board;
+        move_quiet_cmd_suppress_valid = 1'b0;
+        move_quiet_cmd_suppress_move = NULL_MOVE;
+        move_quiet_cmd_tops = MoveBucketTops'(0);
         move_pop_valid = 1'b0;
         move_pop_thread = ThreadID'(0);
         move_pop_ply = PlyIndex'(0);
@@ -1556,8 +1632,11 @@ module search_controller #(
                     move_pop_valid = 1'b1;
                 end
                 MOVE_ORDER_GENERATE_QUIET: begin
-                    move_cmd = MOVE_GEN_GENERATE_QUIET;
-                    move_cmd_valid = 1'b1;
+                    move_quiet_cmd_valid = 1'b1;
+                    move_quiet_cmd_thread = ThreadID'(0);
+                    move_quiet_cmd_ply = search_ply[0];
+                    move_quiet_cmd_board = search_board[0];
+                    move_quiet_cmd_tops = search_stack_top[0].bucket_tops;
                 end
                 MOVE_ORDER_QUIET: begin
                     move_pop_eligible = QUIET_BUCKET_MASK;
@@ -1592,12 +1671,23 @@ module search_controller #(
                     move_cmd = MOVE_GEN_VALIDATE_DIRECT;
                     move_cmd_suppress_valid = 1'b1;
                     move_cmd_suppress_move = order_move;
-                end else if (order_state == MOVE_ORDER_GENERATE_QUIET) begin
-                    move_cmd = MOVE_GEN_GENERATE_QUIET;
                 end else begin
                     move_cmd = MOVE_GEN_GENERATE_NOISY;
                 end
             end
+        end
+
+        if (state == ST_SEARCH_RUN && search_quiet_issue_valid) begin
+            move_quiet_cmd_valid = 1'b1;
+            move_quiet_cmd_thread = search_quiet_issue_thread;
+            move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
+            move_quiet_cmd_board = search_board[search_quiet_issue_thread];
+            move_quiet_cmd_suppress_valid =
+                search_stack_top[search_quiet_issue_thread].direct_attempted;
+            move_quiet_cmd_suppress_move =
+                search_stack_top[search_quiet_issue_thread].tt_move;
+            move_quiet_cmd_tops =
+                search_stack_top[search_quiet_issue_thread].bucket_tops;
         end
 
         eval_base = (state == ST_SEARCH_RUN)
@@ -1684,6 +1774,7 @@ module search_controller #(
             search_dispatch_cursor <= ThreadID'(0);
             search_board_dispatch_cursor <= ThreadID'(0);
             search_move_dispatch_cursor <= ThreadID'(0);
+            search_quiet_dispatch_cursor <= ThreadID'(0);
             search_eval_dispatch_cursor <= ThreadID'(0);
             search_tt_lookup_dispatch_cursor <= ThreadID'(0);
             search_tt_store_dispatch_cursor <= ThreadID'(0);
@@ -1884,6 +1975,7 @@ module search_controller #(
                                 search_dispatch_cursor <= ThreadID'(0);
                                 search_board_dispatch_cursor <= ThreadID'(0);
                                 search_move_dispatch_cursor <= ThreadID'(0);
+                                search_quiet_dispatch_cursor <= ThreadID'(0);
                                 search_eval_dispatch_cursor <= ThreadID'(0);
                                 search_tt_lookup_dispatch_cursor <= ThreadID'(0);
                                 search_tt_store_dispatch_cursor <= ThreadID'(0);
@@ -1976,6 +2068,7 @@ module search_controller #(
                                     search_dispatch_cursor <= ThreadID'(0);
                                     search_board_dispatch_cursor <= ThreadID'(0);
                                     search_move_dispatch_cursor <= ThreadID'(0);
+                                    search_quiet_dispatch_cursor <= ThreadID'(0);
                                     search_eval_dispatch_cursor <= ThreadID'(0);
                                     search_tt_lookup_dispatch_cursor <= ThreadID'(0);
                                     search_tt_store_dispatch_cursor <= ThreadID'(0);
@@ -2050,6 +2143,7 @@ module search_controller #(
                                 search_dispatch_cursor <= ThreadID'(0);
                                 search_board_dispatch_cursor <= ThreadID'(0);
                                 search_move_dispatch_cursor <= ThreadID'(0);
+                                search_quiet_dispatch_cursor <= ThreadID'(0);
                                 search_eval_dispatch_cursor <= ThreadID'(0);
                                 search_tt_lookup_dispatch_cursor <= ThreadID'(0);
                                 search_tt_store_dispatch_cursor <= ThreadID'(0);
@@ -2185,6 +2279,7 @@ module search_controller #(
                             state <= ST_PERFT_REVERSE_ISSUE;
                         end
                     end else if ((move_cmd_valid && move_cmd_ready)
+                            || (move_quiet_cmd_valid && move_quiet_cmd_ready)
                             || (move_pop_valid && move_pop_ready)) begin
                         state <= ST_PERFT_GEN_WAIT;
                     end
@@ -2193,10 +2288,12 @@ module search_controller #(
                 ST_PERFT_GEN_WAIT: begin
                     if (move_cmd_resp_valid && move_cmd_resp_thread == ThreadID'(0)) begin
                         search_stack_top[0].bucket_tops <= move_cmd_resp_tops;
-                        if (search_stack_top[0].move_order_state == MOVE_ORDER_GENERATE_NOISY)
-                            search_stack_top[0].move_order_state <= MOVE_ORDER_GOOD_NOISY;
-                        else
-                            search_stack_top[0].move_order_state <= MOVE_ORDER_QUIET;
+                        search_stack_top[0].move_order_state <= MOVE_ORDER_GOOD_NOISY;
+                        state <= ST_PERFT_GEN_ISSUE;
+                    end else if (move_quiet_resp_valid
+                            && move_quiet_resp_thread == ThreadID'(0)) begin
+                        search_stack_top[0].bucket_tops <= move_quiet_resp_tops;
+                        search_stack_top[0].move_order_state <= MOVE_ORDER_QUIET;
                         state <= ST_PERFT_GEN_ISSUE;
                     end else if (move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)) begin
                         if (move_pop_resp_found) begin
@@ -2321,6 +2418,7 @@ module search_controller #(
                     search_dispatch_cursor <= ThreadID'(0);
                     search_board_dispatch_cursor <= ThreadID'(0);
                     search_move_dispatch_cursor <= ThreadID'(0);
+                    search_quiet_dispatch_cursor <= ThreadID'(0);
                     search_eval_dispatch_cursor <= ThreadID'(0);
                     search_tt_lookup_dispatch_cursor <= ThreadID'(0);
                     search_tt_store_dispatch_cursor <= ThreadID'(0);
@@ -2344,6 +2442,11 @@ module search_controller #(
                     iteration_best_move_next = search_iteration_best_move;
                     iteration_best_score_next = search_iteration_best_score;
                     nodes_next = search_nodes;
+
+                    // The two generators may complete together, but one thread owns only one move operation.
+                    if (move_cmd_resp_valid && move_quiet_resp_valid)
+                        assert (move_cmd_resp_thread != move_quiet_resp_thread)
+                            else $fatal(1, "simultaneous move responses targeted one thread");
 
                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                         if (search_board_wait_count[tid] != BoardWaitCount'(0)) begin
@@ -2561,14 +2664,24 @@ module search_controller #(
                                 end else begin
                                     search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
                                 end
-                            end else if (search_stack_top[move_thread_id].move_order_state
-                                    == MOVE_ORDER_GENERATE_QUIET) begin
-                                search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_QUIET;
-                                search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
                             end else begin
                                 search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_GOOD_NOISY;
                                 search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
                             end
+                        end
+
+                        if (move_quiet_resp_valid) begin
+                            automatic ThreadID move_thread_id;
+                            move_thread_id = move_quiet_resp_thread;
+                            search_move_result_thread_id <= move_thread_id;
+                            search_move_result_valid <= 1'b1;
+                            search_move_wait_count[move_thread_id] <= MoveWaitCount'(0);
+                            search_move_inflight[move_thread_id] <= 1'b0;
+                            search_stack_top[move_thread_id].bucket_tops
+                                <= move_quiet_resp_tops;
+                            search_stack_top[move_thread_id].move_order_state
+                                <= MOVE_ORDER_QUIET;
+                            search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
                         end
 
                         if (move_pop_resp_valid) begin
@@ -2958,6 +3071,18 @@ module search_controller #(
                             search_move_dispatch_cursor <= search_thread_after(search_move_issue_thread);
                         end
 
+                        if (search_quiet_issue_valid
+                                && move_quiet_cmd_valid && move_quiet_cmd_ready) begin
+                            search_thread_id <= search_quiet_issue_thread;
+                            search_move_wait_count[search_quiet_issue_thread]
+                                <= MoveWaitCount'(MOVE_WAIT_CYCLES);
+                            search_thread_phase[search_quiet_issue_thread]
+                                <= SEARCH_PHASE_MOVE_WAIT;
+                            search_move_inflight[search_quiet_issue_thread] <= 1'b1;
+                            search_quiet_dispatch_cursor
+                                <= search_thread_after(search_quiet_issue_thread);
+                        end
+
                         if (search_board_issue_valid) begin
                             search_thread_id <= search_board_issue_thread;
                             search_board_wait_count[search_board_issue_thread] <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
@@ -3100,6 +3225,7 @@ module search_controller #(
                                     search_dispatch_cursor <= ThreadID'(0);
                                     search_board_dispatch_cursor <= ThreadID'(0);
                                     search_move_dispatch_cursor <= ThreadID'(0);
+                                    search_quiet_dispatch_cursor <= ThreadID'(0);
                                     search_eval_dispatch_cursor <= ThreadID'(0);
                                     search_tt_lookup_dispatch_cursor <= ThreadID'(0);
                                     search_tt_store_dispatch_cursor <= ThreadID'(0);

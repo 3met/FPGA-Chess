@@ -75,9 +75,9 @@ flowchart LR
 
 The five major search pipelines are board update, static evaluation, ordered move generation, TT lookup, and TT store.
 
-Board update, static evaluation, and move generation are high-area pipelines and should be kept busy with work from many search threads. For the base design, each search thread may have at most one in-flight request in each pipeline. This avoids duplicate work for the same thread position and lets pipeline results be routed by `thread_id` without a wider request ID.
+Board update, static evaluation, and move generation are high-area pipelines and should be kept busy with work from many search threads. Move generation is split into independent noisy/direct and quiet class pipelines. For the base design, each search thread may have at most one in-flight request in each major component. This avoids duplicate work for the same thread position and lets pipeline results be routed by `thread_id` without a wider request ID.
 
-Pipeline parallelism means different threads can occupy different stages of the same pipeline at the same time. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
+Pipeline parallelism means different threads can occupy different stages of a pipeline at the same time, and different threads can concurrently use the noisy and quiet move-generation pipelines. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
 
 The main pipelines are designed for throughput and can accept a new request each cycle when input work is available and downstream resources are not stalled. TT lookup/store throughput is limited by external memory bandwidth.
 

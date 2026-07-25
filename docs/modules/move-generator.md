@@ -1,10 +1,10 @@
 # Move Generator (`move_generator`)
 
-`move_generator` is a shared, variable-latency destination-centric generator, move-ordering datapath, and eight-bucket move store. It emits pseudo-legal moves; `board_update_pipeline` remains responsible for ordinary king safety, pins, discovered checks, and en-passant discovered checks. Castling origin, transit, and destination safety are checked in the generator because those conditions cannot be reconstructed from only the final board.
+`move_generator` contains independent variable-latency noisy and quiet destination-centric pipelines, their class-specific move-ordering datapaths, and an eight-bucket move store split by move class. It emits pseudo-legal moves; `board_update_pipeline` remains responsible for ordinary king safety, pins, discovered checks, and en-passant discovered checks. Castling origin, transit, and destination safety are checked during quiet generation and direct validation because those conditions cannot be reconstructed from only the final board.
 
 ## Commands
 
-The ready/valid command interface captures one `FullBoard`, `thread`, `ply`, suppression move, and eight current bucket tops.
+Independent noisy/direct and quiet ready/valid interfaces each capture one `FullBoard`, `thread`, `ply`, suppression move, and eight current bucket tops. Both pipelines can accept requests and return tagged completions in the same cycle; no compatibility arbiter serializes either direction.
 
 | Command | Behavior |
 | --- | --- |
@@ -12,15 +12,15 @@ The ready/valid command interface captures one `FullBoard`, `thread`, `ply`, sup
 | `MOVE_GEN_GENERATE_NOISY` | Generates captures, en passant, and all promotion choices. |
 | `MOVE_GEN_GENERATE_QUIET` | Generates ordinary non-captures and standard castling. |
 
-The response is tagged with thread and ply. Generation completion is produced only from the final state after the last candidate has been classified and its RAM write has committed; there is no fixed-latency assumption.
+Each response is tagged with thread and ply. Generation completion is produced only from the final state after the last candidate has been classified and its RAM write has committed; there is no fixed-latency assumption.
 
 An attempted direct move is passed as the exact 14-bit suppression move on later generation commands. Equality includes source, destination, and promotion encoding, so promotion variants remain distinct. A failed direct pseudo-legality validation is not suppressed.
 
 ## Destination Context and Generation
 
-One 64-bit priority selector schedules only destinations in the active phase. The noisy destination mask contains enemy-occupied non-king squares, an en-passant target only when an adjacent pawn can capture it, and empty rank-8 promotion squares for White or rank-1 promotion squares for Black only when the required pawn push exists. The quiet mask contains empty squares, with pawn promotions filtered into the noisy phase.
+Each pipeline has its own 64-bit priority selector and geometry so noisy and quiet destinations for different threads can be processed concurrently. The noisy destination mask contains enemy-occupied non-king squares, an en-passant target only when an adjacent pawn can capture it, and empty rank-8 promotion squares for White or rank-1 promotion squares for Black only when the required pawn push exists. The quiet mask contains empty squares, with pawn promotions filtered into the noisy phase.
 
-For each selected destination, shared combinational geometry constructs a context containing the 6-bit destination, 4-bit destination tile, eight nearest occupied ray records `{Tile, distance_minus_one[2:0]}`, and eight fixed knight-source tiles. One destination-indexed 8-by-7 first-occupant network computes the rays. The same selection cycle constructs the 16-bit source mask; pawn bits include the exact single-push, starting-rank double-push, capture, en-passant, and promotion distance constraints. A zero mask consumes the destination without entering candidate expansion. For a nonzero mask, the context is registered and the generator emits at most one explicit candidate per cycle. Candidate expansion retains defensive geometry validation and carries whether it removed the final source, allowing the scoring/write return path to select the next destination directly instead of spending an empty expansion cycle. A promotion source is retained while bishop, rook, knight, and queen encodings are emitted; LIFO storage makes queen the first returned promotion.
+For each selected destination, the class pipeline's combinational geometry constructs a context containing the 6-bit destination, 4-bit destination tile, eight nearest occupied ray records `{Tile, distance_minus_one[2:0]}`, and eight fixed knight-source tiles. One destination-indexed 8-by-7 first-occupant network computes the rays. The same selection cycle constructs the 16-bit source mask; pawn bits include the exact single-push, starting-rank double-push, capture, en-passant, and promotion distance constraints. A zero mask consumes the destination without entering candidate expansion. For a nonzero mask, the context is registered and the pipeline emits at most one explicit candidate per cycle. Candidate expansion retains defensive geometry validation and carries whether it removed the final source, allowing the scoring/write return path to select the next destination directly instead of spending an empty expansion cycle. A promotion source is retained while bishop, rook, knight, and queen encodings are emitted; LIFO storage makes queen the first returned promotion.
 
 Castling is sequenced separately for the two standard-chess destinations. Permission, king and rook placement, empty path, and attacks on the origin, transit, and final virtual board are checked before storage or direct validation.
 
@@ -36,11 +36,11 @@ Castling is sequenced separately for the two standard-chess destinations. Permis
 | Castle sequencer | Checks each standard castling side and routes a valid castle through quiet scoring. | Finish after both sides. |
 | Finish fence | Returns final tagged tops only after the last write state has completed. | Idle/next command. |
 
-The pop path is independent of generation: eligible-bucket comparison and highest-bucket selection issue a synchronous RAM read, and the following cycle returns the tagged move and decremented top. Search control forwards a found response directly into board update during that response cycle instead of inserting a separate issue bubble. A pop for one thread can overlap generation writes for another thread.
+The pop frontend preserves global bucket priority and routes each request to the pipeline that owns the selected class. Eligible-bucket comparison and highest-bucket selection issue a synchronous RAM read, and the following cycle returns the tagged move and decremented top. Search control forwards a found response directly into board update during that response cycle instead of inserting a separate issue bubble. Pops are independent of generation, so a pop for one thread can overlap either or both class pipelines writing for other threads.
 
 ## Ordering
 
-Quiet candidates issue a synchronous read from shared signed nine-bit `history[color][from][to]` RAM. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff produces bonus `B = min(63, remaining_depth * 4)` and applies the gravity update `H' = H + B - H * |B| / 256`, with the division implemented as a shift and the result limited to +255; no malus is currently applied. Update read-modify-write has priority over a same-bank candidate lookup, and controller-side one-entry records retain pending per-thread updates.
+Quiet candidates issue a synchronous read from signed nine-bit `history[color][from][to]` RAM owned only by the quiet pipeline. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff produces bonus `B = min(63, remaining_depth * 4)` and applies the gravity update `H' = H + B - H * |B| / 256`, with the division implemented as a shift and the result limited to +255; no malus is currently applied. Update read-modify-write has priority over a same-bank candidate lookup, and controller-side one-entry records retain pending per-thread updates.
 
 Captures use one shared bounded visible SEE calculation. The classifier compares the immediate attacker and victim, the least valuable visible enemy recapturer, and one visible friendly defender. Removed pieces do not reveal a second slider. En passant uses a pawn victim. The coarse piece values are pawn 1, minor 3, rook 5, queen 9, and king 15.
 
@@ -59,7 +59,7 @@ Only the 14-bit `Move` is stored. Scores, links, classes, and consumed masks are
 
 ## Bucket RAMs and Stack-Arena Semantics
 
-Each bucket is a synchronous simple-dual-port 14-bit RAM with an independent compile-time power-of-two per-thread capacity, defaulting to 512 moves. Addresses concatenate the configured thread region with the bucket offset. Generation uses the write port while a pop for another thread may use the read port.
+Each bucket is a synchronous simple-dual-port 14-bit RAM with an independent compile-time power-of-two per-thread capacity, defaulting to 512 moves. The noisy pipeline owns buckets 0, 1, 6, and 7; the quiet pipeline owns buckets 2 through 5, so concurrent generation never contends for a bucket write port. Addresses concatenate the configured thread region with the bucket offset. Generation uses the write port while a pop for another thread may use the read port.
 
 For every node the search stack stores eight tops. A push writes at `top` and increments it. A pop decrements the selected top and synchronously reads the move at that address. The node's lower bounds are the parent's current tops, or zero at the root; the node is empty in a bucket when its current top equals that lower bound.
 
@@ -69,6 +69,6 @@ Before a write that would exceed a thread region, the module suppresses both the
 
 ## Initialization, Flush, and Instrumentation
 
-Move RAM contents are never cleared. Reset and New Game serialize history clearing; bucket storage is reclaimed by resetting node tops. Flush cancels active variable-latency command and pop state on Kill or New Game.
+Move RAM contents are never cleared. Reset and New Game serialize clearing only in the quiet pipeline's history RAM; bucket storage is reclaimed by resetting node tops. Flush cancels active variable-latency commands and pop state on Kill or New Game.
 
 Optional counters record noisy and quiet moves, analyzed destinations, emitted candidates, history lookups, generation cycles, per-bucket writes, and per-bucket high-water tops. Overflow status and identification remain present when optional statistics are disabled.
