@@ -204,6 +204,30 @@ module move_generator #(
         return Position'(0);
     endfunction
 
+    // Avoid scheduling pawn-only noisy destinations that have no possible source.
+    function automatic logic noisy_pawn_destination_has_source(
+        input FullBoard board,
+        input Position destination
+    );
+        if (getRank(destination) == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))) begin
+            return isShiftOnBoard(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)
+                && board.tiles[shiftPos(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)]
+                    == Tile'({board.turn, PAWN});
+        end
+        if (board.has_ep && getFile(destination) == board.ep_file
+                && getRank(destination) == (board.turn == WHITE ? BoardRank'(5) : BoardRank'(2))) begin
+            return (isShiftOnBoard(destination, board.turn == WHITE ? SOUTH_WEST : NORTH_WEST, 3'd1)
+                    && board.tiles[shiftPos(destination,
+                        board.turn == WHITE ? SOUTH_WEST : NORTH_WEST, 3'd1)]
+                        == Tile'({board.turn, PAWN}))
+                || (isShiftOnBoard(destination, board.turn == WHITE ? SOUTH_EAST : NORTH_EAST, 3'd1)
+                    && board.tiles[shiftPos(destination,
+                        board.turn == WHITE ? SOUTH_EAST : NORTH_EAST, 3'd1)]
+                        == Tile'({board.turn, PAWN}));
+        end
+        return 1'b0;
+    endfunction
+
     function automatic logic [63:0] generation_destination_mask(
         input FullBoard board,
         input MoveGenCommand operation
@@ -212,19 +236,29 @@ module move_generator #(
         mask = '0;
         for (int pos = 0; pos < 64; pos++) begin
             if (operation == MOVE_GEN_GENERATE_NOISY) begin
+                // Capturing a king is never a chess move; check detection
+                // determines mate without presenting its square as a capture.
                 if ((board.tiles[pos].piece_type != NULL_PIECE
-                        && board.tiles[pos].piece_color != board.turn)
+                        && board.tiles[pos].piece_color != board.turn
+                        && board.tiles[pos].piece_type != KING)
                         || (board.tiles[pos].piece_type == NULL_PIECE
                             && getRank(Position'(pos))
-                                == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))))
+                                == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))
+                            && noisy_pawn_destination_has_source(board, Position'(pos))))
                     mask[pos] = 1'b1;
             end else if (operation == MOVE_GEN_GENERATE_QUIET
                     && board.tiles[pos].piece_type == NULL_PIECE) begin
                 mask[pos] = 1'b1;
             end
         end
-        if (operation == MOVE_GEN_GENERATE_NOISY && board.has_ep)
-            mask[Position'({board.turn == WHITE ? BoardRank'(5) : BoardRank'(2), board.ep_file})] = 1'b1;
+        if (operation == MOVE_GEN_GENERATE_NOISY && board.has_ep) begin
+            automatic Position ep_destination = Position'({
+                board.turn == WHITE ? BoardRank'(5) : BoardRank'(2), board.ep_file
+            });
+            if (board.tiles[ep_destination].piece_type == NULL_PIECE
+                    && noisy_pawn_destination_has_source(board, ep_destination))
+                mask[ep_destination] = 1'b1;
+        end
         return mask;
     endfunction
 
