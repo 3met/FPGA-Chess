@@ -62,15 +62,18 @@ Reset, New Game, Kill, and search initialization invalidate outstanding tags, pe
 At a search node, the controller:
 
 1. Checks draw state and probes the TT.
-2. Tries the TT or previous-iteration ordering move directly when available.
-3. Generates and searches noisy moves.
-4. Generates and searches quiet moves.
-5. Searches deferred bad captures.
-6. Scores checkmate, stalemate, or the completed alpha/beta result.
+2. Tries an eligible reduced null-move probe.
+3. Tries the TT or previous-iteration ordering move directly when available.
+4. Generates and searches noisy moves.
+5. Generates and searches quiet moves.
+6. Searches deferred bad captures.
+7. Scores checkmate, stalemate, or the completed alpha/beta result.
 
 Move generation produces pseudo-legal candidates. The controller speculatively applies each candidate through board update and rejects it if the moving side remains in check. A rejected candidate does not alter thread state or increment the search node count.
 
 A legal child is written to repetition line history before TT lookup, evaluation, or deeper search. On return, the controller reverses the move and folds the child score into the saved parent. A real legal child increments the search node count even if repetition or a TT cutoff resolves it without deeper evaluation.
+
+A null probe is a synthetic child issued directly to board update after the TT probe and before move generation. It uses a reduced scout window, cannot follow another null child, and either returns a beta cutoff or restores the parent and resumes normal ordering. It bypasses legality, repetition, legal-node counting, best-move folding, and move-history heuristics.
 
 When a searched quiet move causes a beta cutoff, the controller snapshots the winner, the node's retained failed quiets, color, and depth into the existing per-thread best-effort history-update slot. Search never waits for that slot or for history RAM maintenance; an event is dropped if the thread's slot is still occupied.
 

@@ -332,17 +332,19 @@ module tb_board_update_pipeline;
         automatic Position rook_from = ref_castle_rook_from(to_pos);
         automatic Position rook_to = ref_castle_rook_to(to_pos);
 
-        ref_board.tiles[from_pos] = restored_mover;
-        ref_board.tiles[to_pos] = restored_capture;
+        if (from_pos != to_pos) begin
+            ref_board.tiles[from_pos] = restored_mover;
+            ref_board.tiles[to_pos] = restored_capture;
 
-        if (is_ep) begin
-            ref_board.tiles[to_pos] = EMPTY_TILE;
-            ref_board.tiles[ep_capture_pos] = Tile'({captured_color, PAWN});
-        end
+            if (is_ep) begin
+                ref_board.tiles[to_pos] = EMPTY_TILE;
+                ref_board.tiles[ep_capture_pos] = Tile'({captured_color, PAWN});
+            end
 
-        if (is_castle) begin
-            ref_board.tiles[rook_to] = EMPTY_TILE;
-            ref_board.tiles[rook_from] = Tile'({moved_color, ROOK});
+            if (is_castle) begin
+                ref_board.tiles[rook_to] = EMPTY_TILE;
+                ref_board.tiles[rook_from] = Tile'({moved_color, ROOK});
+            end
         end
 
         ref_board.turn = moved_color;
@@ -351,6 +353,21 @@ module tb_board_update_pipeline;
         ref_board.ep_file = rec.ep_file;
         ref_board.halfmove_clock = rec.halfmove_clock;
         ref_ply -= PlyIndex'(1);
+    endtask
+
+    task automatic ref_apply_null();
+        ref_history[ref_ply].from_pos = Position'(0);
+        ref_history[ref_ply].to_pos = Position'(0);
+        ref_history[ref_ply].killed_piece = NULL_PIECE;
+        ref_history[ref_ply].castle_perms = ref_board.castle_perms;
+        ref_history[ref_ply].move_flag = NORM_MOVE;
+        ref_history[ref_ply].has_ep = ref_board.has_ep;
+        ref_history[ref_ply].ep_file = ref_board.ep_file;
+        ref_history[ref_ply].halfmove_clock = ref_board.halfmove_clock;
+        ref_board.turn = Color'(~ref_board.turn);
+        ref_board.has_ep = 1'b0;
+        ref_board.halfmove_clock += HalfmoveClock'(1);
+        ref_ply += PlyIndex'(1);
     endtask
 
     task automatic apply_ref_op(input BoardOp op, input Move move, input logic [6:0] data);
@@ -363,6 +380,7 @@ module tb_board_update_pipeline;
             BOARD_SET_EN_PASSANT_OP:      ref_apply_set_en_passant(data);
             BOARD_SET_HALFMOVE_CLOCK_OP:  ref_apply_set_halfmove_clock(data);
             BOARD_REVERSE_MOVE_OP:        ref_apply_reverse();
+            BOARD_PUSH_NULL_OP:           ref_apply_null();
             default: begin end
         endcase
 
@@ -466,6 +484,10 @@ module tb_board_update_pipeline;
         run_op(BOARD_REVERSE_MOVE_OP, NULL_MOVE, 7'd0, test_name);
     endtask
 
+    task automatic push_null(input string test_name);
+        run_op(BOARD_PUSH_NULL_OP, NULL_MOVE, 7'd0, test_name);
+    endtask
+
     task automatic setup_start_position();
         reset_ref_model();
         drive_idle();
@@ -553,6 +575,22 @@ module tb_board_update_pipeline;
         reverse_move("reverse e2e4");
         expect_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0", "after full reverse");
         expect_equal(ref_pst === DRAW_EVAL_SCORE, $sformatf("PST after full reverse expected=0 found=%0d", ref_pst));
+    endtask
+
+    task automatic test_null_move();
+        setup_start_position();
+        set_en_passant(1'b1, BoardFile'(4), "null setup en passant");
+        set_halfmove_clock(HalfmoveClock'(17), "null setup halfmove");
+        push_null("push null");
+        expect_equal(ref_board.turn == BLACK, "null toggles turn");
+        expect_equal(!ref_board.has_ep, "null clears en passant");
+        expect_equal(ref_board.halfmove_clock == HalfmoveClock'(18), "null increments halfmove clock");
+        reverse_move("reverse null");
+        expect_equal(ref_board.turn == WHITE, "null reverse restores turn");
+        expect_equal(ref_board.has_ep && ref_board.ep_file == BoardFile'(4),
+            "null reverse restores en passant");
+        expect_equal(ref_board.halfmove_clock == HalfmoveClock'(17),
+            "null reverse restores halfmove clock");
     endtask
 
     task automatic setup_castle_position(input Color color, input bit kingside);
@@ -760,6 +798,7 @@ module tb_board_update_pipeline;
         $display("=== Board update pipeline testbench ===");
         test_back_to_back_independent_requests();
         test_main_move_sequence();
+        test_null_move();
         test_castles();
         test_set_tile_overwrite();
         test_commit_history_not_written();

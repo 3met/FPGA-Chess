@@ -19,6 +19,7 @@ package board_update_pipeline_defs;
         BOARD_SET_EN_PASSANT_OP,
         BOARD_SET_HALFMOVE_CLOCK_OP,
         BOARD_REVERSE_MOVE_OP,
+        BOARD_PUSH_NULL_OP,   // A synthetic null move made only by search
         BOARD_IDLE_OP
     } BoardOp;
 

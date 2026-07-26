@@ -176,6 +176,12 @@ module board_update_pipeline #(
         return MoveRecordAddr'((int'(tid) * MOVE_RECORD_PLY_COUNT) + int'(ply));
     endfunction : move_hist_addr
 
+    // Standard chess never moves a piece onto its origin square, so a
+    // same-square record identifies a null move without widening history RAM.
+    function automatic logic is_null_record(input MoveRecord rec);
+        return rec.from_pos == rec.to_pos;
+    endfunction : is_null_record
+
     function automatic Position oriented_pos(input Tile tile, input Position pos);
         return (tile.piece_color == BLACK) ? mirrorPos(pos) : pos;
     endfunction : oriented_pos
@@ -419,23 +425,35 @@ module board_update_pipeline #(
 
                 effects.from_pos = rec.from_pos;
                 effects.to_pos = rec.to_pos;
-                effects.end_tile = in.board.tiles[effects.to_pos];
-                effects.is_promo = (rec.move_flag == PROMO_MOVE);
-                effects.is_ep = (rec.move_flag == EP_MOVE);
-                effects.is_castle = (rec.move_flag == CASTLE_MOVE);
-                effects.restored_mover = Tile'({
-                    moved_color,
-                    effects.is_promo ? PAWN : effects.end_tile.piece_type
-                });
-                effects.restored_capture = rec.killed_piece == NULL_PIECE
-                    ? EMPTY_TILE
-                    : Tile'({captured_color, rec.killed_piece});
-                effects.ep_capture_pos = getPosition(
-                    getRank(effects.from_pos),
-                    getFile(effects.to_pos)
-                );
-                effects.rook_from = castle_rook_from(effects.to_pos);
-                effects.rook_to = castle_rook_to(effects.to_pos);
+                if (is_null_record(rec)) begin
+                    effects.end_tile = EMPTY_TILE;
+                    effects.is_promo = 1'b0;
+                    effects.is_ep = 1'b0;
+                    effects.is_castle = 1'b0;
+                    effects.restored_mover = EMPTY_TILE;
+                    effects.restored_capture = EMPTY_TILE;
+                    effects.ep_capture_pos = Position'(0);
+                    effects.rook_from = Position'(0);
+                    effects.rook_to = Position'(0);
+                end else begin
+                    effects.end_tile = in.board.tiles[effects.to_pos];
+                    effects.is_promo = (rec.move_flag == PROMO_MOVE);
+                    effects.is_ep = (rec.move_flag == EP_MOVE);
+                    effects.is_castle = (rec.move_flag == CASTLE_MOVE);
+                    effects.restored_mover = Tile'({
+                        moved_color,
+                        effects.is_promo ? PAWN : effects.end_tile.piece_type
+                    });
+                    effects.restored_capture = rec.killed_piece == NULL_PIECE
+                        ? EMPTY_TILE
+                        : Tile'({captured_color, rec.killed_piece});
+                    effects.ep_capture_pos = getPosition(
+                        getRank(effects.from_pos),
+                        getFile(effects.to_pos)
+                    );
+                    effects.rook_from = castle_rook_from(effects.to_pos);
+                    effects.rook_to = castle_rook_to(effects.to_pos);
+                end
             end
 
             default: begin end
@@ -562,24 +580,34 @@ module board_update_pipeline #(
                 automatic Position rook_to = effects.rook_to;
 
                 plan.address[0] = zobrist_tile_addr(end_tile, to_pos);
-                plan.enable[0] = (end_tile.piece_type != NULL_PIECE);
+                plan.enable[0] = !is_null_record(rec) && (end_tile.piece_type != NULL_PIECE);
                 plan.address[1] = zobrist_tile_addr(restored_mover, from_pos);
-                plan.enable[1] = (restored_mover.piece_type != NULL_PIECE);
-                if (is_castle) begin
+                plan.enable[1] = !is_null_record(rec) && (restored_mover.piece_type != NULL_PIECE);
+                if (!is_null_record(rec) && is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
                     plan.address[2] = zobrist_tile_addr(rook_tile, rook_to);
                     plan.address[3] = zobrist_tile_addr(rook_tile, rook_from);
                     plan.enable[2] = 1'b1;
                     plan.enable[3] = 1'b1;
-                end else if (is_ep) begin
+                end else if (!is_null_record(rec) && is_ep) begin
                     automatic Tile ep_tile = Tile'({captured_color, PAWN});
                     plan.address[2] = zobrist_tile_addr(ep_tile, ep_capture_pos);
                     plan.enable[2] = 1'b1;
-                end else begin
+                end else if (!is_null_record(rec)) begin
                     plan.address[2] = zobrist_tile_addr(restored_capture, to_pos);
                     plan.enable[2] = (restored_capture.piece_type != NULL_PIECE);
                 end
                 plan_side_delta(in.board, moved_color, rec.castle_perms, rec.has_ep, rec.ep_file);
+            end
+
+            BOARD_PUSH_NULL_OP: begin
+                plan_side_delta(
+                    in.board,
+                    Color'(~in.board.turn),
+                    in.board.castle_perms,
+                    1'b0,
+                    in.board.ep_file
+                );
             end
 
             BOARD_SET_TILE_OP: begin
@@ -659,20 +687,20 @@ module board_update_pipeline #(
                 automatic Position rook_to = effects.rook_to;
 
                 plan.address[0] = pst_addr(restored_mover.piece_type, oriented_pos(restored_mover, from_pos));
-                plan.enable[0] = 1'b1;
+                plan.enable[0] = !is_null_record(rec);
                 plan.address[1] = pst_addr(end_tile.piece_type, oriented_pos(end_tile, to_pos));
-                plan.enable[1] = (end_tile.piece_type != NULL_PIECE);
-                if (is_castle) begin
+                plan.enable[1] = !is_null_record(rec) && (end_tile.piece_type != NULL_PIECE);
+                if (!is_null_record(rec) && is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
                     plan.address[2] = pst_addr(ROOK, oriented_pos(rook_tile, rook_from));
                     plan.address[3] = pst_addr(ROOK, oriented_pos(rook_tile, rook_to));
                     plan.enable[2] = 1'b1;
                     plan.enable[3] = 1'b1;
-                end else if (is_ep) begin
+                end else if (!is_null_record(rec) && is_ep) begin
                     automatic Tile ep_tile = Tile'({captured_color, PAWN});
                     plan.address[2] = pst_addr(PAWN, oriented_pos(ep_tile, ep_capture_pos));
                     plan.enable[2] = 1'b1;
-                end else if (rec.killed_piece != NULL_PIECE) begin
+                end else if (!is_null_record(rec) && rec.killed_piece != NULL_PIECE) begin
                     plan.address[2] = pst_addr(rec.killed_piece, oriented_pos(restored_capture, to_pos));
                     plan.enable[2] = 1'b1;
                 end
@@ -783,22 +811,43 @@ module board_update_pipeline #(
                 automatic Position rook_from = effects.rook_from;
                 automatic Position rook_to = effects.rook_to;
 
-                replace_tile(out.board, out.pst_eval, from_pos, restored_mover, EvalScore'(0), pst_start_out);
-                replace_tile(out.board, out.pst_eval, to_pos, restored_capture, pst_end_out, is_ep ? EvalScore'(0) : pst_killed_out);
+                if (!is_null_record(rec)) begin
+                    replace_tile(out.board, out.pst_eval, from_pos, restored_mover, EvalScore'(0), pst_start_out);
+                    replace_tile(out.board, out.pst_eval, to_pos, restored_capture, pst_end_out, is_ep ? EvalScore'(0) : pst_killed_out);
 
-                if (is_ep) begin
-                    automatic Tile ep_tile = Tile'({captured_color, PAWN});
-                    replace_tile(out.board, out.pst_eval, ep_capture_pos, ep_tile, EvalScore'(0), pst_killed_out);
-                end
+                    if (is_ep) begin
+                        automatic Tile ep_tile = Tile'({captured_color, PAWN});
+                        replace_tile(out.board, out.pst_eval, ep_capture_pos, ep_tile, EvalScore'(0), pst_killed_out);
+                    end
 
-                if (is_castle) begin
-                    automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                    replace_tile(out.board, out.pst_eval, rook_to, EMPTY_TILE, pst_castle_out, EvalScore'(0));
-                    replace_tile(out.board, out.pst_eval, rook_from, rook_tile, EvalScore'(0), pst_killed_out);
+                    if (is_castle) begin
+                        automatic Tile rook_tile = Tile'({moved_color, ROOK});
+                        replace_tile(out.board, out.pst_eval, rook_to, EMPTY_TILE, pst_castle_out, EvalScore'(0));
+                        replace_tile(out.board, out.pst_eval, rook_from, rook_tile, EvalScore'(0), pst_killed_out);
+                    end
                 end
 
                 replace_side_data(out.board, moved_color, rec.castle_perms, rec.has_ep, rec.ep_file, rec.halfmove_clock);
                 out.move_record = rec;
+            end
+
+            BOARD_PUSH_NULL_OP: begin
+                out.move_record.from_pos = Position'(0);
+                out.move_record.to_pos = Position'(0);
+                out.move_record.killed_piece = NULL_PIECE;
+                out.move_record.castle_perms = in.board.castle_perms;
+                out.move_record.move_flag = NORM_MOVE;
+                out.move_record.has_ep = in.board.has_ep;
+                out.move_record.ep_file = in.board.ep_file;
+                out.move_record.halfmove_clock = in.board.halfmove_clock;
+                replace_side_data(
+                    out.board,
+                    Color'(~in.board.turn),
+                    in.board.castle_perms,
+                    1'b0,
+                    in.board.ep_file,
+                    in.board.halfmove_clock + HalfmoveClock'(1)
+                );
             end
 
             BOARD_SET_TILE_OP: begin
@@ -831,7 +880,8 @@ module board_update_pipeline #(
         endcase
 
         move_record_in = out.move_record;
-        move_record_wr_en = (out.board_op == BOARD_PUSH_MOVE_OP);
+        move_record_wr_en = out.board_op == BOARD_PUSH_MOVE_OP
+            || out.board_op == BOARD_PUSH_NULL_OP;
         move_record_wr_addr = move_hist_addr(out.thread_id, out.search_ply);
         next_board_out = out.board;
         next_zobrist_key_out = out.zobrist_key;

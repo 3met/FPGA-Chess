@@ -55,6 +55,8 @@ module tb_search_controller;
     bit lmr_recovery_issue_seen;
     bit lmr_reduced_tt_depth_seen;
     bit lmr_full_tt_depth_seen;
+    bit null_push_seen;
+    bit null_reverse_seen;
     bit lmr_depth_check_pending[0:THREAD_COUNT-1];
     bit lmr_recovery_check_pending[0:THREAD_COUNT-1];
     bit lmr_full_tt_pending[0:THREAD_COUNT-1];
@@ -964,6 +966,13 @@ module tb_search_controller;
             "LMR verifies a reduced beta cutoff at full depth");
         check(!dut.search_needs_research(1'b1, 1'b0, EvalScore'(20), EvalScore'(10), EvalScore'(20)),
             "ordinary PVS beta cutoff does not require full-depth recovery");
+        force dut.search_stack_top[0].remaining_depth = 5'd6;
+        check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
+            "null reduction is two plies below depth seven");
+        force dut.search_stack_top[0].remaining_depth = 5'd7;
+        check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
+            "null reduction is three plies from depth seven");
+        release dut.search_stack_top[0].remaining_depth;
         force dut.search_stack_top[0].remaining_depth = 5'd3;
         force dut.search_stack_top[0].legal_move_count = 8'hff;
         check(dut.lmr_child_depth(ThreadID'(0)) <= 8'd2, "LMR clamps reduction to d-1 at saturated move count");
@@ -1006,6 +1015,8 @@ module tb_search_controller;
         setup_kings_only();
         run_perft(8'd1, NodeCountType'(5), "kings-only perft depth 1");
         run_search_depth(8'd4, "kings-only LMR search depth 4");
+        check(null_push_seen, "depth-4 scout search issued a null move");
+        check(null_reverse_seen, "null child was reversed through board history");
         check(lmr_reduced_issue_seen, "LMR controller reduces an eligible third-or-later move");
         check(lmr_recovery_issue_seen, "LMR alpha-raising scout is issued again at full depth");
         check(lmr_reduced_tt_depth_seen, "LMR reduced child TT request uses reduced depth");
@@ -1409,6 +1420,10 @@ module tb_search_controller;
             end
             if (dut.state == dut.ST_SEARCH_RUN && dut.search_board_issue_valid) begin
                 thread_move_handoff_seen[int'(dut.search_board_issue_thread)] = 1'b1;
+                if (dut.board_update_op == BOARD_PUSH_NULL_OP) null_push_seen = 1'b1;
+                if (dut.board_update_op == BOARD_REVERSE_MOVE_OP
+                        && dut.search_stack_top[dut.search_board_issue_thread].entered_by_null)
+                    null_reverse_seen = 1'b1;
             end
             if (dut.state == dut.ST_SEARCH_RUN) begin
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin

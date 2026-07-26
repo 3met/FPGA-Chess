@@ -25,6 +25,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Operation | Inputs Required | Description |
 | --------- | --------------- | ----------- |
 | Push Move | `move_in` | Makes a reversible search move and writes a move-history record. |
+| Push Null | None | Makes a reversible synthetic search null move, toggling the turn, clearing en passant, and incrementing the halfmove clock without changing tiles, castling permissions, or evaluation. |
 | Commit Move | `move_in` | Makes an irreversible active-game move without writing a search move-history record. |
 | Set Tile | `move_in.to_pos`, `set_data` tile | Places a piece or `NULL_PIECE` on one square. |
 | Set Turn | `set_data[0]` | Updates the side to move without changing tiles. |
@@ -79,6 +80,6 @@ Material and piece-square-table constants are maintained together in `hardware/d
 
 ## Move History
 
-Push Move writes enough data to reverse the move later, including origin, destination, captured piece, castling permissions, en passant state, halfmove clock, and special-move flag. Reverse Move reads the record for `thread_id` and `search_ply - 1`.
+Push Move writes enough data to reverse the move later, including origin, destination, captured piece, castling permissions, en passant state, halfmove clock, and special-move flag. Push Null writes the same prior side state and uses an impossible same-square origin/destination pair as its record marker, preserving the 32-bit history width. Reverse Move reads the record for `thread_id` and `search_ply - 1` and restores either operation.
 
 Each thread may have one reversible move per ply. Search must reverse accepted pushed moves before reusing that ply record for a different line. A speculative push rejected for leaving the moving king in check is never accepted as thread state; its record may be overwritten by the next candidate at the same ply.
