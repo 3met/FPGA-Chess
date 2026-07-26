@@ -120,6 +120,10 @@ module search_controller #(
         logic stand_pat_done;
         logic scout_search;
         logic count_move_on_return;
+        logic [11:0] failed_quiet0;
+        logic [11:0] failed_quiet1;
+        logic [11:0] failed_quiet2;
+        logic [1:0] failed_quiet_count;
     } SearchStackEntry;
 
     typedef enum logic [4:0] {
@@ -346,6 +350,10 @@ module search_controller #(
     Position move_history_update_from;
     Position move_history_update_to;
     logic [5:0] move_history_update_depth;
+    logic [11:0] move_history_update_failed0;
+    logic [11:0] move_history_update_failed1;
+    logic [11:0] move_history_update_failed2;
+    logic [1:0] move_history_update_failed_count;
     logic move_init_busy;
     logic move_overflow_sticky;
     ThreadID move_overflow_thread;
@@ -364,6 +372,10 @@ module search_controller #(
     Position history_update_pending_from[0:SEARCH_THREAD_COUNT-1];
     Position history_update_pending_to[0:SEARCH_THREAD_COUNT-1];
     logic [5:0] history_update_pending_depth[0:SEARCH_THREAD_COUNT-1];
+    logic [11:0] history_update_pending_failed0[0:SEARCH_THREAD_COUNT-1];
+    logic [11:0] history_update_pending_failed1[0:SEARCH_THREAD_COUNT-1];
+    logic [11:0] history_update_pending_failed2[0:SEARCH_THREAD_COUNT-1];
+    logic [1:0] history_update_pending_failed_count[0:SEARCH_THREAD_COUNT-1];
 
     // Shared static-evaluator pipeline request and result signals.
     Tile eval_board_tiles[64];
@@ -544,6 +556,10 @@ module search_controller #(
         .history_update_valid(move_history_update_valid), .history_update_ready(move_history_update_ready),
         .history_update_color(move_history_update_color), .history_update_from(move_history_update_from),
         .history_update_to(move_history_update_to), .history_update_depth(move_history_update_depth),
+        .history_update_failed0(move_history_update_failed0),
+        .history_update_failed1(move_history_update_failed1),
+        .history_update_failed2(move_history_update_failed2),
+        .history_update_failed_count(move_history_update_failed_count),
         .overflow_sticky(move_overflow_sticky), .overflow_thread(move_overflow_thread),
         .overflow_bucket(move_overflow_bucket), .overflow_count(move_overflow_count),
         .stat_noisy_count(move_stat_noisy_count), .stat_quiet_count(move_stat_quiet_count),
@@ -951,6 +967,10 @@ module search_controller #(
         entry.stand_pat_done = 1'b0;
         entry.scout_search = 1'b0;
         entry.count_move_on_return = 1'b0;
+        entry.failed_quiet0 = 12'd0;
+        entry.failed_quiet1 = 12'd0;
+        entry.failed_quiet2 = 12'd0;
+        entry.failed_quiet_count = 2'd0;
         return entry;
     endfunction : empty_search_stack_entry
 
@@ -1487,6 +1507,10 @@ module search_controller #(
         move_history_update_from = Position'(0);
         move_history_update_to = Position'(0);
         move_history_update_depth = 6'd0;
+        move_history_update_failed0 = 12'd0;
+        move_history_update_failed1 = 12'd0;
+        move_history_update_failed2 = 12'd0;
+        move_history_update_failed_count = 2'd0;
         for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++) begin
             if (!move_history_update_valid && history_update_pending[idx]) begin
                 move_history_update_valid = 1'b1;
@@ -1494,6 +1518,10 @@ module search_controller #(
                 move_history_update_from = history_update_pending_from[idx];
                 move_history_update_to = history_update_pending_to[idx];
                 move_history_update_depth = history_update_pending_depth[idx];
+                move_history_update_failed0 = history_update_pending_failed0[idx];
+                move_history_update_failed1 = history_update_pending_failed1[idx];
+                move_history_update_failed2 = history_update_pending_failed2[idx];
+                move_history_update_failed_count = history_update_pending_failed_count[idx];
             end
         end
 
@@ -1722,6 +1750,10 @@ module search_controller #(
                 history_update_pending_from[tid] <= Position'(0);
                 history_update_pending_to[tid] <= Position'(0);
                 history_update_pending_depth[tid] <= 6'd0;
+                history_update_pending_failed0[tid] <= 12'd0;
+                history_update_pending_failed1[tid] <= 12'd0;
+                history_update_pending_failed2[tid] <= 12'd0;
+                history_update_pending_failed_count[tid] <= 2'd0;
             end
             for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
                 search_board_tag_pipe[idx] <= ThreadID'(0);
@@ -2484,6 +2516,8 @@ module search_controller #(
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
                                 search_stack_top[board_thread_id].stand_pat_done <= 1'b0;
+                                // A new logical node reuses stale address bits but starts with no failed quiets.
+                                search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
@@ -2772,6 +2806,14 @@ module search_controller #(
                                             <= search_return_move[return_thread_id].to_pos;
                                         history_update_pending_depth[return_thread_id]
                                             <= 6'(search_stack_top[return_thread_id].remaining_depth);
+                                        history_update_pending_failed0[return_thread_id]
+                                            <= search_stack_top[return_thread_id].failed_quiet0;
+                                        history_update_pending_failed1[return_thread_id]
+                                            <= search_stack_top[return_thread_id].failed_quiet1;
+                                        history_update_pending_failed2[return_thread_id]
+                                            <= search_stack_top[return_thread_id].failed_quiet2;
+                                        history_update_pending_failed_count[return_thread_id]
+                                            <= search_stack_top[return_thread_id].failed_quiet_count;
                                     end
                                     search_return_score[return_thread_id] <= parent_score;
                                     search_return_valid[return_thread_id] <= 1'b1;
@@ -2804,6 +2846,28 @@ module search_controller #(
                                         search_thread_phase[return_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
                                     end
                                 end else begin
+                                    // Record a quiet only after its complete logical search, including
+                                    // any PVS/LMR recovery, has definitively failed to cut off.
+                                    if (!search_in_qsearch(return_thread_id)
+                                            && is_quiet_move(
+                                                search_board[return_thread_id],
+                                                search_return_move[return_thread_id]
+                                            )
+                                            && search_stack_top[return_thread_id].failed_quiet_count < 2'd3) begin
+                                        case (search_stack_top[return_thread_id].failed_quiet_count)
+                                            2'd0: search_stack_top[return_thread_id].failed_quiet0
+                                                <= {search_return_move[return_thread_id].from_pos,
+                                                    search_return_move[return_thread_id].to_pos};
+                                            2'd1: search_stack_top[return_thread_id].failed_quiet1
+                                                <= {search_return_move[return_thread_id].from_pos,
+                                                    search_return_move[return_thread_id].to_pos};
+                                            default: search_stack_top[return_thread_id].failed_quiet2
+                                                <= {search_return_move[return_thread_id].from_pos,
+                                                    search_return_move[return_thread_id].to_pos};
+                                        endcase
+                                        search_stack_top[return_thread_id].failed_quiet_count
+                                            <= search_stack_top[return_thread_id].failed_quiet_count + 2'd1;
+                                    end
                                     search_thread_phase[return_thread_id] <= SEARCH_PHASE_READY;
                                 end
                             end

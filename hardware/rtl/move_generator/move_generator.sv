@@ -65,6 +65,10 @@ module move_generator_pipeline #(
     input Position history_update_from,
     input Position history_update_to,
     input logic [5:0] history_update_depth,
+    input logic [11:0] history_update_failed0,
+    input logic [11:0] history_update_failed1,
+    input logic [11:0] history_update_failed2,
+    input logic [1:0] history_update_failed_count,
 
     output logic overflow_sticky,
     output ThreadID overflow_thread,
@@ -98,6 +102,7 @@ module move_generator_pipeline #(
     typedef enum logic [1:0] {
         HISTORY_UPDATE_IDLE,
         HISTORY_UPDATE_READ,
+        HISTORY_UPDATE_CAPTURE,
         HISTORY_UPDATE_WRITE
     } HistoryUpdateState;
 
@@ -202,8 +207,17 @@ module move_generator_pipeline #(
     Color update_color;
     logic [11:0] update_address;
     logic [5:0] update_depth;
+    logic [11:0] update_failed0;
+    logic [11:0] update_failed1;
+    logic [11:0] update_failed2;
+    logic [1:0] update_failed_count;
+    logic [1:0] update_entry;
+    logic update_is_malus;
+    logic signed [HISTORY_BITS-1:0] update_history_value;
     logic generator_history_read;
     logic generator_history_read_early;
+    logic update_read_blocked;
+    logic update_write_blocked;
 
     function automatic Position first_destination(input logic [63:0] mask);
         for (int pos = 0; pos < 64; pos++)
@@ -817,13 +831,13 @@ module move_generator_pipeline #(
         generator_history_read_early = state == GEN_EXPAND_SOURCE
             && source_mask != 16'd0 && source_valid
             && !source_is_capture && !source_is_promotion
-            && !(job_suppress_valid && same_move(source_move, job_suppress_move))
-            && history_update_state != HISTORY_UPDATE_READ;
+            && !(job_suppress_valid && same_move(source_move, job_suppress_move));
         generator_history_read = generator_history_read_early
             || (state == GEN_SCORE
                 && !candidate_is_capture && !candidate_is_promotion
-                && !(job_suppress_valid && same_move(candidate_move, job_suppress_move))
-                && history_update_state != HISTORY_UPDATE_READ);
+                && !(job_suppress_valid && same_move(candidate_move, job_suppress_move)));
+        update_read_blocked = generator_history_read && job_board.turn == update_color;
+        update_write_blocked = generator_history_read && job_board.turn == update_color;
 
         if (state == GEN_SCORE && (candidate_is_capture || candidate_is_promotion)
                 && !(job_suppress_valid && same_move(candidate_move, job_suppress_move))) begin
@@ -854,29 +868,39 @@ module move_generator_pipeline #(
                 history_wr_addr[color] = history_clear_addr;
             end
         end
-        if (!init_busy && history_update_state == HISTORY_UPDATE_READ) begin
+        if (!init_busy && history_update_state == HISTORY_UPDATE_READ && !update_read_blocked) begin
             history_rd_en[update_color] = 1'b1;
             history_rd_addr[update_color] = update_address;
-        end else if (!init_busy && generator_history_read) begin
+        end
+        if (!init_busy && generator_history_read) begin
             history_rd_en[job_board.turn] = 1'b1;
             history_rd_addr[job_board.turn] = generator_history_read_early
                 ? {source_move.from_pos, source_move.to_pos}
                 : {candidate_move.from_pos, candidate_move.to_pos};
         end
-        if (!init_busy && history_update_state == HISTORY_UPDATE_WRITE) begin
-            automatic logic [7:0] bonus;
+        if (!init_busy && history_update_state == HISTORY_UPDATE_WRITE && !update_write_blocked) begin
+            automatic logic [6:0] reward_magnitude;
+            automatic logic [6:0] magnitude;
+            automatic logic signed [7:0] signed_bonus;
             automatic logic signed [16:0] gravity_product;
             automatic logic signed [10:0] updated_history;
-            bonus = (update_depth >= 6'd16) ? 8'd63 : {update_depth, 2'b00};
+            reward_magnitude = (update_depth >= 6'd16) ? 7'd63 : {update_depth[4:0], 2'b00};
+            magnitude = update_is_malus ? (reward_magnitude >> 1) : reward_magnitude;
+            signed_bonus = update_is_malus
+                ? -$signed({1'b0, magnitude}) : $signed({1'b0, magnitude});
             // Gravity makes established history progressively harder to change:
-            // H' = H + B - H*|B|/256. Search currently supplies positive bonuses.
-            gravity_product = $signed(history_q[update_color]) * $signed({1'b0, bonus});
-            updated_history = $signed(history_q[update_color]) + $signed({1'b0, bonus})
+            // H' = H + B - H*|B|/256 for rewards and depth-scaled maluses.
+            gravity_product = $signed(update_history_value) * $signed({1'b0, magnitude});
+            updated_history = $signed(update_history_value) + signed_bonus
                 - (gravity_product >>> HISTORY_LIMIT_SHIFT);
             history_wr_en[update_color] = 1'b1;
             history_wr_addr[update_color] = update_address;
-            history_wr_data[update_color]
-                = updated_history > 11'sd255 ? 9'sd255 : updated_history[8:0];
+            if (updated_history > 11'sd255)
+                history_wr_data[update_color] = 9'sd255;
+            else if (updated_history < -11'sd256)
+                history_wr_data[update_color] = 9'sh100;
+            else
+                history_wr_data[update_color] = updated_history[8:0];
         end
     end
 
@@ -999,11 +1023,39 @@ module move_generator_pipeline #(
                             update_color <= history_update_color;
                             update_address <= {history_update_from, history_update_to};
                             update_depth <= history_update_depth;
+                            update_failed0 <= history_update_failed0;
+                            update_failed1 <= history_update_failed1;
+                            update_failed2 <= history_update_failed2;
+                            update_failed_count <= history_update_failed_count;
+                            update_entry <= 2'd0;
+                            update_is_malus <= 1'b0;
                             history_update_state <= HISTORY_UPDATE_READ;
                         end
                     end
-                    HISTORY_UPDATE_READ: history_update_state <= HISTORY_UPDATE_WRITE;
-                    default: history_update_state <= HISTORY_UPDATE_IDLE;
+                    HISTORY_UPDATE_READ: begin
+                        if (!update_read_blocked)
+                            history_update_state <= HISTORY_UPDATE_CAPTURE;
+                    end
+                    HISTORY_UPDATE_CAPTURE: begin
+                        update_history_value <= history_q[update_color];
+                        history_update_state <= HISTORY_UPDATE_WRITE;
+                    end
+                    default: begin
+                        if (!update_write_blocked) begin
+                            if (update_entry < update_failed_count) begin
+                                case (update_entry)
+                                    2'd0: update_address <= update_failed0;
+                                    2'd1: update_address <= update_failed1;
+                                    default: update_address <= update_failed2;
+                                endcase
+                                update_entry <= update_entry + 2'd1;
+                                update_is_malus <= 1'b1;
+                                history_update_state <= HISTORY_UPDATE_READ;
+                            end else begin
+                                history_update_state <= HISTORY_UPDATE_IDLE;
+                            end
+                        end
+                    end
                 endcase
             end
 
@@ -1105,13 +1157,11 @@ module move_generator_pipeline #(
                                             && same_move(source_move, job_suppress_move)) begin
                                         state <= remaining_mask == 16'd0
                                             ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
-                                    end else if (history_update_state != HISTORY_UPDATE_READ) begin
+                                    end else begin
                                         if (ENABLE_STATS)
                                             stat_history_lookup_count
                                                 <= stat_history_lookup_count + 40'd1;
                                         state <= GEN_HISTORY_WAIT;
-                                    end else begin
-                                        state <= GEN_SCORE;
                                     end
                                 end else begin
                                     state <= GEN_SCORE;
@@ -1153,7 +1203,7 @@ module move_generator_pipeline #(
                                 state <= candidate_last_source
                                     ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
                             end
-                        end else if (history_update_state != HISTORY_UPDATE_READ) begin
+                        end else begin
                             if (job_suppress_valid && same_move(candidate_move, job_suppress_move)) begin
                                 if (candidate_is_castle) begin
                                     if (castle_index) state <= GEN_FINISH;
@@ -1316,6 +1366,10 @@ module move_generator #(
     input Position history_update_from,
     input Position history_update_to,
     input logic [5:0] history_update_depth,
+    input logic [11:0] history_update_failed0,
+    input logic [11:0] history_update_failed1,
+    input logic [11:0] history_update_failed2,
+    input logic [1:0] history_update_failed_count,
 
     output logic overflow_sticky,
     output ThreadID overflow_thread,
@@ -1444,6 +1498,8 @@ module move_generator #(
         .pop_resp_new_top(noisy_pop_resp_new_top),
         .history_update_valid(1'b0), .history_update_ready(),
         .history_update_color, .history_update_from, .history_update_to, .history_update_depth,
+        .history_update_failed0, .history_update_failed1, .history_update_failed2,
+        .history_update_failed_count,
         .overflow_sticky(noisy_overflow_sticky), .overflow_thread(noisy_overflow_thread),
         .overflow_bucket(noisy_overflow_bucket), .overflow_count(noisy_overflow_count),
         .stat_noisy_count(noisy_stat_noisy_count), .stat_quiet_count(noisy_stat_quiet_count),
@@ -1485,6 +1541,8 @@ module move_generator #(
         .pop_resp_new_top(quiet_pop_resp_new_top),
         .history_update_valid, .history_update_ready(quiet_history_update_ready),
         .history_update_color, .history_update_from, .history_update_to, .history_update_depth,
+        .history_update_failed0, .history_update_failed1, .history_update_failed2,
+        .history_update_failed_count,
         .overflow_sticky(quiet_overflow_sticky), .overflow_thread(quiet_overflow_thread),
         .overflow_bucket(quiet_overflow_bucket), .overflow_count(quiet_overflow_count),
         .stat_noisy_count(quiet_stat_noisy_count), .stat_quiet_count(quiet_stat_quiet_count),

@@ -40,7 +40,9 @@ The pop frontend preserves global bucket priority and routes each request to the
 
 ## Ordering
 
-Quiet candidates issue a synchronous read from signed nine-bit `history[color][from][to]` RAM owned only by the quiet pipeline. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff produces bonus `B = min(63, remaining_depth * 4)` and applies the gravity update `H' = H + B - H * |B| / 256`, with the division implemented as a shift and the result limited to +255; no malus is applied. Update read-modify-write has priority over a same-bank candidate lookup, and controller-side one-entry records retain pending per-thread updates.
+Quiet candidates issue a synchronous read from signed nine-bit `history[color][from][to]` RAM owned only by the quiet pipeline. History is implemented as two 4096-word banks and cleared serially over 4096 cycles after reset or New Game. A quiet beta cutoff produces reward `B = min(63, remaining_depth * 4)` for the winner and half-magnitude depth-scaled maluses for the first three earlier quiets that definitively failed at that node. Each entry applies the signed gravity update `H' = H + B - H * |B| / 256`, with the division implemented as a shift and saturation to the signed nine-bit range.
+
+The updater accepts one combined winner-and-failures event, then performs its read-modify-writes over several background cycles. A same-color generator lookup always takes priority and leaves the update pending for retry, while the split color banks permit a generator lookup on one color concurrently with an update on the other. Controller-side one-entry records retain pending per-thread events, and search drops an event rather than waiting when its record is occupied.
 
 Captures use one shared bounded visible SEE calculation. The classifier compares the immediate attacker and victim, the least valuable visible enemy recapturer, and one visible friendly defender. Removed pieces do not reveal a second slider. En passant uses a pawn victim. The coarse piece values are pawn 1, minor 3, rook 5, queen 9, and king 15.
 

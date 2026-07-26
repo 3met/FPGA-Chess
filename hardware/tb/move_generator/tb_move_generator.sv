@@ -51,6 +51,10 @@ module tb_move_generator;
     Position history_update_from;
     Position history_update_to;
     logic [5:0] history_update_depth;
+    logic [11:0] history_update_failed0;
+    logic [11:0] history_update_failed1;
+    logic [11:0] history_update_failed2;
+    logic [1:0] history_update_failed_count;
     logic overflow_sticky;
     ThreadID overflow_thread;
     MoveBucketIndex overflow_bucket;
@@ -109,6 +113,8 @@ module tb_move_generator;
         .history_update_valid, .history_update_ready,
         .history_update_color, .history_update_from, .history_update_to,
         .history_update_depth,
+        .history_update_failed0, .history_update_failed1, .history_update_failed2,
+        .history_update_failed_count,
         .overflow_sticky, .overflow_thread, .overflow_bucket, .overflow_count,
         .stat_noisy_count, .stat_quiet_count, .stat_destination_count,
         .stat_candidate_count, .stat_history_lookup_count, .stat_generation_cycles,
@@ -206,6 +212,10 @@ module tb_move_generator;
         history_update_from = Position'(0);
         history_update_to = Position'(0);
         history_update_depth = 6'd0;
+        history_update_failed0 = 12'd0;
+        history_update_failed1 = 12'd0;
+        history_update_failed2 = 12'd0;
+        history_update_failed_count = 2'd0;
     endtask
 
     task automatic run_command(
@@ -293,10 +303,56 @@ module tb_move_generator;
         history_update_from = move.from_pos;
         history_update_to = move.to_pos;
         history_update_depth = depth;
+        history_update_failed_count = 2'd0;
         history_update_valid = 1'b1;
         tick();
         history_update_valid = 1'b0;
         while (!history_update_ready) tick();
+    endtask
+
+    task automatic history_update_with_failures(
+        input Move winner,
+        input Move failed0,
+        input Move failed1,
+        input Move failed2,
+        input logic [1:0] failed_count,
+        input logic [5:0] depth
+    );
+        while (!history_update_ready) tick();
+        history_update_color = WHITE;
+        history_update_from = winner.from_pos;
+        history_update_to = winner.to_pos;
+        history_update_depth = depth;
+        history_update_failed0 = {failed0.from_pos, failed0.to_pos};
+        history_update_failed1 = {failed1.from_pos, failed1.to_pos};
+        history_update_failed2 = {failed2.from_pos, failed2.to_pos};
+        history_update_failed_count = failed_count;
+        history_update_valid = 1'b1;
+        tick();
+        history_update_valid = 1'b0;
+        while (!history_update_ready) tick();
+    endtask
+
+    task automatic launch_history_update_with_failures(
+        input Move winner,
+        input Move failed0,
+        input Move failed1,
+        input Move failed2,
+        input logic [1:0] failed_count,
+        input logic [5:0] depth
+    );
+        while (!history_update_ready) tick();
+        history_update_color = WHITE;
+        history_update_from = winner.from_pos;
+        history_update_to = winner.to_pos;
+        history_update_depth = depth;
+        history_update_failed0 = {failed0.from_pos, failed0.to_pos};
+        history_update_failed1 = {failed1.from_pos, failed1.to_pos};
+        history_update_failed2 = {failed2.from_pos, failed2.to_pos};
+        history_update_failed_count = failed_count;
+        history_update_valid = 1'b1;
+        tick();
+        history_update_valid = 1'b0;
     endtask
 
     initial begin
@@ -306,6 +362,7 @@ module tb_move_generator;
         automatic MoveBucketTops parent_tops;
         automatic MoveBucketTops child_tops;
         automatic logic [39:0] generation_cycles_before;
+        automatic logic [39:0] baseline_quiet_generation_cycles;
         automatic logic [39:0] destination_count_before;
         automatic MoveBucketTops lower;
         automatic logic direct_valid;
@@ -313,6 +370,9 @@ module tb_move_generator;
         automatic int count;
         automatic logic [16383:0] seen;
         automatic Move target;
+        automatic Move failed0;
+        automatic Move failed1;
+        automatic Move failed2;
         automatic logic found;
         automatic Move popped;
         automatic MoveBucketIndex popped_bucket;
@@ -403,10 +463,26 @@ module tb_move_generator;
         generation_cycles_before = stat_generation_cycles;
         run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
             tops, direct_valid, direct_move, tops);
+        baseline_quiet_generation_cycles = stat_generation_cycles - generation_cycles_before;
         $display("Start-position quiet generation cycles: %0d",
-            stat_generation_cycles - generation_cycles_before);
+            baseline_quiet_generation_cycles);
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
         check(count == 20, $sformatf("start position has 20 moves, found %0d", count));
+        launch_history_update_with_failures(
+            make_move(Position'(63), Position'(63)),
+            make_move(Position'(62), Position'(62)),
+            make_move(Position'(61), Position'(61)),
+            make_move(Position'(60), Position'(60)),
+            2'd3,
+            6'd4
+        );
+        tops = '0;
+        generation_cycles_before = stat_generation_cycles;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        check(stat_generation_cycles - generation_cycles_before == baseline_quiet_generation_cycles,
+            "background history maintenance adds no quiet-generation cycles");
+        while (!history_update_ready) tick();
 
         empty_board(board);
         board.tiles[4] = WHITE_KING;
@@ -473,6 +549,19 @@ module tb_move_generator;
                 {target.from_pos, target.to_pos}])
                 == 9'sd238,
             "history gravity reduces bonuses as history approaches its limit");
+        failed0 = make_move(Position'(1), Position'(16));
+        failed1 = make_move(Position'(1), Position'(11));
+        failed2 = make_move(Position'(4), Position'(5));
+        history_update_with_failures(target, failed0, failed1, failed2, 2'd3, 6'd4);
+        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+                {failed0.from_pos, failed0.to_pos}]) == -9'sd8,
+            "failed quiet zero history receives half-strength malus");
+        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+                {failed1.from_pos, failed1.to_pos}]) == -9'sd8,
+            "second failed quiet receives a malus");
+        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+                {failed2.from_pos, failed2.to_pos}]) == -9'sd8,
+            "third failed quiet receives a malus");
 
         // Pins are deliberately left to board update: the sideways rook move
         // must remain in the pseudo-legal stream even though it exposes e1.

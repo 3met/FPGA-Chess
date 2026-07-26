@@ -36,6 +36,8 @@ Each search thread owns a current board, Zobrist key, incremental evaluation sta
 
 Each node records its actual remaining depth. That value controls main-search versus quiescence behavior, late-move reductions, and TT depth; it is not inferred from ply.
 
+Each packed node record also retains the first three ordinary quiet moves that were searched completely without cutting off. The count is cleared when a node is entered, while the stale move-address fields need not be cleared. A quiet is appended only after all PVS or LMR re-searches for that logical move are complete; qsearch, illegal moves, captures, promotions, and unsearched moves are excluded.
+
 The primary thread owns the reported principal variation, score, and completed depth. Helper threads cooperate through the shared TT and never overwrite the primary result directly.
 
 ## Shared-Pipeline Scheduling
@@ -69,6 +71,8 @@ At a search node, the controller:
 Move generation produces pseudo-legal candidates. The controller speculatively applies each candidate through board update and rejects it if the moving side remains in check. A rejected candidate does not alter thread state or increment the search node count.
 
 A legal child is written to repetition line history before TT lookup, evaluation, or deeper search. On return, the controller reverses the move and folds the child score into the saved parent. A real legal child increments the search node count even if repetition or a TT cutoff resolves it without deeper evaluation.
+
+When a searched quiet move causes a beta cutoff, the controller snapshots the winner, the node's retained failed quiets, color, and depth into the existing per-thread best-effort history-update slot. Search never waits for that slot or for history RAM maintenance; an event is dropped if the thread's slot is still occupied.
 
 Quiescence search uses captures and promotions and omits quiet generation and direct TT move ordering. Perft uses the same legality and board-update paths but counts fixed-depth leaves instead of evaluating positions.
 
