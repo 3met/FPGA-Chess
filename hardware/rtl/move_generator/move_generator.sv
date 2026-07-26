@@ -162,9 +162,10 @@ module move_generator_pipeline #(
     logic candidate_is_promotion;
     logic candidate_is_castle;
     logic candidate_is_knight;
-    logic candidate_last_source;
     Direction candidate_lane;
     logic [1:0] candidate_promo_counter;
+    logic candidate_valid;
+    logic candidate_slot_ready;
 
     logic source_valid;
     Move source_move;
@@ -216,8 +217,12 @@ module move_generator_pipeline #(
     logic signed [HISTORY_BITS-1:0] update_history_value;
     logic generator_history_read;
     logic generator_history_read_early;
+    logic generator_history_read_castle;
     logic update_read_blocked;
     logic update_write_blocked;
+    Move castle_candidate_move;
+    logic castle_candidate_pseudo_legal;
+    logic castle_candidate_suppressed;
 
     function automatic Position first_destination(input logic [63:0] mask);
         for (int pos = 0; pos < 64; pos++)
@@ -616,6 +621,16 @@ module move_generator_pipeline #(
             && left.promo_piece == right.promo_piece;
     endfunction
 
+    function automatic logic kingside_castle_permitted(input FullBoard board);
+        return board.turn == WHITE
+            ? board.castle_perms.white_kingside : board.castle_perms.black_kingside;
+    endfunction
+
+    function automatic logic queenside_castle_permitted(input FullBoard board);
+        return board.turn == WHITE
+            ? board.castle_perms.white_queenside : board.castle_perms.black_queenside;
+    endfunction
+
     function automatic logic [3:0] first_source(input logic [15:0] mask);
         for (int index = 0; index < 16; index++)
             if (mask[index]) return 4'(index);
@@ -692,6 +707,20 @@ module move_generator_pipeline #(
     endfunction
 
     always_comb source_select_index = first_source(source_mask);
+
+    // Castling uses the same pending writeback stage as ordinary quiet moves.
+    always_comb begin
+        castle_candidate_move.from_pos =
+            job_board.turn == WHITE ? Position'(4) : Position'(60);
+        castle_candidate_move.to_pos = job_board.turn == WHITE
+            ? (castle_index ? Position'(2) : Position'(6))
+            : (castle_index ? Position'(58) : Position'(62));
+        castle_candidate_move.promo_piece = PROMO_QUEEN;
+        castle_candidate_pseudo_legal = state == GEN_CASTLE && candidate_slot_ready
+            && castle_pseudo_legal(job_board, castle_candidate_move);
+        castle_candidate_suppressed = job_suppress_valid
+            && same_move(castle_candidate_move, job_suppress_move);
+    end
 
     // Expand one of the active context's eight ray or eight knight sources.
     always_comb begin
@@ -799,6 +828,10 @@ module move_generator_pipeline #(
     end
 
     assign path_ready = state == GEN_IDLE && !init_busy;
+    // A normal candidate is consumed every cycle; promotion variants retain
+    // the slot until all four encodings have been written.
+    assign candidate_slot_ready = !candidate_valid
+        || !(candidate_is_promotion && candidate_promo_counter != 2'd0);
     assign cmd_ready = path_ready
         && (cmd == GENERATION_COMMAND
             || (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
@@ -829,23 +862,23 @@ module move_generator_pipeline #(
             bucket_rd_en[pop_select_bucket] = 1'b1;
 
         generator_history_read_early = state == GEN_EXPAND_SOURCE
+            && candidate_slot_ready
             && source_mask != 16'd0 && source_valid
             && !source_is_capture && !source_is_promotion
             && !(job_suppress_valid && same_move(source_move, job_suppress_move));
-        generator_history_read = generator_history_read_early
-            || (state == GEN_SCORE
-                && !candidate_is_capture && !candidate_is_promotion
-                && !(job_suppress_valid && same_move(candidate_move, job_suppress_move)));
+        generator_history_read_castle = castle_candidate_pseudo_legal
+            && !castle_candidate_suppressed;
+        generator_history_read =
+            generator_history_read_early || generator_history_read_castle;
         update_read_blocked = generator_history_read && job_board.turn == update_color;
         update_write_blocked = generator_history_read && job_board.turn == update_color;
 
-        if (state == GEN_SCORE && (candidate_is_capture || candidate_is_promotion)
-                && !(job_suppress_valid && same_move(candidate_move, job_suppress_move))) begin
+        if (candidate_valid && (candidate_is_capture || candidate_is_promotion)) begin
             bucket_wr_select = noisy_bucket();
             bucket_wr_top = job_tops[bucket_wr_select];
             if (job_tops[bucket_wr_select] < MoveBucketTop'(bucket_capacity(bucket_wr_select)))
                 bucket_wr_en[bucket_wr_select] = 1'b1;
-        end else if (state == GEN_HISTORY_WAIT) begin
+        end else if (candidate_valid) begin
             automatic logic signed [10:0] score;
             score = $signed(history_q[job_board.turn]);
             if (candidate_is_castle) score += 11'sd16;
@@ -874,9 +907,9 @@ module move_generator_pipeline #(
         end
         if (!init_busy && generator_history_read) begin
             history_rd_en[job_board.turn] = 1'b1;
-            history_rd_addr[job_board.turn] = generator_history_read_early
-                ? {source_move.from_pos, source_move.to_pos}
-                : {candidate_move.from_pos, candidate_move.to_pos};
+            history_rd_addr[job_board.turn] = generator_history_read_castle
+                ? {castle_candidate_move.from_pos, castle_candidate_move.to_pos}
+                : {source_move.from_pos, source_move.to_pos};
         end
         if (!init_busy && history_update_state == HISTORY_UPDATE_WRITE && !update_write_blocked) begin
             automatic logic [6:0] reward_magnitude;
@@ -971,6 +1004,7 @@ module move_generator_pipeline #(
             history_clear_addr <= 12'd0;
             history_update_state <= HISTORY_UPDATE_IDLE;
             pop_pending <= 1'b0;
+            candidate_valid <= 1'b0;
             cmd_resp_valid <= 1'b0;
             cmd_resp_thread <= ThreadID'(0);
             cmd_resp_ply <= PlyIndex'(0);
@@ -1062,9 +1096,49 @@ module move_generator_pipeline #(
             if (flush) begin
                 state <= GEN_IDLE;
                 pop_pending <= 1'b0;
+                candidate_valid <= 1'b0;
             end else begin
                 if (state != GEN_IDLE && ENABLE_STATS)
                     stat_generation_cycles <= stat_generation_cycles + 40'd1;
+
+                // Candidate writeback runs independently of destination/source
+                // walking, permitting one ordinary candidate to complete while
+                // the next candidate or destination is prepared.
+                if (candidate_valid) begin
+                    automatic MoveBucketIndex selected = bucket_wr_select;
+                    if (job_tops[selected] < MoveBucketTop'(bucket_capacity(selected))) begin
+                        job_tops[selected] <= job_tops[selected] + MoveBucketTop'(1);
+                        if (ENABLE_STATS) begin
+                            stat_bucket_count[selected] <= stat_bucket_count[selected] + 40'd1;
+                            if (candidate_is_capture || candidate_is_promotion)
+                                stat_noisy_count <= stat_noisy_count + 40'd1;
+                            else
+                                stat_quiet_count <= stat_quiet_count + 40'd1;
+                            if (job_tops[selected] + MoveBucketTop'(1)
+                                    > stat_bucket_high_water[selected])
+                                stat_bucket_high_water[selected]
+                                    <= job_tops[selected] + MoveBucketTop'(1);
+                        end
+                    end else begin
+                        overflow_sticky <= 1'b1;
+                        overflow_thread <= job_thread;
+                        overflow_bucket <= selected;
+                        if (overflow_count != 16'hffff)
+                            overflow_count <= overflow_count + 16'd1;
+`ifndef SYNTHESIS
+                        if (ASSERT_ON_OVERFLOW)
+                            $error("move bucket overflow bucket=%0d thread=%0d",
+                                selected, job_thread);
+`endif
+                    end
+                    if (candidate_is_promotion && candidate_promo_counter != 2'd0) begin
+                        candidate_promo_counter <= candidate_promo_counter - 2'd1;
+                        candidate_move.promo_piece
+                            <= PromoType'(candidate_promo_counter - 2'd1);
+                    end else begin
+                        candidate_valid <= 1'b0;
+                    end
+                end
                 case (state)
                     GEN_IDLE: begin
                         if (cmd_valid && cmd_ready) begin
@@ -1074,6 +1148,7 @@ module move_generator_pipeline #(
                             job_suppress_valid <= cmd_suppress_valid;
                             job_suppress_move <= cmd_suppress_move;
                             job_tops <= cmd_bucket_tops;
+                            candidate_valid <= 1'b0;
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
                                     && cmd == MOVE_GEN_VALIDATE_DIRECT) begin
                                 state <= GEN_DIRECT;
@@ -1121,16 +1196,31 @@ module move_generator_pipeline #(
                                 source_mask <= next_source_mask;
                                 state <= GEN_EXPAND_SOURCE;
                             end
-                        end else if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET) begin
-                            castle_index <= 1'b0;
-                            state <= GEN_CASTLE;
-                        end else begin
-                            state <= GEN_FINISH;
+                        end else if (!candidate_valid) begin
+                            if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
+                                    && (kingside_castle_permitted(job_board)
+                                        || queenside_castle_permitted(job_board))) begin
+                                // Skip a denied kingside attempt and avoid the
+                                // castle sequencer entirely once both rights
+                                // have been lost.
+                                castle_index <= !kingside_castle_permitted(job_board);
+                                state <= GEN_CASTLE;
+                            end else begin
+                                cmd_resp_valid <= 1'b1;
+                                cmd_resp_thread <= job_thread;
+                                cmd_resp_ply <= job_ply;
+                                cmd_resp_direct_valid <= 1'b0;
+                                cmd_resp_direct_move <= NULL_MOVE;
+                                cmd_resp_bucket_tops <= job_tops;
+                                state <= GEN_IDLE;
+                            end
                         end
                     end
 
                     GEN_EXPAND_SOURCE: begin
-                        if (source_mask == 16'd0) begin
+                        if (!candidate_slot_ready) begin
+                            state <= GEN_EXPAND_SOURCE;
+                        end else if (source_mask == 16'd0) begin
                             state <= GEN_SELECT_DEST;
                         end else begin
                             automatic logic [15:0] remaining_mask =
@@ -1145,27 +1235,24 @@ module move_generator_pipeline #(
                                 candidate_is_promotion <= source_is_promotion;
                                 candidate_is_castle <= 1'b0;
                                 candidate_is_knight <= source_is_knight;
-                                candidate_last_source <= remaining_mask == 16'd0;
                                 candidate_lane <= source_lane;
                                 candidate_promo_counter <= source_is_promotion ? 2'd3 : 2'd0;
                                 if (source_is_promotion)
                                     candidate_move.promo_piece <= PROMO_BISHOP;
                                 if (ENABLE_STATS)
                                     stat_candidate_count <= stat_candidate_count + 40'd1;
-                                if (!source_is_capture && !source_is_promotion) begin
-                                    if (job_suppress_valid
-                                            && same_move(source_move, job_suppress_move)) begin
-                                        state <= remaining_mask == 16'd0
-                                            ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
-                                    end else begin
-                                        if (ENABLE_STATS)
-                                            stat_history_lookup_count
-                                                <= stat_history_lookup_count + 40'd1;
-                                        state <= GEN_HISTORY_WAIT;
-                                    end
+                                if (job_suppress_valid
+                                        && same_move(source_move, job_suppress_move)) begin
+                                    candidate_valid <= 1'b0;
                                 end else begin
-                                    state <= GEN_SCORE;
+                                    candidate_valid <= 1'b1;
+                                    if (!source_is_capture && !source_is_promotion
+                                            && ENABLE_STATS)
+                                        stat_history_lookup_count
+                                            <= stat_history_lookup_count + 40'd1;
                                 end
+                                state <= remaining_mask == 16'd0
+                                    ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
                             end else begin
                                 state <= remaining_mask == 16'd0
                                     ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
@@ -1174,93 +1261,22 @@ module move_generator_pipeline #(
                     end
 
                     GEN_SCORE: begin
-                        if (candidate_is_capture || candidate_is_promotion) begin
-                            if (!(job_suppress_valid && same_move(candidate_move, job_suppress_move))) begin
-                                automatic MoveBucketIndex selected = noisy_bucket();
-                                if (job_tops[selected] < MoveBucketTop'(bucket_capacity(selected))) begin
-                                    job_tops[selected] <= job_tops[selected] + MoveBucketTop'(1);
-                                    if (ENABLE_STATS) begin
-                                        stat_bucket_count[selected] <= stat_bucket_count[selected] + 40'd1;
-                                        stat_noisy_count <= stat_noisy_count + 40'd1;
-                                        if (job_tops[selected] + MoveBucketTop'(1) > stat_bucket_high_water[selected])
-                                            stat_bucket_high_water[selected] <= job_tops[selected] + MoveBucketTop'(1);
-                                    end
-                                end else begin
-                                    overflow_sticky <= 1'b1;
-                                    overflow_thread <= job_thread;
-                                    overflow_bucket <= selected;
-                                    if (overflow_count != 16'hffff) overflow_count <= overflow_count + 16'd1;
-`ifndef SYNTHESIS
-                                    if (ASSERT_ON_OVERFLOW)
-                                        $error("move bucket overflow bucket=%0d thread=%0d", selected, job_thread);
-`endif
-                                end
-                            end
-                            if (candidate_is_promotion && candidate_promo_counter != 2'd0) begin
-                                candidate_promo_counter <= candidate_promo_counter - 2'd1;
-                                candidate_move.promo_piece <= PromoType'(candidate_promo_counter - 2'd1);
-                            end else begin
-                                state <= candidate_last_source
-                                    ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
-                            end
-                        end else begin
-                            if (job_suppress_valid && same_move(candidate_move, job_suppress_move)) begin
-                                if (candidate_is_castle) begin
-                                    if (castle_index) state <= GEN_FINISH;
-                                    else begin castle_index <= 1'b1; state <= GEN_CASTLE; end
-                                end else begin
-                                    state <= candidate_last_source
-                                        ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
-                                end
-                            end else begin
-                                if (ENABLE_STATS) stat_history_lookup_count <= stat_history_lookup_count + 40'd1;
-                                state <= GEN_HISTORY_WAIT;
-                            end
-                        end
+                        // Retained encoding for stable profiling; new commands
+                        // never enter this state.
+                        state <= GEN_SELECT_DEST;
                     end
 
                     GEN_HISTORY_WAIT: begin
-                        automatic logic signed [10:0] score;
-                        automatic MoveBucketIndex selected;
-                        score = $signed(history_q[job_board.turn]);
-                        if (candidate_is_castle) score += 11'sd16;
-                        selected = quiet_bucket(score);
-                        if (job_tops[selected] < MoveBucketTop'(bucket_capacity(selected))) begin
-                            job_tops[selected] <= job_tops[selected] + MoveBucketTop'(1);
-                            if (ENABLE_STATS) begin
-                                stat_bucket_count[selected] <= stat_bucket_count[selected] + 40'd1;
-                                stat_quiet_count <= stat_quiet_count + 40'd1;
-                                if (job_tops[selected] + MoveBucketTop'(1) > stat_bucket_high_water[selected])
-                                    stat_bucket_high_water[selected] <= job_tops[selected] + MoveBucketTop'(1);
-                            end
-                        end else begin
-                            overflow_sticky <= 1'b1;
-                            overflow_thread <= job_thread;
-                            overflow_bucket <= selected;
-                            if (overflow_count != 16'hffff) overflow_count <= overflow_count + 16'd1;
-`ifndef SYNTHESIS
-                            if (ASSERT_ON_OVERFLOW)
-                                $error("move bucket overflow bucket=%0d thread=%0d", selected, job_thread);
-`endif
-                        end
-                        if (candidate_is_castle) begin
-                            if (castle_index) state <= GEN_FINISH;
-                            else begin castle_index <= 1'b1; state <= GEN_CASTLE; end
-                        end else begin
-                            state <= candidate_last_source
-                                ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
-                        end
+                        // Retained encoding for stable profiling; new commands
+                        // never enter this state.
+                        state <= GEN_SELECT_DEST;
                     end
 
                     GEN_CASTLE: begin
-                        automatic Move castle_move;
-                        castle_move.from_pos = job_board.turn == WHITE ? Position'(4) : Position'(60);
-                        castle_move.to_pos = job_board.turn == WHITE
-                            ? (castle_index ? Position'(2) : Position'(6))
-                            : (castle_index ? Position'(58) : Position'(62));
-                        castle_move.promo_piece = PROMO_QUEEN;
-                        if (castle_pseudo_legal(job_board, castle_move)) begin
-                            candidate_move <= castle_move;
+                        if (!candidate_slot_ready) begin
+                            state <= GEN_CASTLE;
+                        end else if (castle_candidate_pseudo_legal) begin
+                            candidate_move <= castle_candidate_move;
                             candidate_attacker <= Tile'({job_board.turn, KING});
                             candidate_victim <= EMPTY_TILE;
                             candidate_is_capture <= 1'b0;
@@ -1268,26 +1284,52 @@ module move_generator_pipeline #(
                             candidate_is_promotion <= 1'b0;
                             candidate_is_castle <= 1'b1;
                             candidate_is_knight <= 1'b0;
-                            candidate_last_source <= 1'b1;
                             candidate_lane <= Direction'(0);
                             if (ENABLE_STATS) stat_candidate_count <= stat_candidate_count + 40'd1;
-                            state <= GEN_SCORE;
-                        end else if (castle_index) begin
+                            if (castle_candidate_suppressed) begin
+                                candidate_valid <= 1'b0;
+                            end else begin
+                                candidate_valid <= 1'b1;
+                                if (ENABLE_STATS)
+                                    stat_history_lookup_count
+                                        <= stat_history_lookup_count + 40'd1;
+                            end
+                            if (!castle_index && queenside_castle_permitted(job_board)) begin
+                                castle_index <= 1'b1;
+                            end else begin
+                                state <= GEN_FINISH;
+                            end
+                        end else if (!castle_index
+                                && queenside_castle_permitted(job_board)) begin
+                            castle_index <= 1'b1;
+                        end else if (candidate_valid) begin
+                            // The previous castle writes on this edge, so its
+                            // incremented top must be observed before response.
                             state <= GEN_FINISH;
                         end else begin
-                            castle_index <= 1'b1;
+                            cmd_resp_valid <= 1'b1;
+                            cmd_resp_thread <= job_thread;
+                            cmd_resp_ply <= job_ply;
+                            cmd_resp_direct_valid <= 1'b0;
+                            cmd_resp_direct_move <= NULL_MOVE;
+                            cmd_resp_bucket_tops <= job_tops;
+                            state <= GEN_IDLE;
                         end
                     end
 
-                    default: begin
-                        cmd_resp_valid <= 1'b1;
-                        cmd_resp_thread <= job_thread;
-                        cmd_resp_ply <= job_ply;
-                        cmd_resp_direct_valid <= 1'b0;
-                        cmd_resp_direct_move <= NULL_MOVE;
-                        cmd_resp_bucket_tops <= job_tops;
-                        state <= GEN_IDLE;
+                    GEN_FINISH: begin
+                        if (!candidate_valid) begin
+                            cmd_resp_valid <= 1'b1;
+                            cmd_resp_thread <= job_thread;
+                            cmd_resp_ply <= job_ply;
+                            cmd_resp_direct_valid <= 1'b0;
+                            cmd_resp_direct_move <= NULL_MOVE;
+                            cmd_resp_bucket_tops <= job_tops;
+                            state <= GEN_IDLE;
+                        end
                     end
+
+                    default: state <= GEN_IDLE;
                 endcase
             end
         end
