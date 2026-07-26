@@ -161,7 +161,6 @@ class ReportTests(unittest.TestCase):
             "error": 0,
         }
         report = build_profile_report(configuration, sample_metrics(), result_values, 0.5)
-        self.assertEqual(report["schema_version"], 1)
         self.assertEqual(report["timing"]["cycles_per_node"], 2)
         self.assertEqual(report["timing"]["simulated_search_seconds"], 0.1)
         self.assertEqual(report["timing"]["search_cycles_per_wall_second"], 20)

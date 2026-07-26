@@ -231,7 +231,6 @@ class TuningModelAndExportTests(unittest.TestCase):
             torch.save({"model": model.state_dict(), "step": 12}, run / "best.pt")
             parameters, source = load_run_parameters(run)
             self.assertEqual(source, "best checkpoint")
-            self.assertEqual(parameters["schema"], 2)
             self.assertEqual(parameters["best_step"], 12)
             self.assertEqual(parameters["material"]["pawn"], 100.0)
 

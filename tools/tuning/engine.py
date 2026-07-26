@@ -107,7 +107,6 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
     state = checkpoint["model"]
     if "terms.material_pst" in state:
         return {
-            "schema": 1,
             "units": "centipawns",
             "piece_order": list(PIECE_ORDER),
             "combined_pst": state["terms.material_pst"].reshape(6, 64).tolist(),
@@ -119,7 +118,6 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
     material = model.material_cp().detach().cpu()
     pst = model.pst_cp().detach().cpu()
     return {
-        "schema": 2,
         "units": "centipawns",
         "piece_order": list(PIECE_ORDER),
         "material": {piece: float(material[index]) for index, piece in enumerate(PIECE_ORDER)},

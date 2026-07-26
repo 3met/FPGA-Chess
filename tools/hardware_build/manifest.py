@@ -35,8 +35,6 @@ def require_fields(item: dict, context: str, fields: set[str]) -> None:
 def validate_manifest(manifest: object) -> None:
     if not isinstance(manifest, dict):
         raise BuildError("Manifest root must be an object")
-    if manifest.get("schema_version") != 1:
-        raise BuildError("Manifest schema_version must be 1")
 
     source_sets = manifest_object(manifest, "source_sets")
     tests = manifest_object(manifest, "tests")

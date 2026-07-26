@@ -22,7 +22,7 @@ The default is the normal starting position searched for 50 ms of simulated engi
 
 ## Artifacts
 
-Each run writes `report.txt`, schema-versioned `report.json`, `metrics.tsv`, the encoded `board.hex`, and simulator logs under `work/build/profile/<timestamp>/` by default. `--event-trace` adds `events.jsonl`, and `--waveform` retains `wave.fst` under Verilator or `wave.wlf` under ModelSim; both can become large and are disabled by default.
+Each run writes `report.txt`, `report.json`, `metrics.tsv`, the encoded `board.hex`, and simulator logs under `work/build/profile/<timestamp>/` by default. `--event-trace` adds `events.jsonl`, and `--waveform` retains `wave.fst` under Verilator or `wave.wlf` under ModelSim; both can become large and are disabled by default.
 
 Verilator builds an `-O3` and link-time-optimized native executable cached by RTL contents, hardware generics, execution-thread count, waveform setting, and Verilator installation. Compilation uses all available host cores, while execution defaults to one thread: this engine's tightly coupled clock domains do not partition effectively, and an eight-thread test was slower than one thread. `--simulator-threads` permits experimentation on another host or hardware configuration. ModelSim signal logging is disabled unless requested, and `--waveform` will run either backend more slowly.
 

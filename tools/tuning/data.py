@@ -287,7 +287,6 @@ def build_cache(config: dict, print_fn=print) -> Path:
         raise ValueError(f"only {accepted} positions passed filters; need more than {validation_size}")
     temporary.replace(cache / DATA_NAME)
     metadata = {
-        "schema": 1,
         "record_size": RECORD.size,
         "train_count": train_count,
         "validation_count": len(reservoir),

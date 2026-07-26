@@ -319,7 +319,6 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
             best_pst = best_model.pst_cp().detach().cpu()
             best_weights = best_model.combined_cp().detach().cpu()
             parameters = {
-                "schema": 2,
                 "units": "centipawns",
                 "piece_order": list(PIECE_ORDER),
                 "material": {

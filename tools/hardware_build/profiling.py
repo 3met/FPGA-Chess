@@ -149,7 +149,7 @@ def build_profile_report(
     result_values: dict[str, int],
     simulator_seconds: float,
 ) -> dict:
-    """Build the stable JSON schema and all derived measurements."""
+    """Build the stable JSON and all derived measurements."""
     search_cycles = metrics["cycles.search"]
     nodes = result_values["nodes"]
     simulated_seconds = search_cycles / configuration["engine_clock_hz"]
@@ -338,7 +338,6 @@ def build_profile_report(
         )
 
     return {
-        "schema_version": 1,
         "configuration": configuration,
         "result": {
             "best_move": move_to_uci(

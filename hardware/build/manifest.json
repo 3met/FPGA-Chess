@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "simulator": {
     "modelsim": {
       "vlog_args": ["-sv"],

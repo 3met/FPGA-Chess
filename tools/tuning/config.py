@@ -117,7 +117,6 @@ def cache_key(config: dict[str, Any]) -> str:
         "validation_size": config["training"]["validation_size"],
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
-        "schema": 1,
     }
     raw = json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()[:16]
