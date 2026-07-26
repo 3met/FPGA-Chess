@@ -73,7 +73,7 @@ module board_update_pipeline #(
     MoveRecordAddr move_record_rd_addr, move_record_wr_addr;
     logic move_record_rd_en, move_record_wr_en;
 
-    simple_dual_port_ram #(
+    async_read_simple_dual_port_ram #(
         .NUM_WORDS(MOVE_RECORD_COUNT),
         .WORD_SIZE($bits(MoveRecord))
     ) move_hist_mem (
@@ -115,7 +115,7 @@ module board_update_pipeline #(
     genvar port_pair;
     generate
         for (port_pair = 0; port_pair < ZOBRIST_TILE_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_zobrist_rom
-            synchronous_dual_port_rom #(
+            sync_read_dual_port_rom #(
                 .NUM_WORDS(ZOBRIST_ENTRY_CNT),
                 .WORD_SIZE($bits(ZobristKey)),
                 .MEM_INIT_FILE(ZOBRIST_MEM_INIT_FILE)
@@ -134,7 +134,7 @@ module board_update_pipeline #(
     // Side-state hashing needs only the old and new en-passant file values.
     // Turn and castling keys are fixed constants, so keeping them out of the
     // replicated piece ROMs halves the piece-table read-port requirement.
-    synchronous_dual_port_rom #(
+    sync_read_dual_port_rom #(
         .NUM_WORDS(ZOBRIST_ENTRY_CNT),
         .WORD_SIZE($bits(ZobristKey)),
         .MEM_INIT_FILE(ZOBRIST_MEM_INIT_FILE)
@@ -150,7 +150,7 @@ module board_update_pipeline #(
 
     generate
         for (port_pair = 0; port_pair < PST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_pst_rom
-            synchronous_dual_port_rom #(
+            sync_read_dual_port_rom #(
                 .NUM_WORDS(PST_ENTRY_COUNT),
                 .WORD_SIZE($bits(PstScore)),
                 .MEM_INIT_FILE(PST_MEM_INIT_FILE)

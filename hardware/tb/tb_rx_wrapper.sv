@@ -16,7 +16,6 @@ module tb_rx_decode;
     logic mark_read = 1'b0;
     logic [7:0] rx_stream;
     logic rx_stream_valid;
-    logic kill;
     logic remote_reset;
     logic error;
     logic remote_reset_seen;
@@ -49,7 +48,6 @@ module tb_rx_decode;
         .mark_read(mark_read),
         .rx_stream(rx_stream),
         .rx_stream_valid(rx_stream_valid),
-        .kill(kill),
         .remote_reset(remote_reset),
         .error(error)
     );
@@ -118,7 +116,6 @@ module tb_rx_decode;
     initial begin
         reset_dut();
         check(!rx_stream_valid, "RX FIFO empty after reset");
-        check(!kill, "kill reserved low");
 
         send_uart_byte(8'h10);
         send_uart_byte(8'h1f);

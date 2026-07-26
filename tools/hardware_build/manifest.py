@@ -6,7 +6,7 @@ import math
 import re
 from pathlib import Path
 
-from .common import BuildError, MANIFEST_PATH, REPO_ROOT, rel, repo_path
+from .common import BuildError, MANIFEST_PATH, rel, repo_path
 
 
 def load_manifest() -> dict:
@@ -17,10 +17,6 @@ def load_manifest() -> dict:
         raise BuildError(f"Could not load {rel(MANIFEST_PATH)}: {exc}") from exc
     validate_manifest(manifest)
     return manifest
-
-
-def repo_path(value: str) -> Path:
-    return (REPO_ROOT / value).resolve()
 
 
 def manifest_object(manifest: dict, key: str) -> dict:

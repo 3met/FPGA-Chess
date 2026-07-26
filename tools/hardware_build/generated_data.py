@@ -61,15 +61,24 @@ def command_check(args: argparse.Namespace) -> int:
     if command_gen_data(argparse.Namespace(update=False)) != 0:
         return 1
 
+    suites = [
+        ("Host software", "tests/software"),
+        ("Benchmarks", "tests/benchmarks"),
+        ("Hardware build", "tests/hardware_build"),
+    ]
+    if args.tuning:
+        suites.append(("Evaluation tuning", "tests/tuning"))
+
     print("\n== Python tests ==")
-    cmd = [sys.executable, "-m", "unittest", "discover", "-s", "software", "-p", "test_*.py"]
-    code, output, elapsed = run_command(cmd, REPO_ROOT)
-    if output.strip():
-        print(output.rstrip())
-    print(f"[{'PASS' if code == 0 else 'FAIL'}] Python tests ({elapsed:.2f}s)")
-    if code != 0:
-        print_failure_excerpt(output)
-        return 1
+    for label, directory in suites:
+        cmd = [sys.executable, "-m", "unittest", "discover", "-s", directory, "-p", "test_*.py"]
+        code, output, elapsed = run_command(cmd, REPO_ROOT)
+        if output.strip():
+            print(output.rstrip())
+        print(f"[{'PASS' if code == 0 else 'FAIL'}] {label} tests ({elapsed:.2f}s)")
+        if code != 0:
+            print_failure_excerpt(output)
+            return 1
 
     print("\n== RTL tests ==")
     return command_test(argparse.Namespace(names=None, jobs=args.jobs, timeout=args.timeout))

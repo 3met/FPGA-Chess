@@ -75,7 +75,7 @@ Perft is a supported hardware command in the engine/controller protocol and is e
 
 Ack responses for Set Board, Make Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
 
-UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads. In the current board wrapper, BREAK clears the RX FIFO and resets the engine-side command, search-controller, and TX path state.
+UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads. BREAK clears the RX FIFO and resets the engine-side command, search-controller, and TX path state.
 
 ## Responses
 

@@ -50,7 +50,6 @@ module tb_engine_profile #(
 
     logic [7:0] data_in;
     logic data_in_valid;
-    logic kill;
     logic ready_for_result;
     logic error_flag;
     logic ready;
@@ -93,7 +92,7 @@ module tb_engine_profile #(
         .ENABLE_SEARCH_STATS(1'b1)
     ) dut (
         .clk(engine_clk), .rst_n(engine_rst_n),
-        .data_in, .data_in_valid, .kill, .ready_for_result,
+        .data_in, .data_in_valid, .ready_for_result,
         .error_flag, .ready, .data_out, .data_out_valid,
         .tt_memory_ready, .tt_memory_error,
         .tt_mem_req_valid, .tt_mem_req_ready, .tt_mem_req_write,
@@ -784,7 +783,6 @@ module tb_engine_profile #(
     initial begin
         data_in = '0;
         data_in_valid = 1'b0;
-        kill = 1'b0;
         ready_for_result = 1'b1;
         profile_active = 1'b0;
         drain_active = 1'b0;

@@ -88,24 +88,38 @@ module tb_tt_external_load_store;
             $error("[FAIL] %s", label);
         end
     endtask
-    task automatic do_store(input ZobristKey key);
+    task automatic do_store(
+        input ZobristKey key,
+        input TTDepth depth = TTDepth'(6),
+        input EvalScore score = EvalScore'(123),
+        input TTBoundType bound_type = TT_BOUND_EXACT,
+        input PlyIndex ply = PlyIndex'(0)
+    );
         store_req = TTStoreRequest'('0); store_req.zobrist_key = key;
-        store_req.depth = 6; store_req.score = 123; store_req.bound_type = TT_BOUND_EXACT;
+        store_req.depth = depth; store_req.score = score; store_req.bound_type = bound_type;
+        store_req.ply = ply;
         store_req.best_move.from_pos = 1; store_req.best_move.to_pos = 18;
         store_req_valid = 1;
         do @(posedge clk); while (!store_req_ready);
         store_req_valid = 0;
         do @(posedge clk); while (dut.store_fifo_count != 0 || dut.state != dut.S_IDLE);
     endtask
-    task automatic do_lookup(input ZobristKey key, input logic expected_hit, input ThreadID thread_id);
+    task automatic do_lookup(
+        input ZobristKey key,
+        input logic expected_hit,
+        input ThreadID thread_id,
+        input EvalScore expected_score = EvalScore'(123),
+        input PlyIndex ply = PlyIndex'(0)
+    );
         lookup_req = TTLookupRequest'('0); lookup_req.zobrist_key = key; lookup_req.thread_id = thread_id;
+        lookup_req.ply = ply;
         lookup_req_valid = 1;
         do @(posedge clk); while (!lookup_req_ready);
         lookup_req_valid = 0;
         do @(posedge clk); while (!lookup_resp_valid);
         check(lookup_resp.thread_id == thread_id, "lookup response retained thread tag");
         check(lookup_resp.hit == expected_hit, expected_hit ? "lookup hit" : "lookup miss");
-        if (expected_hit) check(lookup_resp.score == 123, "lookup score");
+        if (expected_hit) check(lookup_resp.score == expected_score, "lookup score");
     endtask
 
     initial begin
@@ -163,6 +177,29 @@ module tb_tt_external_load_store;
         clear = 1; @(posedge clk); clear = 0; repeat (2) @(posedge clk);
         do_lookup(64'h0123_4567_89ab_cdef, 1'b0, ThreadID'(0));
         check(mem_req_address < 96 && mem_req_length == 6, "bounded aligned burst mapping");
+
+        // An old-generation result survives a much shallower publication. This
+        // must match the inferred-RAM backend's shared depth/age policy.
+        do_store(64'h3456_789a_bcde_f012, TTDepth'(12), EvalScore'(321));
+        clear = 1; @(posedge clk); clear = 0;
+        do @(posedge clk); while (dut.clear_busy);
+        request_count = 0;
+        do_store(64'h3456_789a_bcde_f012, TTDepth'(1), EvalScore'(111));
+        check(request_count == 1, "stale deep entry read but rejected shallow replacement write");
+
+        // At equal depth, an exact result replaces a non-exact bound.
+        do_store(64'h4567_89ab_cdef_0123, TTDepth'(8), EvalScore'(210), TT_BOUND_UPPER);
+        request_count = 0;
+        do_store(64'h4567_89ab_cdef_0123, TTDepth'(8), EvalScore'(211), TT_BOUND_EXACT);
+        check(request_count == 1, "equal-depth exact result replaced upper bound");
+        do_lookup(64'h4567_89ab_cdef_0123, 1'b1, ThreadID'(0), EvalScore'(211));
+
+        // Stored mate distance is node-relative and restored for the lookup ply.
+        do_store(64'h5678_9abc_def0_1234, TTDepth'(4),
+            EvalScore'(MATE_SCORE - 5), TT_BOUND_EXACT, PlyIndex'(5));
+        do_lookup(64'h5678_9abc_def0_1234, 1'b1, ThreadID'(0),
+            EvalScore'(MATE_SCORE - 2), PlyIndex'(2));
+
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
         if (fail_count != 0) $fatal(1, "external TT test failed");

@@ -1,6 +1,8 @@
 # Documentation
 
-These docs describe the RTL architecture.
+These docs specify the intended final design of the FPGA chess engine and its supporting software. Documents under `architecture/`, `modules/`, and `protocols/` are normative: they describe the design regardless of whether every part is complete in the current implementation. Progress, experiments, alternatives, measurements, and open questions belong under `development/`.
+
+Implementation details are documented only when they establish a contract, explain a non-obvious invariant, or materially constrain another subsystem. Source code and tests remain authoritative for incidental signal names, state-machine encoding, test coverage, and target-specific measurements.
 
 ## Key Documents
 
@@ -15,18 +17,21 @@ These docs describe the RTL architecture.
 | [modules/board-update-pipeline.md](modules/board-update-pipeline.md)                                                                                                                                                   | Board-state update pipeline contract.                                  |
 | [modules/move-generator.md](modules/move-generator.md)                                                                                                                                                                 | Move-generation interface, ordering, and legality behavior.            |
 | [modules/static-evaluator.md](modules/static-evaluator.md)                                                                                                                                                             | Static-evaluation interface and latency.                               |
-| [modules/tt-lookup.md](modules/tt-lookup.md) and [modules/tt-store.md](modules/tt-store.md)                                                                                                                            | Transposition-table lookup and store pipelines.                        |
+| [modules/transposition-table.md](modules/transposition-table.md)                                                                                                                                                       | TT lookup, store, entry, score, and replacement semantics.             |
 | [modules/search-controller.md](modules/search-controller.md)                                                                                                                                                           | Search orchestration and shared-pipeline scheduling.                   |
+| [modules/repetition-checker.md](modules/repetition-checker.md)                                                                                                                                                         | Threefold-repetition history and lookup contract.                      |
+| [modules/tt-memory.md](modules/tt-memory.md)                                                                                                                                                                           | TT storage backends, external-memory protocol, cache, and clock crossing. |
+| [modules/sdr-sdram-controller.md](modules/sdr-sdram-controller.md)                                                                                                                                                     | Vendor-neutral JEDEC SDR SDRAM controller contract.                    |
 | [modules/engine.md](modules/engine.md), [modules/rx-decode.md](modules/rx-decode.md), [modules/tx-encode.md](modules/tx-encode.md), [modules/timer.md](modules/timer.md), and [modules/de1-soc.md](modules/de1-soc.md) | Top-level command, byte-stream, timing, and board-wrapper interfaces.  |
 
 ## Directories
 
 | Directory                      | Contents                                                                       |
 | ------------------------------ | ------------------------------------------------------------------------------ |
-| [architecture/](architecture/) | Chip design, shared data model, search, evaluation, and time-management notes. |
-| [modules/](modules/)           | Per-module design notes.                                                       |
+| [architecture/](architecture/) | System architecture, shared data model, search, evaluation, and time management. |
+| [modules/](modules/)           | Subsystem interfaces, behavior, ownership, and invariants.                     |
 | [protocols/](protocols/)       | Binary encoding and laptop-FPGA communication.                                 |
-| [development/](development/)   | Build/test flow, open questions, and test metrics.                              |
+| [development/](development/)   | Workflows, implementation status, experiments, open questions, and measurements. |
 
 ## Development Docs
 

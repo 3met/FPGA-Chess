@@ -20,7 +20,7 @@ usable_time = max(0, clock_time - MOVE_OVERHEAD_MS)
 target_end  = min(usable_time, increment * 3 / 4 + usable_time / 32)
 ```
 
-If `usable_time` is nonzero, every checkpoint should be at least `MIN_SEARCH_MS`, clamped to `usable_time` if the clock is nearly empty.
+If `usable_time` is nonzero, every checkpoint is at least `MIN_SEARCH_MS`, clamped to `usable_time` if the clock is nearly empty.
 
 ## Iterative-Deepening Exit Rules
 

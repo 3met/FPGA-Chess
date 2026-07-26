@@ -170,7 +170,6 @@ module rx_decode #(
     input logic mark_read,
     output logic [7:0] rx_stream,
     output logic rx_stream_valid,
-    output logic kill,
     output logic remote_reset,
     output logic error
 );
@@ -265,7 +264,6 @@ module rx_decode #(
     end
 
     assign rx_stream_valid = !rx_fifo_empty;
-    assign kill = 1'b0;
     assign remote_reset = break_engine_sync && !break_engine_sync_prev;
 
 endmodule : rx_decode

@@ -4,7 +4,7 @@
 
 Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP and share only the transposition table.
 
-The number of threads, allocated stack depth, external perft support, Zobrist hashing, TT traffic, and board-update PST ROM use are parameterized at build time.
+Thread count, allocated stack depth, and optional instrumentation are parameterized at build time.
 
 Search uses side-to-move point-of-view scores internally. Raw evaluation inputs are White-relative, so the search controller normalizes leaf/static scores by negating them when Black is to move.
 
@@ -22,15 +22,15 @@ Search node counts advance exactly when a speculative push has passed the king-s
 
 Search uses stack records for reverse traversal rather than storing a full board state at every ply. Each packed record includes the node's actual remaining main-search depth and an 8-bit saturating count of legal moves already searched. The actual depth controls qsearch entry and TT depth instead of deriving depth from ply. A push move sends the current board state and move into the board update pipeline, and a reverse move uses the stored move record to recover the previous state.
 
-For the base design, a thread may have at most one in-flight request per major pipeline. Current controller RTL tags board-update, move-generation, and static-evaluation requests with fixed-latency thread tag shift registers and routes completions through those tags; TT responses carry `thread_id` solely as routing metadata, and TT lookup results are captured into per-thread pending records before dispatcher-selected application. Completed child scores are held as per-thread return-pending work and folded into parent nodes only after dispatcher selection, so result routing is no longer tied directly to the thread that happened to be current when a pipeline completed. The controller tracks per-pipeline in-flight flags and dispatch cursors, issues independent ready threads into board, move, eval, TT lookup, and TT store paths when work is available, and tests assert overlapping move-generator requests plus overlap between different tagged pipelines.
+A thread has at most one in-flight request per major pipeline. Requests and responses carry enough routing metadata to associate completion with the issuing thread independently of the controller's current dispatch choice. TT responses and completed child scores are captured as per-thread pending work before being applied, so unrelated pipeline completions may overlap safely.
 
 ## Pipeline Scheduling
 
 The search controller feeds five shared pipelines: board update, move generation, static evaluation, TT lookup, and TT store.
 
-Board update, move generation, and static evaluation are high-area pipelines and should be kept busy by scheduling work across the available threads. These pipelines allow one accepted request per cycle when work is available. TT pipelines are constrained by external memory bandwidth.
+Board update, move generation, and static evaluation are high-area pipelines kept busy by scheduling work across the available threads. These pipelines allow one accepted request per cycle when work is available. TT pipelines are constrained by external memory bandwidth.
 
-Pipeline arbitration prioritizes captured TT lookup responses, parent-return folding, TT lookups, and normal ready search progress over TT stores, because lookups and returned child values block search progress while stores can usually be delayed. Current controller RTL captures lookup responses by thread, leaves accepted-but-not-issued stores as per-thread `STORE_WAIT` pending work, and retries delayed work from the concurrent run scheduler when higher-priority contexts are not available.
+Pipeline arbitration prioritizes captured TT lookup responses, parent-return folding, TT lookups, and normal ready search progress over TT stores, because lookups and returned child values block search progress while stores can be delayed. Delayed work remains associated with its thread and is retried by the scheduler.
 
 ## Move Generation and Legality
 
@@ -42,9 +42,7 @@ Host-supplied game-position commands are assumed valid because the Python host v
 
 ## Transposition Table Use
 
-The TT is required for Lazy SMP communication between threads. The primary TT is stored in external memory behind a vendor-neutral wrapper, with a BRAM cache when the target FPGA has enough block memory to make caching useful.
-
-Scores stored in the TT should use the same side-to-move point-of-view convention as the search controller. The TT replacement policy is single-entry depth/age replacement. Store into an invalid entry, a stale entry that is not much deeper than the new result, a shallower entry, or a same-depth non-exact entry when the new result is exact.
+The TT is required for Lazy SMP communication between threads. Its lookup, score, and replacement semantics are defined in [transposition-table.md](../modules/transposition-table.md), and its physical backends are defined in [tt-memory.md](../modules/tt-memory.md).
 
 ## Mate and Draw Scores
 
@@ -52,10 +50,8 @@ Use `MATE_SCORE = 32000` and `MATE_THRESHOLD = 31000`. Non-mate evaluation score
 
 A winning forced mate at search ply `ply` is encoded as `MATE_SCORE - ply`. A losing forced mate is encoded as `-MATE_SCORE + ply`. This makes faster mates score higher and delayed losses score better than immediate losses.
 
-TT stores should normalize mate scores to be relative to the stored node rather than the root ply. TT lookups should restore scores relative to the current root search.
+TT stores normalize mate scores relative to the stored node rather than the root ply. TT lookups restore scores relative to the current root search.
 
 Draw scores are `DRAW_EVAL_SCORE = 0`. The controller detects checkmate, stalemate, the 50-move rule, and repetition draws; it deliberately does not detect insufficient material to avoid the area cost of a full-board material scan. The 50-move rule uses `halfmove_clock` from `FullBoard`. Repetition detection uses a separate history of reversible-position hashes because repetition history is intentionally not part of `FullBoard`.
 
-For threefold repetition, the engine uses authoritative 64-bit Zobrist keys. A shared checker builds one collision-free 512-entry pre-root table whose high address bit selects root-relative side-to-move parity, and stores per-thread search-line keys in one simple-dual-port RAM bank per adjacent pair of plies. Runtime requests have a two-cycle fixed latency and an initiation interval of one cycle. The controller checks the root before starting an iteration and checks every legal child before TT, evaluation, move-generation, or qsearch processing continues. The current node is excluded from both histories, stale line entries are masked by the current ply and irreversible boundary, and a draw is reported after two saturated previous occurrences.
-
-The default 32-entry search stack represents plies 0 through 31. Its line history therefore uses 16 logical banks; the second slot in the last bank is unused. Static construction occurs before search timing begins and may retry programmable hash seeds. On Cyclone V, the 512-by-67 parity-addressed static table uses four M10Ks, the 100-by-64 active history uses two, and each independently readable 64-bit line bank uses two. The full eight-thread/32-entry checker therefore uses 38 M10Ks; the current DE1-SoC one-thread/24-entry engine profile uses 30. The high count relative to stored bits is the unavoidable width and shallow-bank underutilization required for parallel reads.
+For threefold repetition, the engine uses authoritative 64-bit Zobrist keys. The controller checks the root before starting an iteration and checks every legal child before TT, evaluation, move-generation, or quiescence processing continues. History representation, parity handling, reversible boundaries, and request routing are defined in [repetition-checker.md](../modules/repetition-checker.md).

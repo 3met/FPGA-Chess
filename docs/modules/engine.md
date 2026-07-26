@@ -12,7 +12,6 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Input | `rst_n` | 1 | Synchronous active-low reset. |
 | Input | `data_in` | 8 | Command or payload byte from RX decode. |
 | Input | `data_in_valid` | 1 | Indicates `data_in` is valid. |
-| Input | `kill` | 1 | Request to stop the current search. |
 | Input | `ready_for_result` | 1 | Indicates the downstream output path can accept another result byte. |
 | Output | `error_flag` | 1 | Indicates the engine has detected a protocol or internal error. |
 | Output | `ready` | 1 | Indicates the engine can accept the next command or payload byte for its current input state. |
@@ -27,7 +26,7 @@ The engine parameters configure the controller clock frequency, thread count, st
 
 The engine command byte and payload formats are defined in [laptop-fpga-communication.md](../protocols/laptop-fpga-communication.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
-The external protocol should expose `Set board` as a single fixed-size command. The engine may decompose it into multiple direct-board operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
+The external protocol exposes `Set board` as a single fixed-size command. The engine decomposes it into multiple direct-board operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
 
 ## States
 
@@ -73,21 +72,6 @@ stateDiagram-v2
     OutputResult --> Idle: response complete
     Error --> OutputResult: queue error response
 ```
-
-## Registers
-
-| Register Name | Size | Description |
-| ------------- | ---- | ----------- |
-| `state` | Enum | Current engine FSM state. |
-| `curr_opcode` | 8 | Command currently being processed. |
-| `payload_count` | Small counter | Number of payload bytes received for the current command. |
-| `payload` | 36 bytes | Buffered fixed-size command payload. |
-| `request_reg` | `EngineControllerRequest` | Decoded controller request held until accepted. |
-| `response_kind` | Enum | Type and serialization format of the pending response. |
-| `active_operation` | 8 | Opcode of the active controller-backed operation. |
-| `last_score` | `EvalScore` | Score from the most recent completed search. |
-| `last_move` | `Move` | Best move from the most recent completed search. |
-| `last_node_count` | `NODE_COUNT_BITS` | Node count from the most recent completed search. |
 
 ## New Game Semantics
 

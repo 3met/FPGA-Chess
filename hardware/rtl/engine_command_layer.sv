@@ -9,7 +9,6 @@ module engine_command_layer (
     input wire rst_n,
     input logic [7:0] data_in,
     input logic data_in_valid,
-    input logic kill,
     input logic ready_for_result,
     output logic error_flag,
     output logic ready,
@@ -573,9 +572,7 @@ module engine_command_layer (
                 end
 
                 ST_WAIT_RESULT: begin
-                    if (kill && search_active) begin
-                        issue_kill_request();
-                    end else if (data_in_valid) begin
+                    if (data_in_valid) begin
                         if (search_active && data_in == ENGINE_CMD_KILL) begin
                             issue_kill_request();
                         end else begin

@@ -75,7 +75,7 @@ Both are 3 bits wide.
 | `BoardRank` | Rank index from `0` for rank 1 through `7` for rank 8. |
 | `BoardFile` | File index from `0` for file a through `7` for file h. |
 
-The helper functions `getRank`, `getFile`, and `getPosition` should follow the same convention.
+The helper functions `getRank`, `getFile`, and `getPosition` follow the same convention.
 
 ### Display Order
 
@@ -160,7 +160,7 @@ The total packed width is 272 bits.
 
 ### Evaluation Scores
 
-`EvalScore` is a signed 16-bit value. Raw static evaluation and incremental PST/material state should be White-relative in the final design: positive scores are good for White and negative scores are good for Black. Search should convert raw evaluation into side-to-move point-of-view scores at search boundaries.
+`EvalScore` is a signed 16-bit value. Raw static evaluation and incremental PST/material state are White-relative: positive scores are good for White and negative scores are good for Black. Search converts raw evaluation into side-to-move point-of-view scores at search boundaries.
 
 `PstScore` is a signed 10-bit ROM-entry value. Board update sign-extends each entry to `EvalScore` before applying the incremental material/PST delta, so stored PST values use less block memory without narrowing accumulated or final evaluation scores.
 

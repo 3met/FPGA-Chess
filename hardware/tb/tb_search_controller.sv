@@ -971,13 +971,15 @@ module tb_search_controller;
         release dut.search_stack_top[0].legal_move_count;
         for (int depth_bucket = 0; depth_bucket < dut.LMR_DEPTH_BUCKETS; depth_bucket++) begin
             for (int move_bucket = 1; move_bucket < 8; move_bucket++) begin
-                check(dut.LMR_TABLE[depth_bucket][move_bucket] >= dut.LMR_TABLE[depth_bucket][move_bucket - 1],
+                check(dut.lmr_reduction(3'(depth_bucket), 3'(move_bucket))
+                        >= dut.lmr_reduction(3'(depth_bucket), 3'(move_bucket - 1)),
                     $sformatf("LMR table move monotonic depth bucket %0d move bucket %0d", depth_bucket, move_bucket));
             end
         end
         for (int depth_bucket = 1; depth_bucket < dut.LMR_DEPTH_BUCKETS; depth_bucket++) begin
             for (int move_bucket = 0; move_bucket < 8; move_bucket++) begin
-                check(dut.LMR_TABLE[depth_bucket][move_bucket] >= dut.LMR_TABLE[depth_bucket - 1][move_bucket],
+                check(dut.lmr_reduction(3'(depth_bucket), 3'(move_bucket))
+                        >= dut.lmr_reduction(3'(depth_bucket - 1), 3'(move_bucket)),
                     $sformatf("LMR table depth monotonic depth bucket %0d move bucket %0d", depth_bucket, move_bucket));
             end
         end
@@ -1183,25 +1185,25 @@ module tb_search_controller;
                 end
                 if (dut.search_board_inflight[idx]) begin
                     thread_board_inflight_seen[idx] = 1'b1;
-                    if (dut.search_board_dispatch_cursor == expected_next_thread(idx)) begin
+                    if (dut.search_dispatch.board == expected_next_thread(idx)) begin
                         thread_board_cursor_seen[idx] = 1'b1;
                     end
                 end
                 if (dut.search_move_inflight[idx]) begin
                     thread_move_inflight_seen[idx] = 1'b1;
-                    if (dut.search_move_dispatch_cursor == expected_next_thread(idx)) begin
+                    if (dut.search_dispatch.move == expected_next_thread(idx)) begin
                         thread_move_cursor_seen[idx] = 1'b1;
                     end
                 end
                 if (dut.search_eval_inflight[idx]) begin
                     thread_eval_inflight_seen[idx] = 1'b1;
-                    if (dut.search_eval_dispatch_cursor == expected_next_thread(idx)) begin
+                    if (dut.search_dispatch.eval == expected_next_thread(idx)) begin
                         thread_eval_cursor_seen[idx] = 1'b1;
                     end
                 end
                 if (dut.search_tt_lookup_inflight[idx]) begin
                     thread_tt_lookup_inflight_seen[idx] = 1'b1;
-                    if (dut.search_tt_lookup_dispatch_cursor == expected_next_thread(idx)) begin
+                    if (dut.search_dispatch.tt_lookup == expected_next_thread(idx)) begin
                         thread_tt_lookup_cursor_seen[idx] = 1'b1;
                     end
                 end
@@ -1209,7 +1211,7 @@ module tb_search_controller;
                     thread_tt_store_inflight_seen[idx] = 1'b1;
                 end
                 if (thread_tt_store_inflight_seen[idx]
-                        && dut.search_tt_store_dispatch_cursor == expected_next_thread(idx)) begin
+                        && dut.search_dispatch.tt_store == expected_next_thread(idx)) begin
                     thread_tt_store_cursor_seen[idx] = 1'b1;
                 end
             end

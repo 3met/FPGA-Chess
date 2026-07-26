@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+from tools.common.files import atomic_write_text
 
 from .config import REPO_ROOT
 from .model import PIECE_ORDER, PST_PATH
@@ -145,7 +146,7 @@ def commit_parameters(run: Path, dry_run: bool = False) -> None:
     paths = (PST_PATH, *GENERATED_PATHS)
     before = {path: path.read_bytes() for path in paths}
     try:
-        _atomic_text(PST_PATH, new_pst)
+        atomic_write_text(PST_PATH, new_pst)
         result = subprocess.run(
             [sys.executable, str(GENERATOR)],
             cwd=REPO_ROOT,
@@ -160,12 +161,6 @@ def commit_parameters(run: Path, dry_run: bool = False) -> None:
         for path, contents in before.items():
             temporary = path.with_suffix(path.suffix + ".restore")
             temporary.write_bytes(contents)
-            os.replace(temporary, path)
+            temporary.replace(path)
         raise
     print("Updated evaluation parameter JSON, PST ROM image, and material include.")
-
-
-def _atomic_text(path: Path, contents: str) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(contents, encoding="utf-8")
-    os.replace(temporary, path)

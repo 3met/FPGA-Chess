@@ -1,6 +1,6 @@
-// Portable combinational-read, synchronous-write dual-port RAM.
+// By Emet Behrendt
 
-module simple_dual_port_ram #(
+module sync_read_simple_dual_port_ram #(
     parameter int NUM_WORDS = 1,
     parameter int WORD_SIZE = 1
 ) (
@@ -13,14 +13,21 @@ module simple_dual_port_ram #(
     output logic [WORD_SIZE-1:0] q
 );
 
+    // These attributes are ignored by tools that do not recognize them. The
+    // synchronous-read template is the portable part that enables block-RAM
+    // inference on both Intel/Altera and Xilinx devices.
+    (* ramstyle = "M10K, no_rw_check" *)
+    (* ram_style = "block" *)
     logic [WORD_SIZE-1:0] mem [0:NUM_WORDS-1];
 
-    assign q = rden ? mem[rdaddress] : 'x;
-
     always_ff @(posedge clock) begin
+        if (rden) begin
+            q <= mem[rdaddress];
+        end
+
         if (wren) begin
             mem[wraddress] <= data;
         end
     end
 
-endmodule : simple_dual_port_ram
+endmodule : sync_read_simple_dual_port_ram

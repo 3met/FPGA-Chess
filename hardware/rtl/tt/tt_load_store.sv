@@ -113,38 +113,6 @@ module tt_load_store #(
         return payload;
     endfunction : store_payload
 
-    function automatic EvalScore normalize_mate_for_store(input EvalScore score, input PlyIndex ply);
-        automatic int signed adjusted;
-
-        if (score >= MATE_THRESHOLD) begin
-            adjusted = int'(score) + int'(ply);
-            return EvalScore'(adjusted);
-        end
-
-        if (score <= -MATE_THRESHOLD) begin
-            adjusted = int'(score) - int'(ply);
-            return EvalScore'(adjusted);
-        end
-
-        return score;
-    endfunction : normalize_mate_for_store
-
-    function automatic EvalScore restore_mate_for_lookup(input EvalScore score, input PlyIndex ply);
-        automatic int signed adjusted;
-
-        if (score >= MATE_THRESHOLD) begin
-            adjusted = int'(score) - int'(ply);
-            return EvalScore'(adjusted);
-        end
-
-        if (score <= -MATE_THRESHOLD) begin
-            adjusted = int'(score) + int'(ply);
-            return EvalScore'(adjusted);
-        end
-
-        return score;
-    endfunction : restore_mate_for_lookup
-
     function automatic TTStorageEntry invalid_storage_entry();
         if (USE_FULL_KEY) begin
             return TTStorageEntry'(tt_invalid_full_entry());
@@ -158,7 +126,7 @@ module tt_load_store #(
             return TTStorageEntry'(tt_make_full_entry(
                 req.zobrist_key,
                 req.best_move,
-                normalize_mate_for_store(req.score, req.ply),
+                tt_normalize_mate_score(req.score, req.ply),
                 req.depth,
                 req.bound_type,
                 req.age,
@@ -169,7 +137,7 @@ module tt_load_store #(
         return TTStorageEntry'(tt_make_entry(
             req.zobrist_key,
             req.best_move,
-            normalize_mate_for_store(req.score, req.ply),
+            tt_normalize_mate_score(req.score, req.ply),
             req.depth,
             req.bound_type,
             req.age
@@ -280,7 +248,7 @@ module tt_load_store #(
 
         resp.thread_id = req.thread_id;
         resp.hit = entry_hit;
-        resp.score = entry_hit ? restore_mate_for_lookup(storage_score(entry), req.ply) : UNKNOWN_EVAL_SCORE;
+        resp.score = entry_hit ? tt_restore_mate_score(storage_score(entry), req.ply) : UNKNOWN_EVAL_SCORE;
         resp.bound_type = entry_hit ? storage_bound_type(entry) : TT_BOUND_INVALID;
         resp.depth = entry_hit ? storage_depth(entry) : TTDepth'(0);
         resp.best_move = entry_hit ? storage_best_move(entry) : NULL_MOVE;
@@ -288,21 +256,16 @@ module tt_load_store #(
     endfunction : make_lookup_response
 
     function automatic logic should_replace(input TTStorageEntry old_entry, input TTStorePayload req);
-        automatic logic old_invalid;
-        automatic logic key_mismatch;
-        automatic logic stale_with_depth_window;
-        automatic logic new_deeper_or_equal;
-        automatic logic exact_over_non_exact;
-
-        old_invalid = storage_bound_type(old_entry) == TT_BOUND_INVALID;
-        key_mismatch = !storage_key_matches(old_entry, req.zobrist_key);
-        stale_with_depth_window = (storage_age(old_entry) != req.age) && ((int'(req.depth) + 4) >= int'(storage_depth(old_entry)));
-        new_deeper_or_equal = req.depth >= storage_depth(old_entry);
-        exact_over_non_exact = (req.bound_type == TT_BOUND_EXACT)
-            && (storage_bound_type(old_entry) != TT_BOUND_EXACT)
-            && (req.depth == storage_depth(old_entry));
-
-        return old_invalid || key_mismatch || stale_with_depth_window || new_deeper_or_equal || exact_over_non_exact;
+        return tt_should_replace(
+            storage_bound_type(old_entry) != TT_BOUND_INVALID,
+            storage_key_matches(old_entry, req.zobrist_key),
+            storage_age(old_entry),
+            storage_depth(old_entry),
+            storage_bound_type(old_entry),
+            req.age,
+            req.depth,
+            req.bound_type
+        );
     endfunction : should_replace
 
     // Keep response data continuously driven so it is stable with the valid pulse.
@@ -352,7 +315,7 @@ module tt_load_store #(
         end
     end
 
-    synchronous_simple_dual_port_ram #(
+    sync_read_simple_dual_port_ram #(
         .NUM_WORDS(TT_ENTRY_COUNT),
         .WORD_SIZE(STORAGE_ENTRY_BITS)
     ) entry_memory (

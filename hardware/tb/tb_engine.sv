@@ -10,7 +10,6 @@ module tb_engine;
     logic rst_n;
     logic [7:0] data_in;
     logic data_in_valid;
-    logic kill;
     logic ready_for_result;
     logic error_flag;
     logic ready;
@@ -35,7 +34,6 @@ module tb_engine;
         .rst_n(rst_n),
         .data_in(data_in),
         .data_in_valid(data_in_valid),
-        .kill(kill),
         .ready_for_result(ready_for_result),
         .error_flag(error_flag),
         .ready(ready),
@@ -69,7 +67,6 @@ module tb_engine;
     task automatic reset_dut();
         data_in = 8'h00;
         data_in_valid = 1'b0;
-        kill = 1'b0;
         ready_for_result = 1'b1;
         search_req_ready = 1'b1;
         search_resp_valid = 1'b0;

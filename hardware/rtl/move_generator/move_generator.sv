@@ -884,7 +884,7 @@ module move_generator_pipeline #(
     generate
         for (history_color = 0; history_color < 2; history_color++) begin : gen_history
             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET) begin : gen_ram
-                synchronous_simple_dual_port_ram #(
+                sync_read_simple_dual_port_ram #(
                     .NUM_WORDS(HISTORY_WORDS),
                     .WORD_SIZE(HISTORY_BITS)
                 ) history_ram (
@@ -915,7 +915,7 @@ module move_generator_pipeline #(
                     rd_addr = ADDR_BITS'(int'(bucket_rd_thread) * CAPACITY + int'(bucket_rd_top));
                     wr_addr = ADDR_BITS'(int'(bucket_wr_thread) * CAPACITY + int'(bucket_wr_top));
                 end
-                synchronous_simple_dual_port_ram #(
+                sync_read_simple_dual_port_ram #(
                     .NUM_WORDS(WORDS),
                     .WORD_SIZE($bits(Move))
                 ) move_ram (

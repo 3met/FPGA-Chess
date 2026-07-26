@@ -98,6 +98,43 @@ package tt_defs;
         return Move'(move_bits[$bits(Move)-1:0]);
     endfunction : tt_decode_move
 
+    // Store mate scores relative to the node so entries remain valid when the
+    // same position is reached at a different root-relative ply.
+    function automatic EvalScore tt_normalize_mate_score(input EvalScore score, input PlyIndex ply);
+        if (score >= MATE_THRESHOLD) return EvalScore'(int'(score) + int'(ply));
+        if (score <= -MATE_THRESHOLD) return EvalScore'(int'(score) - int'(ply));
+        return score;
+    endfunction : tt_normalize_mate_score
+
+    function automatic EvalScore tt_restore_mate_score(input EvalScore score, input PlyIndex ply);
+        if (score >= MATE_THRESHOLD) return EvalScore'(int'(score) - int'(ply));
+        if (score <= -MATE_THRESHOLD) return EvalScore'(int'(score) + int'(ply));
+        return score;
+    endfunction : tt_restore_mate_score
+
+    // All TT backends use the same single-entry depth/age replacement policy.
+    function automatic logic tt_should_replace(
+        input logic old_valid,
+        input logic old_key_matches,
+        input TTAge old_age,
+        input TTDepth old_depth,
+        input TTBoundType old_bound_type,
+        input TTAge new_age,
+        input TTDepth new_depth,
+        input TTBoundType new_bound_type
+    );
+        automatic logic stale_with_depth_window;
+        automatic logic exact_over_non_exact;
+
+        stale_with_depth_window = (old_age != new_age)
+            && ((int'(new_depth) + 4) >= int'(old_depth));
+        exact_over_non_exact = (new_bound_type == TT_BOUND_EXACT)
+            && (old_bound_type != TT_BOUND_EXACT)
+            && (new_depth == old_depth);
+        return !old_valid || !old_key_matches || stale_with_depth_window
+            || new_depth >= old_depth || exact_over_non_exact;
+    endfunction : tt_should_replace
+
     function automatic TTEntry tt_invalid_entry();
         automatic TTEntry entry;
 
@@ -128,6 +165,31 @@ package tt_defs;
         entry.age = age;
         return entry;
     endfunction : tt_make_entry
+
+    function automatic TTPhysicalEntry tt_pack_entry(input TTEntry entry);
+        automatic TTPhysicalEntry physical;
+
+        physical = '0;
+        physical[47:0] = entry.verify_key;
+        physical[61:48] = entry.best_move_bits;
+        physical[79:64] = entry.score;
+        physical[85:80] = entry.depth;
+        physical[87:86] = entry.bound_type;
+        physical[95:88] = entry.age;
+        return physical;
+    endfunction : tt_pack_entry
+
+    function automatic TTEntry tt_unpack_entry(input TTPhysicalEntry physical);
+        automatic TTEntry entry;
+
+        entry.verify_key = physical[47:0];
+        entry.best_move_bits = physical[61:48];
+        entry.score = EvalScore'(physical[79:64]);
+        entry.depth = TTDepth'(physical[85:80]);
+        entry.bound_type = TTBoundType'(physical[87:86]);
+        entry.age = TTAge'(physical[95:88]);
+        return entry;
+    endfunction : tt_unpack_entry
 
     function automatic TTFullEntry tt_invalid_full_entry();
         automatic TTFullEntry entry;

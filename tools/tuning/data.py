@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
+from tools.common.files import atomic_write_json
+
 from .config import cache_key
 
 
@@ -292,15 +294,9 @@ def build_cache(config: dict, print_fn=print) -> Path:
         "counts": dict(sorted(counts.items())),
         "validation_offset": train_count,
     }
-    _atomic_json(meta_path, metadata)
+    atomic_write_json(meta_path, metadata)
     status(f"Cached {train_count:,} training and {len(reservoir):,} validation positions ({key}).")
     return cache
-
-
-def _atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 class CacheDataset:

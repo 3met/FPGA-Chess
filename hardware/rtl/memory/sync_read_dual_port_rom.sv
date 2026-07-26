@@ -1,19 +1,21 @@
-// Portable combinational-read dual-port ROM.
+// Portable synchronous-read dual-port ROM.
 
-module inferred_dual_port_rom #(
+module sync_read_dual_port_rom #(
     parameter int NUM_WORDS = 1,
     parameter int WORD_SIZE = 1,
     parameter MEM_INIT_FILE = ""
 ) (
+    input logic clock,
     input logic [$clog2(NUM_WORDS)-1:0] address_a,
     input logic [$clog2(NUM_WORDS)-1:0] address_b,
-    input logic clock,
     input logic rden_a,
     input logic rden_b,
     output logic [WORD_SIZE-1:0] q_a,
     output logic [WORD_SIZE-1:0] q_b
 );
 
+    (* ramstyle = "M10K" *)
+    (* ram_style = "block" *)
     logic [WORD_SIZE-1:0] mem [0:NUM_WORDS-1];
 
     initial begin
@@ -22,7 +24,13 @@ module inferred_dual_port_rom #(
         end
     end
 
-    assign q_a = rden_a ? mem[address_a] : '0;
-    assign q_b = rden_b ? mem[address_b] : '0;
+    always_ff @(posedge clock) begin
+        if (rden_a) begin
+            q_a <= mem[address_a];
+        end
+        if (rden_b) begin
+            q_b <= mem[address_b];
+        end
+    end
 
-endmodule : inferred_dual_port_rom
+endmodule : sync_read_dual_port_rom

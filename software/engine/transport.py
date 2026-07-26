@@ -213,27 +213,6 @@ class SerialByteTransport:
         self.close()
 
 
-class UART_Manager:
-    """Compatibility wrapper for older scripts using the previous class name."""
-
-    def __init__(self, port: str | None, baudrate: int = BAUD_RATE) -> None:
-        self.transport = SerialByteTransport(port=port, baudrate=baudrate)
-
-    def __del__(self) -> None:
-        try:
-            self.transport.close()
-        except Exception:
-            pass
-
-    def transmit(self, msg: bytes, urgent: bool = False) -> None:
-        del urgent
-        self.transport.write(msg)
-
-    def receive_next(self) -> bytes | None:
-        data = self.transport.read_available(1)
-        return data or None
-
-
 def _parse_hex_bytes(text: str) -> bytes:
     compact = "".join(text.split())
     if compact.startswith("0x"):

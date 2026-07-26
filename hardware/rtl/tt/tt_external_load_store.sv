@@ -99,70 +99,39 @@ module tt_external_load_store #(
         return TTWordAddress'((index << 2) + (index << 1));
     endfunction
 
-    function automatic TTPhysicalEntry pack_entry(input TTEntry entry);
-        TTPhysicalEntry physical;
-        physical = '0;
-        physical[47:0] = entry.verify_key;
-        physical[61:48] = entry.best_move_bits;
-        physical[63:62] = 2'b0;
-        physical[79:64] = entry.score;
-        physical[85:80] = entry.depth;
-        physical[87:86] = entry.bound_type;
-        physical[95:88] = entry.age;
-        return physical;
-    endfunction
-
-    function automatic TTEntry unpack_entry(input TTPhysicalEntry physical);
-        TTEntry entry;
-        entry.verify_key = physical[47:0];
-        entry.best_move_bits = physical[61:48];
-        entry.score = EvalScore'(physical[79:64]);
-        entry.depth = TTDepth'(physical[85:80]);
-        entry.bound_type = TTBoundType'(physical[87:86]);
-        entry.age = TTAge'(physical[95:88]);
-        return entry;
-    endfunction
-
-    function automatic EvalScore normalize_mate(input EvalScore score, input PlyIndex ply);
-        if (score >= MATE_THRESHOLD) return EvalScore'(int'(score) + int'(ply));
-        if (score <= -MATE_THRESHOLD) return EvalScore'(int'(score) - int'(ply));
-        return score;
-    endfunction
-
-    function automatic EvalScore restore_mate(input EvalScore score, input PlyIndex ply);
-        if (score >= MATE_THRESHOLD) return EvalScore'(int'(score) - int'(ply));
-        if (score <= -MATE_THRESHOLD) return EvalScore'(int'(score) + int'(ply));
-        return score;
-    endfunction
-
     function automatic logic entry_hit(input TTEntry entry, input ZobristKey key);
         return entry.bound_type != TT_BOUND_INVALID && entry.age == generation
             && entry.verify_key == tt_verify_key(key);
     endfunction
 
     function automatic logic should_replace(input TTEntry old_entry, input TTStoreRequest req);
-        return old_entry.bound_type == TT_BOUND_INVALID || old_entry.age != generation
-            || old_entry.verify_key != tt_verify_key(req.zobrist_key)
-            || req.depth >= old_entry.depth
-            || ((req.bound_type == TT_BOUND_EXACT) && (old_entry.bound_type != TT_BOUND_EXACT)
-                && (req.depth == old_entry.depth));
+        return tt_should_replace(
+            old_entry.bound_type != TT_BOUND_INVALID,
+            old_entry.verify_key == tt_verify_key(req.zobrist_key),
+            old_entry.age,
+            old_entry.depth,
+            old_entry.bound_type,
+            generation,
+            req.depth,
+            req.bound_type
+        );
     endfunction
 
     function automatic TTPhysicalEntry make_store_entry(input TTStoreRequest req);
         TTEntry entry;
-        entry = tt_make_entry(req.zobrist_key, req.best_move, normalize_mate(req.score, req.ply),
+        entry = tt_make_entry(req.zobrist_key, req.best_move, tt_normalize_mate_score(req.score, req.ply),
             req.depth, req.bound_type, generation);
-        return pack_entry(entry);
+        return tt_pack_entry(entry);
     endfunction
 
     task automatic drive_lookup_response(input TTLookupRequest req, input TTPhysicalEntry physical);
         TTEntry entry;
         logic hit;
-        entry = unpack_entry(physical);
+        entry = tt_unpack_entry(physical);
         hit = entry_hit(entry, req.zobrist_key);
         lookup_resp.thread_id <= req.thread_id;
         lookup_resp.hit <= hit;
-        lookup_resp.score <= hit ? restore_mate(entry.score, req.ply) : UNKNOWN_EVAL_SCORE;
+        lookup_resp.score <= hit ? tt_restore_mate_score(entry.score, req.ply) : UNKNOWN_EVAL_SCORE;
         lookup_resp.bound_type <= hit ? entry.bound_type : TT_BOUND_INVALID;
         lookup_resp.depth <= hit ? entry.depth : TTDepth'(0);
         lookup_resp.best_move <= hit ? tt_decode_move(entry.best_move_bits) : NULL_MOVE;
@@ -238,7 +207,7 @@ module tt_external_load_store #(
                         if (!operation_store) begin
                             drive_lookup_response(active_lookup, cache_read_data);
                             state <= S_IDLE;
-                        end else if (should_replace(unpack_entry(cache_read_data), active_store)) begin
+                        end else if (should_replace(tt_unpack_entry(cache_read_data), active_store)) begin
                             write_entry <= make_store_entry(active_store);
                             state <= S_WRITE_REQ;
                         end else begin
@@ -302,7 +271,7 @@ module tt_external_load_store #(
                         if (!operation_store) begin
                             drive_lookup_response(active_lookup, transfer_entry);
                             state <= S_IDLE;
-                        end else if (should_replace(unpack_entry(transfer_entry), active_store)) begin
+                        end else if (should_replace(tt_unpack_entry(transfer_entry), active_store)) begin
                             write_entry <= make_store_entry(active_store);
                             state <= S_WRITE_REQ;
                         end else begin

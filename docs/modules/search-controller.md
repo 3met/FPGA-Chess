@@ -1,131 +1,87 @@
 # Search Controller (`search_controller`)
 
-## Current RTL Summary
-
-`search_controller` owns active board state, applies direct-board operations through `board_update_pipeline`, maintains repetition history, clears the compact TT on New Game, initializes the normal starting position through board-update setup operations, runs generic stack-based perft through the real move generator, and runs iterative-deepening Lazy SMP PVS negamax with late-move reductions. Fixed-depth searches use a four-pawn aspiration margin around the previous completed score from depth two onward and repeat a failed aspiration pass once with the full window; timed and node-limited searches retain a full root window so retries cannot consume their deadline. The controller also uses board-update push/reverse operations, TT lookup/store cutoffs and move ordering, static-evaluator leaves, and qsearch captures and promotions after main-search depth reaches zero. Perft is serialized and borrows search context zero without modifying the active game board.
-
-Search state is stored per configured thread for lifecycle status, scheduler phase, current board, Zobrist key, PST state, pipeline waits, alpha/beta values, repetition state, returns, and node counters. Full board states are not stored per ply. Per-node variables are packed into one synchronous block-RAM stack per thread, including actual remaining depth, an 8-bit saturating legal-move count, move-order phase, direct-move suppression state, eight bucket tops, and node/PVS/recovery flags. Each thread caches its current node in registers, writes that cache through to its current-ply RAM entry, and continuously prefetches the parent entry.
-
-The LMR curve is `R = round(A + ln(d) * ln(m) / B)`, approximated with `ln(x) ~= ln(2) * floor(log2(x))` and a constant-folded bucket table. Unsigned Q8 parameters `LMR_A_Q8 = 192` and `LMR_B_Q8 = 614` encode `0.75` and approximately `2.4`; zero `LMR_B_Q8` is invalid. Only depth buckets reachable by the configured stack are generated, and entries use the native `SearchDepth` width; the default table ranges from one through six and needs three significant bits. Runtime logic registers the table result before board completion and clamps `R` to `0..d-1`. Non-root main-search moves are eligible at `d >= 3` and legal index `m >= 3`, including captures, promotions, checking moves, and evasions. Illegal candidates and re-searches do not advance `m`. Eligible children use depth `d - 1 - R` with the PVS scout window; every alpha-raising reduced scout, including an apparent beta cutoff, repeats the move at depth `d - 1` with the full parent window. TT probe/store depth always follows the child's actual depth.
-
-TT lookups keep only their issuing thread in `TT_WAIT` until the tagged memory response arrives. Stores are fire-and-forget: a thread enters `STORE_PUBLISH` only until the TT frontend consumes its request, then continues without waiting for memory completion. The block-RAM frontend FIFO defaults to 256 stores and drops overflow publications. A matching TT best move is retained for direct validation even when the stored depth is too shallow for its score or bound to cause a cutoff. Once attempted it is suppressed by exact encoded equality during ordinary generation even if board update rejects it. All search contexts share the TT: the primary thread orders the previous iteration's principal-variation move first at the root, while helper threads use normal position-dependent legal move ordering and diverge further through shared-TT timing and hits.
-
-Board-update requests carry controller-local thread, operation, and ply tag shift registers so push and reverse completions restore or descend the tagged thread correctly. Move generation uses independent noisy/direct and quiet tagged ready/valid request and response channels plus a common tagged pop channel rather than a fixed-latency tag pipe. Static-evaluation requests retain controller-local thread tags, and TT requests carry `thread_id` in their records. The concurrent `ST_SEARCH_RUN` scheduler keeps root, child-return, TT-response, and per-pipeline dispatch cursors so independent ready threads can use different shared pipelines when more than one thread is configured.
-
-Each main-search node advances through `DIRECT`, `GENERATE_NOISY`, `GOOD_NOISY`, `GENERATE_QUIET`, `QUIET`, `BAD_NOISY`, and `DONE`. Qsearch omits direct TT ordering and quiet generation. Perft uses the same noisy and quiet bucket path but drains both noisy ranges before quiets because ordering is irrelevant. A child inherits the parent's post-pop bucket tops, and returning restores the packed parent entry. Quiet beta cutoffs enqueue a positive shared-history update. Separate round-robin arbitration can issue one noisy/direct request and one quiet request in the same cycle, and the independent response channels can retire both without serialization.
-
-The search-time paths are: TT/root direct validation → board push → child search; noisy generation → good-noisy pop loop; quiet generation → quiet pop loop; bad-noisy pop loop; and terminal handling. A found pop or valid direct response feeds board update in the response cycle, eliminating the former response-to-issue bubble. Illegal results return directly to the current pop phase, legal results enter repetition/TT/evaluation/child search, and reverse completion restores the parent stack record. A node completes a whole class before its buckets become eligible, while noisy generation, quiet generation, and independent bucket reads may overlap across different threads.
-
-Controller-level one-thread acceptance tests cover start-position perft depths 0, 1, and 2 plus direct-setup positions for kings-only, castling, en passant, promotion, stalemate, and checkmate. Search tests cover White and Black POV capture scoring, 50-move draw, stalemate draw, checkmate losing-mate terminal scores, node limit, fixed-time stop, clock-budget stop, oversized-depth errors, TT reuse, TT direct ordering, PVS, depth-4 LMR behavior, repetition, and Kill.
-
-At the start of each root iteration, the controller initializes every `SEARCH_THREAD_COUNT` context as active and ready at the root position. The primary owns the reported iteration PV and score; helper results contribute through TT entries rather than overriding the main result. It handles kill during active work, bounds requested depth to the local stack, clears active repetition history on direct setup writes, cancels search pipeline wait, tag, and in-flight state on Kill, New Game, or search start, and scores 50-move and repetition draws plus checkmate and stalemate when no legal moves remain. Node and time stops report only fully completed iteration depth, but may return a legal root move whose child has fully returned from the deeper in-progress iteration when that result strictly improves on the completed score.
-
-The capacity constants are singular: `THREAD_COUNT = 16` defines the supported thread-ID space and `MAX_PLY_COUNT = 64` defines the supported ply-index space. The controller parameters `SEARCH_THREAD_COUNT` and `SEARCH_STACK_DEPTH` select the number of those supported contexts actually instantiated; they default to the capacity values. The DE1-SoC target explicitly instantiates one search thread and 24 stack plies. Other defaults are `ACTIVE_REPETITION_DEPTH = 100`, `LMR_A_Q8 = 192`, `LMR_B_Q8 = 614`, and `ENABLE_SEARCH_STATS = 0`.
-
-When `ENABLE_SEARCH_STATS` is set, 40-bit counters record TT lookups and hits, frontend TT-cache lookup probes and hits, cycles spent in each non-idle per-thread search phase, noisy and quiet generation, destinations, candidates, history lookups, generation cycles, per-bucket writes, and bucket high-water tops. Overflow count and packed sticky/bucket/thread identity are also exposed. The values are serialized byte-wise through the narrow addressed debug port only after the search. Disabled builds elaborate constant-zero optional counters while retaining overflow status.
-
-The engine profiling build defines `FPGA_CHESS_PROFILE` to expose one-cycle simulator-only terminal-classification and beta-cutoff events used by the external profiler. The events and their storage are absent from normal simulation and synthesis builds.
-
-The `quartus-de1-soc` synthesis target uses one search context and 24 allocated plies. The controller request contract is uniform: `req_ready` means the request was captured, and `resp_valid` means the operation is complete for direct-board, new-game, kill, perft, and search operations.
-
-The search controller owns hardware search threads, the active board state visible to search, alpha/beta state, pipeline dispatch, and search-result selection.
+The search controller owns the active position, hardware search threads, search stacks, alpha/beta state, repetition state, shared-pipeline scheduling, and result selection. The search algorithm is specified in [search-design.md](../architecture/search-design.md); this document defines the controller boundary and orchestration responsibilities.
 
 ## Operations
 
-| Operation | Description |
-| --------- | ----------- |
-| Idle | Search controller is idle. Result ports hold the most recent completed search result. |
-| Direct Board | Parent module applies a board operation directly. Used for setup, make move, and active-position maintenance. |
-| Search Depth | Search current position to a fixed depth. |
-| Search Fixed Time | Search until the fixed time limit expires. |
-| Search on Clock | Search using clock and increment information from the engine layer. |
-| Search Nodes | Search until a node limit is reached. |
-| Perft | Count strictly legal moves to a fixed depth. Result is transmitted via node count. |
-| Kill | Stop the current search as soon as pipeline state can be drained safely. |
+| Operation | Behavior |
+| --------- | -------- |
+| Direct Board | Applies a setup or game move operation to the active position. |
+| New Game | Cancels active work, clears game-dependent search state, advances the TT generation, and restores the standard starting position. |
+| Search Depth | Searches the active position to a bounded fixed depth. |
+| Search Fixed Time | Searches until the fixed-time budget expires. |
+| Search on Clock | Derives and enforces a budget from the supplied clock and increment. |
+| Search Nodes | Searches until the node budget is reached. |
+| Perft | Counts strictly legal leaf positions through the normal move-generation and board-update paths without modifying the active position. |
+| Kill | Cancels active search or perft work and drains or invalidates outstanding pipeline responses. |
+
+The request uses a ready/valid handshake. `req_ready` means the complete typed request was captured. Exactly one `resp_valid` completion is produced for every accepted operation.
 
 ## Ports
 
-| Direction | Port Name | Size | Description |
-| --------- | --------- | ---- | ----------- |
-| Input | `clk` | 1 | Clock. |
-| Input | `rst_n` | 1 | Synchronous active-low reset. |
-| Input | `req_valid`, `req` | 1, `EngineControllerRequest` | Decoded direct-board, new-game, perft, search, or kill request. |
-| Output | `req_ready` | 1 | The controller captured `req`. |
-| Output | `resp_valid`, `resp` | 1, `EngineControllerResponse` | Completion and result for the captured request. |
-| Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status from the selected TT backend. |
-| Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral external TT memory command, write-data, read-data, and completion channels. |
+| Direction | Port | Description |
+| --------- | ---- | ----------- |
+| Input | `clk`, `rst_n` | Controller clock and synchronous active-low reset. |
+| Input | `req_valid`, `req` | Typed operation request from the engine command layer. |
+| Output | `req_ready` | Request acceptance. |
+| Output | `resp_valid`, `resp` | Operation completion and result. |
+| Input | `tt_memory_ready`, `tt_memory_error` | Selected TT backend status. |
+| Request/response | `tt_mem_*` | Vendor-neutral TT burst-memory channels described in [tt-memory.md](tt-memory.md). |
 
-## Score Convention
+## State Ownership
 
-Search uses side-to-move point-of-view scores internally. Raw static evaluation and incremental PST/material state are White-relative, and the search controller converts them at leaf/static-eval boundaries based on the board side to move.
+The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`; pipeline modules do not retain canonical positions.
 
-TT scores use the same side-to-move point-of-view convention as search. Mate scores must be adjusted by ply when stored or loaded so mate distance remains comparable.
+Each search thread owns a current board, Zobrist key, incremental evaluation state, alpha/beta state, node count, lifecycle phase, and a block-RAM search stack. Stack records hold the information needed to resume a parent after reversing a child, rather than storing a complete board at every ply.
 
-## Required Child Pipelines
+Each node records its actual remaining depth. That value controls main-search versus quiescence behavior, late-move reductions, and TT depth; it is not inferred from ply.
 
-- [`board_update_pipeline`](board-update-pipeline.md)
-- [`move_generator`](move-generator.md)
-- [`static_evaluator`](static-evaluator.md)
-- [`tt_lookup`](tt-lookup.md)
-- [`tt_store`](tt-store.md)
-- [`timer`](timer.md)
+The primary thread owns the reported principal variation, score, and completed depth. Helper threads cooperate through the shared TT and never overwrite the primary result directly.
 
-```mermaid
-flowchart LR
-    Engine["Engine command layer"]
-    Timer["Timer"]
-    Result["Best result registers"]
+## Shared-Pipeline Scheduling
 
-    subgraph Control["Search controller internals"]
-        Scheduler["Scheduler and arbitration"]
-        Threads["Per-thread state\nand search stacks"]
-    end
+The controller schedules threads across:
 
-    subgraph Pipelines["Shared pipelines"]
-        BoardUpdate["Board update"]
-        MoveGen["Move generator"]
-        StaticEval["Static evaluator"]
-        TTLookup["TT lookup"]
-        TTStore["TT store"]
-    end
+- [board update](board-update-pipeline.md)
+- [move generation](move-generator.md)
+- [static evaluation](static-evaluator.md)
+- [transposition-table lookup and store](transposition-table.md)
+- [repetition checking](repetition-checker.md)
+- [timer](timer.md)
 
-    Engine -->|"Operation, limits,\nand direct-board ops"| Scheduler
-    Scheduler <-->|"Dispatch state,\nalpha/beta, counters"| Threads
+A thread has at most one in-flight request in each shared subsystem. Every request carries enough thread and operation metadata to route its completion independently of whichever thread is being dispatched when the response arrives.
 
-    Scheduler -->|"Push, commit,\nreverse, setup"| BoardUpdate
-    BoardUpdate -->|"Updated board,\nZobrist, PST state"| Threads
+Ready threads are selected independently for different pipelines, allowing unrelated thread work to overlap. Lookup responses and returned child scores take priority because they unblock existing search work. TT stores are best-effort and never block a thread after the TT frontend accepts the publication.
 
-    Scheduler -->|"Candidate request"| MoveGen
-    MoveGen -->|"Candidate and legality"| Scheduler
+Reset, New Game, Kill, and search initialization invalidate outstanding tags, pending returns, and in-flight state so a late response cannot mutate a later operation.
 
-    Scheduler -->|"Leaf board state\nplus base eval"| StaticEval
-    StaticEval -->|"White-relative score"| Scheduler
+## Node Lifecycle
 
-    Scheduler -->|"Probe current node"| TTLookup
-    TTLookup -->|"Hit, bound,\nbest move"| Scheduler
+At a search node, the controller:
 
-    Scheduler -->|"Publish searched node"| TTStore
-    Timer -->|"Elapsed milliseconds"| Scheduler
-    Scheduler --> Result --> Engine
-```
+1. Checks draw state and probes the TT.
+2. Tries the TT or previous-iteration ordering move directly when available.
+3. Generates and searches noisy moves.
+4. Generates and searches quiet moves.
+5. Searches deferred bad captures.
+6. Scores checkmate, stalemate, or the completed alpha/beta result.
 
-## Registers
+Move generation produces pseudo-legal candidates. The controller speculatively applies each candidate through board update and rejects it if the moving side remains in check. A rejected candidate does not alter thread state or increment the search node count.
 
-| Register Name | Size | Description |
-| ------------- | ---- | ----------- |
-| `state` | Enum | Current search-controller FSM state. |
-| `gen_search_stack_ram[].search_stack_mem` | Packed records | One synchronous block-RAM search stack per thread, containing moves, scores, bounds, repetition boundary, actual remaining depth, legal-move count, move-order state, direct suppression, eight bucket tops, and node/PVS flags. |
-| `search_stack_top[THREAD_COUNT]` | Packed records | Register caches for each thread's current node. |
-| `search_stack_parent_q[THREAD_COUNT]` | Packed records | Continuously prefetched synchronous-RAM parent values used on ascent. |
-| `search_nodes` | `NODE_COUNT_BITS` | Search node count for the active operation; increments when a real legal move commits and enters its child position. Perft retains its conventional fixed-depth leaf count. |
-| `search_thread_phase[THREAD_COUNT]` | Enum | Per-thread scheduler phase: ready, TT wait, eval wait, move wait, board wait, store publish, done, or idle. |
-| `search_*_inflight[THREAD_COUNT]` | Bit arrays | Per-thread flags indicating accepted or pending board, move, eval, TT lookup, and TT store-publication work. Store publication retires on frontend acceptance. |
-| `search_active_thread_count` | Count | Number of root-thread contexts still active in the current iterative-deepening pass. |
-| `search_dispatch_cursor` | `ThreadID` | Round-robin cursor used to choose the next active ready thread context. |
-| `search_return_dispatch_cursor` | `ThreadID` | Round-robin cursor used to choose the next thread with a pending child return to fold into its parent node. |
-| `search_tt_response_dispatch_cursor` | `ThreadID` | Cursor used to choose among helper responses when no primary response is pending. |
-| `search_*_dispatch_cursor` | `ThreadID` | Per-pipeline cursors used to choose among helpers after ready primary work has been preferred. |
-| `search_*_tag_pipe` | Thread, operation, ply, and check-state tag arrays | Controller-local fixed-latency tags for board-update and static-evaluation completions; move generation instead returns explicit thread/ply tags on its variable-latency response. |
-| `repetition_checker.active_history` | 100-entry 64-bit key RAM | Active-game reversible positions used to construct the shared checker’s parity-addressed static table before a search. The current root sample is excluded from previous-occurrence counts. |
-| `repetition_checker` | Shared two-stage pipeline | Performs full-key static and per-thread line-history lookup with one request accepted per cycle, saturated occurrence reduction, irreversible-boundary masking, and tagged responses. |
-| `repetition_checker.line_bank[]` | Banked 64-bit key RAM | Search-line history owned by the shared checker; stale entries are excluded by request-time ply and irreversible-boundary masks rather than cleared. |
+A legal child is written to repetition line history before TT lookup, evaluation, or deeper search. On return, the controller reverses the move and folds the child score into the saved parent. A real legal child increments the search node count even if repetition or a TT cutoff resolves it without deeper evaluation.
+
+Quiescence search uses captures and promotions and omits quiet generation and direct TT move ordering. Perft uses the same legality and board-update paths but counts fixed-depth leaves instead of evaluating positions.
+
+## Stops and Results
+
+Depth, node, and time limits are checked at safe search boundaries. The reported depth is the deepest fully completed primary-thread iteration. If a deeper iteration is interrupted, the controller preserves the completed result and may also retain a legal root move whose child result completed during the partial iteration.
+
+Kill stops issuing new search work, invalidates work that cannot safely complete, and produces a completion only after late responses can no longer alter the active operation.
+
+Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal search results. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
+
+## Configuration and Instrumentation
+
+Thread count, stack depth, repetition-history depth, LMR constants, clock frequency, TT backend selection, and optional statistics are synthesis parameters. Capacity types define the maximum encodable thread and ply identifiers; a target may instantiate fewer contexts.
+
+Optional statistics report pipeline activity, search phases, TT/cache behavior, move-generation activity, and overflow state through the engine debug interface. Statistics do not affect search semantics.

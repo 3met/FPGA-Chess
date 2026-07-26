@@ -156,11 +156,11 @@ module repetition_checker #(
             line_wren[(line_write_ply - 1'b1) >> 1] = 1'b1;
     end
 
-    synchronous_simple_dual_port_ram #(.NUM_WORDS(ACTIVE_HISTORY_DEPTH), .WORD_SIZE(64)) active_history_ram (
+    sync_read_simple_dual_port_ram #(.NUM_WORDS(ACTIVE_HISTORY_DEPTH), .WORD_SIZE(64)) active_history_ram (
         .clock(clk), .data(active_history_key), .rdaddress(active_history_rdaddr), .rden(active_history_rden),
         .wraddress(active_history_wraddr), .wren(active_history_wren), .q(active_history_q)
     );
-    synchronous_simple_dual_port_ram #(.NUM_WORDS(STATIC_WORD_COUNT), .WORD_SIZE(STATIC_ENTRY_BITS)) static_history_ram (
+    sync_read_simple_dual_port_ram #(.NUM_WORDS(STATIC_WORD_COUNT), .WORD_SIZE(STATIC_ENTRY_BITS)) static_history_ram (
         .clock(clk), .data(static_write_data), .rdaddress(static_rdaddr), .rden(static_rden),
         .wraddress(static_wraddr), .wren(static_wren), .q(static_q_bits)
     );
@@ -168,7 +168,7 @@ module repetition_checker #(
     genvar bank_gen;
     generate
         for (bank_gen = 0; bank_gen < LINE_BANK_COUNT; bank_gen = bank_gen + 1) begin : gen_line_bank
-            synchronous_simple_dual_port_ram #(.NUM_WORDS(LINE_ADDR_WORDS), .WORD_SIZE(64)) line_ram (
+            sync_read_simple_dual_port_ram #(.NUM_WORDS(LINE_ADDR_WORDS), .WORD_SIZE(64)) line_ram (
                 .clock(clk), .data(line_write_key), .rdaddress(line_rdaddr), .rden(req_valid),
                 .wraddress(line_wraddr), .wren(line_wren[bank_gen]), .q(line_read_data[bank_gen])
             );

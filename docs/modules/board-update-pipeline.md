@@ -63,7 +63,7 @@ flowchart LR
 
 ## Board Setup
 
-The final engine should set up a board by issuing explicit Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, or by using a higher-level Set Board command that the engine layer decomposes into those operations. Resetting the board update pipeline should not be required to create a legal position.
+The engine sets up a board through Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
 
 ## Hashing
 

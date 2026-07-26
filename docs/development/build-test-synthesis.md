@@ -6,7 +6,7 @@ The repo-level entrypoint is `python -m tools.hardware_build`. The package is sp
 
 Build metadata lives in `hardware/build/manifest.json`.
 
-`source_sets` are ordered lists of RTL files and `@other-set` references; order is significant because packages and imported helper functions must compile before dependent modules.
+`source_sets` are ordered lists of RTL files and `@other-set` references; order is significant because packages and imported helper functions must compile before dependent modules. Higher-level sets reference the smallest complete subsystem sets instead of repeating their files or transitive dependencies.
 
 `tests` map a test name to a source set, testbench file, and simulator top module.
 
@@ -30,7 +30,7 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 `python -m tools.hardware_build profile` runs one engine-only search through the external TT, cache, CDC bridge, and DE1 SDR SDRAM controller, then prints detailed runtime statistics and saves text and JSON reports. It prefers a cached Verilator native build when available, with ModelSim selectable as a reference backend. It defaults to a 50 ms simulated search from the normal starting position and accepts `--fen`, one of `--depth`/`--nodes`/`--time-ms`, hardware configuration overrides, and opt-in event-trace or waveform artifacts. See [engine-profiling.md](engine-profiling.md).
 
-`python -m tools.hardware_build check` verifies generated data, runs the host-side Python unit tests, and runs all SystemVerilog tests. It accepts `--jobs <count>` concurrency control and `--timeout <seconds>` for RTL tests. A simulation that exceeds its limit is terminated and reported as failed.
+`python -m tools.hardware_build check` verifies generated data, runs the core Python suites under `tests/software`, `tests/benchmarks`, and `tests/hardware_build`, and runs all SystemVerilog tests. Add `--tuning` to run `tests/tuning` when the optional dependencies from `requirements-tuning.txt` are installed. The command accepts `--jobs <count>` concurrency control and `--timeout <seconds>` for RTL tests. A simulation that exceeds its limit is terminated and reported as failed.
 
 `python -m tools.hardware_build synth --target quartus-de1-soc` verifies generated data, refreshes the Quartus project and copied generated data under `work/build/quartus-de1-soc/`, preserves Quartus compilation databases for reuse, uses `de1_soc` as the top-level entity, imports matching DE1-SoC pin assignments from the board template, and runs map, fit, assembler, and timing analysis while writing each stage's output to its own log. A successful TimeQuest process still fails the build if its summary contains negative setup or hold slack. Interrupting the build stops the active vendor tool and its worker processes before the CLI exits. Pass `--stream-logs` to also print the live vendor output, `--clean` to discard the existing Quartus build directory, `--update-generated-data` to regenerate and keep changed generated data instead of failing on drift, or `--jobs <count>` to override the automatic Quartus processor count.
 
@@ -54,7 +54,7 @@ Each new synthesis run writes `synthesis.json` beside its vendor reports so time
 
 ## Adding Tests or Targets
 
-To add a new RTL test, add or reuse a source set, add the testbench file and top module under `tests`, then run `python -m tools.hardware_build test --name <test-name>`.
+To add a new RTL test, add or reuse a source set, add the testbench file and top module under `hardware/tb`, then run `python -m tools.hardware_build test --name <test-name>`. Python tests belong under the matching subsystem directory in `tests/`.
 
 To add a new board target, create a new `synthesis_targets` entry with its own source set, top module, constraints, and vendor tool settings; generated project files should still be written only under `work/build/`.
 

@@ -37,4 +37,4 @@ The three directional propagation slots are scheduled independently for each squ
 
 ## Score Convention
 
-Positive `static_eval` values favor White. Negative values favor Black. The evaluator should not know whose turn it is unless a future evaluation term explicitly depends on side to move.
+Positive `static_eval` values favor White. Negative values favor Black. The evaluator is independent of the side to move.

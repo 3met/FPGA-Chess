@@ -28,7 +28,7 @@
     ],
     "move-generator": [
       "@common",
-      "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
+      "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/move_generator/defs.sv",
       "hardware/rtl/move_generator/move_generator.sv"
     ],
@@ -37,14 +37,13 @@
       "hardware/rtl/zobrist_defs.sv",
       "hardware/rtl/generated/zobrist_values_pkg.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
-      "hardware/rtl/memory/simple_dual_port_ram.sv",
-      "hardware/rtl/memory/inferred_dual_port_rom.sv",
-      "hardware/rtl/memory/synchronous_dual_port_rom.sv",
+      "hardware/rtl/memory/async_read_simple_dual_port_ram.sv",
+      "hardware/rtl/memory/sync_read_dual_port_rom.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline.sv"
     ],
     "tt-load-store": [
       "@common",
-      "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
+      "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/memory/synchronous_fifo.sv",
       "hardware/rtl/tt/tt_defs.sv",
       "hardware/rtl/tt/tt_load_store.sv",
@@ -58,17 +57,16 @@
     "repetition-checker": [
       "@common",
       "hardware/rtl/zobrist_defs.sv",
-      "hardware/rtl/memory/synchronous_simple_dual_port_ram.sv",
+      "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/repetition_checker.sv"
     ],
     "search-controller": [
-      "@common",
       "@board-update-pipeline",
       "@move-generator",
       "@static-evaluator",
       "@tt-load-store",
+      "@repetition-checker",
       "hardware/rtl/engine_defs.sv",
-      "hardware/rtl/repetition_checker.sv",
       "hardware/rtl/timer.sv",
       "hardware/rtl/search_controller.sv"
     ],
@@ -85,10 +83,6 @@
     ],
     "portable-rtl": [
       "@uart",
-      "@static-evaluator",
-      "@move-generator",
-      "@board-update-pipeline",
-      "@tt-load-store",
       "@search-controller",
       "@engine-rtl"
     ],

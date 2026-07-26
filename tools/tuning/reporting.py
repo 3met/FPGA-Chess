@@ -7,11 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tools.common.files import atomic_write_json
 
-def atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+
+atomic_json = atomic_write_json
 
 
 def create_run(root: Path, config_hash: str) -> Path:

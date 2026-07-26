@@ -11,7 +11,8 @@ from .generated_data import command_check, command_gen_data
 from .manifest import command_list, command_validate
 from .programming import command_flash
 from .profiling import command_profile
-from .reports import command_synth_report, command_timing_paths
+from .reports import command_synth_report
+from .reports_quartus import command_timing_paths
 from .simulation import command_compile, command_test
 from .synthesis import command_synth
 
@@ -84,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Check generated data and run Python and RTL tests")
     check_parser.add_argument("--jobs", type=int, help="Number of RTL tests to run concurrently; defaults to 1")
+    check_parser.add_argument(
+        "--tuning",
+        action="store_true",
+        help="Also run tests requiring the optional evaluation-tuning dependencies",
+    )
     check_parser.add_argument(
         "--timeout",
         type=float,

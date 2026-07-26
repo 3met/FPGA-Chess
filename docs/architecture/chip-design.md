@@ -75,7 +75,7 @@ flowchart LR
 
 The five major search pipelines are board update, static evaluation, ordered move generation, TT lookup, and TT store.
 
-Board update, static evaluation, and move generation are high-area pipelines and should be kept busy with work from many search threads. Move generation is split into independent noisy/direct and quiet class pipelines. For the base design, each search thread may have at most one in-flight request in each major component. This avoids duplicate work for the same thread position and lets pipeline results be routed by `thread_id` without a wider request ID.
+Board update, static evaluation, and move generation are high-area pipelines kept busy with work from many search threads. Move generation is split into independent noisy/direct and quiet class pipelines. Each search thread has at most one in-flight request in each major component. This avoids duplicate work for the same thread position and lets pipeline results be routed by `thread_id` without a wider request ID.
 
 Pipeline parallelism means different threads can occupy different stages of a pipeline at the same time, and different threads can concurrently use the noisy and quiet move-generation pipelines. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
 
@@ -85,18 +85,18 @@ The main pipelines are designed for throughput and can accept a new request each
 
 The FPGA maintains active game state between commands. The host can send setup, make-move, new-game, perft, and search commands; the Python host is responsible for parsing and validating UCI inputs before encoding those commands.
 
-Search owns per-thread state. Each thread keeps an active search stack and move records for reverse traversal rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but should not be treated as the long-term owner of the engine position.
+Search owns per-thread state. Each thread keeps an active search stack and move records for reverse traversal rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but does not own the engine position.
 
 Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. The remainder of the static evaluation is fully computed by the static evaluation pipeline on dispatch.
 
-Raw static evaluation and incremental PST/material state should be White-relative in the final design. Search should normalize scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
+Raw static evaluation and incremental PST/material state are White-relative. Search normalizes scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
 
 ## Transposition Table
 
 The transposition table used to store previously computed information is required for Lazy SMP multithreading. The DE1 implementation stores the primary TT in its FPGA-side SDR SDRAM behind a vendor-neutral burst interface and uses a small direct-mapped BRAM cache. Other targets can connect a different memory controller to the same logical interface or retain the inferred-BRAM fallback.
 
-TT lookups are more latency-sensitive than TT stores and receive priority when lookup/store bandwidth conflicts. Stores enter a parameterized best-effort frontend FIFO and drain opportunistically; overflow stores are dropped so memory pressure never blocks search after publication. The memory arbitration policy and FIFO depth are tunable parameters and should be selected based on measured search throughput.
+TT lookups are more latency-sensitive than TT stores and receive priority when lookup/store bandwidth conflicts. Stores enter a parameterized best-effort frontend FIFO and drain opportunistically; overflow stores are dropped so memory pressure never blocks search after publication. Memory arbitration and FIFO depth are target parameters selected using measured search throughput.
 
 ## Vendor Support
 
-The logical design should be FPGA-vendor neutral. Vendor-specific resources must be isolated behind wrappers or generated modules with stable logical interfaces. Intel/Altera and Xilinx support should both be considered when defining RAMs, FIFOs, external memory controllers, clocking, and board-level I/O.
+The logical design is FPGA-vendor neutral. Vendor-specific resources are isolated behind wrappers or generated modules with stable logical interfaces. RAMs, FIFOs, external memory controllers, clocking, and board-level I/O support both Intel/Altera and Xilinx implementations.
