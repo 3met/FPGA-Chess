@@ -3,7 +3,7 @@
 // Takes data bytes and transmits them as UART frames.
 module uart_transmitter #(
     parameter int BAUD_RATE = 2_000_000,
-    parameter int CLOCK_FREQ = 50_000_000
+    parameter int CLOCK_FREQ = 100_000_000
 ) (
     input logic clk,
     input logic rst_n,
@@ -123,7 +123,7 @@ endmodule : uart_transmitter
 // Output encoder. Engine bytes are written in clk and transmitted in uart_clk.
 module tx_encode #(
     parameter int BAUD_RATE = 2_000_000,
-    parameter int UART_CLOCK_FREQ = 50_000_000,
+    parameter int UART_CLOCK_FREQ = 100_000_000,
     parameter int FIFO_DEPTH = 1024
 ) (
     input logic clk,

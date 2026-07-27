@@ -22,7 +22,7 @@ module de1_soc(input CLOCK_50,
             output logic DRAM_WE_N
             );
 
-	parameter UART_CLOCK_FREQ = 50_000_000;
+	parameter UART_CLOCK_FREQ = 100_000_000;
 	parameter BAUD_RATE = 2_000_000;
 	parameter ENABLE_SEARCH_STATS = 1'b0;
 	parameter int unsigned LMR_A_Q8 = 192;
@@ -45,7 +45,8 @@ module de1_soc(input CLOCK_50,
 		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(memory_read_clk),
 		.locked(pll_locked_status));
 	assign DRAM_CLK = memory_output_clk;
-	assign uart_clk = CLOCK_50;
+	// Reuse the PLL's zero-phase 100 MHz memory clock for finer UART sampling.
+	assign uart_clk = memory_clk;
 
 	localparam int PLL_RESET_HOLD_CYCLES = 1024;
 	localparam int PLL_LOCK_STABLE_CYCLES = 256;

@@ -3,7 +3,7 @@
 // Receives UART RX one bit at a time and emits valid data bytes.
 module uart_receiver #(
     parameter int BAUD_RATE = 2_000_000,
-    parameter int CLOCK_FREQ = 50_000_000,
+    parameter int CLOCK_FREQ = 100_000_000,
     parameter int BREAK_BIT_COUNT = 20
 ) (
     input logic clk,
@@ -49,6 +49,7 @@ module uart_receiver #(
     logic [2:0] rx_data_pos;
     logic [7:0] rx_shift;
     logic uart_rx_meta, uart_rx_sync;
+    logic [1:0] sample_high_count;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -78,6 +79,7 @@ module uart_receiver #(
             rx_timer <= '0;
             rx_data_pos <= '0;
             rx_shift <= '0;
+            sample_high_count <= '0;
             rx_stream <= '0;
             rx_stream_valid <= 1'b0;
             uart_violation <= 1'b0;
@@ -90,20 +92,29 @@ module uart_receiver #(
                 rx_timer <= '0;
                 rx_data_pos <= '0;
                 rx_shift <= '0;
+                sample_high_count <= '0;
             end else begin
                 case (uart_stage)
                     UART_IDLE: begin
                         rx_timer <= '0;
                         rx_data_pos <= '0;
+                        sample_high_count <= '0;
                         if (!uart_rx_sync) begin
                             uart_stage <= UART_START;
                         end
                     end
 
                     UART_START: begin
+                        // Majority vote three samples around the start-bit center.
+                        if (rx_timer == TIMER_BITS'(HALF_BIT_CLKS - 2)) begin
+                            sample_high_count <= {1'b0, uart_rx_sync};
+                        end else if (rx_timer == TIMER_BITS'(HALF_BIT_CLKS - 1)) begin
+                            sample_high_count <= sample_high_count + {1'b0, uart_rx_sync};
+                        end
                         if (rx_timer == TIMER_BITS'(HALF_BIT_CLKS)) begin
                             rx_timer <= '0;
-                            if (!uart_rx_sync) begin
+                            sample_high_count <= '0;
+                            if ((sample_high_count + {1'b0, uart_rx_sync}) < 2) begin
                                 uart_stage <= UART_DATA;
                                 rx_data_pos <= '0;
                             end else begin
@@ -115,9 +126,18 @@ module uart_receiver #(
                     end
 
                     UART_DATA: begin
+                        // Sample each data bit three times near its center to reject
+                        // isolated input glitches without changing the baud timing.
+                        if (rx_timer == TIMER_BITS'(CLKS_PER_BIT - 3)) begin
+                            sample_high_count <= {1'b0, uart_rx_sync};
+                        end else if (rx_timer == TIMER_BITS'(CLKS_PER_BIT - 2)) begin
+                            sample_high_count <= sample_high_count + {1'b0, uart_rx_sync};
+                        end
                         if (rx_timer == TIMER_BITS'(CLKS_PER_BIT - 1)) begin
                             rx_timer <= '0;
-                            rx_shift[rx_data_pos] <= uart_rx_sync;
+                            sample_high_count <= '0;
+                            rx_shift[rx_data_pos] <=
+                                (sample_high_count + {1'b0, uart_rx_sync}) >= 2;
                             rx_data_pos <= rx_data_pos + 3'd1;
                             if (rx_data_pos == 3'd7) begin
                                 uart_stage <= UART_STOP;
@@ -128,10 +148,16 @@ module uart_receiver #(
                     end
 
                     UART_STOP: begin
+                        if (rx_timer == TIMER_BITS'(CLKS_PER_BIT - 3)) begin
+                            sample_high_count <= {1'b0, uart_rx_sync};
+                        end else if (rx_timer == TIMER_BITS'(CLKS_PER_BIT - 2)) begin
+                            sample_high_count <= sample_high_count + {1'b0, uart_rx_sync};
+                        end
                         if (rx_timer == TIMER_BITS'(CLKS_PER_BIT - 1)) begin
                             uart_stage <= UART_IDLE;
                             rx_timer <= '0;
-                            if (uart_rx_sync) begin
+                            sample_high_count <= '0;
+                            if ((sample_high_count + {1'b0, uart_rx_sync}) >= 2) begin
                                 rx_stream <= rx_shift;
                                 rx_stream_valid <= 1'b1;
                             end else begin
@@ -146,6 +172,7 @@ module uart_receiver #(
                         uart_stage <= UART_IDLE;
                         rx_timer <= '0;
                         rx_data_pos <= '0;
+                        sample_high_count <= '0;
                     end
                 endcase
             end
@@ -158,7 +185,7 @@ endmodule : uart_receiver
 // Input decoder. UART bytes are written in uart_clk and consumed in clk.
 module rx_decode #(
     parameter int BAUD_RATE = 2_000_000,
-    parameter int UART_CLOCK_FREQ = 50_000_000,
+    parameter int UART_CLOCK_FREQ = 100_000_000,
     parameter int FIFO_DEPTH = 1024,
     parameter int BREAK_BIT_COUNT = 20
 ) (

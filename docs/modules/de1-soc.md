@@ -8,7 +8,7 @@ The SDRAM controller parameter `SKIP_INITIAL_CLEAR` defaults to zero and must re
 
 ## Clocking
 
-`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses a 35.714286 MHz engine clock. The UART continues to use the undivided 50 MHz reference clock.
+`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses a 35.714286 MHz engine clock. The UART uses the PLL's zero-phase 100 MHz memory-domain output.
 
 After configuration, a `CLOCK_50` startup controller asserts PLL reset for 1024 cycles, requires lock to remain asserted for 256 cycles, and retries automatically if lock is not acquired within 20 ms or is subsequently lost. Engine, SDRAM, and UART logic each release reset through a local-clock synchronizer only after the PLL reaches the running state. UART BREAK applies the same stretched local reset to the engine, SDRAM path, and UART transmitter, so normal remote recovery does not require either physical reset button.
 

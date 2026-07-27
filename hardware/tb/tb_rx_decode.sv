@@ -2,7 +2,7 @@
 
 module tb_uart_primitives;
 
-    localparam int CLOCK_FREQ = 50_000_000;
+    localparam int CLOCK_FREQ = 100_000_000;
     localparam int BAUD_RATE = 2_000_000;
     localparam real CLK_NS = 1_000_000_000.0 / CLOCK_FREQ;
     localparam real BIT_NS = 1_000_000_000.0 / BAUD_RATE;
@@ -106,6 +106,25 @@ module tb_uart_primitives;
         #(BIT_NS);
     endtask : send_uart_byte
 
+    task automatic send_uart_byte_with_center_glitch(input logic [7:0] value);
+        uart_rx = 1'b0;
+        #(BIT_NS);
+        for (int idx = 0; idx < 8; idx += 1) begin
+            uart_rx = value[idx];
+            if (idx == 3) begin
+                #(BIT_NS / 2.0 - CLK_NS / 2.0);
+                uart_rx = ~value[idx];
+                #(CLK_NS);
+                uart_rx = value[idx];
+                #(BIT_NS / 2.0 - CLK_NS / 2.0);
+            end else begin
+                #(BIT_NS);
+            end
+        end
+        uart_rx = 1'b1;
+        #(BIT_NS);
+    endtask : send_uart_byte_with_center_glitch
+
     task automatic send_bad_stop(input logic [7:0] value);
         uart_rx = 1'b0;
         #(BIT_NS);
@@ -164,6 +183,10 @@ module tb_uart_primitives;
         clear_rx_events();
         send_uart_byte(8'h3c);
         expect_rx_byte(8'h3c);
+
+        clear_rx_events();
+        send_uart_byte_with_center_glitch(8'ha5);
+        expect_rx_byte(8'ha5);
 
         clear_rx_events();
         uart_rx = 1'b0;

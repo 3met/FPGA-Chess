@@ -125,6 +125,37 @@ class UCIHostSpecTests(unittest.TestCase):
 class UCIHostDiagnosticTests(unittest.TestCase):
     """Exercise diagnostics without requiring python-chess or a serial adapter."""
 
+    def test_isready_withholds_readyok_for_latched_engine_error(self):
+        class Client:
+            def request(self, command):
+                self.command = command
+                return StatusResponse(status=0x09, error=EngineError.INTERNAL, active_operation=0)
+
+        host = object.__new__(FPGAUCIHost)
+        host.client = Client()
+        host._search_active = False
+        host._search_lock = threading.Lock()
+        host.emit = (lines := []).append
+        host.connect = lambda: host.client
+
+        host._handle_isready()
+
+        self.assertEqual(host.client.command, cmd_get_status())
+        self.assertEqual(lines, ["info string engine error latched: 5"])
+
+    def test_isready_withholds_readyok_when_status_request_fails(self):
+        host = object.__new__(FPGAUCIHost)
+        host._search_active = False
+        host._search_lock = threading.Lock()
+        host.emit = (lines := []).append
+        host.connect = lambda: (_ for _ in ()).throw(TimeoutError("no response"))
+        host.logger = logging.getLogger("test_isready_failure")
+        host.logger.disabled = True
+
+        host._handle_isready()
+
+        self.assertEqual(lines, ["info string hardware not ready: no response"])
+
     def test_status_diagnostic_formats_protocol_state(self):
         class Client:
             def request(self, command):

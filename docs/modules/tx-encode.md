@@ -8,7 +8,7 @@ The output encoder contains an 8-bit asynchronous FIFO with parameterized depth.
 
 The engine writes bytes when `tx_stream_valid` is asserted and `full` is deasserted. If `full` is asserted, the engine must pause response streaming until space is available.
 
-The default UART side uses `UART_CLOCK_FREQ = 50_000_000` and `BAUD_RATE = 2_000_000`, which gives exactly 25 UART clock cycles per bit.
+The default UART side uses `UART_CLOCK_FREQ = 100_000_000` and `BAUD_RATE = 2_000_000`, which gives exactly 50 UART clock cycles per bit.
 
 ## Ports
 

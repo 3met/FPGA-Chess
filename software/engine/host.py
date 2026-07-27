@@ -258,17 +258,23 @@ class FPGAUCIHost:
         self.emit("info string use 'debug help' for diagnostics")
 
     def _handle_isready(self) -> None:
+        """Report readiness only after a clean FPGA status response."""
         if self._is_search_active():
             self.emit("readyok")
             return
         try:
             client = self.connect()
             response = client.request(cmd_get_status())
-            if isinstance(response, StatusResponse) and response.error_latched:
+            if not isinstance(response, StatusResponse):
+                self.emit(f"info string hardware not ready: unexpected status response: {response}")
+                return
+            if response.error_latched:
                 self.emit(f"info string engine error latched: {response.error}")
+                return
         except Exception as exc:
             self.emit(f"info string hardware not ready: {exc}")
             self.logger.exception("Readiness check failed")
+            return
         self.emit("readyok")
 
     def _handle_setoption(self, args: list[str]) -> None:

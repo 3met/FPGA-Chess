@@ -2,7 +2,7 @@
 
 module tb_rx_decode;
 
-    localparam int UART_CLOCK_FREQ = 50_000_000;
+    localparam int UART_CLOCK_FREQ = 100_000_000;
     localparam int ENGINE_CLOCK_FREQ = 100_000_000;
     localparam int BAUD_RATE = 2_000_000;
     localparam real UART_CLK_NS = 1_000_000_000.0 / UART_CLOCK_FREQ;

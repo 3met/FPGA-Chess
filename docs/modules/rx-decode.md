@@ -10,7 +10,7 @@ If the FIFO is empty, `rx_stream_valid` is deasserted. The decoder does not emit
 
 Normal bytes are dropped and `error` is latched if the FIFO is full. The host is responsible for avoiding overflow by respecting engine readiness. UART BREAK is recognized even when the normal FIFO is full, pulses `remote_reset` in the engine clock domain, and clears the RX FIFO.
 
-The default UART side uses `UART_CLOCK_FREQ = 50_000_000` and `BAUD_RATE = 2_000_000`, which gives exactly 25 UART clock cycles per bit.
+The default UART side uses `UART_CLOCK_FREQ = 100_000_000` and `BAUD_RATE = 2_000_000`, which gives exactly 50 UART clock cycles per bit. The receiver takes a three-sample majority vote around each bit center to reject isolated input glitches.
 
 ## Ports
 
