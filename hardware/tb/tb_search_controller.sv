@@ -890,14 +890,18 @@ module tb_search_controller;
     task automatic run_node_limit_search(input string label);
         automatic EngineControllerRequest request = zero_request();
 
+        aspiration_window_seen = 1'b0;
         request.operation = ENGINE_CTRL_SEARCH_NODES;
-        request.node_limit = NodeCountType'(1);
+        // Complete at least one iteration, then stop under a hard node budget
+        // to exercise aspiration without relying on perft-like node accounting.
+        request.node_limit = NodeCountType'(1000);
         pulse_request(request, label);
         wait_response(label);
         check(!resp.error, {label, " no error"});
-        check(resp.nodes_count >= NodeCountType'(1), {label, " reached node limit"});
-        check(resp.completed_depth == 8'd0, {label, " no partial iteration depth reported complete"});
+        check(resp.nodes_count >= NodeCountType'(1000), {label, " reached node limit"});
+        check(resp.completed_depth >= 8'd1, {label, " reports a completed iteration"});
         check(resp.end_reason == ENGINE_END_NODE_LIMIT, {label, " end reason"});
+        check(aspiration_window_seen, {label, " used an aspiration window"});
     endtask : run_node_limit_search
 
     task automatic run_fixed_time_search(input string label);

@@ -62,7 +62,7 @@ module search_controller #(
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_INF_VALUE = 32001;
     localparam int NULL_MIN_BETA_VALUE = -32000 + MAX_PLY_COUNT;
-    localparam int ASPIRATION_DELTA_VALUE = 512;
+    localparam int ASPIRATION_DELTA_VALUE = 64;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam EvalScore NULL_MIN_BETA = EvalScore'(NULL_MIN_BETA_VALUE);
     localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_DELTA_VALUE);
@@ -3254,17 +3254,12 @@ module search_controller #(
                                     state <= ST_RESPOND;
                                 end else begin
                                     search_target_depth <= search_target_depth + SearchDepth'(1);
-                                    if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH) begin
-                                        search_root_alpha <= aspiration_lower_bound(iteration_best_score_next);
-                                        search_root_beta <= aspiration_upper_bound(iteration_best_score_next);
-                                        search_aspiration_active <= 1'b1;
-                                    end else begin
-                                        // A failed retry can consume a move deadline, so bounded
-                                        // searches retain the full root window.
-                                        search_root_alpha <= -SEARCH_INF;
-                                        search_root_beta <= SEARCH_INF;
-                                        search_aspiration_active <= 1'b0;
-                                    end
+                                    // Every completed iteration supplies a stable center for the
+                                    // next root window. Budget expiry during a failed narrow pass
+                                    // safely returns the previous completed iteration.
+                                    search_root_alpha <= aspiration_lower_bound(iteration_best_score_next);
+                                    search_root_beta <= aspiration_upper_bound(iteration_best_score_next);
+                                    search_aspiration_active <= 1'b1;
                                     search_thread_id <= ThreadID'(0);
                                     search_dispatch <= '0;
                                     search_active_thread_count <= ThreadCount'(0);

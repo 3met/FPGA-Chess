@@ -81,7 +81,7 @@ Quiescence search uses captures and promotions and omits quiet generation and di
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. The reported depth is the deepest fully completed primary-thread iteration. If a deeper iteration is interrupted, the controller preserves the completed result and may also retain a legal root move whose child result completed during the partial iteration.
+Depth, node, and time limits are checked at safe search boundaries. All search modes use an aspiration window around the previous completed iteration from depth two onward. A failed narrow pass is retried at the same depth with the full window; if its time or node budget has expired, the controller returns the previous completed result instead. The reported depth is the deepest fully completed primary-thread iteration. If a deeper iteration is interrupted, the controller preserves the completed result and may also retain a legal root move whose child result completed during the partial iteration.
 
 Kill stops issuing new search work, invalidates work that cannot safely complete, and produces a completion only after late responses can no longer alter the active operation.
 
