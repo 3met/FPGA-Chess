@@ -92,6 +92,11 @@ class FPGAUCISession:
         self.send("isready")
         self.wait_for(lambda line: line == "readyok", timeout, "readyok")
 
+    def new_game(self, timeout: float) -> None:
+        """Reset FPGA game-local search state and wait until it is usable."""
+        self.send("ucinewgame")
+        self.ready(timeout)
+
     def close(self) -> None:
         if self.process is None:
             return

@@ -247,6 +247,9 @@ def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_ra
     with FPGAUCISession(verbose=verbose) as engine:
         engine.initialize(startup_timeout)
         for index, puzzle in enumerate(puzzles, 1):
+            # Puzzles are independent positions: do not carry timing-sensitive
+            # TT or quiet-history state from one solution into the next.
+            engine.new_game(startup_timeout)
             solved = solve_puzzle(engine, puzzle, movetime_ms, search_timeout)
             results.append((puzzle.rating, solved))
             print(f"{'PASS' if solved else 'FAIL'} puzzle {index}/{count} rating={puzzle.rating:.0f}")
