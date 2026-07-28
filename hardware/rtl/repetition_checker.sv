@@ -80,6 +80,7 @@ module repetition_checker #(
     ZobristKey request_key;
     logic [LINE_BANK_COUNT-1:0] request_mask;
     logic request_suppress_static;
+    logic request_is_root;
     logic [1:0] line_count, static_count;
 
     // Four fixed rotations per byte provide a cheap programmable index fold;
@@ -118,8 +119,8 @@ module repetition_checker #(
     assign resp_is_draw = resp_previous_count >= 2;
 
     always_comb begin
-        active_history_rden = init_state == INIT_HISTORY_READ && active_history_count > 1
-            && scan_index < active_history_count - 1'b1;
+        active_history_rden = init_state == INIT_HISTORY_READ
+            && scan_index < active_history_count;
         active_history_rdaddr = HISTORY_ADDR_BITS'(scan_index);
         active_history_wren = active_history_reset || (active_history_write && active_history_count < ACTIVE_HISTORY_DEPTH);
         active_history_wraddr = active_history_reset ? '0 : HISTORY_ADDR_BITS'(active_history_count);
@@ -140,7 +141,7 @@ module repetition_checker #(
                 entry.count = 2'd1;
                 static_wren = 1'b1;
                 static_write_data = entry;
-            end else if (entry.key == active_history_q && entry.count < 2) begin
+            end else if (entry.key == active_history_q && entry.count < 3) begin
                 entry.count = entry.count + 1'b1;
                 static_wren = 1'b1;
                 static_write_data = entry;
@@ -204,11 +205,9 @@ module repetition_checker #(
                         init_state <= INIT_HISTORY_READ;
                     end else clear_index <= clear_index + 1'b1;
                 end
-                INIT_HISTORY_READ: begin
-                    if (active_history_count <= 1 || scan_index == active_history_count-1) begin
-                        init_state <= INIT_READY;
-                    end else init_state <= INIT_STATIC_READ;
-                end
+                INIT_HISTORY_READ:
+                    if (scan_index == active_history_count) init_state <= INIT_READY;
+                    else init_state <= INIT_STATIC_READ;
                 INIT_STATIC_READ: begin
                     init_state <= INIT_STATIC_CHECK;
                 end
@@ -242,6 +241,7 @@ module repetition_checker #(
             epoch_pipe[0] <= req_epoch;
             request_key <= req_key;
             request_suppress_static <= req_start_ply != 0;
+            request_is_root <= req_ply == 0;
             request_mask <= '0;
             if (req_valid && req_ply != 0) begin
                 automatic int current_bank = (int'(req_ply) - 1) >> 1;
@@ -265,8 +265,13 @@ module repetition_checker #(
             begin
                 automatic StaticEntry lookup;
                 lookup = static_q;
-                static_count <= (valid_pipe[0] && !request_suppress_static
-                    && lookup.valid && lookup.key == request_key) ? lookup.count : 0;
+                static_count <= 2'd0;
+                if (valid_pipe[0] && !request_suppress_static
+                        && lookup.valid && lookup.key == request_key) begin
+                    // The table includes the root. A root request excludes its
+                    // current occurrence; descendants retain it as history.
+                    static_count <= request_is_root ? lookup.count - 1'b1 : lookup.count;
+                end
             end
             if (flush) for (int stage = 0; stage < 2; stage++) valid_pipe[stage] <= 1'b0;
 

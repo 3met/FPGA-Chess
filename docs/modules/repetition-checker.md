@@ -9,7 +9,7 @@ Repetition history has two parts:
 - Active-game history contains positions reached before the search root.
 - Per-thread line history contains positions reached from the root along each active search line.
 
-The current root position is excluded from the active-game previous-occurrence count. Search writes a line key when it accepts a child position. A request supplies the current ply and the earliest reversible ply; entries outside that range are ignored.
+The current root position is included in the active-game table. A root request subtracts its current occurrence from the returned count, while matching descendant requests count it when the reversible boundary includes ply zero. Search writes a line key when it accepts a child position. A request supplies the current ply and the earliest reversible ply; entries outside that range are ignored.
 
 Only positions with the same side-to-move parity can repeat. Active history is partitioned by parity relative to the root, and line history reads only plies matching the requested position's parity.
 

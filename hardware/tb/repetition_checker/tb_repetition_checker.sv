@@ -149,6 +149,13 @@ module tb_repetition_checker;
         request(0, 5, 1, 64'haaaa, 2, "two line occurrences");
         request(0, 5, 4, 64'haaaa, 0, "irreversible lower boundary");
 
+        // Reinitialize with a unique root, then count root -> ply 4 -> ply 6.
+        history_sample(64'h7777, 1);
+        initialize();
+        line_sample(1, 4, 64'h7777);
+        request(1, 6, 0, 64'h7777, 2, "root plus one line occurrence");
+        request(1, 6, 1, 64'h7777, 1, "boundary excludes root occurrence");
+
         @(negedge clk); flush = 1; req_valid = 1; req_key = 64'h1111;
         @(negedge clk); flush = 0; req_valid = 0;
         repeat (7) @(negedge clk);
