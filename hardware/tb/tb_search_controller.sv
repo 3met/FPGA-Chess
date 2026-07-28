@@ -769,6 +769,14 @@ module tb_search_controller;
         set_turn(BLACK, "checkmate black to move");
     endtask : setup_checkmate_position
 
+    task automatic setup_qsearch_quiet_evasion_position();
+        clear_board("qsearch quiet evasion");
+        set_tile(WHITE_KING, Position'(0), "qsearch quiet evasion white king a1");
+        set_tile(WHITE_ROOK, Position'(7), "qsearch quiet evasion white rook h1");
+        set_tile(BLACK_KING, Position'(63), "qsearch quiet evasion black king h8");
+        set_turn(BLACK, "qsearch quiet evasion black to move");
+    endtask : setup_qsearch_quiet_evasion_position
+
     task automatic setup_rook_takes_queen();
         setup_kings_only();
         set_tile(WHITE_ROOK, Position'(0), "place white rook a1");
@@ -821,6 +829,34 @@ module tb_search_controller;
         check(resp.completed_depth == 8'd2, {label, " completed requested depth"});
         check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
     endtask : run_checkmate_search
+
+    task automatic run_qsearch_checkmate_test(input string label);
+        automatic EngineControllerRequest request = zero_request();
+
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd0;
+        pulse_request(request, label);
+        wait_response(label);
+        check(!resp.error, {label, " no error"});
+        check(resp.score <= -MATE_THRESHOLD, {label, " losing mate score"});
+        check(is_null_move(resp.best_move), {label, " no best move"});
+        check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
+    endtask : run_qsearch_checkmate_test
+
+    task automatic run_qsearch_quiet_evasion_test(input string label);
+        automatic EngineControllerRequest request = zero_request();
+
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd0;
+        pulse_request(request, label);
+        wait_response(label);
+        check(!resp.error, {label, " no error"});
+        check(resp.score > -MATE_THRESHOLD, {label, " not checkmate"});
+        check(resp.best_move.from_pos == Position'(63), {label, " evasion moves black king"});
+        check(resp.best_move.to_pos == Position'(54) || resp.best_move.to_pos == Position'(62),
+            {label, " quiet king evasion"});
+        check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
+    endtask : run_qsearch_quiet_evasion_test
 
     task automatic run_qsearch_capture_test(input string label);
         automatic EngineControllerRequest request = zero_request();
@@ -1059,6 +1095,14 @@ module tb_search_controller;
         setup_checkmate_position();
         run_perft(8'd1, NodeCountType'(0), "checkmate perft depth 1");
         run_checkmate_search("checkmate search");
+
+        new_game();
+        setup_checkmate_position();
+        run_qsearch_checkmate_test("qsearch checkmate");
+
+        new_game();
+        setup_qsearch_quiet_evasion_position();
+        run_qsearch_quiet_evasion_test("qsearch quiet check evasion");
 
         new_game();
         make_direct_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4");

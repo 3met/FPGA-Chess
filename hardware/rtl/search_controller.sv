@@ -1289,6 +1289,7 @@ module search_controller #(
             && !search_thread_null_ready(thread_index)
             && !search_eval_inflight[thread_index]
             && ((search_in_qsearch(ThreadID'(thread_index))
+                    && !search_board_in_check[thread_index]
                     && !search_stack_top[thread_index].stand_pat_done)
                 || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1);
     endfunction : search_thread_eval_ready
@@ -2685,6 +2686,7 @@ module search_controller #(
                                     MOVE_ORDER_GOOD_NOISY:
                                         search_stack_top[move_thread_id].move_order_state
                                             <= search_in_qsearch(move_thread_id)
+                                                    && !search_board_in_check[move_thread_id]
                                                 ? MOVE_ORDER_BAD_NOISY : MOVE_ORDER_GENERATE_QUIET;
                                     MOVE_ORDER_QUIET:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_BAD_NOISY;
@@ -3041,6 +3043,8 @@ module search_controller #(
                                     terminal_result_thread_pipe <= terminal_thread_id;
                                     terminal_result_ply_pipe <= search_ply[terminal_thread_id];
                                     terminal_result_score_pipe <= search_in_qsearch(terminal_thread_id)
+                                            && (!search_board_in_check[terminal_thread_id]
+                                                || search_stack_top[terminal_thread_id].has_legal)
                                         ? search_stack_top[terminal_thread_id].best_score
                                         : search_stack_top[terminal_thread_id].has_legal
                                         ? search_stack_top[terminal_thread_id].best_score
@@ -3089,6 +3093,7 @@ module search_controller #(
                             search_thread_phase[search_eval_issue_thread] <= SEARCH_PHASE_EVAL_WAIT;
                             search_eval_inflight[search_eval_issue_thread] <= 1'b1;
                             search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_eval_issue_thread)
+                                && !search_board_in_check[search_eval_issue_thread]
                                 && !search_stack_top[search_eval_issue_thread].stand_pat_done;
                             search_dispatch.eval <= search_thread_after(search_eval_issue_thread);
                         end
