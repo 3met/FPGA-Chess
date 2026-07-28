@@ -190,7 +190,9 @@ module search_controller #(
     // Perft borrows search context zero and tracks whether each ply starts a node.
 
     // Per-thread search context and shared-pipeline bookkeeping.
-    Move search_best_move[0:SEARCH_THREAD_COUNT-1];
+    // Root-result arbitration is timing-critical; bounded fanout lets both Intel
+    // and Xilinx tools duplicate these sources locally without changing latency.
+    (* maxfan = 12, max_fanout = 12 *) Move search_best_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
     NodeCountType search_nodes;
     NodeCountType search_thread_nodes[0:SEARCH_THREAD_COUNT-1];
@@ -266,8 +268,8 @@ module search_controller #(
     SearchThreadPhase search_thread_phase[0:SEARCH_THREAD_COUNT-1];
     ThreadCount search_active_thread_count;
     logic search_iteration_has_result;
-    Move search_iteration_best_move;
-    EvalScore search_iteration_best_score;
+    (* maxfan = 12, max_fanout = 12 *) Move search_iteration_best_move;
+    (* maxfan = 12, max_fanout = 12 *) EvalScore search_iteration_best_score;
     EvalScore search_return_score[0:SEARCH_THREAD_COUNT-1];
     logic search_return_valid[0:SEARCH_THREAD_COUNT-1];
     logic search_return_was_scout[0:SEARCH_THREAD_COUNT-1];
@@ -848,7 +850,7 @@ module search_controller #(
 
     function automatic EvalScore terminal_no_move_score(input logic in_check, input PlyIndex ply);
         if (in_check) begin
-            return EvalScore'(int'(ply) - int'(MATE_SCORE));
+            return EvalScore'($signed({1'b0, ply}) - MATE_SCORE);
         end
         return DRAW_EVAL_SCORE;
     endfunction : terminal_no_move_score
@@ -942,15 +944,15 @@ module search_controller #(
 
     // Clamp aspiration bounds before narrowing them to the score representation.
     function automatic EvalScore aspiration_lower_bound(input EvalScore score);
-        automatic integer bound;
-        bound = int'(score) - int'(ASPIRATION_DELTA);
-        return (bound <= -SEARCH_INF_VALUE) ? -SEARCH_INF : EvalScore'(bound);
+        automatic logic signed [16:0] bound =
+            $signed({score[15], score}) - $signed({ASPIRATION_DELTA[15], ASPIRATION_DELTA});
+        return (bound <= -17'sd32001) ? -SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_lower_bound
 
     function automatic EvalScore aspiration_upper_bound(input EvalScore score);
-        automatic integer bound;
-        bound = int'(score) + int'(ASPIRATION_DELTA);
-        return (bound >= SEARCH_INF_VALUE) ? SEARCH_INF : EvalScore'(bound);
+        automatic logic signed [16:0] bound =
+            $signed({score[15], score}) + $signed({ASPIRATION_DELTA[15], ASPIRATION_DELTA});
+        return (bound >= 17'sd32001) ? SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_upper_bound
 
     // Every newly entered node starts from the same empty search record.
@@ -1381,18 +1383,26 @@ module search_controller #(
         return destination_tile.piece_type == NULL_PIECE && !pawn_promotion && !pawn_diagonal;
     endfunction : is_quiet_move
 
-    function automatic logic root_result_better(
-        input ThreadID thread,
-        input EvalScore candidate_score,
-        input Move candidate_move,
-        input logic has_current,
-        input EvalScore current_score,
-        input Move current_move
+    typedef struct packed {
+        logic valid;
+        EvalScore score;
+        Move move;
+    } RootResultCandidate;
+
+    // Select the stronger root result. Reachable controller states present at
+    // most one new primary-thread completion, so a balanced reduction preserves
+    // the procedural winner while avoiding a false serial arbitration path.
+    function automatic RootResultCandidate select_root_result(
+        input RootResultCandidate current,
+        input RootResultCandidate candidate
     );
-        return thread == ThreadID'(0) && (!has_current
-            || candidate_score > current_score
-            || (candidate_score == current_score && move_tiebreak_less(candidate_move, current_move)));
-    endfunction : root_result_better
+        if (candidate.valid && (!current.valid
+                || candidate.score > current.score
+                || (candidate.score == current.score && move_tiebreak_less(candidate.move, current.move)))) begin
+            return candidate;
+        end
+        return current;
+    endfunction : select_root_result
 
     function automatic TTDepth search_remaining_depth(input ThreadID thread);
         return TTDepth'(search_stack_top[thread].remaining_depth);
@@ -2376,12 +2386,22 @@ module search_controller #(
                     automatic NodeCountType nodes_next;
                     automatic logic node_stop_next;
                     automatic logic time_stop_next;
+                    automatic RootResultCandidate root_candidates[0:7];
+                    automatic RootResultCandidate root_pair_winners[0:3];
+                    automatic RootResultCandidate root_quad_winners[0:1];
+                    automatic RootResultCandidate root_winner;
 
                     active_count_next = search_active_thread_count;
                     iteration_has_result_next = search_iteration_has_result;
                     iteration_best_move_next = search_iteration_best_move;
                     iteration_best_score_next = search_iteration_best_score;
                     nodes_next = search_nodes;
+                    root_candidates[0].valid = search_iteration_has_result;
+                    root_candidates[0].score = search_iteration_best_score;
+                    root_candidates[0].move = search_iteration_best_move;
+                    for (int candidate_idx = 1; candidate_idx < 8; candidate_idx++) begin
+                        root_candidates[candidate_idx] = RootResultCandidate'('0);
+                    end
 
                     // The two generators may complete together, but one thread owns only one move operation.
                     if (move_cmd_resp_valid && move_quiet_resp_valid)
@@ -2467,16 +2487,9 @@ module search_controller #(
                                 search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_DONE;
                                 search_thread_completed_depth[terminal_thread_id] <= search_target_depth;
                                 search_thread_completed_best_move[terminal_thread_id] <= search_best_move[terminal_thread_id];
-                                if (root_result_better(
-                                    terminal_thread_id,
-                                    node_score,
-                                    search_best_move[terminal_thread_id],
-                                    iteration_has_result_next,
-                                    iteration_best_score_next,
-                                    iteration_best_move_next)) begin
-                                    iteration_best_move_next = search_best_move[terminal_thread_id];
-                                    iteration_best_score_next = node_score;
-                                end
+                                root_candidates[1].valid = terminal_thread_id == ThreadID'(0);
+                                root_candidates[1].score = node_score;
+                                root_candidates[1].move = search_best_move[terminal_thread_id];
                                 if (terminal_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                 if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                             end else begin
@@ -2724,16 +2737,9 @@ module search_controller #(
                                         search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
                                         search_thread_completed_depth[eval_thread_id] <= search_target_depth;
                                         search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
-                                        if (root_result_better(
-                                                eval_thread_id,
-                                                eval_score,
-                                                NULL_MOVE,
-                                                iteration_has_result_next,
-                                                iteration_best_score_next,
-                                                iteration_best_move_next)) begin
-                                            iteration_best_move_next = NULL_MOVE;
-                                            iteration_best_score_next = eval_score;
-                                        end
+                                        root_candidates[2].valid = eval_thread_id == ThreadID'(0);
+                                        root_candidates[2].score = eval_score;
+                                        root_candidates[2].move = NULL_MOVE;
                                         if (eval_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                         if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                                     end else begin
@@ -2750,16 +2756,9 @@ module search_controller #(
                                     search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[eval_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
-                                    if (root_result_better(
-                                            eval_thread_id,
-                                            eval_score,
-                                            NULL_MOVE,
-                                            iteration_has_result_next,
-                                            iteration_best_score_next,
-                                            iteration_best_move_next)) begin
-                                        iteration_best_move_next = NULL_MOVE;
-                                        iteration_best_score_next = eval_score;
-                                    end
+                                    root_candidates[3].valid = eval_thread_id == ThreadID'(0);
+                                    root_candidates[3].score = eval_score;
+                                    root_candidates[3].move = NULL_MOVE;
                                     if (eval_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                     if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                                 end else begin
@@ -2823,16 +2822,9 @@ module search_controller #(
                                     search_thread_phase[lookup_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[lookup_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[lookup_thread_id] <= lookup_resp.best_move;
-                                    if (root_result_better(
-                                            lookup_thread_id,
-                                            lookup_resp.score,
-                                            lookup_resp.best_move,
-                                            iteration_has_result_next,
-                                            iteration_best_score_next,
-                                            iteration_best_move_next)) begin
-                                        iteration_best_move_next = lookup_resp.best_move;
-                                        iteration_best_score_next = lookup_resp.score;
-                                    end
+                                    root_candidates[4].valid = lookup_thread_id == ThreadID'(0);
+                                    root_candidates[4].score = lookup_resp.score;
+                                    root_candidates[4].move = lookup_resp.best_move;
                                     if (lookup_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                     if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                                 end else begin
@@ -2957,16 +2949,9 @@ module search_controller #(
                                         search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
                                         search_thread_completed_depth[return_thread_id] <= search_target_depth;
                                         search_thread_completed_best_move[return_thread_id] <= root_move;
-                                        if (root_result_better(
-                                                return_thread_id,
-                                                parent_score,
-                                                root_move,
-                                                iteration_has_result_next,
-                                                iteration_best_score_next,
-                                                iteration_best_move_next)) begin
-                                            iteration_best_move_next = root_move;
-                                            iteration_best_score_next = parent_score;
-                                        end
+                                        root_candidates[5].valid = return_thread_id == ThreadID'(0);
+                                        root_candidates[5].score = parent_score;
+                                        root_candidates[5].move = root_move;
                                         if (return_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                         if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                                     end else begin
@@ -3061,16 +3046,9 @@ module search_controller #(
                                     search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_completed_depth[terminal_thread_id] <= search_target_depth;
                                     search_thread_completed_best_move[terminal_thread_id] <= NULL_MOVE;
-                                    if (root_result_better(
-                                            terminal_thread_id,
-                                            DRAW_EVAL_SCORE,
-                                            NULL_MOVE,
-                                            iteration_has_result_next,
-                                            iteration_best_score_next,
-                                            iteration_best_move_next)) begin
-                                        iteration_best_move_next = NULL_MOVE;
-                                        iteration_best_score_next = DRAW_EVAL_SCORE;
-                                    end
+                                    root_candidates[6].valid = terminal_thread_id == ThreadID'(0);
+                                    root_candidates[6].score = DRAW_EVAL_SCORE;
+                                    root_candidates[6].move = NULL_MOVE;
                                     if (terminal_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                     if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                                 end else if (!terminal_is_no_move) begin
@@ -3186,22 +3164,35 @@ module search_controller #(
                                 search_thread_phase[store_thread_id] <= SEARCH_PHASE_DONE;
                                 search_thread_completed_depth[store_thread_id] <= search_target_depth;
                                 search_thread_completed_best_move[store_thread_id] <= search_stack_top[store_thread_id].best_move;
-                                if (root_result_better(
-                                        store_thread_id,
-                                        search_return_score[store_thread_id],
-                                        search_stack_top[store_thread_id].best_move,
-                                        iteration_has_result_next,
-                                        iteration_best_score_next,
-                                        iteration_best_move_next)) begin
-                                    iteration_best_move_next = search_stack_top[store_thread_id].best_move;
-                                    iteration_best_score_next = search_return_score[store_thread_id];
-                                end
+                                root_candidates[7].valid = store_thread_id == ThreadID'(0);
+                                root_candidates[7].score = search_return_score[store_thread_id];
+                                root_candidates[7].move = search_stack_top[store_thread_id].best_move;
                                 if (store_thread_id == ThreadID'(0)) iteration_has_result_next = 1'b1;
                                 if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
                             end else begin
                                 search_thread_phase[store_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
                             end
                         end
+
+                        // Root completions are mutually exclusive for the primary
+                        // thread, but expressing arbitration as a balanced tree
+                        // prevents synthesis from preserving seven serial muxes.
+                        for (int pair_idx = 0; pair_idx < 4; pair_idx++) begin
+                            root_pair_winners[pair_idx] = select_root_result(
+                                root_candidates[pair_idx * 2],
+                                root_candidates[pair_idx * 2 + 1]
+                            );
+                        end
+                        for (int quad_idx = 0; quad_idx < 2; quad_idx++) begin
+                            root_quad_winners[quad_idx] = select_root_result(
+                                root_pair_winners[quad_idx * 2],
+                                root_pair_winners[quad_idx * 2 + 1]
+                            );
+                        end
+                        root_winner = select_root_result(root_quad_winners[0], root_quad_winners[1]);
+                        iteration_has_result_next = root_winner.valid;
+                        iteration_best_move_next = root_winner.move;
+                        iteration_best_score_next = root_winner.score;
 
                         search_nodes <= nodes_next;
                         search_active_thread_count <= active_count_next;

@@ -107,7 +107,7 @@ module repetition_checker #(
     endfunction
 
     assign static_q = StaticEntry'(static_q_bits);
-    assign scan_odd_parity = ((int'(active_history_count) - 1 - int'(scan_index)) & 1) != 0;
+    assign scan_odd_parity = ~(active_history_count[0] ^ scan_index[0]);
     assign init_busy = init_state == INIT_CLEAR || init_state == INIT_HISTORY_READ
         || init_state == INIT_STATIC_READ || init_state == INIT_STATIC_CHECK || init_state == INIT_RETRY;
     assign init_done = init_state == INIT_READY;
@@ -148,10 +148,8 @@ module repetition_checker #(
             end
         end
 
-        line_rdaddr = LINE_ADDR_BITS'((int'(req_thread) << 1)
-            | ((req_ply == 0) ? 0 : ((int'(req_ply) - 1) & 1)));
-        line_wraddr = LINE_ADDR_BITS'((int'(line_write_thread) << 1)
-            | ((int'(line_write_ply) - 1) & 1));
+        line_rdaddr = LINE_ADDR_BITS'({req_thread, (req_ply == 0) ? 1'b0 : ~req_ply[0]});
+        line_wraddr = LINE_ADDR_BITS'({line_write_thread, ~line_write_ply[0]});
         line_wren = '0;
         if (line_write_valid && line_write_ply != 0)
             line_wren[(line_write_ply - 1'b1) >> 1] = 1'b1;
@@ -244,12 +242,13 @@ module repetition_checker #(
             request_is_root <= req_ply == 0;
             request_mask <= '0;
             if (req_valid && req_ply != 0) begin
-                automatic int current_bank = (int'(req_ply) - 1) >> 1;
-                automatic int first_ply = int'(req_start_ply);
-                if (first_ply < 1) first_ply = 1;
-                if ((first_ply & 1) != (int'(req_ply) & 1)) first_ply++;
+                automatic PlyIndex current_bank = (req_ply - PlyIndex'(1)) >> 1;
+                automatic PlyIndex first_ply = req_start_ply;
+                if (first_ply < PlyIndex'(1)) first_ply = PlyIndex'(1);
+                if (first_ply[0] != req_ply[0]) first_ply++;
                 for (int bank = 0; bank < LINE_BANK_COUNT; bank++)
-                    request_mask[bank] <= bank >= ((first_ply - 1) >> 1) && bank < current_bank;
+                    request_mask[bank] <= PlyIndex'(bank) >= ((first_ply - PlyIndex'(1)) >> 1)
+                        && PlyIndex'(bank) < current_bank;
             end
 
             valid_pipe[1] <= valid_pipe[0];

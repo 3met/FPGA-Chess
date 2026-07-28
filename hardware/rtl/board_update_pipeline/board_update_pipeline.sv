@@ -173,7 +173,8 @@ module board_update_pipeline #(
     assign pst_castle_out = pst_read_enable_q[3] ? EvalScore'(pst_read_data[3]) : EvalScore'(0);
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
-        return MoveRecordAddr'((int'(tid) * MOVE_RECORD_PLY_COUNT) + int'(ply));
+        return MoveRecordAddr'(MoveRecordAddr'(tid) * MoveRecordAddr'(MOVE_RECORD_PLY_COUNT)
+            + MoveRecordAddr'(ply));
     endfunction : move_hist_addr
 
     // Standard chess never moves a piece onto its origin square, so a

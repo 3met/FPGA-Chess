@@ -106,16 +106,16 @@ module move_generator_pipeline #(
         HISTORY_UPDATE_WRITE
     } HistoryUpdateState;
 
-    function automatic int bucket_capacity(input int bucket);
+    function automatic MoveBucketTop bucket_capacity(input MoveBucketIndex bucket);
         case (bucket)
-            0: return BUCKET_0_CAPACITY;
-            1: return BUCKET_1_CAPACITY;
-            2: return BUCKET_2_CAPACITY;
-            3: return BUCKET_3_CAPACITY;
-            4: return BUCKET_4_CAPACITY;
-            5: return BUCKET_5_CAPACITY;
-            6: return BUCKET_6_CAPACITY;
-            default: return BUCKET_7_CAPACITY;
+            0: return MoveBucketTop'(BUCKET_0_CAPACITY);
+            1: return MoveBucketTop'(BUCKET_1_CAPACITY);
+            2: return MoveBucketTop'(BUCKET_2_CAPACITY);
+            3: return MoveBucketTop'(BUCKET_3_CAPACITY);
+            4: return MoveBucketTop'(BUCKET_4_CAPACITY);
+            5: return MoveBucketTop'(BUCKET_5_CAPACITY);
+            6: return MoveBucketTop'(BUCKET_6_CAPACITY);
+            default: return MoveBucketTop'(BUCKET_7_CAPACITY);
         endcase
     endfunction
 
@@ -131,8 +131,8 @@ module move_generator_pipeline #(
                 && GENERATION_COMMAND != MOVE_GEN_GENERATE_QUIET)
             $fatal(1, "move-generator pipeline must be noisy or quiet");
         for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
-            if (!is_power_of_two(bucket_capacity(bucket))
-                    || bucket_capacity(bucket) > (1 << (MOVE_BUCKET_TOP_BITS - 1)))
+            if (!is_power_of_two(int'(bucket_capacity(MoveBucketIndex'(bucket))))
+                    || int'(bucket_capacity(MoveBucketIndex'(bucket))) > (1 << (MOVE_BUCKET_TOP_BITS - 1)))
                 $fatal(1, "move bucket capacities must be powers of two no larger than 512");
         end
     end
@@ -285,18 +285,19 @@ module move_generator_pipeline #(
         return mask;
     endfunction
 
-    function automatic int ray_max_distance(input Position pos, input Direction dir);
-        automatic int rank = int'(getRank(pos));
-        automatic int file = int'(getFile(pos));
+    function automatic logic [2:0] ray_max_distance(input Position pos, input Direction dir);
+        automatic BoardRank rank = getRank(pos);
+        automatic BoardFile file = getFile(pos);
         case (dir)
-            NORTH:      return 7 - rank;
-            NORTH_EAST: return ((7 - rank) < (7 - file)) ? (7 - rank) : (7 - file);
-            EAST:       return 7 - file;
-            SOUTH_EAST: return (rank < (7 - file)) ? rank : (7 - file);
+            NORTH:      return 3'd7 - rank;
+            NORTH_EAST: return ((3'd7 - rank) < (3'd7 - file))
+                ? (3'd7 - rank) : (3'd7 - file);
+            EAST:       return 3'd7 - file;
+            SOUTH_EAST: return (rank < (3'd7 - file)) ? rank : (3'd7 - file);
             SOUTH:      return rank;
             SOUTH_WEST: return (rank < file) ? rank : file;
             WEST:       return file;
-            default:    return ((7 - rank) < file) ? (7 - rank) : file;
+            default:    return ((3'd7 - rank) < file) ? (3'd7 - rank) : file;
         endcase
     endfunction
 
@@ -309,7 +310,7 @@ module move_generator_pipeline #(
         automatic RayRecord result;
         result = NULL_RAY;
         for (int distance = 1; distance < 8; distance++) begin
-            if (distance <= ray_max_distance(destination, dir)
+            if (3'(distance) <= ray_max_distance(destination, dir)
                     && result.tile.piece_type == NULL_PIECE) begin
                 automatic Position pos = shiftPos(destination, dir, 3'(distance));
                 if (board.tiles[pos].piece_type != NULL_PIECE) begin
@@ -326,19 +327,25 @@ module move_generator_pipeline #(
         input Position from_pos,
         input Position to_pos
     );
-        automatic int from_rank = int'(getRank(from_pos));
-        automatic int from_file = int'(getFile(from_pos));
-        automatic int to_rank = int'(getRank(to_pos));
-        automatic int to_file = int'(getFile(to_pos));
-        automatic int rank_step = (to_rank > from_rank) ? 1 : (to_rank < from_rank) ? -1 : 0;
-        automatic int file_step = (to_file > from_file) ? 1 : (to_file < from_file) ? -1 : 0;
-        automatic int distance = (to_rank == from_rank)
+        automatic BoardRank from_rank = getRank(from_pos);
+        automatic BoardFile from_file = getFile(from_pos);
+        automatic BoardRank to_rank = getRank(to_pos);
+        automatic BoardFile to_file = getFile(to_pos);
+        automatic logic signed [1:0] rank_step =
+            (to_rank > from_rank) ? 2'sd1 : (to_rank < from_rank) ? -2'sd1 : 2'sd0;
+        automatic logic signed [1:0] file_step =
+            (to_file > from_file) ? 2'sd1 : (to_file < from_file) ? -2'sd1 : 2'sd0;
+        automatic logic [2:0] distance = (to_rank == from_rank)
             ? ((to_file > from_file) ? to_file - from_file : from_file - to_file)
             : ((to_rank > from_rank) ? to_rank - from_rank : from_rank - to_rank);
         for (int step = 1; step < 8; step++) begin
+            automatic logic signed [4:0] path_rank =
+                $signed({1'b0, from_rank}) + rank_step * 4'(step);
+            automatic logic signed [4:0] path_file =
+                $signed({1'b0, from_file}) + file_step * 4'(step);
+            automatic Position path_pos = Position'({path_rank[2:0], path_file[2:0]});
             if (step < distance
-                    && board.tiles[Position'((from_rank + rank_step * step) * 8
-                        + from_file + file_step * step)].piece_type != NULL_PIECE)
+                    && board.tiles[path_pos].piece_type != NULL_PIECE)
                 return 1'b0;
         end
         return 1'b1;
@@ -397,8 +404,8 @@ module move_generator_pipeline #(
         input Move move
     );
         automatic FullBoard result = board;
-        automatic int file_step = getFile(move.to_pos) > getFile(move.from_pos) ? 1 : -1;
-        automatic Position transit = Position'(int'(move.from_pos) + file_step);
+        automatic Position transit = getFile(move.to_pos) > getFile(move.from_pos)
+            ? move.from_pos + Position'(1) : move.from_pos - Position'(1);
         result.tiles[move.from_pos] = EMPTY_TILE;
         result.tiles[transit] = Tile'({board.turn, KING});
         return result;
@@ -429,7 +436,6 @@ module move_generator_pipeline #(
         automatic logic permission_ok;
         automatic Position rook_pos;
         automatic Position transit;
-        automatic int file_step;
         automatic FullBoard transit_board;
         automatic FullBoard final_board;
         occupancy_ok = 1'b0;
@@ -458,8 +464,8 @@ module move_generator_pipeline #(
         end
         if (!permission_ok || !occupancy_ok
                 || board.tiles[rook_pos] != Tile'({board.turn, ROOK})) return 1'b0;
-        file_step = getFile(move.to_pos) > getFile(move.from_pos) ? 1 : -1;
-        transit = Position'(int'(move.from_pos) + file_step);
+        transit = getFile(move.to_pos) > getFile(move.from_pos)
+            ? move.from_pos + Position'(1) : move.from_pos - Position'(1);
         transit_board = castle_transit_board(board, move);
         final_board = castle_final_board(board, move);
         return !square_attacked(board, move.from_pos, Color'(~board.turn))
@@ -471,14 +477,16 @@ module move_generator_pipeline #(
     function automatic logic move_pseudo_legal(input FullBoard board, input Move move);
         automatic Tile source = board.tiles[move.from_pos];
         automatic Tile destination = board.tiles[move.to_pos];
-        automatic int from_rank = int'(getRank(move.from_pos));
-        automatic int from_file = int'(getFile(move.from_pos));
-        automatic int to_rank = int'(getRank(move.to_pos));
-        automatic int to_file = int'(getFile(move.to_pos));
-        automatic int dr = to_rank - from_rank;
-        automatic int df = to_file - from_file;
-        automatic int abs_dr = dr < 0 ? -dr : dr;
-        automatic int abs_df = df < 0 ? -df : df;
+        automatic BoardRank from_rank = getRank(move.from_pos);
+        automatic BoardFile from_file = getFile(move.from_pos);
+        automatic BoardRank to_rank = getRank(move.to_pos);
+        automatic BoardFile to_file = getFile(move.to_pos);
+        automatic logic signed [3:0] dr =
+            $signed({1'b0, to_rank}) - $signed({1'b0, from_rank});
+        automatic logic signed [3:0] df =
+            $signed({1'b0, to_file}) - $signed({1'b0, from_file});
+        automatic logic [2:0] abs_dr = dr[3] ? 3'(-dr) : 3'(dr);
+        automatic logic [2:0] abs_df = df[3] ? 3'(-df) : 3'(df);
         if (move.from_pos == move.to_pos || source.piece_type == NULL_PIECE
                 || source.piece_color != board.turn
                 || (destination.piece_type != NULL_PIECE && destination.piece_color == board.turn))
@@ -492,7 +500,7 @@ module move_generator_pipeline #(
                         return 1'b1;
                     if (dr == 1 && abs_df == 1
                             && ((destination.piece_type != NULL_PIECE && destination.piece_color == BLACK)
-                                || (board.has_ep && to_rank == 5 && to_file == int'(board.ep_file)
+                                || (board.has_ep && to_rank == 3'd5 && to_file == board.ep_file
                                     && from_rank == 4)))
                         return 1'b1;
                 end else begin
@@ -502,7 +510,7 @@ module move_generator_pipeline #(
                         return 1'b1;
                     if (dr == -1 && abs_df == 1
                             && ((destination.piece_type != NULL_PIECE && destination.piece_color == WHITE)
-                                || (board.has_ep && to_rank == 2 && to_file == int'(board.ep_file)
+                                || (board.has_ep && to_rank == 3'd2 && to_file == board.ep_file
                                     && from_rank == 3)))
                         return 1'b1;
                 end
@@ -876,7 +884,7 @@ module move_generator_pipeline #(
         if (candidate_valid && (candidate_is_capture || candidate_is_promotion)) begin
             bucket_wr_select = noisy_bucket();
             bucket_wr_top = job_tops[bucket_wr_select];
-            if (job_tops[bucket_wr_select] < MoveBucketTop'(bucket_capacity(bucket_wr_select)))
+            if (job_tops[bucket_wr_select] < bucket_capacity(bucket_wr_select))
                 bucket_wr_en[bucket_wr_select] = 1'b1;
         end else if (candidate_valid) begin
             automatic logic signed [10:0] score;
@@ -884,7 +892,7 @@ module move_generator_pipeline #(
             if (candidate_is_castle) score += 11'sd16;
             bucket_wr_select = quiet_bucket(score);
             bucket_wr_top = job_tops[bucket_wr_select];
-            if (job_tops[bucket_wr_select] < MoveBucketTop'(bucket_capacity(bucket_wr_select)))
+            if (job_tops[bucket_wr_select] < bucket_capacity(bucket_wr_select))
                 bucket_wr_en[bucket_wr_select] = 1'b1;
         end
     end
@@ -962,7 +970,7 @@ module move_generator_pipeline #(
     genvar bucket_gen;
     generate
         for (bucket_gen = 0; bucket_gen < MOVE_BUCKET_COUNT; bucket_gen++) begin : gen_bucket_ram
-            localparam int CAPACITY = bucket_capacity(bucket_gen);
+            localparam int CAPACITY = int'(bucket_capacity(MoveBucketIndex'(bucket_gen)));
             localparam int WORDS = THREAD_COUNT * CAPACITY;
             localparam int ADDR_BITS = (WORDS <= 1) ? 1 : $clog2(WORDS);
             if (OWNED_BUCKETS[bucket_gen]) begin : gen_ram
@@ -1106,7 +1114,7 @@ module move_generator_pipeline #(
                 // the next candidate or destination is prepared.
                 if (candidate_valid) begin
                     automatic MoveBucketIndex selected = bucket_wr_select;
-                    if (job_tops[selected] < MoveBucketTop'(bucket_capacity(selected))) begin
+                    if (job_tops[selected] < bucket_capacity(selected)) begin
                         job_tops[selected] <= job_tops[selected] + MoveBucketTop'(1);
                         if (ENABLE_STATS) begin
                             stat_bucket_count[selected] <= stat_bucket_count[selected] + 40'd1;

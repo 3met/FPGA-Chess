@@ -40,6 +40,8 @@ Each packed node record also retains the first three ordinary quiet moves that w
 
 The primary thread owns the reported principal variation, score, and completed depth. Helper threads cooperate through the shared TT and never overwrite the primary result directly.
 
+Primary-thread root completions from the shared subsystems are mutually exclusive in reachable controller states. Their result candidates are reduced through parallel arbitration before the iteration result registers are updated, preserving the existing completion cycle without a serial priority path.
+
 ## Shared-Pipeline Scheduling
 
 The controller schedules threads across:

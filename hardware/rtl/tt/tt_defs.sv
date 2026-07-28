@@ -101,14 +101,18 @@ package tt_defs;
     // Store mate scores relative to the node so entries remain valid when the
     // same position is reached at a different root-relative ply.
     function automatic EvalScore tt_normalize_mate_score(input EvalScore score, input PlyIndex ply);
-        if (score >= MATE_THRESHOLD) return EvalScore'(int'(score) + int'(ply));
-        if (score <= -MATE_THRESHOLD) return EvalScore'(int'(score) - int'(ply));
+        automatic logic signed [16:0] score_wide = $signed({score[15], score});
+        automatic logic signed [16:0] ply_wide = $signed({1'b0, ply});
+        if (score >= MATE_THRESHOLD) return EvalScore'(score_wide + ply_wide);
+        if (score <= -MATE_THRESHOLD) return EvalScore'(score_wide - ply_wide);
         return score;
     endfunction : tt_normalize_mate_score
 
     function automatic EvalScore tt_restore_mate_score(input EvalScore score, input PlyIndex ply);
-        if (score >= MATE_THRESHOLD) return EvalScore'(int'(score) - int'(ply));
-        if (score <= -MATE_THRESHOLD) return EvalScore'(int'(score) + int'(ply));
+        automatic logic signed [16:0] score_wide = $signed({score[15], score});
+        automatic logic signed [16:0] ply_wide = $signed({1'b0, ply});
+        if (score >= MATE_THRESHOLD) return EvalScore'(score_wide - ply_wide);
+        if (score <= -MATE_THRESHOLD) return EvalScore'(score_wide + ply_wide);
         return score;
     endfunction : tt_restore_mate_score
 
@@ -127,7 +131,7 @@ package tt_defs;
         automatic logic exact_over_non_exact;
 
         stale_with_depth_window = (old_age != new_age)
-            && ((int'(new_depth) + 4) >= int'(old_depth));
+            && (({1'b0, new_depth} + 7'd4) >= {1'b0, old_depth});
         exact_over_non_exact = (new_bound_type == TT_BOUND_EXACT)
             && (old_bound_type != TT_BOUND_EXACT)
             && (new_depth == old_depth);

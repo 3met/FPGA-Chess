@@ -15,11 +15,14 @@ package zobrist_defs;
     typedef logic [$clog2(ZOBRIST_ENTRY_CNT)-1:0] ZobristAddr;
 
     function automatic ZobristAddr zobrist_tile_addr(input Tile tile, input Position pos);
+        automatic logic [3:0] piece_index;
         if (tile.piece_type == NULL_PIECE) begin
             return ZobristAddr'(0);
         end
 
-        return ZobristAddr'(ZOBRIST_TILE_BASE_ADDR + (((int'(tile.piece_color) * ZOBRIST_PIECE_CNT) + int'(tile.piece_type) - 1) * 64) + int'(pos));
+        piece_index = (tile.piece_color ? 4'd6 : 4'd0)
+            + {1'b0, tile.piece_type} - 4'd1;
+        return ZobristAddr'(10'd13 + {piece_index, 6'b0} + {4'd0, pos});
     endfunction : zobrist_tile_addr
 
     function automatic ZobristAddr zobrist_castle_addr(input int castle_idx);
@@ -27,7 +30,7 @@ package zobrist_defs;
     endfunction : zobrist_castle_addr
 
     function automatic ZobristAddr zobrist_ep_addr(input BoardFile ep_file);
-        return ZobristAddr'(ZOBRIST_EP_BASE_ADDR + int'(ep_file));
+        return ZobristAddr'(10'd5 + {7'd0, ep_file});
     endfunction : zobrist_ep_addr
 
 endpackage : zobrist_defs

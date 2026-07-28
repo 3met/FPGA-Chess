@@ -77,9 +77,9 @@ module sdr_sdram_controller #(
     function automatic logic [12:0] row_of(input logic [24:0] word); return word[22:10]; endfunction
     function automatic logic [9:0] col_of(input logic [24:0] word); return word[9:0]; endfunction
     function automatic logic [3:0] segment_len(input logic [24:0] word, input logic [3:0] count);
-        int room;
-        room = 1024 - int'(col_of(word));
-        return (room < int'(count)) ? 4'(room) : count;
+        logic [10:0] room;
+        room = 11'd1024 - {1'b0, col_of(word)};
+        return (room < {7'd0, count}) ? room[3:0] : count;
     endfunction
 
     always_comb begin

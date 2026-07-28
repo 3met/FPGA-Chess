@@ -18,7 +18,7 @@ python -m tools.hardware_build profile --time-ms 100 --event-trace --waveform
 python -m tools.hardware_build profile --simulator modelsim --depth 3
 ```
 
-The default is the normal starting position searched for 50 ms of simulated engine time with the current DE1 configuration: one thread, 24 stack plies, a 35.714286 MHz engine clock, and a 100 MHz SDRAM clock. Exactly one of `--depth`, `--nodes`, or `--time-ms` may select another limit. Use `--output` for a fixed artifact directory, `--timeout` for the simulator wall-clock limit, and `--force-rebuild` to ignore the simulator build cache. `--simulator verilator` or `--simulator modelsim` selects a backend explicitly.
+The default is the normal starting position searched for 50 ms of simulated engine time with the current DE1 configuration: one thread, 24 stack plies, a 40 MHz engine clock, and a 100 MHz SDRAM clock. Exactly one of `--depth`, `--nodes`, or `--time-ms` may select another limit. Use `--output` for a fixed artifact directory, `--timeout` for the simulator wall-clock limit, and `--force-rebuild` to ignore the simulator build cache. `--simulator verilator` or `--simulator modelsim` selects a backend explicitly.
 
 ## Artifacts
 
