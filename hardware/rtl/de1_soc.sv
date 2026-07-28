@@ -39,7 +39,9 @@ module de1_soc(input CLOCK_50,
 	wire memory_output_clk;
 	wire memory_read_clk;
 	wire uart_clk;
-	logic pll_reset;
+	// Hold the PLL in reset immediately when configuration enters user mode,
+	// before the startup controller receives its first reference-clock edge.
+	logic pll_reset = 1'b1;
 	wire pll_locked_status;
 	pll_ip pll_1(.refclk(CLOCK_50), .rst(pll_reset), .outclk_0(clk),
 		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(memory_read_clk),

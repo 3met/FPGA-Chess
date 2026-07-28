@@ -205,6 +205,10 @@ class SerialByteTransport:
 
     def send_break(self, duration: float = 0.01) -> None:
         self._serial.send_break(duration)
+        # Some USB-UART adapters otherwise apply the first queued start bit
+        # immediately after BREAK. Give the FPGA receiver an observable
+        # mark-high interval so it can leave BREAK before the next byte.
+        time.sleep(max(2.0 / self.baudrate, 0.001))
 
     def __enter__(self) -> "SerialByteTransport":
         return self

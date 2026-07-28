@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest import mock
 
-from software.engine.transport import SerialDependencyError, SerialPortInfo, get_serial_port
+from software.engine.transport import SerialByteTransport, SerialDependencyError, SerialPortInfo, get_serial_port
 
 
 class SerialPortDetectionTests(unittest.TestCase):
@@ -39,6 +39,20 @@ class SerialPortDetectionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch("software.engine.transport.list_serial_ports", return_value=ports):
             with self.assertRaises(SerialDependencyError):
                 get_serial_port(interactive=False)
+
+
+class SerialBreakTests(unittest.TestCase):
+    def test_break_waits_for_idle_high_recovery(self):
+        serial_port = mock.Mock()
+        transport = object.__new__(SerialByteTransport)
+        transport.baudrate = 2_000_000
+        transport._serial = serial_port
+
+        with mock.patch("software.engine.transport.time.sleep") as sleep:
+            transport.send_break(0.01)
+
+        serial_port.send_break.assert_called_once_with(0.01)
+        sleep.assert_called_once_with(0.001)
 
 
 if __name__ == "__main__":

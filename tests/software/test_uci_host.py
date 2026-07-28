@@ -4,8 +4,10 @@ import io
 import logging
 import threading
 import unittest
+from unittest import mock
 
 from software.engine.protocol import (
+    AckResponse,
     Command,
     DebugStatResponse,
     EndReason,
@@ -14,8 +16,10 @@ from software.engine.protocol import (
     SearchResultResponse,
     StatusResponse,
     cmd_get_status,
+    cmd_new_game,
 )
-from software.engine.host import FPGAUCIHost
+from software.engine.host import FPGAClient, FPGAUCIHost, RESET_RECOVERY_SECONDS
+from software.engine.transport import SerialTimeoutError
 
 
 @unittest.skipIf(importlib.util.find_spec("chess") is None, "python-chess is required for the UCI host")
@@ -199,6 +203,68 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         self.assertEqual(lines[1], "info string TT cache hits=3 lookups=4 hit_rate=75.00%")
         self.assertIn("ready=1", lines[2])
         self.assertIn("done=10", lines[2])
+
+
+class FPGAClientInitializationTests(unittest.TestCase):
+    def test_remote_reset_waits_for_board_reinitialization(self):
+        transport = mock.Mock()
+        client = FPGAClient(transport)
+
+        with mock.patch("software.engine.host.time.sleep") as sleep:
+            client.remote_reset()
+
+        transport.send_break.assert_called_once_with()
+        transport.reset_input_buffer.assert_called_once_with()
+        sleep.assert_called_once_with(RESET_RECOVERY_SECONDS)
+
+    def test_initialize_uses_responsive_fpga_without_break(self):
+        transport = mock.Mock()
+        client = FPGAClient(transport)
+        client.request = mock.Mock(
+            side_effect=[
+                StatusResponse(status=0x01, error=EngineError.NONE, active_operation=0),
+                AckResponse(status=0x01),
+            ]
+        )
+        client.remote_reset = mock.Mock()
+
+        client.initialize()
+
+        self.assertEqual(
+            client.request.call_args_list,
+            [mock.call(cmd_get_status()), mock.call(cmd_new_game())],
+        )
+        client.remote_reset.assert_not_called()
+
+    def test_initialize_uses_break_after_failed_probe(self):
+        transport = mock.Mock()
+        client = FPGAClient(transport)
+        client.request = mock.Mock(
+            side_effect=[SerialTimeoutError("no status"), AckResponse(status=0x01)]
+        )
+        client.remote_reset = mock.Mock()
+
+        client.initialize()
+
+        client.remote_reset.assert_called_once_with()
+        self.assertEqual(
+            client.request.call_args_list,
+            [mock.call(cmd_get_status()), mock.call(cmd_new_game())],
+        )
+
+    def test_initialize_reports_when_status_works_but_new_game_times_out(self):
+        transport = mock.Mock()
+        client = FPGAClient(transport)
+        client.request = mock.Mock(
+            side_effect=[
+                StatusResponse(status=0x01, error=EngineError.NONE, active_operation=0),
+                SerialTimeoutError("no ack"),
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "answered status but New Game did not respond"):
+            client.initialize()
+
 
 if __name__ == "__main__":
     unittest.main()

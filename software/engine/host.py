@@ -46,6 +46,9 @@ from software.engine.transport import SerialByteTransport, SerialDependencyError
 MAX_SEARCH_DEPTH = 31
 DEFAULT_SEARCH_DEPTH = MAX_SEARCH_DEPTH
 SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
+# BREAK restarts the DE1 SDRAM path. Startup time is negligible beside search
+# time, so wait for board initialization instead of queuing across reset.
+RESET_RECOVERY_SECONDS = 1.0
 # These values mirror hardware/rtl/tt/tt_defs.sv. Scores in this range encode
 # a forced mate as MATE_SCORE minus the distance in plies.
 MATE_SCORE = 32_000
@@ -96,11 +99,23 @@ class FPGAClient:
         """Reset the FPGA transport state and discard any pre-reset reply bytes."""
         self.transport.send_break()
         self.transport.reset_input_buffer()
+        time.sleep(RESET_RECOVERY_SECONDS)
 
     def initialize(self) -> None:
-        """Start a clean game after BREAK, including clearing RAM-backed engine state."""
-        self.remote_reset()
-        response = self.request(cmd_new_game())
+        """Synchronize with a running FPGA, using BREAK only for recovery."""
+        self.transport.reset_input_buffer()
+        try:
+            status = self.request(cmd_get_status())
+        except (ProtocolError, SerialTimeoutError):
+            status = None
+        if not isinstance(status, StatusResponse):
+            self.remote_reset()
+        try:
+            response = self.request(cmd_new_game())
+        except SerialTimeoutError as exc:
+            if isinstance(status, StatusResponse):
+                raise HostError(f"FPGA answered status but New Game did not respond: {exc}") from exc
+            raise HostError(f"FPGA did not respond after BREAK recovery: {exc}") from exc
         if not isinstance(response, AckResponse):
             raise HostError(f"FPGA initialization returned unexpected response: {response}")
 
@@ -147,8 +162,8 @@ class FPGAUCIHost:
             )
             client = FPGAClient(transport, response_timeout=self.response_timeout)
             try:
-                # A host process has no trustworthy view of a previously running FPGA.
-                # New Game also clears TT RAM, which survives the controller-only BREAK reset.
+                # Probe an already-reset FPGA first; BREAK is reserved for
+                # recovering an unknown or partially received protocol state.
                 client.initialize()
             except Exception:
                 client.close()

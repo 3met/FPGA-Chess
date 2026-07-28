@@ -145,6 +145,8 @@ module tb_rx_decode;
         #(BIT_NS * 3.0);
         repeat (8) @(posedge clk);
         check(!rx_stream_valid, "BREAK clears RX FIFO");
+        send_uart_byte(8'h04);
+        pop_byte(8'h04);
 
         send_uart_byte(8'h00);
         send_uart_byte(8'h01);
