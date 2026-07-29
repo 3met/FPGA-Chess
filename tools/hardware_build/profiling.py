@@ -40,6 +40,26 @@ THREAD_PHASES = [
     "idle", "ready", "tt_wait", "eval_wait", "move_wait", "board_wait",
     "reverse_wait", "repetition_wait", "store_publish", "terminal_wait", "done",
 ]
+THREAD_PHASE_LABELS = {
+    "idle": "Inactive",
+    "ready": "Runnable",
+    "tt_wait": "TT lookup in flight",
+    "eval_wait": "Evaluation in flight",
+    "move_wait": "Move operation in flight",
+    "board_wait": "Board update in flight",
+    "reverse_wait": "Reverse update in flight",
+    "repetition_wait": "Repetition check in flight",
+    "store_publish": "TT store request pending",
+    "terminal_wait": "Terminal scoring",
+    "done": "Iteration complete",
+}
+READY_BREAKDOWN_LABELS = {
+    "dispatch": "Pipeline request accepted",
+    "arbitration": "Shared-pipeline arbitration",
+    "tt_blocked": "TT lookup request blocked",
+    "move_blocked": "Move request blocked",
+    "transition": "Node/iteration transition",
+}
 MOVE_ORDER_STATES = [
     "direct", "generate_noisy", "good_noisy", "generate_quiet", "quiet", "bad_noisy", "done",
 ]
@@ -47,7 +67,7 @@ MOVE_BUCKETS = [
     "bad_noisy_low", "bad_noisy_high", "quiet_low", "quiet_medium",
     "quiet_high", "quiet_highest", "good_noisy_low", "good_noisy_high",
 ]
-ORDINAL_BUCKETS = ["1-4", "5-8", "9-16", "17-32", "33+"]
+ORDINAL_BUCKETS = ["1", "2", "3", "4", "5-8", "9-16", "17-32", "33+"]
 STALL_LABELS = {
     "move_not_ready": "Move generator busy; a generation request was waiting",
     "tt_request_not_ready": "TT frontend busy; a lookup request was waiting",
@@ -164,12 +184,23 @@ def build_profile_report(
             raise BuildError(
                 f"Thread {tid} phase total {phase_total} does not match search cycles {search_cycles}"
             )
+        ready_breakdown = {
+            name: metrics[f"threads.{tid}.ready.{name}"]
+            for name in (
+                "dispatch", "arbitration", "tt_blocked", "move_blocked", "transition"
+            )
+        }
+        if sum(ready_breakdown.values()) != phases["ready"]:
+            raise BuildError(
+                f"Thread {tid} ready breakdown does not match ready cycles"
+            )
         threads.append(
             {
                 "id": tid,
                 "nodes": metrics.get(f"threads.{tid}.nodes", 0),
                 "phase_cycles": phases,
                 "phase_percent": {name: percent(value, search_cycles) for name, value in phases.items()},
+                "ready_breakdown": ready_breakdown,
                 "move_order_cycles": _named_series(
                     metrics, f"threads.{tid}.move_order", MOVE_ORDER_STATES
                 ),
@@ -323,7 +354,7 @@ def build_profile_report(
             ),
         },
         "static_evaluator": {
-            "issues": metrics["components.eval.issues"],
+            "evaluations": metrics["components.eval.evaluations"],
             "completions": metrics["components.eval.completions"],
         },
         "repetition_checker": {
@@ -333,7 +364,13 @@ def build_profile_report(
     }
     for values in components.values():
         values["issue_utilization_percent"] = percent(
-            values.get("issues", values.get("commands", values.get("requests", 0))),
+            values.get(
+                "issues",
+                values.get(
+                    "evaluations",
+                    values.get("commands", values.get("requests", 0)),
+                ),
+            ),
             search_cycles,
         )
 
@@ -467,6 +504,13 @@ def _format_number(value: float | int | None, suffix: str = "") -> str:
     return f"{value:,}{suffix}"
 
 
+def _format_percent(value: float | None) -> str:
+    """Format percentages compactly with a fixed-width numeric field."""
+    if value is None or not math.isfinite(value):
+        return "n/a"
+    return f"{value:4.1f}%"
+
+
 def format_profile_report(report: dict) -> str:
     """Format a compact but detailed terminal report."""
     timing = report["timing"]
@@ -505,15 +549,69 @@ def format_profile_report(report: dict) -> str:
             f"background TT-store completion={timing['post_search_drain_cycles']:,} cycles"
         ),
         "",
-        "Per-thread state cycles",
+        "Per-thread lifecycle (cycles and % of search)",
     ]
-    for thread in report["threads"]:
-        phase_text = ", ".join(
-            f"{name}={value:,} ({_format_number(thread['phase_percent'][name], '%')})"
-            for name, value in thread["phase_cycles"].items()
-            if value
+    lifecycle_metrics = [
+        (THREAD_PHASE_LABELS["idle"], "phase", "idle"),
+        (READY_BREAKDOWN_LABELS["dispatch"], "ready", "dispatch"),
+        (READY_BREAKDOWN_LABELS["tt_blocked"], "ready", "tt_blocked"),
+        (READY_BREAKDOWN_LABELS["move_blocked"], "ready", "move_blocked"),
+        (READY_BREAKDOWN_LABELS["arbitration"], "ready", "arbitration"),
+        (THREAD_PHASE_LABELS["tt_wait"], "phase", "tt_wait"),
+        (THREAD_PHASE_LABELS["eval_wait"], "phase", "eval_wait"),
+        (THREAD_PHASE_LABELS["move_wait"], "phase", "move_wait"),
+        (THREAD_PHASE_LABELS["board_wait"], "phase", "board_wait"),
+        (THREAD_PHASE_LABELS["repetition_wait"], "phase", "repetition_wait"),
+        (THREAD_PHASE_LABELS["reverse_wait"], "phase", "reverse_wait"),
+        (THREAD_PHASE_LABELS["terminal_wait"], "phase", "terminal_wait"),
+        (THREAD_PHASE_LABELS["store_publish"], "phase", "store_publish"),
+        (READY_BREAKDOWN_LABELS["transition"], "ready", "transition"),
+        (THREAD_PHASE_LABELS["done"], "phase", "done"),
+    ]
+
+    def lifecycle_value(thread: dict, source: str, key: str) -> int:
+        return (
+            thread["phase_cycles"][key]
+            if source == "phase"
+            else thread["ready_breakdown"][key]
         )
-        lines.append(f"  Thread {thread['id']}: nodes={thread['nodes']:,}; {phase_text}")
+
+    lifecycle_metrics = [
+        metric
+        for metric in lifecycle_metrics
+        if any(lifecycle_value(thread, metric[1], metric[2]) for thread in report["threads"])
+    ]
+    label_width = max(20, max(len(label) for label, _, _ in lifecycle_metrics) + 2)
+    cell_width = 20
+    for start in range(0, len(report["threads"]), 4):
+        thread_group = report["threads"][start : start + 4]
+        if start:
+            lines.append("")
+        lines.append(
+            f"  {'Metric':<{label_width}}"
+            + "".join(f"{f'T{thread['id']}':>{cell_width}}" for thread in thread_group)
+        )
+        lines.append(
+            f"  {'-' * (label_width - 2):<{label_width}}"
+            + "".join(f"{'-' * (cell_width - 2):>{cell_width}}" for _ in thread_group)
+        )
+        lines.append(
+            f"  {'Nodes':<{label_width}}"
+            + "".join(f"{thread['nodes']:>{cell_width},}" for thread in thread_group)
+        )
+        for label, source, key in lifecycle_metrics:
+            cells = []
+            for thread in thread_group:
+                value = lifecycle_value(thread, source, key)
+                cells.append(
+                    "-"
+                    if value == 0
+                    else f"{value:,} ({_format_percent(percent(value, timing['search_cycles']))})"
+                )
+            lines.append(
+                f"  {label:<{label_width}}"
+                + "".join(f"{cell:>{cell_width}}" for cell in cells)
+            )
 
     lines += ["", "Per-depth breakdown"]
     lines.append(
@@ -524,8 +622,8 @@ def format_profile_report(report: dict) -> str:
             f"  {depth['depth']:>5}  {depth['cycles']:>11,}  {depth['nodes']:>7,}  "
             f"{_format_number(depth['cycles_per_node']):>11}  "
             f"{_format_number(depth['node_growth_vs_previous_depth']):>11}  "
-            f"{_format_number(depth['tt_hit_rate_percent'], '%'):>11}  "
-            f"{_format_number(depth['cache_hit_rate_percent'], '%'):>9}  "
+            f"{_format_percent(depth['tt_hit_rate_percent']):>11}  "
+            f"{_format_percent(depth['cache_hit_rate_percent']):>9}  "
             f"{depth['maximum_ply']:>7}  {depth['status']}"
         )
 
@@ -533,21 +631,33 @@ def format_profile_report(report: dict) -> str:
     for name, values in report["components"].items():
         if name == "move_generator":
             continue
-        count = values.get("issues", values.get("commands", values.get("requests", 0)))
+        count = values.get(
+            "issues",
+            values.get(
+                "evaluations",
+                values.get("commands", values.get("requests", 0)),
+            ),
+        )
         if name == "board_update":
             forward_count = count - values["reverses"]
             lines.append(
                 f"  board update: {count:,} issues, "
-                f"{_format_number(values['issue_utilization_percent'], '%')} issue utilization "
+                f"{_format_percent(values['issue_utilization_percent'])} issue utilization "
                 f"({forward_count:,} candidate pushes: "
                 f"{values['legal_candidates']:,} legal, "
                 f"{values['illegal_candidates']:,} illegal; "
                 f"{values['reverses']:,} reversals)"
             )
             continue
+        if name == "static_evaluator":
+            lines.append(
+                f"  static evaluator: {count:,} evaluations, "
+                f"{_format_percent(values['issue_utilization_percent'])} issue utilization"
+            )
+            continue
         lines.append(
             f"  {name.replace('_', ' ')}: {count:,} issues, "
-            f"{_format_number(values['issue_utilization_percent'], '%')} issue utilization"
+            f"{_format_percent(values['issue_utilization_percent'])} issue utilization"
         )
 
     move_generator = report["components"]["move_generator"]
@@ -594,7 +704,7 @@ def format_profile_report(report: dict) -> str:
         )
         lines.append(
             f"  {STALL_LABELS.get(name, name.replace('_', ' ').capitalize())}: {value:,} cycles "
-            f"({_format_number(percent(value, denominator), '%')})"
+            f"({_format_percent(percent(value, denominator))})"
         )
 
     lines += ["", "Move ordering"]
@@ -607,16 +717,16 @@ def format_profile_report(report: dict) -> str:
         high = report["move_ordering"]["bucket_high_water"][bucket]
         lines.append(
             f"  {bucket}: writes={writes:,}, pops={pops:,}, beta cutoffs={cutoffs:,} "
-            f"({_format_number(percent(cutoffs, pops), '%')} of pops), peak queued={high:,}"
+            f"({_format_percent(percent(cutoffs, pops))} of pops), peak queued={high:,}"
         )
     ordinal_text = ", ".join(
         f"{bucket}={count:,}"
         for bucket, count in report["move_ordering"]["legal_move_ordinal"].items()
     )
-    lines.append(f"  Legal move ordinals: {ordinal_text}")
+    lines.append(f"  Legal candidates by searched rank: {ordinal_text}")
     cutoff_total = sum(report["move_ordering"]["cutoff_ordinal"].values())
     cutoff_text = ", ".join(
-        f"{bucket}={count:,} ({_format_number(percent(count, cutoff_total), '%')})"
+        f"{bucket}={count:,} ({_format_percent(percent(count, cutoff_total))})"
         for bucket, count in report["move_ordering"]["cutoff_ordinal"].items()
     )
     lines.append(f"  Beta cutoffs by searched move rank: {cutoff_text}")
@@ -634,12 +744,12 @@ def format_profile_report(report: dict) -> str:
         "Transposition table and SDRAM",
         (
             f"  TT: lookups={tt['lookups']:,}, hits={tt['hits']:,} "
-            f"({_format_number(tt['hit_rate_percent'], '%')}), stores={tt['stores']:,}, "
+            f"({_format_percent(tt['hit_rate_percent'])}), stores={tt['stores']:,}, "
             f"dropped={tt['store_drops']:,}"
         ),
         (
             f"  Cache: probes={cache['lookup_probes']:,}, hits={cache['lookup_hits']:,} "
-            f"({_format_number(cache['lookup_hit_rate_percent'], '%')})"
+            f"({_format_percent(cache['lookup_hit_rate_percent'])})"
         ),
         (
             f"  TT hit use: cutoffs={tt['cutoff_hits']:,}, "
@@ -648,8 +758,10 @@ def format_profile_report(report: dict) -> str:
         (
             f"  SDRAM: reads={report['sdram']['read_requests']:,}, "
             f"writes={report['sdram']['write_requests']:,}, "
-            f"row-hit rate={_format_number(report['sdram']['row_hit_rate_percent'], '%')}, "
-            f"effective bandwidth={_format_number(report['sdram']['effective_bytes_per_simulated_second'])} B/s"
+            f"rows hit/miss/conflict={report['sdram']['row_hits']:,}/"
+            f"{report['sdram']['row_misses']:,}/{report['sdram']['row_conflicts']:,} "
+            f"({_format_percent(report['sdram']['row_hit_rate_percent'])} hit), "
+            f"payload={_format_number(report['sdram']['effective_bytes_per_simulated_second'] / (1024 * 1024))} MiB/s"
         ),
         "",
         (

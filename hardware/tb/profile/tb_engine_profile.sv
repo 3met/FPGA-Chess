@@ -22,7 +22,12 @@ module tb_engine_profile #(
     localparam int ENGINE_STATE_COUNT = 8;
     localparam int CONTROLLER_STATE_COUNT = 21;
     localparam int THREAD_PHASE_COUNT = 11;
+    // Profiler-local copies of the stable state encodings avoid hierarchical
+    // enum-item references, which trigger a Verilator width-analysis bug.
+    localparam int CONTROLLER_STATE_SEARCH_RUN = 18;
+    localparam int THREAD_PHASE_READY = 1;
     localparam int MOVE_ORDER_STATE_COUNT = 7;
+    localparam int ORDINAL_BUCKET_COUNT = 8;
     localparam int GENERATOR_STATE_COUNT = 8;
     localparam int MOVE_OPERATION_COUNT = 4;
     localparam int MOVE_OPERATION_BUCKET_POP = 3;
@@ -168,6 +173,11 @@ module tb_engine_profile #(
     longint unsigned engine_state_cycles[0:ENGINE_STATE_COUNT-1];
     longint unsigned controller_state_cycles[0:CONTROLLER_STATE_COUNT-1];
     longint unsigned thread_phase_cycles[0:SEARCH_THREAD_COUNT-1][0:THREAD_PHASE_COUNT-1];
+    longint unsigned thread_ready_dispatch[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_ready_arbitration[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_ready_tt_blocked[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_ready_move_blocked[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_ready_transition[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_move_order_cycles[0:SEARCH_THREAD_COUNT-1][0:MOVE_ORDER_STATE_COUNT-1];
     longint unsigned thread_ply_cycles[0:SEARCH_THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
     longint unsigned active_thread_histogram[0:SEARCH_THREAD_COUNT];
@@ -178,8 +188,8 @@ module tb_engine_profile #(
     longint unsigned bucket_writes[0:MOVE_BUCKET_COUNT-1];
     longint unsigned bucket_pops[0:MOVE_BUCKET_COUNT-1];
     longint unsigned bucket_cutoffs[0:MOVE_BUCKET_COUNT-1];
-    longint unsigned legal_ordinal_histogram[0:4];
-    longint unsigned cutoff_ordinal_histogram[0:4];
+    longint unsigned legal_ordinal_histogram[0:ORDINAL_BUCKET_COUNT-1];
+    longint unsigned cutoff_ordinal_histogram[0:ORDINAL_BUCKET_COUNT-1];
     longint unsigned direct_move_cutoffs;
     longint unsigned board_issues, board_reverses, board_completions;
     longint unsigned legal_candidates, illegal_candidates;
@@ -197,7 +207,7 @@ module tb_engine_profile #(
     longint unsigned noisy_destinations_examined, quiet_destinations_examined;
     longint unsigned noisy_destinations_with_sources, quiet_destinations_with_sources;
     longint unsigned noisy_candidates_emitted, quiet_candidates_emitted;
-    longint unsigned eval_issues, eval_completions;
+    longint unsigned evaluations, eval_completions;
     longint unsigned repetition_requests, repetition_responses;
     longint unsigned tt_lookups, tt_hits, tt_stores;
     longint unsigned tt_bound_hits[0:2];
@@ -253,11 +263,14 @@ module tb_engine_profile #(
     endtask
 
     function automatic int ordinal_bucket(input int ordinal);
-        if (ordinal <= 4) return 0;
-        if (ordinal <= 8) return 1;
-        if (ordinal <= 16) return 2;
-        if (ordinal <= 32) return 3;
-        return 4;
+        if (ordinal <= 1) return 0;
+        if (ordinal == 2) return 1;
+        if (ordinal == 3) return 2;
+        if (ordinal == 4) return 3;
+        if (ordinal <= 8) return 4;
+        if (ordinal <= 16) return 5;
+        if (ordinal <= 32) return 6;
+        return 7;
     endfunction
 
     // Finish one measured generator operation. Timed searches may stop with
@@ -293,6 +306,8 @@ module tb_engine_profile #(
             int active_count;
             int inflight_count;
             int iteration_depth;
+            logic any_ready_move_blocked;
+            logic any_ready_tt_blocked;
             iteration_depth = int'(dut.controller.search_target_depth);
             // These counters are testbench-only observations. Blocking updates
             // avoid scheduling thousands of needless NBA events without changing
@@ -312,9 +327,63 @@ module tb_engine_profile #(
 
             active_count = 0;
             inflight_count = 0;
+            any_ready_move_blocked = 1'b0;
+            any_ready_tt_blocked = 1'b0;
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 thread_phase_cycles[tid][int'(dut.controller.search_thread_phase[tid])] =
                     thread_phase_cycles[tid][int'(dut.controller.search_thread_phase[tid])] + 1;
+                // Split the broad READY phase into exclusive causes without
+                // adding profiler state to the synthesizable controller.
+                if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_READY) begin
+                    automatic logic dispatched =
+                        (dut.controller.search_tt_lookup_issue_valid
+                            && dut.controller.tt_lookup_req_ready
+                            && dut.controller.search_tt_lookup_issue_thread == ThreadID'(tid))
+                        || (dut.controller.search_eval_issue_valid
+                            && dut.controller.search_eval_issue_thread == ThreadID'(tid))
+                        || (dut.controller.search_move_issue_valid
+                            && ((dut.controller.move_cmd_valid && dut.controller.move_cmd_ready)
+                                || (dut.controller.move_pop_valid && dut.controller.move_pop_ready))
+                            && dut.controller.search_move_issue_thread == ThreadID'(tid))
+                        || (dut.controller.search_quiet_issue_valid
+                            && dut.controller.move_quiet_cmd_valid
+                            && dut.controller.move_quiet_cmd_ready
+                            && dut.controller.search_quiet_issue_thread == ThreadID'(tid))
+                        || (dut.controller.search_null_issue_valid
+                            && dut.controller.search_board_issue_thread == ThreadID'(tid));
+                    automatic MoveOrderState order_state =
+                        dut.controller.search_stack_top[tid].move_order_state;
+                    if (int'(dut.controller.state) != CONTROLLER_STATE_SEARCH_RUN
+                            || order_state == MOVE_ORDER_DONE
+                            || dut.controller.search_board[tid].halfmove_clock >= HalfmoveClock'(100)) begin
+                        thread_ready_transition[tid] = thread_ready_transition[tid] + 1;
+                    end else if (dispatched) begin
+                        thread_ready_dispatch[tid] = thread_ready_dispatch[tid] + 1;
+                    end else if (dut.controller.search_tt_lookup_mask[tid]
+                            && !dut.controller.tt_lookup_req_ready) begin
+                        thread_ready_tt_blocked[tid] = thread_ready_tt_blocked[tid] + 1;
+                        any_ready_tt_blocked = 1'b1;
+                    end else if (dut.controller.search_tt_lookup_mask[tid]
+                            || dut.controller.search_eval_mask[tid]
+                            || dut.controller.search_null_mask[tid]) begin
+                        thread_ready_arbitration[tid] = thread_ready_arbitration[tid] + 1;
+                    end else if (order_state == MOVE_ORDER_GENERATE_QUIET
+                            && !dut.controller.move_quiet_cmd_ready) begin
+                        thread_ready_move_blocked[tid] = thread_ready_move_blocked[tid] + 1;
+                        any_ready_move_blocked = 1'b1;
+                    end else if ((order_state == MOVE_ORDER_DIRECT
+                                || order_state == MOVE_ORDER_GENERATE_NOISY)
+                            && !dut.controller.move_cmd_ready) begin
+                        thread_ready_move_blocked[tid] = thread_ready_move_blocked[tid] + 1;
+                        any_ready_move_blocked = 1'b1;
+                    end else if (dut.controller.search_move_mask[tid]
+                            || dut.controller.search_quiet_mask[tid]
+                            ) begin
+                        thread_ready_arbitration[tid] = thread_ready_arbitration[tid] + 1;
+                    end else begin
+                        thread_ready_transition[tid] = thread_ready_transition[tid] + 1;
+                    end
+                end
                 if (dut.controller.search_thread_status[tid] == 1) begin
                     active_count++;
                     thread_move_order_cycles[tid][int'(dut.controller.search_stack_top[tid].move_order_state)] =
@@ -335,6 +404,8 @@ module tb_engine_profile #(
             active_thread_histogram[active_count] = active_thread_histogram[active_count] + 1;
             if (inflight_count > 5) inflight_count = 5;
             inflight_histogram[inflight_count] = inflight_histogram[inflight_count] + 1;
+            if (any_ready_move_blocked) move_stall_cycles <= move_stall_cycles + 1;
+            if (any_ready_tt_blocked) tt_request_stall_cycles <= tt_request_stall_cycles + 1;
 
             if (dut.controller.search_board_issue_valid) begin
                 board_issues <= board_issues + 1;
@@ -487,7 +558,8 @@ module tb_engine_profile #(
                     quiet_candidates_emitted = quiet_candidates_emitted + 1;
                 end
             end
-            if (dut.controller.search_eval_issue_valid) eval_issues <= eval_issues + 1;
+            // An accepted evaluator request is one static evaluation.
+            if (dut.controller.search_eval_issue_valid) evaluations <= evaluations + 1;
             if (dut.controller.search_eval_result_valid) eval_completions <= eval_completions + 1;
             if (dut.controller.repetition_req_valid) repetition_requests <= repetition_requests + 1;
             if (dut.controller.repetition_resp_valid) repetition_responses <= repetition_responses + 1;
@@ -533,12 +605,6 @@ module tb_engine_profile #(
             if (dut.controller.external_tt_gen.tt_load_store.store_accept
                     && !dut.controller.external_tt_gen.tt_load_store.store_fifo_push_ready)
                 tt_store_drops <= tt_store_drops + 1;
-            if ((dut.controller.move_cmd_valid && !dut.controller.move_cmd_ready)
-                    || (dut.controller.move_quiet_cmd_valid
-                        && !dut.controller.move_quiet_cmd_ready))
-                move_stall_cycles <= move_stall_cycles + 1;
-            if (dut.controller.tt_lookup_req_valid && !dut.controller.tt_lookup_req_ready)
-                tt_request_stall_cycles <= tt_request_stall_cycles + 1;
             if (tt_mem_req_valid && !tt_mem_req_ready) cdc_command_stalls <= cdc_command_stalls + 1;
             if (tt_mem_write_valid && !tt_mem_write_ready) cdc_write_stalls <= cdc_write_stalls + 1;
             if (tt_mem_read_valid && !tt_mem_read_ready) cdc_read_stalls <= cdc_read_stalls + 1;
@@ -660,6 +726,11 @@ module tb_engine_profile #(
             emit($sformatf("threads.%0d.nodes", tid), dut.controller.search_thread_nodes[tid]);
             for (int phase = 0; phase < THREAD_PHASE_COUNT; phase++)
                 emit($sformatf("threads.%0d.phases.%0d", tid, phase), thread_phase_cycles[tid][phase]);
+            emit($sformatf("threads.%0d.ready.dispatch", tid), thread_ready_dispatch[tid]);
+            emit($sformatf("threads.%0d.ready.arbitration", tid), thread_ready_arbitration[tid]);
+            emit($sformatf("threads.%0d.ready.tt_blocked", tid), thread_ready_tt_blocked[tid]);
+            emit($sformatf("threads.%0d.ready.move_blocked", tid), thread_ready_move_blocked[tid]);
+            emit($sformatf("threads.%0d.ready.transition", tid), thread_ready_transition[tid]);
             for (int order = 0; order < MOVE_ORDER_STATE_COUNT; order++)
                 emit($sformatf("threads.%0d.move_order.%0d", tid, order), thread_move_order_cycles[tid][order]);
             for (int ply = 0; ply < MAX_PLY_COUNT; ply++)
@@ -717,7 +788,7 @@ module tb_engine_profile #(
             quiet_destinations_with_sources);
         emit("components.move_generator.generation.quiet.candidates_emitted",
             quiet_candidates_emitted);
-        emit("components.eval.issues", eval_issues);
+        emit("components.eval.evaluations", evaluations);
         emit("components.eval.completions", eval_completions);
         emit("components.repetition.requests", repetition_requests);
         emit("components.repetition.responses", repetition_responses);
@@ -734,9 +805,9 @@ module tb_engine_profile #(
             emit($sformatf("move_order.bucket_high_water.%0d", bucket),
                 dut.controller.move_stat_bucket_high_water[bucket]);
         end
-        for (int idx = 0; idx < 5; idx++)
+        for (int idx = 0; idx < ORDINAL_BUCKET_COUNT; idx++)
             emit($sformatf("move_order.legal_ordinal.%0d", idx), legal_ordinal_histogram[idx]);
-        for (int idx = 0; idx < 5; idx++)
+        for (int idx = 0; idx < ORDINAL_BUCKET_COUNT; idx++)
             emit($sformatf("move_order.cutoff_ordinal.%0d", idx), cutoff_ordinal_histogram[idx]);
         emit("move_order.direct_cutoffs", direct_move_cutoffs);
         emit("move_order.noisy_jobs", dut.controller.move_stat_noisy_count);
@@ -799,6 +870,11 @@ module tb_engine_profile #(
             move_command_active[tid] = 1'b0;
             move_command_operation[tid] = '0;
             move_command_start_cycle[tid] = 0;
+            thread_ready_dispatch[tid] = 0;
+            thread_ready_arbitration[tid] = 0;
+            thread_ready_tt_blocked[tid] = 0;
+            thread_ready_move_blocked[tid] = 0;
+            thread_ready_transition[tid] = 0;
         end
         move_pop_start_cycle = 0;
         previous_generator_state[0] = 0;

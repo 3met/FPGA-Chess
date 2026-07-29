@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     limits.add_argument("--nodes", type=int, help="Node-limited search")
     limits.add_argument("--time-ms", type=int, help="Fixed simulated search time; defaults to 50 ms")
     profile_parser.add_argument("--threads", type=int, default=1, help="Search threads; defaults to the DE1 value 1")
-    profile_parser.add_argument("--stack-depth", type=int, default=24, help="Stack plies; defaults to the DE1 value 24")
+    profile_parser.add_argument("--stack-depth", type=int, default=32, help="Stack plies; defaults to 32")
     profile_parser.add_argument(
         "--engine-clock-hz", type=int, default=35_714_286,
         help="Engine clock frequency; defaults to the DE1 value 35714286",

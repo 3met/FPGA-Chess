@@ -33,7 +33,7 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "components.move.commands": 1,
         "components.move.pops": 1,
         "components.move.pop_misses": 0,
-        "components.eval.issues": 1,
+        "components.eval.evaluations": 1,
         "components.eval.completions": 1,
         "components.repetition.requests": 1,
         "components.repetition.responses": 1,
@@ -87,6 +87,11 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
     for index in range(len(MOVE_ORDER_STATES)):
         metrics[f"threads.0.move_order.{index}"] = search_cycles if index == 0 else 0
     metrics["threads.0.nodes"] = 5
+    metrics["threads.0.ready.dispatch"] = search_cycles
+    metrics["threads.0.ready.arbitration"] = 0
+    metrics["threads.0.ready.tt_blocked"] = 0
+    metrics["threads.0.ready.move_blocked"] = 0
+    metrics["threads.0.ready.transition"] = 0
     for index in range(len(MOVE_BUCKETS)):
         metrics[f"move_order.bucket_writes.{index}"] = 1 if index == 2 else 0
         metrics[f"move_order.bucket_pops.{index}"] = 1 if index == 2 else 0
@@ -180,9 +185,17 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Per-depth breakdown", text)
         self.assertIn("max ply  status", text)
         self.assertIn("Deepest search ply reached (including qsearch): 3", text)
+        self.assertIn("Metric", text)
+        self.assertIn("T0", text)
+        self.assertIn("Pipeline request accepted", text)
+        self.assertIn("10 (100.0%)", text)
+        self.assertNotIn("runnable breakdown", text)
         self.assertIn("Beta cutoffs by searched move rank", text)
+        self.assertIn("Legal candidates by searched rank", text)
         self.assertIn("Move generator busy; a generation request was waiting", text)
         self.assertIn("2 candidate pushes: 1 legal, 1 illegal; 0 reversals", text)
+        self.assertIn("static evaluator: 1 evaluations", text)
+        self.assertEqual(report["components"]["static_evaluator"]["evaluations"], 1)
         self.assertIn("Move generator operations", text)
         self.assertIn("Direct validation", text)
         self.assertIn("Move generation work", text)
@@ -210,6 +223,27 @@ class ReportTests(unittest.TestCase):
     def test_phase_total_mismatch_fails(self):
         metrics = sample_metrics()
         metrics["threads.0.phases.1"] = 9
+        with self.assertRaises(BuildError):
+            build_profile_report(
+                {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+                metrics,
+                {
+                    "best_move.from": 0,
+                    "best_move.to": 0,
+                    "best_move.promotion": 0,
+                    "score": 0,
+                    "nodes": 0,
+                    "completed_depth": 0,
+                    "deepest_search_ply": 0,
+                    "end_reason": 0,
+                    "error": 0,
+                },
+                0,
+            )
+
+    def test_ready_breakdown_mismatch_fails(self):
+        metrics = sample_metrics()
+        metrics["threads.0.ready.dispatch"] = 9
         with self.assertRaises(BuildError):
             build_profile_report(
                 {"fen": "x", "threads": 1, "engine_clock_hz": 100},
@@ -275,7 +309,7 @@ class ProfileArgumentTests(unittest.TestCase):
     def namespace(self, **updates):
         values = {
             "threads": 1,
-            "stack_depth": 24,
+            "stack_depth": 32,
             "engine_clock_hz": 35_714_286,
             "timeout": 10,
             "simulator_threads": 1,
@@ -295,7 +329,7 @@ class ProfileArgumentTests(unittest.TestCase):
         with self.assertRaises(BuildError):
             _validate_profile_args(self.namespace(threads=17))
         with self.assertRaises(BuildError):
-            _validate_profile_args(self.namespace(depth=24))
+            _validate_profile_args(self.namespace(depth=32))
         with self.assertRaises(BuildError):
             _validate_profile_args(self.namespace(simulator_threads=0))
 
