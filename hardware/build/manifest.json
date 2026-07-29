@@ -198,7 +198,7 @@
         "kind": "intel-pll",
         "template": "hardware/ip/pll"
       },
-      "seed": 1,
+      "seed": 3,
       "map_effort": "fast",
       "fit_effort": "standard",
       "message_disable": [12021, 12022, 12128, 12134, 169065, 169070, 286033],

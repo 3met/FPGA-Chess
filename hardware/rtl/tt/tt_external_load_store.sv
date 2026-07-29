@@ -48,6 +48,11 @@ module tt_external_load_store #(
     typedef logic [ENTRY_INDEX_BITS-1:0] EntryIndex;
     typedef logic [CACHE_INDEX_BITS-1:0] CacheIndex;
     typedef logic [$clog2(STORE_FIFO_DEPTH + 1)-1:0] StoreFifoCount;
+    typedef struct packed {
+        logic valid;
+        EntryIndex tag;
+        TTPhysicalEntry data;
+    } CacheLine;
 
     typedef enum logic [3:0] {
         S_IDLE, S_READ_REQ, S_READ_DATA, S_WRITE_REQ, S_WRITE_DATA, S_WRITE_DONE,
@@ -68,13 +73,25 @@ module tt_external_load_store #(
     TTAge generation;
     logic clear_prev;
     logic clear_pending;
-    EntryIndex lookup_index;
+    EntryIndex cache_request_index;
     StoreFifoCount store_fifo_count;
     TTStoreRequest store_fifo_data;
     logic store_fifo_valid;
     logic store_fifo_push_ready;
     logic store_accept;
     logic store_pop;
+    logic lookup_probe_valid;
+    TTLookupRequest lookup_probe_req;
+    EntryIndex lookup_probe_index;
+    logic lookup_miss_valid;
+    TTLookupRequest lookup_miss_req;
+    EntryIndex lookup_miss_index;
+    logic store_write_pending;
+    EntryIndex store_write_index;
+    TTPhysicalEntry store_write_data;
+    logic backend_lookup_response;
+    logic cache_read_enable;
+    CacheIndex cache_read_index;
 
 `ifndef SYNTHESIS
     initial begin
@@ -82,12 +99,10 @@ module tt_external_load_store #(
     end
 `endif
 
-    (* ramstyle = "M10K" *) (* ram_style = "block" *) TTPhysicalEntry cache_data[0:CACHE_COUNT-1];
-    (* ramstyle = "M10K" *) (* ram_style = "block" *) EntryIndex cache_tag[0:CACHE_COUNT-1];
-    (* ramstyle = "M10K" *) (* ram_style = "block" *) logic cache_valid[0:CACHE_COUNT-1];
-    TTPhysicalEntry cache_read_data;
-    EntryIndex cache_read_tag;
-    logic cache_read_valid;
+    // Packing the complete line into one RAM avoids separately rounding the
+    // data, tag, and validity arrays to physical block-RAM boundaries.
+    (* ramstyle = "M10K" *) (* ram_style = "block" *) CacheLine cache[0:CACHE_COUNT-1];
+    CacheLine cache_read_line;
 
     function automatic EntryIndex entry_index(input ZobristKey key);
         logic [54:0] product;
@@ -139,14 +154,27 @@ module tt_external_load_store #(
     endtask
 
     always_comb begin
-        lookup_index = entry_index(lookup_req.zobrist_key);
-        lookup_req_ready = memory_ready && !memory_error && state == S_IDLE && !clear;
+        // Lookup acceptance and store dequeue are mutually exclusive, so one
+        // range-reduction multiplier serves both cache-port request sources.
+        cache_request_index = entry_index(
+            lookup_req_valid ? lookup_req.zobrist_key : store_fifo_data.zobrist_key
+        );
+        // One buffered probe is sufficient to serve cache hits while an
+        // unrelated SDRAM transaction is active. Cache-fill/write cycles are
+        // excluded so inferred single-port RAM read-during-write behavior is
+        // never part of the frontend contract.
+        lookup_req_ready = memory_ready && !memory_error && !clear && !clear_busy
+            && !lookup_probe_valid && !lookup_miss_valid
+            && state != S_READ_DONE && state != S_WRITE_DONE;
         // A full queue drops the incoming best-effort publication rather than
         // stalling its search thread.
         store_req_ready = !clear && !clear_busy;
         store_accept = store_req_valid && store_req_ready;
         store_pop = state == S_IDLE && !clear_pending && !lookup_req_valid
+            && !lookup_probe_valid && !lookup_miss_valid && !store_write_pending
             && store_fifo_valid;
+        cache_read_enable = (lookup_req_valid && lookup_req_ready) || store_pop;
+        cache_read_index = CacheIndex'(cache_request_index);
         clear_busy = clear || clear_pending || state == S_CACHE_CLEAR
             || state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE;
         mem_req_valid = state == S_READ_REQ || state == S_WRITE_REQ || state == S_CLEAR_REQ;
@@ -161,6 +189,8 @@ module tt_external_load_store #(
         // Every backend request, including reads, has a completion token. Do
         // not allow the backend to remain blocked after delivering read data.
         mem_done_ready = state == S_READ_DONE || state == S_WRITE_DONE || state == S_CLEAR_DONE;
+        backend_lookup_response = (!operation_store && state == S_READ_DONE && mem_done_valid)
+            || (!operation_store && memory_error && state != S_IDLE);
     end
 
     always_ff @(posedge clk) begin
@@ -177,6 +207,9 @@ module tt_external_load_store #(
             word_count <= 3'd0;
             clear_index <= '0;
             cache_clear_index <= '0;
+            lookup_probe_valid <= 1'b0;
+            lookup_miss_valid <= 1'b0;
+            store_write_pending <= 1'b0;
         end else begin
             lookup_resp_valid <= 1'b0;
             cache_access <= 1'b0;
@@ -184,6 +217,35 @@ module tt_external_load_store #(
             cache_access_is_store <= 1'b0;
             clear_prev <= clear;
             if (clear && !clear_prev) clear_pending <= 1'b1;
+            if (cache_read_enable) cache_read_line <= cache[cache_read_index];
+
+            if (lookup_req_valid && lookup_req_ready) begin
+                lookup_probe_req <= lookup_req;
+                lookup_probe_index <= cache_request_index;
+                lookup_probe_valid <= 1'b1;
+            end
+
+            // Lookup cache probes are independent of the external-memory state
+            // machine. A response from the active backend operation wins the
+            // single response port; a buffered probe remains held for one more
+            // cycle in that rare collision.
+            if (lookup_probe_valid && !backend_lookup_response) begin
+                cache_access <= 1'b1;
+                cache_hit <= cache_read_line.valid
+                    && cache_read_line.data[95:88] == generation
+                    && cache_read_line.tag == lookup_probe_index;
+                cache_access_is_store <= 1'b0;
+                if (cache_read_line.valid
+                        && cache_read_line.data[95:88] == generation
+                        && cache_read_line.tag == lookup_probe_index) begin
+                    drive_lookup_response(lookup_probe_req, cache_read_line.data);
+                end else begin
+                    lookup_miss_req <= lookup_probe_req;
+                    lookup_miss_index <= lookup_probe_index;
+                    lookup_miss_valid <= 1'b1;
+                end
+                lookup_probe_valid <= 1'b0;
+            end
 
             if (memory_error && state != S_IDLE) begin
                 if (operation_store) begin
@@ -193,32 +255,33 @@ module tt_external_load_store #(
                 state <= S_IDLE;
             end else case (state)
                 S_CACHE_CLEAR: begin
-                    cache_valid[cache_clear_index] <= 1'b0;
+                    cache[cache_clear_index] <= CacheLine'('0);
                     if (cache_clear_index == CacheIndex'(CACHE_COUNT-1)) state <= S_IDLE;
                     else cache_clear_index <= cache_clear_index + CacheIndex'(1);
                 end
                 S_CACHE_READ: begin
                     cache_access <= 1'b1;
-                    cache_hit <= cache_read_valid && cache_read_data[95:88] == generation
-                        && cache_read_tag == active_index;
-                    cache_access_is_store <= operation_store;
-                    if (cache_read_valid && cache_read_data[95:88] == generation
-                            && cache_read_tag == active_index) begin
-                        if (!operation_store) begin
-                            drive_lookup_response(active_lookup, cache_read_data);
-                            state <= S_IDLE;
-                        end else if (should_replace(tt_unpack_entry(cache_read_data), active_store)) begin
-                            write_entry <= make_store_entry(active_store);
-                            state <= S_WRITE_REQ;
-                        end else begin
-                            state <= S_IDLE;
+                    cache_hit <= cache_read_line.valid
+                        && cache_read_line.data[95:88] == generation
+                        && cache_read_line.tag == active_index;
+                    cache_access_is_store <= 1'b1;
+                    if (cache_read_line.valid
+                            && cache_read_line.data[95:88] == generation
+                            && cache_read_line.tag == active_index) begin
+                        if (should_replace(tt_unpack_entry(cache_read_line.data), active_store)) begin
+                            store_write_index <= active_index;
+                            store_write_data <= make_store_entry(active_store);
+                            store_write_pending <= 1'b1;
                         end
+                        state <= S_IDLE;
                     end else begin
                         state <= S_READ_REQ;
                     end
                 end
                 S_IDLE: begin
-                    if (clear_pending || (clear && !clear_prev)) begin
+                    if ((clear_pending || (clear && !clear_prev))
+                            && !lookup_probe_valid && !lookup_miss_valid
+                            && !store_write_pending) begin
                         clear_pending <= 1'b0;
                         if (&generation) begin
                             clear_index <= '0;
@@ -226,22 +289,25 @@ module tt_external_load_store #(
                         end else begin
                             generation <= generation + TTAge'(1);
                         end
-                    end else if ((lookup_req_valid && lookup_req_ready) || store_pop) begin
+                    end else if (lookup_miss_valid) begin
+                        active_index <= lookup_miss_index;
+                        active_lookup <= lookup_miss_req;
+                        operation_store <= 1'b0;
+                        lookup_miss_valid <= 1'b0;
+                        state <= S_READ_REQ;
+                    end else if (store_write_pending && !lookup_probe_valid
+                            && !lookup_req_valid) begin
+                        active_index <= store_write_index;
+                        write_entry <= store_write_data;
+                        operation_store <= 1'b1;
+                        store_write_pending <= 1'b0;
+                        state <= S_WRITE_REQ;
+                    end else if (store_pop) begin
                         EntryIndex idx;
-                        CacheIndex cidx;
-                        idx = lookup_req_valid ? lookup_index : entry_index(store_fifo_data.zobrist_key);
-                        cidx = CacheIndex'(idx);
+                        idx = cache_request_index;
                         active_index <= idx;
-                        cache_read_data <= cache_data[cidx];
-                        cache_read_tag <= cache_tag[cidx];
-                        cache_read_valid <= cache_valid[cidx];
-                        if (lookup_req_valid) begin
-                            active_lookup <= lookup_req;
-                            operation_store <= 1'b0;
-                        end else begin
-                            active_store <= store_fifo_data;
-                            operation_store <= 1'b1;
-                        end
+                        active_store <= store_fifo_data;
+                        operation_store <= 1'b1;
                         state <= S_CACHE_READ;
                     end
                 end
@@ -265,15 +331,15 @@ module tt_external_load_store #(
                     end else begin
                         CacheIndex cidx;
                         cidx = CacheIndex'(active_index);
-                        cache_data[cidx] <= transfer_entry;
-                        cache_tag[cidx] <= active_index;
-                        cache_valid[cidx] <= 1'b1;
+                        cache[cidx] <= CacheLine'({1'b1, active_index, transfer_entry});
                         if (!operation_store) begin
                             drive_lookup_response(active_lookup, transfer_entry);
                             state <= S_IDLE;
                         end else if (should_replace(tt_unpack_entry(transfer_entry), active_store)) begin
-                            write_entry <= make_store_entry(active_store);
-                            state <= S_WRITE_REQ;
+                            store_write_index <= active_index;
+                            store_write_data <= make_store_entry(active_store);
+                            store_write_pending <= 1'b1;
+                            state <= S_IDLE;
                         end else begin
                             state <= S_IDLE;
                         end
@@ -288,9 +354,7 @@ module tt_external_load_store #(
                     CacheIndex cidx;
                     cidx = CacheIndex'(active_index);
                     if (!mem_done_error) begin
-                        cache_data[cidx] <= write_entry;
-                        cache_tag[cidx] <= active_index;
-                        cache_valid[cidx] <= 1'b1;
+                        cache[cidx] <= CacheLine'({1'b1, active_index, write_entry});
                     end
                     state <= S_IDLE;
                 end

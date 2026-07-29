@@ -215,6 +215,9 @@ module tb_engine_profile #(
     longint unsigned tt_cache_lookup_probes, tt_cache_lookup_hits;
     longint unsigned tt_cache_store_probes, tt_cache_store_hits;
     longint unsigned tt_store_drops;
+    longint unsigned tt_store_fifo_high_water;
+    longint unsigned tt_cache_bypass_hits;
+    longint unsigned tt_store_write_preemptions;
     longint unsigned pvs_scouts, pvs_researches, lmr_reduced_issues;
     longint unsigned terminal_checkmates, terminal_stalemates;
     longint unsigned terminal_main_exhausted, terminal_qsearch_exhausted;
@@ -324,6 +327,15 @@ module tb_engine_profile #(
                 generator_state_cycles[int'(dut.controller.move_generator.quiet_pipeline.state)] + 1;
             tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] =
                 tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] + 1;
+            if (dut.controller.external_tt_gen.tt_load_store.store_fifo_count
+                    > tt_store_fifo_high_water)
+                tt_store_fifo_high_water =
+                    dut.controller.external_tt_gen.tt_load_store.store_fifo_count;
+            if (dut.controller.external_tt_gen.tt_load_store.state
+                        == dut.controller.external_tt_gen.tt_load_store.S_IDLE
+                    && dut.controller.external_tt_gen.tt_load_store.lookup_miss_valid
+                    && dut.controller.external_tt_gen.tt_load_store.store_write_pending)
+                tt_store_write_preemptions = tt_store_write_preemptions + 1;
 
             active_count = 0;
             inflight_count = 0;
@@ -598,6 +610,10 @@ module tb_engine_profile #(
                     tt_cache_lookup_probes <= tt_cache_lookup_probes + 1;
                     depth_cache_probes[iteration_depth] <= depth_cache_probes[iteration_depth] + 1;
                     if (dut.controller.tt_cache_hit) tt_cache_lookup_hits <= tt_cache_lookup_hits + 1;
+                    if (dut.controller.tt_cache_hit
+                            && dut.controller.external_tt_gen.tt_load_store.state
+                                != dut.controller.external_tt_gen.tt_load_store.S_IDLE)
+                        tt_cache_bypass_hits <= tt_cache_bypass_hits + 1;
                     if (dut.controller.tt_cache_hit)
                         depth_cache_hits[iteration_depth] <= depth_cache_hits[iteration_depth] + 1;
                 end
@@ -837,8 +853,11 @@ module tb_engine_profile #(
         emit("tt.ordering_hits", tt_ordering_hits);
         emit("tt.stores", tt_stores);
         emit("tt.store_drops", tt_store_drops);
+        emit("tt.store_fifo_high_water", tt_store_fifo_high_water);
+        emit("tt.store_write_preemptions", tt_store_write_preemptions);
         emit("tt.cache.lookup_probes", tt_cache_lookup_probes);
         emit("tt.cache.lookup_hits", tt_cache_lookup_hits);
+        emit("tt.cache.bypass_hits", tt_cache_bypass_hits);
         emit("tt.cache.store_probes", tt_cache_store_probes);
         emit("tt.cache.store_hits", tt_cache_store_hits);
         emit("sdram.read_requests", sdram_reads);
@@ -865,6 +884,9 @@ module tb_engine_profile #(
         drain_cycles = 0;
         previous_nodes = 0;
         deepest_search_ply = PlyIndex'(0);
+        tt_store_fifo_high_water = 0;
+        tt_cache_bypass_hits = 0;
+        tt_store_write_preemptions = 0;
         move_pop_active = 1'b0;
         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
             move_command_active[tid] = 1'b0;
@@ -961,6 +983,7 @@ module tb_engine_profile #(
         repeat (20000) begin
             @(posedge engine_clk);
             if (dut.controller.external_tt_gen.tt_load_store.store_fifo_count == 0
+                    && !dut.controller.external_tt_gen.tt_load_store.store_write_pending
                     && dut.controller.external_tt_gen.tt_load_store.state == 0
                     && memory_bridge.cmd_empty && memory_bridge.write_empty
                     && memory_bridge.done_empty && memory_controller.state == 16)

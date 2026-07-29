@@ -102,7 +102,8 @@ module tb_tt_external_load_store;
         store_req_valid = 1;
         do @(posedge clk); while (!store_req_ready);
         store_req_valid = 0;
-        do @(posedge clk); while (dut.store_fifo_count != 0 || dut.state != dut.S_IDLE);
+        do @(posedge clk); while (dut.store_fifo_count != 0 || dut.store_write_pending
+            || dut.state != dut.S_IDLE);
     endtask
     task automatic do_lookup(
         input ZobristKey key,
@@ -137,6 +138,52 @@ module tb_tt_external_load_store;
         check(store_cache_access_count == 2, "store cache probes identified separately");
         check(lookup_cache_access_count == 1, "lookup cache probe counted");
         check(lookup_cache_hit_count == 1, "lookup cache hit counted");
+
+        // A cache hit must bypass an unrelated external lookup miss instead of
+        // waiting for the single SDRAM transaction to finish.
+        lookup_req = TTLookupRequest'('0);
+        lookup_req.zobrist_key = 64'h1000_0000_0000_0001;
+        lookup_req.thread_id = ThreadID'(0);
+        lookup_req_valid = 1;
+        do @(posedge clk); while (!lookup_req_ready);
+        lookup_req_valid = 0;
+        do @(posedge clk); while (!read_active);
+        lookup_req = TTLookupRequest'('0);
+        lookup_req.zobrist_key = 64'h0123_4567_89ab_cdef;
+        lookup_req.thread_id = ThreadID'(1);
+        lookup_req_valid = 1;
+        do @(posedge clk); while (!lookup_req_ready);
+        lookup_req_valid = 0;
+        do @(posedge clk); while (!lookup_resp_valid);
+        check(lookup_resp.thread_id == ThreadID'(1) && lookup_resp.hit,
+            "cache hit bypassed active SDRAM miss");
+        do @(posedge clk); while (!lookup_resp_valid);
+        check(lookup_resp.thread_id == ThreadID'(0) && !lookup_resp.hit,
+            "older external miss completed after bypass hit");
+
+        // A lookup miss arriving during a store replacement read must run
+        // before the store's deferred write.
+        store_req = TTStoreRequest'('0);
+        store_req.zobrist_key = 64'h2345_6789_abcd_ef01;
+        store_req.depth = TTDepth'(7);
+        store_req.score = EvalScore'(77);
+        store_req.bound_type = TT_BOUND_EXACT;
+        store_req_valid = 1;
+        do @(posedge clk); while (!store_req_ready);
+        store_req_valid = 0;
+        do @(posedge clk); while (!read_active);
+        lookup_req = TTLookupRequest'('0);
+        lookup_req.zobrist_key = 64'h789a_bcde_f012_3456;
+        lookup_req.thread_id = ThreadID'(1);
+        lookup_req_valid = 1;
+        do @(posedge clk); while (!lookup_req_ready);
+        lookup_req_valid = 0;
+        do @(posedge clk); while (!dut.lookup_miss_valid);
+        do @(posedge clk); while (!(mem_req_valid && mem_req_ready));
+        check(!mem_req_write, "lookup miss preempted deferred store write");
+        do @(posedge clk); while (!lookup_resp_valid);
+        check(lookup_resp.thread_id == ThreadID'(1), "preempting lookup retained thread tag");
+        do @(posedge clk); while (dut.store_write_pending || dut.state != dut.S_IDLE);
 
         // Stores are accepted while the backend is occupied. Once the queue
         // fills, later publications are consumed and dropped without stalling.

@@ -456,6 +456,8 @@ def build_profile_report(
             "hit_rate_percent": percent(tt_hits, tt_lookups),
             "stores": metrics["tt.stores"],
             "store_drops": metrics["tt.store_drops"],
+            "store_fifo_high_water": metrics["tt.store_fifo_high_water"],
+            "store_write_preemptions": metrics["tt.store_write_preemptions"],
             "cutoff_hits": metrics["tt.cutoff_hits"],
             "ordering_only_hits": metrics["tt.ordering_hits"],
             "bound_hits": {
@@ -465,6 +467,7 @@ def build_profile_report(
                 "lookup_probes": cache_probes,
                 "lookup_hits": cache_hits,
                 "lookup_hit_rate_percent": percent(cache_hits, cache_probes),
+                "bypass_hits": metrics["tt.cache.bypass_hits"],
                 "store_probes": metrics["tt.cache.store_probes"],
                 "store_hits": metrics["tt.cache.store_hits"],
             },
@@ -749,7 +752,12 @@ def format_profile_report(report: dict) -> str:
         ),
         (
             f"  Cache: probes={cache['lookup_probes']:,}, hits={cache['lookup_hits']:,} "
-            f"({_format_percent(cache['lookup_hit_rate_percent'])})"
+            f"({_format_percent(cache['lookup_hit_rate_percent'])}), "
+            f"busy bypasses={cache['bypass_hits']:,}"
+        ),
+        (
+            f"  Store queue: peak={tt['store_fifo_high_water']:,}, "
+            f"writes preempted by lookup misses={tt['store_write_preemptions']:,}"
         ),
         (
             f"  TT hit use: cutoffs={tt['cutoff_hits']:,}, "

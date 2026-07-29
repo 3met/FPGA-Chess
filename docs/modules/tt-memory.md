@@ -21,7 +21,7 @@ The protocol consists of four independent ready/valid channels:
 | Read data | Memory to frontend | 16-bit words and an end-of-burst marker. |
 | Completion | Memory to frontend | One terminal status for every accepted request. |
 
-At most one transaction is issued by the TT frontend at a time. A backend may apply backpressure before accepting a request or write word and the frontend may apply backpressure to returned read data and completion. Once a physical SDR write burst begins, any required buffering is the backend's responsibility.
+At most one external-memory transaction is issued by the TT frontend at a time. The cache-probe path remains independent of that transaction, so a buffered lookup that hits in the cache may complete while an unrelated external read or write is active. A backend may apply backpressure before accepting a request or write word and the frontend may apply backpressure to returned read data and completion. Once a physical SDR write burst begins, any required buffering is the backend's responsibility.
 
 Every request produces exactly one completion, including reads. Read data precedes its completion. A failed read produces a miss-equivalent lookup response and sets the persistent memory-error status; failed stores do not affect search correctness.
 
@@ -35,9 +35,11 @@ Each clock domain has its own reset. The subsystem does not report memory ready 
 
 ## Cache and Arbitration
 
-Lookups take priority over queued stores. Stores are buffered and consumed only when no lookup is waiting; a full store queue drops new publications while still accepting them from search.
+Lookups take priority over queued stores. One lookup probe or miss may be buffered independently from the external-memory state machine. Stores are buffered and consumed only when no lookup is waiting; a full store queue drops new publications while still accepting them from search.
 
-On a cache miss, the frontend reads the existing external entry before responding to a lookup or deciding whether a store may replace it. Accepted replacements update the cache and external memory. The cache is therefore a write-through performance layer, not an independent source of TT state.
+On a cache miss, the frontend reads the existing external entry before responding to a lookup or deciding whether a store may replace it. A replacement write is held separately after the store read, allowing a waiting lookup miss to use external memory before the low-priority write. Accepted replacements update the cache and external memory. The cache is therefore a write-through performance layer, not an independent source of TT state.
+
+The direct-mapped cache packs each line's data, complete external-index tag, and validity into one block-RAM array. Cache probes share one physical read port; arbitration guarantees that a store probe and a lookup probe are never issued together. This avoids replicating the cache merely to provide a second read port.
 
 ## Clearing
 
