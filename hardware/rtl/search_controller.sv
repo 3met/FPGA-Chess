@@ -150,6 +150,7 @@ module search_controller #(
         ST_REPETITION_ROOT_WAIT,
         ST_SEARCH_ITER_START,
         ST_SEARCH_RUN,
+        ST_SEARCH_ITER_FINISH,
         ST_RESPOND,
         ST_KILL_DONE
     } SearchControllerState;
@@ -247,6 +248,7 @@ module search_controller #(
     EvalScore search_root_alpha;
     EvalScore search_root_beta;
     logic search_aspiration_active;
+    logic search_finish_aspiration_active;
 `ifndef SYNTHESIS
     logic [7:0] search_thread_completed_depth[0:SEARCH_THREAD_COUNT-1];
     Move search_thread_completed_best_move[0:SEARCH_THREAD_COUNT-1];
@@ -1751,6 +1753,7 @@ module search_controller #(
             search_root_alpha <= -SEARCH_INF;
             search_root_beta <= SEARCH_INF;
             search_aspiration_active <= 1'b0;
+            search_finish_aspiration_active <= 1'b0;
             search_thread_id <= ThreadID'(0);
             search_dispatch <= '0;
 `ifndef SYNTHESIS
@@ -2035,6 +2038,7 @@ module search_controller #(
                                     search_root_alpha <= -SEARCH_INF;
                                     search_root_beta <= SEARCH_INF;
                                     search_aspiration_active <= 1'b0;
+                                    search_finish_aspiration_active <= 1'b0;
                                     search_thread_id <= ThreadID'(0);
                                     search_dispatch <= '0;
                                     search_active_thread_count <= ThreadCount'(0);
@@ -2384,8 +2388,6 @@ module search_controller #(
                     automatic Move iteration_best_move_next;
                     automatic EvalScore iteration_best_score_next;
                     automatic NodeCountType nodes_next;
-                    automatic logic node_stop_next;
-                    automatic logic time_stop_next;
                     automatic RootResultCandidate root_candidates[0:7];
                     automatic RootResultCandidate root_pair_winners[0:3];
                     automatic RootResultCandidate root_quad_winners[0:1];
@@ -3200,73 +3202,89 @@ module search_controller #(
                         search_iteration_best_move <= iteration_best_move_next;
                         search_iteration_best_score <= iteration_best_score_next;
 
-                        node_stop_next = active_req.operation == ENGINE_CTRL_SEARCH_NODES && nodes_next >= active_req.node_limit;
-                        time_stop_next = (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
-                            && elapsed_ms >= search_budget_ms;
                         if (active_count_next == ThreadCount'(0) && iteration_has_result_next) begin
-                            if (search_aspiration_active
-                                    && (iteration_best_score_next <= search_root_alpha
-                                        || iteration_best_score_next >= search_root_beta)) begin
-                                // A failed narrow pass is only a bound. Retry the same
-                                // depth once with the full window before publishing it.
-                                search_root_alpha <= -SEARCH_INF;
-                                search_root_beta <= SEARCH_INF;
-                                search_aspiration_active <= 1'b0;
-                                search_active_thread_count <= ThreadCount'(0);
-                                search_iteration_has_result <= 1'b0;
-                                search_iteration_best_move <= NULL_MOVE;
-                                search_iteration_best_score <= -SEARCH_INF;
-                                if (node_stop_next || time_stop_next) begin
-                                    resp_reg <= EngineControllerResponse'('0);
-                                    resp_reg.best_move <= search_completed_best_move;
-                                    resp_reg.score <= search_completed_score;
-                                    resp_reg.nodes_count <= nodes_next;
-                                    resp_reg.completed_depth <= search_completed_depth;
-                                    resp_reg.end_reason <= node_stop_next ? ENGINE_END_NODE_LIMIT : ENGINE_END_TIME_LIMIT;
-                                    state <= ST_RESPOND;
-                                end else begin
-                                    state <= ST_SEARCH_ITER_START;
-                                end
-                            end else begin
-                                search_completed_depth <= search_target_depth;
-                                search_completed_best_move <= iteration_best_move_next;
-                                search_completed_score <= iteration_best_score_next;
-                                resp_reg <= EngineControllerResponse'('0);
-                                resp_reg.best_move <= iteration_best_move_next;
-                                resp_reg.score <= iteration_best_score_next;
-                                resp_reg.nodes_count <= nodes_next;
-                                resp_reg.completed_depth <= search_target_depth;
-                                if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH && search_target_depth >= search_max_depth) begin
-                                    resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                    state <= ST_RESPOND;
-                                end else if (node_stop_next) begin
-                                    resp_reg.end_reason <= ENGINE_END_NODE_LIMIT;
-                                    state <= ST_RESPOND;
-                                end else if (time_stop_next) begin
-                                    resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
-                                    state <= ST_RESPOND;
-                                end else if (search_target_depth >= search_max_depth) begin
-                                    resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                    state <= ST_RESPOND;
-                                end else begin
-                                    search_target_depth <= search_target_depth + SearchDepth'(1);
-                                    // Every completed iteration supplies a stable center for the
-                                    // next root window. Budget expiry during a failed narrow pass
-                                    // safely returns the previous completed iteration.
-                                    search_root_alpha <= aspiration_lower_bound(iteration_best_score_next);
-                                    search_root_beta <= aspiration_upper_bound(iteration_best_score_next);
-                                    search_aspiration_active <= 1'b1;
-                                    search_thread_id <= ThreadID'(0);
-                                    search_dispatch <= '0;
-                                    search_active_thread_count <= ThreadCount'(0);
-                                    search_iteration_has_result <= 1'b0;
-                                    search_iteration_best_move <= NULL_MOVE;
-                                    search_iteration_best_score <= -SEARCH_INF;
-                                    state <= ST_SEARCH_ITER_START;
-                                end
-                            end
+                            // Finalize from the registered winner on the next cycle.
+                            // This removes root score/arbitration logic from the
+                            // response path at a cost of one cycle per iteration.
+                            search_finish_aspiration_active <= search_aspiration_active;
+                            search_aspiration_active <= 1'b0;
+                            state <= ST_SEARCH_ITER_FINISH;
                         end else begin
                             state <= ST_SEARCH_RUN;
+                        end
+                    end
+                end
+
+                ST_SEARCH_ITER_FINISH: begin
+                    automatic logic node_stop;
+                    automatic logic time_stop;
+
+                    node_stop = active_req.operation == ENGINE_CTRL_SEARCH_NODES
+                        && search_nodes >= active_req.node_limit;
+                    time_stop = (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
+                            || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
+                        && elapsed_ms >= search_budget_ms;
+                    if (search_finish_aspiration_active
+                            && (search_iteration_best_score <= search_root_alpha
+                                || search_iteration_best_score >= search_root_beta)) begin
+                        // A failed narrow pass is only a bound. Retry the same
+                        // depth once with the full window before publishing it.
+                        search_root_alpha <= -SEARCH_INF;
+                        search_root_beta <= SEARCH_INF;
+                        search_aspiration_active <= 1'b0;
+                        search_finish_aspiration_active <= 1'b0;
+                        search_active_thread_count <= ThreadCount'(0);
+                        search_iteration_has_result <= 1'b0;
+                        search_iteration_best_move <= NULL_MOVE;
+                        search_iteration_best_score <= -SEARCH_INF;
+                        if (node_stop || time_stop) begin
+                            resp_reg <= EngineControllerResponse'('0);
+                            resp_reg.best_move <= search_completed_best_move;
+                            resp_reg.score <= search_completed_score;
+                            resp_reg.nodes_count <= search_nodes;
+                            resp_reg.completed_depth <= search_completed_depth;
+                            resp_reg.end_reason <= node_stop ? ENGINE_END_NODE_LIMIT : ENGINE_END_TIME_LIMIT;
+                            state <= ST_RESPOND;
+                        end else begin
+                            state <= ST_SEARCH_ITER_START;
+                        end
+                    end else begin
+                        search_finish_aspiration_active <= 1'b0;
+                        search_completed_depth <= search_target_depth;
+                        search_completed_best_move <= search_iteration_best_move;
+                        search_completed_score <= search_iteration_best_score;
+                        resp_reg <= EngineControllerResponse'('0);
+                        resp_reg.best_move <= search_iteration_best_move;
+                        resp_reg.score <= search_iteration_best_score;
+                        resp_reg.nodes_count <= search_nodes;
+                        resp_reg.completed_depth <= search_target_depth;
+                        if (active_req.operation == ENGINE_CTRL_SEARCH_DEPTH && search_target_depth >= search_max_depth) begin
+                            resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                            state <= ST_RESPOND;
+                        end else if (node_stop) begin
+                            resp_reg.end_reason <= ENGINE_END_NODE_LIMIT;
+                            state <= ST_RESPOND;
+                        end else if (time_stop) begin
+                            resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
+                            state <= ST_RESPOND;
+                        end else if (search_target_depth >= search_max_depth) begin
+                            resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
+                            state <= ST_RESPOND;
+                        end else begin
+                            search_target_depth <= search_target_depth + SearchDepth'(1);
+                            // Every completed iteration supplies a stable center for the
+                            // next root window. Budget expiry during a failed narrow pass
+                            // safely returns the previous completed iteration.
+                            search_root_alpha <= aspiration_lower_bound(search_iteration_best_score);
+                            search_root_beta <= aspiration_upper_bound(search_iteration_best_score);
+                            search_aspiration_active <= 1'b1;
+                            search_thread_id <= ThreadID'(0);
+                            search_dispatch <= '0;
+                            search_active_thread_count <= ThreadCount'(0);
+                            search_iteration_has_result <= 1'b0;
+                            search_iteration_best_move <= NULL_MOVE;
+                            search_iteration_best_score <= -SEARCH_INF;
+                            state <= ST_SEARCH_ITER_START;
                         end
                     end
                 end

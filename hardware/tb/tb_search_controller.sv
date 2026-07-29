@@ -1199,10 +1199,10 @@ module tb_search_controller;
                 end
                 if (dut.search_aspiration_active && !aspiration_window_seen) begin
                     aspiration_window_seen = 1'b1;
-                    check(dut.search_root_beta - dut.search_root_alpha == EvalScore'(1024),
-                        "aspiration window is eight pawns wide");
-                    check(dut.search_root_alpha == dut.search_completed_score - EvalScore'(512)
-                            && dut.search_root_beta == dut.search_completed_score + EvalScore'(512),
+                    check(dut.search_root_beta - dut.search_root_alpha == EvalScore'(128),
+                        "aspiration window is one pawn wide");
+                    check(dut.search_root_alpha == dut.search_completed_score - EvalScore'(64)
+                            && dut.search_root_beta == dut.search_completed_score + EvalScore'(64),
                         "aspiration window is centered on the previous score");
                 end
                 if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
