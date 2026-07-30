@@ -922,6 +922,7 @@ module search_controller #(
         automatic TimeType stm_inc;
         automatic TimeType usable;
         automatic logic [TIME_BITS+1:0] increment_scaled;
+        automatic logic [TIME_BITS+1:0] budget_sum;
         automatic logic [TIME_BITS:0] budget;
 
         stm_time = (active_board.turn == WHITE) ? request.wtime : request.btime;
@@ -930,7 +931,8 @@ module search_controller #(
         // Spend the documented target share of both the increment and remaining
         // clock so increment games do not consistently finish with excess time.
         increment_scaled = {2'b00, stm_inc} * 2'd3;
-        budget = (increment_scaled >> 2) + {1'b0, (usable >> 5)};
+        budget_sum = (increment_scaled >> 2) + {1'b0, (usable >> 5)};
+        budget = budget_sum[TIME_BITS:0];
         if (budget > {1'b0, usable}) begin
             return usable;
         end
@@ -2029,7 +2031,7 @@ module search_controller #(
                                     state <= ST_RESPOND;
                                 end else begin
                                     search_ply[search_thread_id] <= PlyIndex'(0);
-                                    search_max_depth <= requested_search_depth(req);
+                                    search_max_depth <= SearchDepth'(requested_search_depth(req));
                                     search_target_depth <= (requested_search_depth(req) == SearchDepth'(0))
                                         ? SearchDepth'(0) : SearchDepth'(1);
                                     search_completed_depth <= SearchDepth'(0);

@@ -130,7 +130,7 @@ module sdr_sdram_controller #(
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             state <= S_POWERUP; ready <= 1'b0; error <= 1'b0;
-            wait_count <= POWERUP_CYCLES; refresh_count <= REFRESH_CYCLES;
+            wait_count <= WAIT_COUNT_BITS'(POWERUP_CYCLES); refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
             clear_word <= 25'd5; address <= '0; remaining <= '0; segment_remaining <= '0;
             write_collect_count <= '0; write_emit_count <= '0;
             read_capture_count <= '0; read_emit_count <= '0; transaction_length <= '0;
@@ -146,39 +146,39 @@ module sdr_sdram_controller #(
             dram_ldqm <= dram_ldqm_next; dram_ras_n <= dram_ras_n_next;
             dram_udqm <= dram_udqm_next; dram_we_n <= dram_we_n_next;
             dq_out <= dq_out_next; dq_oe <= dq_oe_next;
-            if ((ready || state >= S_CLEAR_CHECK) && refresh_count != 0) refresh_count <= refresh_count - 1;
+            if ((ready || state >= S_CLEAR_CHECK) && refresh_count != 0) refresh_count <= refresh_count - 1'b1;
             case (state)
-                S_POWERUP: if (wait_count == 0) state <= S_INIT_PRE; else wait_count <= wait_count - 1;
-                S_INIT_PRE: begin invalidate_rows(); wait_count <= TRP-1; state <= S_INIT_PRE_WAIT; end
-                S_INIT_PRE_WAIT: if (wait_count == 0) state <= S_INIT_REF1; else wait_count <= wait_count-1;
-                S_INIT_REF1: begin wait_count <= TRFC-1; state <= S_INIT_REF1_WAIT; end
-                S_INIT_REF1_WAIT: if (wait_count == 0) state <= S_INIT_REF2; else wait_count <= wait_count-1;
-                S_INIT_REF2: begin wait_count <= TRFC-1; state <= S_INIT_REF2_WAIT; end
-                S_INIT_REF2_WAIT: if (wait_count == 0) state <= S_INIT_MODE; else wait_count <= wait_count-1;
-                S_INIT_MODE: begin wait_count <= TMRD-1; state <= S_INIT_MODE_WAIT; end
+                S_POWERUP: if (wait_count == 0) state <= S_INIT_PRE; else wait_count <= wait_count - 1'b1;
+                S_INIT_PRE: begin invalidate_rows(); wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_INIT_PRE_WAIT; end
+                S_INIT_PRE_WAIT: if (wait_count == 0) state <= S_INIT_REF1; else wait_count <= wait_count - 1'b1;
+                S_INIT_REF1: begin wait_count <= WAIT_COUNT_BITS'(TRFC - 1); state <= S_INIT_REF1_WAIT; end
+                S_INIT_REF1_WAIT: if (wait_count == 0) state <= S_INIT_REF2; else wait_count <= wait_count - 1'b1;
+                S_INIT_REF2: begin wait_count <= WAIT_COUNT_BITS'(TRFC - 1); state <= S_INIT_REF2_WAIT; end
+                S_INIT_REF2_WAIT: if (wait_count == 0) state <= S_INIT_MODE; else wait_count <= wait_count - 1'b1;
+                S_INIT_MODE: begin wait_count <= WAIT_COUNT_BITS'(TMRD - 1); state <= S_INIT_MODE_WAIT; end
                 S_INIT_MODE_WAIT: if (wait_count == 0) begin
                     address <= clear_word;
-                    refresh_count <= REFRESH_CYCLES;
+                    refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
                     if (SKIP_INITIAL_CLEAR) begin
                         ready <= 1'b1;
                         state <= S_IDLE;
                     end else begin
                         state <= S_CLEAR_CHECK;
                     end
-                end else wait_count <= wait_count-1;
+                end else wait_count <= wait_count - 1'b1;
                 S_CLEAR_CHECK: begin
                     address <= clear_word;
                     if (open_valid[bank_of(clear_word)] && open_row[bank_of(clear_word)] == row_of(clear_word)) state <= S_CLEAR_WRITE;
                     else if (open_valid[bank_of(clear_word)]) state <= S_CLEAR_PRE;
                     else state <= S_CLEAR_ACT;
                 end
-                S_CLEAR_PRE: begin open_valid[address[24:23]] <= 1'b0; wait_count <= TRP-1; state <= S_CLEAR_PRE_WAIT; end
-                S_CLEAR_PRE_WAIT: if (wait_count == 0) state <= S_CLEAR_ACT; else wait_count <= wait_count-1;
-                S_CLEAR_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= TRCD-1; state <= S_CLEAR_ACT_WAIT; end
-                S_CLEAR_ACT_WAIT: if (wait_count == 0) state <= S_CLEAR_WRITE; else wait_count <= wait_count-1;
+                S_CLEAR_PRE: begin open_valid[address[24:23]] <= 1'b0; wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_CLEAR_PRE_WAIT; end
+                S_CLEAR_PRE_WAIT: if (wait_count == 0) state <= S_CLEAR_ACT; else wait_count <= wait_count - 1'b1;
+                S_CLEAR_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= WAIT_COUNT_BITS'(TRCD - 1); state <= S_CLEAR_ACT_WAIT; end
+                S_CLEAR_ACT_WAIT: if (wait_count == 0) state <= S_CLEAR_WRITE; else wait_count <= wait_count - 1'b1;
                 S_CLEAR_WRITE: state <= S_CLEAR_TERM;
                 S_CLEAR_TERM: begin
-                    if (clear_word >= 25'((ENTRY_COUNT-1)*6+5)) begin ready <= 1'b1; refresh_count <= REFRESH_CYCLES; state <= S_IDLE; end
+                    if (clear_word >= 25'((ENTRY_COUNT-1)*6+5)) begin ready <= 1'b1; refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES); state <= S_IDLE; end
                     else begin
                         clear_word <= clear_word + 25'd6;
                         state <= (refresh_count == 0) ? S_REFRESH_PRE : S_CLEAR_CHECK;
@@ -219,16 +219,16 @@ module sdr_sdram_controller #(
                         else state <= S_ACT;
                     end else write_collect_count <= write_collect_count + 3'd1;
                 end
-                S_PRE: begin open_valid[address[24:23]] <= 1'b0; wait_count <= TRP-1; state <= S_PRE_WAIT; end
-                S_PRE_WAIT: if (wait_count == 0) state <= S_ACT; else wait_count <= wait_count-1;
-                S_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= TRCD-1; state <= S_ACT_WAIT; end
-                S_ACT_WAIT: if (wait_count == 0) state <= transaction_write ? S_WRITE_CMD : S_READ_CMD; else wait_count <= wait_count-1;
-                S_READ_CMD: begin wait_count <= CAS_LATENCY; state <= S_READ_WAIT; end
-                S_READ_WAIT: if (wait_count == 0) state <= S_READ_DATA; else wait_count <= wait_count-1;
+                S_PRE: begin open_valid[address[24:23]] <= 1'b0; wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_PRE_WAIT; end
+                S_PRE_WAIT: if (wait_count == 0) state <= S_ACT; else wait_count <= wait_count - 1'b1;
+                S_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= WAIT_COUNT_BITS'(TRCD - 1); state <= S_ACT_WAIT; end
+                S_ACT_WAIT: if (wait_count == 0) state <= transaction_write ? S_WRITE_CMD : S_READ_CMD; else wait_count <= wait_count - 1'b1;
+                S_READ_CMD: begin wait_count <= WAIT_COUNT_BITS'(CAS_LATENCY); state <= S_READ_WAIT; end
+                S_READ_WAIT: if (wait_count == 0) state <= S_READ_DATA; else wait_count <= wait_count - 1'b1;
                 S_READ_DATA: begin
                     read_buffer[read_capture_count] <= dq_read_capture;
                     read_capture_count <= read_capture_count + 3'd1;
-                    address <= address + 25'd1; remaining <= remaining-1; segment_remaining <= segment_remaining-1;
+                    address <= address + 25'd1; remaining <= remaining - 1'b1; segment_remaining <= segment_remaining - 1'b1;
                     if (remaining == 1) state <= S_BURST_TERM;
                     else if (segment_remaining == 1) state <= S_BURST_TERM;
                 end
@@ -237,7 +237,7 @@ module sdr_sdram_controller #(
                     else read_emit_count <= read_emit_count + 3'd1;
                 end
                 S_WRITE_CMD, S_WRITE_DATA: begin
-                    address <= address + 25'd1; remaining <= remaining-1; segment_remaining <= segment_remaining-1;
+                    address <= address + 25'd1; remaining <= remaining - 1'b1; segment_remaining <= segment_remaining - 1'b1;
                     write_emit_count <= write_emit_count + 3'd1;
                     if (remaining == 1 || segment_remaining == 1) state <= S_BURST_TERM;
                     else state <= S_WRITE_DATA;
@@ -260,13 +260,13 @@ module sdr_sdram_controller #(
                     end
                 end
                 S_COMPLETE: if (done_valid && done_ready) state <= S_IDLE;
-                S_REFRESH_PRE: begin invalidate_rows(); wait_count <= TRP-1; state <= S_REFRESH_PRE_WAIT; end
-                S_REFRESH_PRE_WAIT: if (wait_count == 0) state <= S_REFRESH; else wait_count <= wait_count-1;
-                S_REFRESH: begin wait_count <= TRFC-1; state <= S_REFRESH_WAIT; end
+                S_REFRESH_PRE: begin invalidate_rows(); wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_REFRESH_PRE_WAIT; end
+                S_REFRESH_PRE_WAIT: if (wait_count == 0) state <= S_REFRESH; else wait_count <= wait_count - 1'b1;
+                S_REFRESH: begin wait_count <= WAIT_COUNT_BITS'(TRFC - 1); state <= S_REFRESH_WAIT; end
                 S_REFRESH_WAIT: if (wait_count == 0) begin
-                    refresh_count <= REFRESH_CYCLES;
+                    refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
                     state <= ready ? S_IDLE : S_CLEAR_CHECK;
-                end else wait_count <= wait_count-1;
+                end else wait_count <= wait_count - 1'b1;
                 default: state <= S_POWERUP;
             endcase
         end

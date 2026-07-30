@@ -47,6 +47,12 @@ module de1_soc(input CLOCK_50,
 		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(memory_read_clk),
 		.locked(pll_locked_status));
 	assign DRAM_CLK = memory_output_clk;
+	// Only GPIO_0[7] and GPIO_0[9] are the UART TX/RX pins. Keep the other
+	// header pins explicitly high impedance rather than leaving bidirectional
+	// ports structurally undriven.
+	assign GPIO_0[35:10] = 'z;
+	assign GPIO_0[8:8] = 1'bz;
+	assign GPIO_0[6:0] = 'z;
 	// Reuse the PLL's zero-phase 100 MHz memory clock for finer UART sampling.
 	assign uart_clk = memory_clk;
 

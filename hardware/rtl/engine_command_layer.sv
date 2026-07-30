@@ -478,10 +478,10 @@ module engine_command_layer (
             state <= ST_IDLE;
             response_kind <= RESP_NONE;
             response_index <= 4'd0;
-            response_status <= 8'h00;
-            response_error <= ENGINE_ERR_NONE;
+            response_status <= 4'h0;
+            response_error <= ENGINE_ERR_NONE[2:0];
             response_active_op <= 8'h00;
-            error_code <= ENGINE_ERR_NONE;
+            error_code <= ENGINE_ERR_NONE[2:0];
             curr_opcode <= 8'h00;
             payload_count <= 6'd0;
             payload_error <= 1'b0;
@@ -497,7 +497,7 @@ module engine_command_layer (
             last_score <= EvalScore'(0);
             last_node_count <= NodeCountType'(0);
             last_completed_depth <= 8'd0;
-            last_end_reason <= ENGINE_END_NORMAL;
+            last_end_reason <= ENGINE_END_NORMAL[2:0];
             debug_stat_address_reg <= 8'd0;
         end else begin
             case (state)
@@ -543,7 +543,7 @@ module engine_command_layer (
                             || (!direct_request_inflight && search_req_ready && search_resp_valid)) begin
                         direct_request_inflight <= 1'b0;
                         if (search_resp_valid && search_resp.error) begin
-                            error_code <= ENGINE_ERR_INTERNAL;
+                            error_code <= ENGINE_ERR_INTERNAL[2:0];
                             active_operation <= 8'h00;
                             start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
                         end else if (direct_index == 7'd67) begin
@@ -558,12 +558,12 @@ module engine_command_layer (
                 ST_ISSUE_REQUEST: begin
                     if (search_req_ready) begin
                         if (request_clears_error) begin
-                            error_code <= ENGINE_ERR_NONE;
+                            error_code <= ENGINE_ERR_NONE[2:0];
                             last_move <= Move'('0);
                             last_score <= EvalScore'(0);
                             last_node_count <= NodeCountType'(0);
                             last_completed_depth <= 8'd0;
-                            last_end_reason <= ENGINE_END_NORMAL;
+                            last_end_reason <= ENGINE_END_NORMAL[2:0];
                         end
 
                         search_active <= request_waits_for_result;
@@ -582,15 +582,15 @@ module engine_command_layer (
                         search_active <= 1'b0;
                         active_operation <= 8'h00;
                         if (search_resp.error) begin
-                            error_code <= ENGINE_ERR_INTERNAL;
-                            last_end_reason <= ENGINE_END_ERROR;
+                            error_code <= ENGINE_ERR_INTERNAL[2:0];
+                            last_end_reason <= ENGINE_END_ERROR[2:0];
                             start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
                         end else begin
                             last_move <= search_resp.best_move;
                             last_score <= search_resp.score;
                             last_node_count <= search_resp.nodes_count;
                             last_completed_depth <= search_resp.completed_depth;
-                            last_end_reason <= search_resp.end_reason;
+                            last_end_reason <= search_resp.end_reason[2:0];
                             active_operation <= 8'h00;
                             start_response(
                                 request_response_kind,

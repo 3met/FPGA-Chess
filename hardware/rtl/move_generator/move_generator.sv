@@ -932,8 +932,8 @@ module move_generator_pipeline #(
             // Gravity makes established history progressively harder to change:
             // H' = H + B - H*|B|/256 for rewards and depth-scaled maluses.
             gravity_product = $signed(update_history_value) * $signed({1'b0, magnitude});
-            updated_history = $signed(update_history_value) + signed_bonus
-                - (gravity_product >>> HISTORY_LIMIT_SHIFT);
+            updated_history = 11'($signed(update_history_value) + signed_bonus
+                - (gravity_product >>> HISTORY_LIMIT_SHIFT));
             history_wr_en[update_color] = 1'b1;
             history_wr_addr[update_color] = update_address;
             if (updated_history > 11'sd255)

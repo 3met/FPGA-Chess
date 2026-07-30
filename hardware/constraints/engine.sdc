@@ -36,3 +36,9 @@ if {[get_collection_size $sdram_clock] > 0} {
     set_multicycle_path -setup 2 -from [get_ports {DRAM_DQ[*]}] -to $sdram_capture_regs
     set_multicycle_path -hold 1 -from [get_ports {DRAM_DQ[*]}] -to $sdram_capture_regs
 }
+
+# These board-facing signals communicate with people or an asynchronous UART,
+# not a source-synchronous device. They are either synchronized internally or
+# only affect displays, so no external setup/hold relationship exists to time.
+set_false_path -from [get_ports {GPIO_0[9] KEY[2] KEY[3] SW[9]}]
+set_false_path -to [get_ports {GPIO_0[7] HEX0[*] HEX1[*] HEX2[*] HEX3[*] HEX4[*] HEX5[*] LEDR[*]}]
