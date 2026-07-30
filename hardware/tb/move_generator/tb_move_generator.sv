@@ -422,7 +422,7 @@ module tb_move_generator;
         $display("Start-position noisy generation cycles: %0d",
             stat_generation_cycles - generation_cycles_before);
         check(stat_generation_cycles - generation_cycles_before <= 40'd16,
-            "noisy writeback and empty-tail completion remain overlapped");
+            "noisy final-write response preserves the generation cycle bound");
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
         check(count == 0, "start position has no noisy moves");
 
@@ -468,8 +468,8 @@ module tb_move_generator;
         baseline_quiet_generation_cycles = stat_generation_cycles - generation_cycles_before;
         $display("Start-position quiet generation cycles: %0d",
             baseline_quiet_generation_cycles);
-        check(baseline_quiet_generation_cycles <= 40'd55,
-            "quiet history writeback remains overlapped with generation");
+        check(baseline_quiet_generation_cycles <= 40'd39,
+            "quiet destination lookahead reduces generation cycles");
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
         check(count == 20, $sformatf("start position has 20 moves, found %0d", count));
         launch_history_update_with_failures(

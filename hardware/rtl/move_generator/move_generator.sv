@@ -119,6 +119,18 @@ module move_generator_pipeline #(
         endcase
     endfunction
 
+    // Forward the top produced by a bucket write so a generation response can
+    // accompany the final write instead of waiting another cycle.
+    function automatic MoveBucketTops tops_after_candidate_write(
+        input MoveBucketTops tops,
+        input MoveBucketIndex selected
+    );
+        automatic MoveBucketTops result = tops;
+        if (tops[selected] < bucket_capacity(selected))
+            result[selected] = tops[selected] + MoveBucketTop'(1);
+        return result;
+    endfunction
+
     function automatic logic is_power_of_two(input int value);
         return value > 0 && (value & (value - 1)) == 0;
     endfunction
@@ -152,6 +164,13 @@ module move_generator_pipeline #(
     Tile context_knight[8];
     logic [15:0] source_mask;
     logic [3:0] source_select_index;
+    Position selected_destination;
+    Tile selected_destination_tile;
+    RayRecord selected_context_ray[8];
+    Tile selected_context_knight[8];
+    logic [15:0] selected_source_mask;
+    logic destination_examined_event;
+    logic destination_with_source_event;
     logic castle_index;
 
     Move candidate_move;
@@ -166,6 +185,7 @@ module move_generator_pipeline #(
     logic [1:0] candidate_promo_counter;
     logic candidate_valid;
     logic candidate_slot_ready;
+    logic candidate_finishes_write;
 
     logic source_valid;
     Move source_move;
@@ -716,6 +736,44 @@ module move_generator_pipeline #(
 
     always_comb source_select_index = first_source(source_mask);
 
+    // Build the next destination context from the remaining mask. The same
+    // combinational network serves ordinary selection and final-source
+    // lookahead, so lookahead does not add another ray-analysis lane.
+    always_comb begin
+        selected_destination = first_destination(destination_mask);
+        selected_destination_tile = job_board.tiles[selected_destination];
+        selected_source_mask = 16'd0;
+        for (int dir = 0; dir < 8; dir++) begin
+            selected_context_ray[dir] =
+                nearest_ray(job_board, selected_destination, Direction'(dir));
+            selected_context_knight[dir] =
+                isKnightShiftOnBoard(selected_destination, KnightDirection'(dir))
+                    ? job_board.tiles[
+                        shiftKnightPos(selected_destination, KnightDirection'(dir))
+                    ] : EMPTY_TILE;
+            selected_source_mask[dir] = potential_ray_source(
+                job_board, selected_destination, selected_destination_tile,
+                Direction'(dir), selected_context_ray[dir]
+            );
+            selected_source_mask[dir + 8] = potential_knight_source(
+                job_board, selected_destination_tile, selected_context_knight[dir]
+            );
+        end
+    end
+
+    // These combinational events keep optional counters and simulation
+    // profiling exact when a destination is consumed by lookahead.
+    always_comb begin
+        automatic logic final_source_cycle = state == GEN_EXPAND_SOURCE
+            && candidate_slot_ready && source_mask != 16'd0
+            && (source_mask & ~(16'b1 << source_select_index)) == 16'd0;
+        destination_examined_event =
+            (state == GEN_SELECT_DEST && destination_mask != 64'd0)
+            || (final_source_cycle && destination_mask != 64'd0);
+        destination_with_source_event =
+            destination_examined_event && selected_source_mask != 16'd0;
+    end
+
     // Castling uses the same pending writeback stage as ordinary quiet moves.
     always_comb begin
         castle_candidate_move.from_pos =
@@ -840,6 +898,8 @@ module move_generator_pipeline #(
     // the slot until all four encodings have been written.
     assign candidate_slot_ready = !candidate_valid
         || !(candidate_is_promotion && candidate_promo_counter != 2'd0);
+    assign candidate_finishes_write = candidate_valid
+        && !(candidate_is_promotion && candidate_promo_counter != 2'd0);
     assign cmd_ready = path_ready
         && (cmd == GENERATION_COMMAND
             || (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
@@ -1108,6 +1168,8 @@ module move_generator_pipeline #(
             end else begin
                 if (state != GEN_IDLE && ENABLE_STATS)
                     stat_generation_cycles <= stat_generation_cycles + 40'd1;
+                if (destination_examined_event && ENABLE_STATS)
+                    stat_destination_count <= stat_destination_count + 40'd1;
 
                 // Candidate writeback runs independently of destination/source
                 // walking, permitting one ordinary candidate to complete while
@@ -1179,30 +1241,33 @@ module move_generator_pipeline #(
 
                     GEN_SELECT_DEST: begin
                         if (destination_mask != 64'd0) begin
-                            automatic Position destination = first_destination(destination_mask);
-                            automatic logic [15:0] next_source_mask = 16'd0;
-                            destination_mask[destination] <= 1'b0;
+                            destination_mask[selected_destination] <= 1'b0;
                             for (int dir = 0; dir < 8; dir++) begin
-                                automatic RayRecord ray =
-                                    nearest_ray(job_board, destination, Direction'(dir));
-                                automatic Tile knight =
-                                    isKnightShiftOnBoard(destination, KnightDirection'(dir))
-                                    ? job_board.tiles[shiftKnightPos(destination, KnightDirection'(dir))]
-                                    : EMPTY_TILE;
-                                next_source_mask[dir] = potential_ray_source(
-                                    job_board, destination,
-                                    job_board.tiles[destination], Direction'(dir), ray);
-                                next_source_mask[dir + 8] = potential_knight_source(
-                                    job_board, job_board.tiles[destination], knight);
-                                context_ray[dir] <= ray;
-                                context_knight[dir] <= knight;
+                                context_ray[dir] <= selected_context_ray[dir];
+                                context_knight[dir] <= selected_context_knight[dir];
                             end
-                            if (ENABLE_STATS) stat_destination_count <= stat_destination_count + 40'd1;
-                            if (next_source_mask != 16'd0) begin
-                                context_destination <= destination;
-                                context_destination_tile <= job_board.tiles[destination];
-                                source_mask <= next_source_mask;
+                            if (selected_source_mask != 16'd0) begin
+                                context_destination <= selected_destination;
+                                context_destination_tile <= selected_destination_tile;
+                                source_mask <= selected_source_mask;
                                 state <= GEN_EXPAND_SOURCE;
+                            end
+                        end else if (candidate_finishes_write) begin
+                            if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
+                                    && (kingside_castle_permitted(job_board)
+                                        || queenside_castle_permitted(job_board))) begin
+                                castle_index <= !kingside_castle_permitted(job_board);
+                                state <= GEN_CASTLE;
+                            end else begin
+                                cmd_resp_valid <= 1'b1;
+                                cmd_resp_thread <= job_thread;
+                                cmd_resp_ply <= job_ply;
+                                cmd_resp_direct_valid <= 1'b0;
+                                cmd_resp_direct_move <= NULL_MOVE;
+                                cmd_resp_bucket_tops <= tops_after_candidate_write(
+                                    job_tops, bucket_wr_select
+                                );
+                                state <= GEN_IDLE;
                             end
                         end else if (!candidate_valid) begin
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
@@ -1259,8 +1324,23 @@ module move_generator_pipeline #(
                                         stat_history_lookup_count
                                             <= stat_history_lookup_count + 40'd1;
                                 end
-                                state <= remaining_mask == 16'd0
-                                    ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
+                            end
+                            if (remaining_mask == 16'd0 && destination_mask != 64'd0) begin
+                                // Consume the next destination while the final
+                                // current source enters writeback.
+                                destination_mask[selected_destination] <= 1'b0;
+                                if (selected_source_mask != 16'd0) begin
+                                    context_destination <= selected_destination;
+                                    context_destination_tile <= selected_destination_tile;
+                                    source_mask <= selected_source_mask;
+                                    for (int dir = 0; dir < 8; dir++) begin
+                                        context_ray[dir] <= selected_context_ray[dir];
+                                        context_knight[dir] <= selected_context_knight[dir];
+                                    end
+                                    state <= GEN_EXPAND_SOURCE;
+                                end else begin
+                                    state <= GEN_SELECT_DEST;
+                                end
                             end else begin
                                 state <= remaining_mask == 16'd0
                                     ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
@@ -1311,9 +1391,17 @@ module move_generator_pipeline #(
                                 && queenside_castle_permitted(job_board)) begin
                             castle_index <= 1'b1;
                         end else if (candidate_valid) begin
-                            // The previous castle writes on this edge, so its
-                            // incremented top must be observed before response.
-                            state <= GEN_FINISH;
+                            // A previously accepted castle writes on this edge;
+                            // forward its incremented top with the response.
+                            cmd_resp_valid <= 1'b1;
+                            cmd_resp_thread <= job_thread;
+                            cmd_resp_ply <= job_ply;
+                            cmd_resp_direct_valid <= 1'b0;
+                            cmd_resp_direct_move <= NULL_MOVE;
+                            cmd_resp_bucket_tops <= tops_after_candidate_write(
+                                job_tops, bucket_wr_select
+                            );
+                            state <= GEN_IDLE;
                         end else begin
                             cmd_resp_valid <= 1'b1;
                             cmd_resp_thread <= job_thread;
@@ -1326,7 +1414,17 @@ module move_generator_pipeline #(
                     end
 
                     GEN_FINISH: begin
-                        if (!candidate_valid) begin
+                        if (candidate_finishes_write) begin
+                            cmd_resp_valid <= 1'b1;
+                            cmd_resp_thread <= job_thread;
+                            cmd_resp_ply <= job_ply;
+                            cmd_resp_direct_valid <= 1'b0;
+                            cmd_resp_direct_move <= NULL_MOVE;
+                            cmd_resp_bucket_tops <= tops_after_candidate_write(
+                                job_tops, bucket_wr_select
+                            );
+                            state <= GEN_IDLE;
+                        end else if (!candidate_valid) begin
                             cmd_resp_valid <= 1'b1;
                             cmd_resp_thread <= job_thread;
                             cmd_resp_ply <= job_ply;

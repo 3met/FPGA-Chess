@@ -203,7 +203,6 @@ module tb_engine_profile #(
     logic move_command_active[0:SEARCH_THREAD_COUNT-1];
     logic move_pop_active;
     logic [1:0] move_command_operation[0:SEARCH_THREAD_COUNT-1];
-    logic [3:0] previous_generator_state[0:1];
     longint unsigned noisy_destinations_examined, quiet_destinations_examined;
     longint unsigned noisy_destinations_with_sources, quiet_destinations_with_sources;
     longint unsigned noisy_candidates_emitted, quiet_candidates_emitted;
@@ -532,20 +531,14 @@ module tb_engine_profile #(
             // Destination/source events are classified by the active
             // generation command. Candidate emission is counted below at the
             // common ordering-bucket write interface.
-            if (dut.controller.move_generator.noisy_pipeline.state == 2
-                    && dut.controller.move_generator.noisy_pipeline.destination_mask != 0)
+            if (dut.controller.move_generator.noisy_pipeline.destination_examined_event)
                 noisy_destinations_examined = noisy_destinations_examined + 1;
-            if (dut.controller.move_generator.quiet_pipeline.state == 2
-                    && dut.controller.move_generator.quiet_pipeline.destination_mask != 0)
+            if (dut.controller.move_generator.quiet_pipeline.destination_examined_event)
                 quiet_destinations_examined = quiet_destinations_examined + 1;
-            if (dut.controller.move_generator.noisy_pipeline.state == 3
-                    && previous_generator_state[0] == 2)
+            if (dut.controller.move_generator.noisy_pipeline.destination_with_source_event)
                 noisy_destinations_with_sources = noisy_destinations_with_sources + 1;
-            if (dut.controller.move_generator.quiet_pipeline.state == 3
-                    && previous_generator_state[1] == 2)
+            if (dut.controller.move_generator.quiet_pipeline.destination_with_source_event)
                 quiet_destinations_with_sources = quiet_destinations_with_sources + 1;
-            previous_generator_state[0] = dut.controller.move_generator.noisy_pipeline.state;
-            previous_generator_state[1] = dut.controller.move_generator.quiet_pipeline.state;
             if (dut.controller.move_pop_resp_valid) begin
                 if (dut.controller.move_pop_resp_found) begin
                     bucket_pops[int'(dut.controller.move_pop_resp_bucket)] <=
@@ -899,8 +892,6 @@ module tb_engine_profile #(
             thread_ready_transition[tid] = 0;
         end
         move_pop_start_cycle = 0;
-        previous_generator_state[0] = 0;
-        previous_generator_state[1] = 0;
         noisy_destinations_examined = 0;
         quiet_destinations_examined = 0;
         noisy_destinations_with_sources = 0;
