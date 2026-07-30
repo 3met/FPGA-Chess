@@ -2,7 +2,7 @@
 
 ## Search Model
 
-Each hardware search thread runs iterative-deepening alpha/beta search. Threads cooperate through Lazy SMP and share only the transposition table.
+Each hardware search thread runs its own iterative-deepening alpha/beta loop. A thread that completes an iteration immediately retries a failed aspiration pass or starts its next depth without waiting for any other thread. Threads cooperate through Lazy SMP and share only the transposition table.
 
 Thread count, allocated stack depth, and optional instrumentation are parameterized at build time.
 
@@ -19,6 +19,8 @@ An eligible move has parent remaining depth `d >= 3`, is the third or later lega
 ## Thread State
 
 Each thread owns its search stack, alpha/beta values, depth counters, node counters, current board state, move history stack records, scheduler phase, pipeline wait state, and per-pipeline in-flight flags.
+
+Each thread also owns its current iterative-deepening target, root aspiration window, and completed-iteration result. The primary thread alone publishes the engine result and controls completion of a depth-limited search; helper completion never delays primary progress.
 
 Search node counts advance exactly when a speculative real-move push has passed the king-safety check and the controller enters its legal child position. The root, synthetic null children, and rejected pseudo-legal candidates are not counted; legal children count even when repetition, terminal scoring, or a TT cutoff avoids static evaluation.
 

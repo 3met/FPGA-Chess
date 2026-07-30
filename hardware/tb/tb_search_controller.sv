@@ -1197,12 +1197,12 @@ module tb_search_controller;
                         "LMR recovery restores full child depth without another reduction");
                     lmr_recovery_check_pending[idx] = 1'b0;
                 end
-                if (dut.search_aspiration_active && !aspiration_window_seen) begin
+                if (dut.search_thread_aspiration_active[0] && !aspiration_window_seen) begin
                     aspiration_window_seen = 1'b1;
-                    check(dut.search_root_beta - dut.search_root_alpha == EvalScore'(128),
+                    check(dut.search_thread_root_beta[0] - dut.search_thread_root_alpha[0] == EvalScore'(128),
                         "aspiration window is one pawn wide");
-                    check(dut.search_root_alpha == dut.search_completed_score - EvalScore'(64)
-                            && dut.search_root_beta == dut.search_completed_score + EvalScore'(64),
+                    check(dut.search_thread_root_alpha[0] == dut.search_completed_score - EvalScore'(64)
+                            && dut.search_thread_root_beta[0] == dut.search_completed_score + EvalScore'(64),
                         "aspiration window is centered on the previous score");
                 end
                 if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
@@ -1359,7 +1359,8 @@ module tb_search_controller;
                     "TT lookup uses the node actual remaining depth");
                 if (dut.search_stack_top[int'(dut.tt_lookup_req.thread_id)].count_move_on_return) begin
                     if (dut.search_stack_top[int'(dut.tt_lookup_req.thread_id)].remaining_depth
-                            < dut.search_target_depth - 5'(dut.search_ply[int'(dut.tt_lookup_req.thread_id)])) begin
+                            < dut.search_thread_target_depth[int'(dut.tt_lookup_req.thread_id)]
+                                - 5'(dut.search_ply[int'(dut.tt_lookup_req.thread_id)])) begin
                         lmr_reduced_tt_depth_seen = 1'b1;
                     end
                 end

@@ -32,15 +32,15 @@ The request uses a ready/valid handshake. `req_ready` means the complete typed r
 
 The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`; pipeline modules do not retain canonical positions.
 
-Each search thread owns a current board, Zobrist key, incremental evaluation state, alpha/beta state, node count, lifecycle phase, and a block-RAM search stack. Stack records hold the information needed to resume a parent after reversing a child, rather than storing a complete board at every ply.
+Each search thread owns a current board, Zobrist key, incremental evaluation state, alpha/beta state, iterative-deepening target and aspiration window, node count, lifecycle phase, and a block-RAM search stack. Stack records hold the information needed to resume a parent after reversing a child, rather than storing a complete board at every ply.
 
 Each node records its actual remaining depth. That value controls main-search versus quiescence behavior, late-move reductions, and TT depth; it is not inferred from ply.
 
 Each packed node record also retains the first three ordinary quiet moves that were searched completely without cutting off. The count is cleared when a node is entered, while the stale move-address fields need not be cleared. A quiet is appended only after all PVS or LMR re-searches for that logical move are complete; qsearch, illegal moves, captures, promotions, and unsearched moves are excluded.
 
-The primary thread owns the reported principal variation, score, and completed depth. Helper threads cooperate through the shared TT and never overwrite the primary result directly.
+The primary thread owns the reported principal variation, score, and completed depth. Helper threads cooperate through the shared TT and never overwrite the primary result directly. Every thread immediately advances its own iterative-deepening loop after a successful pass or retries the same depth after an aspiration failure; there is no all-thread iteration barrier.
 
-Primary-thread root completions from the shared subsystems are mutually exclusive in reachable controller states. Their result candidates are reduced through parallel arbitration into iteration result registers, then finalized on the following cycle so root score computation and response selection do not share a timing path.
+Primary-thread root completions from the shared subsystems are mutually exclusive in reachable controller states. A completion is registered in the primary context, then published or used to restart the thread on the following cycle so root score computation and response selection do not share a timing path.
 
 ## Shared-Pipeline Scheduling
 
@@ -83,7 +83,7 @@ Quiescence search uses captures and promotions and omits quiet generation and di
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. All search modes use an aspiration window around the previous completed iteration from depth two onward. A failed narrow pass is retried at the same depth with the full window; if its time or node budget has expired, the controller returns the previous completed result instead. The reported depth is the deepest fully completed primary-thread iteration. If a deeper iteration is interrupted, the controller preserves the completed result and may also retain a legal root move whose child result completed during the partial iteration.
+Depth, node, and time limits are checked at safe search boundaries. Every thread uses an aspiration window around its own previous completed iteration from depth two onward. A failed narrow pass is retried at the same depth with the full window; if the shared time or node budget expires, the controller returns the primary thread's previous completed result instead. The reported depth is the deepest fully completed primary-thread iteration. If a deeper primary iteration is interrupted, the controller preserves the completed result and may also retain a legal root move whose child result completed during the partial iteration.
 
 Kill stops issuing new search work, invalidates work that cannot safely complete, and produces a completion only after late responses can no longer alter the active operation.
 

@@ -51,7 +51,7 @@ THREAD_PHASE_LABELS = {
     "repetition_wait": "Repetition check in flight",
     "store_publish": "TT store request pending",
     "terminal_wait": "Terminal scoring",
-    "done": "Iteration complete",
+    "done": "Iteration handoff",
 }
 READY_BREAKDOWN_LABELS = {
     "dispatch": "Pipeline request accepted",

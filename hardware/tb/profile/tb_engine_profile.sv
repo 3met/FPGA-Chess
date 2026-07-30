@@ -311,7 +311,7 @@ module tb_engine_profile #(
             int iteration_depth;
             logic any_ready_move_blocked;
             logic any_ready_tt_blocked;
-            iteration_depth = int'(dut.controller.search_target_depth);
+            iteration_depth = int'(dut.controller.search_thread_target_depth[0]);
             // These counters are testbench-only observations. Blocking updates
             // avoid scheduling thousands of needless NBA events without changing
             // any DUT timing or sampled value.
