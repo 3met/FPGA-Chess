@@ -45,7 +45,6 @@ THREAD_PHASE_LABELS = {
     "ready": "Runnable",
     "tt_wait": "TT lookup in flight",
     "eval_wait": "Evaluation in flight",
-    "move_wait": "Move operation in flight",
     "board_wait": "Board update in flight",
     "reverse_wait": "Reverse update in flight",
     "repetition_wait": "Repetition check in flight",
@@ -57,7 +56,8 @@ READY_BREAKDOWN_LABELS = {
     "dispatch": "Pipeline request accepted",
     "arbitration": "Shared-pipeline arbitration",
     "tt_blocked": "TT lookup request blocked",
-    "move_blocked": "Move request blocked",
+    "noisy_move_blocked": "Noisy move request blocked",
+    "quiet_move_blocked": "Quiet move request blocked",
     "transition": "Node/iteration transition",
 }
 MOVE_ORDER_STATES = [
@@ -187,12 +187,21 @@ def build_profile_report(
         ready_breakdown = {
             name: metrics[f"threads.{tid}.ready.{name}"]
             for name in (
-                "dispatch", "arbitration", "tt_blocked", "move_blocked", "transition"
+                "dispatch", "arbitration", "tt_blocked", "noisy_move_blocked",
+                "quiet_move_blocked", "transition"
             )
         }
         if sum(ready_breakdown.values()) != phases["ready"]:
             raise BuildError(
                 f"Thread {tid} ready breakdown does not match ready cycles"
+            )
+        move_wait_breakdown = {
+            kind: metrics[f"threads.{tid}.move_wait.{kind}"]
+            for kind in ("noisy", "quiet")
+        }
+        if sum(move_wait_breakdown.values()) != phases["move_wait"]:
+            raise BuildError(
+                f"Thread {tid} move-wait breakdown does not match move-wait cycles"
             )
         threads.append(
             {
@@ -201,6 +210,7 @@ def build_profile_report(
                 "phase_cycles": phases,
                 "phase_percent": {name: percent(value, search_cycles) for name, value in phases.items()},
                 "ready_breakdown": ready_breakdown,
+                "move_wait_breakdown": move_wait_breakdown,
                 "move_order_cycles": _named_series(
                     metrics, f"threads.{tid}.move_order", MOVE_ORDER_STATES
                 ),
@@ -558,11 +568,13 @@ def format_profile_report(report: dict) -> str:
         (THREAD_PHASE_LABELS["idle"], "phase", "idle"),
         (READY_BREAKDOWN_LABELS["dispatch"], "ready", "dispatch"),
         (READY_BREAKDOWN_LABELS["tt_blocked"], "ready", "tt_blocked"),
-        (READY_BREAKDOWN_LABELS["move_blocked"], "ready", "move_blocked"),
+        (READY_BREAKDOWN_LABELS["noisy_move_blocked"], "ready", "noisy_move_blocked"),
+        (READY_BREAKDOWN_LABELS["quiet_move_blocked"], "ready", "quiet_move_blocked"),
         (READY_BREAKDOWN_LABELS["arbitration"], "ready", "arbitration"),
         (THREAD_PHASE_LABELS["tt_wait"], "phase", "tt_wait"),
         (THREAD_PHASE_LABELS["eval_wait"], "phase", "eval_wait"),
-        (THREAD_PHASE_LABELS["move_wait"], "phase", "move_wait"),
+        ("Noisy move operation in flight", "move_wait", "noisy"),
+        ("Quiet move operation in flight", "move_wait", "quiet"),
         (THREAD_PHASE_LABELS["board_wait"], "phase", "board_wait"),
         (THREAD_PHASE_LABELS["repetition_wait"], "phase", "repetition_wait"),
         (THREAD_PHASE_LABELS["reverse_wait"], "phase", "reverse_wait"),
@@ -573,11 +585,11 @@ def format_profile_report(report: dict) -> str:
     ]
 
     def lifecycle_value(thread: dict, source: str, key: str) -> int:
-        return (
-            thread["phase_cycles"][key]
-            if source == "phase"
-            else thread["ready_breakdown"][key]
-        )
+        if source == "phase":
+            return thread["phase_cycles"][key]
+        if source == "move_wait":
+            return thread["move_wait_breakdown"][key]
+        return thread["ready_breakdown"][key]
 
     lifecycle_metrics = [
         metric

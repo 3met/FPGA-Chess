@@ -26,6 +26,7 @@ module tb_engine_profile #(
     // enum-item references, which trigger a Verilator width-analysis bug.
     localparam int CONTROLLER_STATE_SEARCH_RUN = 18;
     localparam int THREAD_PHASE_READY = 1;
+    localparam int THREAD_PHASE_MOVE_WAIT = 4;
     localparam int MOVE_ORDER_STATE_COUNT = 7;
     localparam int ORDINAL_BUCKET_COUNT = 8;
     localparam int GENERATOR_STATE_COUNT = 8;
@@ -176,8 +177,11 @@ module tb_engine_profile #(
     longint unsigned thread_ready_dispatch[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_ready_arbitration[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_ready_tt_blocked[0:SEARCH_THREAD_COUNT-1];
-    longint unsigned thread_ready_move_blocked[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_ready_noisy_move_blocked[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_ready_quiet_move_blocked[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_ready_transition[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_noisy_move_wait[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_quiet_move_wait[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_move_order_cycles[0:SEARCH_THREAD_COUNT-1][0:MOVE_ORDER_STATE_COUNT-1];
     longint unsigned thread_ply_cycles[0:SEARCH_THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
     longint unsigned active_thread_histogram[0:SEARCH_THREAD_COUNT];
@@ -343,6 +347,17 @@ module tb_engine_profile #(
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 thread_phase_cycles[tid][int'(dut.controller.search_thread_phase[tid])] =
                     thread_phase_cycles[tid][int'(dut.controller.search_thread_phase[tid])] + 1;
+                // Attribute the shared move-wait phase to the ordering class
+                // that issued the generation or bucket-pop operation.
+                if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_MOVE_WAIT) begin
+                    automatic MoveOrderState wait_order_state =
+                        dut.controller.search_stack_top[tid].move_order_state;
+                    if (wait_order_state == MOVE_ORDER_GENERATE_QUIET
+                            || wait_order_state == MOVE_ORDER_QUIET)
+                        thread_quiet_move_wait[tid] = thread_quiet_move_wait[tid] + 1;
+                    else
+                        thread_noisy_move_wait[tid] = thread_noisy_move_wait[tid] + 1;
+                end
                 // Split the broad READY phase into exclusive causes without
                 // adding profiler state to the synthesizable controller.
                 if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_READY) begin
@@ -380,12 +395,14 @@ module tb_engine_profile #(
                         thread_ready_arbitration[tid] = thread_ready_arbitration[tid] + 1;
                     end else if (order_state == MOVE_ORDER_GENERATE_QUIET
                             && !dut.controller.move_quiet_cmd_ready) begin
-                        thread_ready_move_blocked[tid] = thread_ready_move_blocked[tid] + 1;
+                        thread_ready_quiet_move_blocked[tid] =
+                            thread_ready_quiet_move_blocked[tid] + 1;
                         any_ready_move_blocked = 1'b1;
                     end else if ((order_state == MOVE_ORDER_DIRECT
                                 || order_state == MOVE_ORDER_GENERATE_NOISY)
                             && !dut.controller.move_cmd_ready) begin
-                        thread_ready_move_blocked[tid] = thread_ready_move_blocked[tid] + 1;
+                        thread_ready_noisy_move_blocked[tid] =
+                            thread_ready_noisy_move_blocked[tid] + 1;
                         any_ready_move_blocked = 1'b1;
                     end else if (dut.controller.search_move_mask[tid]
                             || dut.controller.search_quiet_mask[tid]
@@ -738,8 +755,13 @@ module tb_engine_profile #(
             emit($sformatf("threads.%0d.ready.dispatch", tid), thread_ready_dispatch[tid]);
             emit($sformatf("threads.%0d.ready.arbitration", tid), thread_ready_arbitration[tid]);
             emit($sformatf("threads.%0d.ready.tt_blocked", tid), thread_ready_tt_blocked[tid]);
-            emit($sformatf("threads.%0d.ready.move_blocked", tid), thread_ready_move_blocked[tid]);
+            emit($sformatf("threads.%0d.ready.noisy_move_blocked", tid),
+                thread_ready_noisy_move_blocked[tid]);
+            emit($sformatf("threads.%0d.ready.quiet_move_blocked", tid),
+                thread_ready_quiet_move_blocked[tid]);
             emit($sformatf("threads.%0d.ready.transition", tid), thread_ready_transition[tid]);
+            emit($sformatf("threads.%0d.move_wait.noisy", tid), thread_noisy_move_wait[tid]);
+            emit($sformatf("threads.%0d.move_wait.quiet", tid), thread_quiet_move_wait[tid]);
             for (int order = 0; order < MOVE_ORDER_STATE_COUNT; order++)
                 emit($sformatf("threads.%0d.move_order.%0d", tid, order), thread_move_order_cycles[tid][order]);
             for (int ply = 0; ply < MAX_PLY_COUNT; ply++)
@@ -888,8 +910,11 @@ module tb_engine_profile #(
             thread_ready_dispatch[tid] = 0;
             thread_ready_arbitration[tid] = 0;
             thread_ready_tt_blocked[tid] = 0;
-            thread_ready_move_blocked[tid] = 0;
+            thread_ready_noisy_move_blocked[tid] = 0;
+            thread_ready_quiet_move_blocked[tid] = 0;
             thread_ready_transition[tid] = 0;
+            thread_noisy_move_wait[tid] = 0;
+            thread_quiet_move_wait[tid] = 0;
         end
         move_pop_start_cycle = 0;
         noisy_destinations_examined = 0;

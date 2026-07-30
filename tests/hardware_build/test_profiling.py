@@ -93,8 +93,11 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
     metrics["threads.0.ready.dispatch"] = search_cycles
     metrics["threads.0.ready.arbitration"] = 0
     metrics["threads.0.ready.tt_blocked"] = 0
-    metrics["threads.0.ready.move_blocked"] = 0
+    metrics["threads.0.ready.noisy_move_blocked"] = 0
+    metrics["threads.0.ready.quiet_move_blocked"] = 0
     metrics["threads.0.ready.transition"] = 0
+    metrics["threads.0.move_wait.noisy"] = 0
+    metrics["threads.0.move_wait.quiet"] = 0
     for index in range(len(MOVE_BUCKETS)):
         metrics[f"move_order.bucket_writes.{index}"] = 1 if index == 2 else 0
         metrics[f"move_order.bucket_pops.{index}"] = 1 if index == 2 else 0
@@ -191,6 +194,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Metric", text)
         self.assertIn("T0", text)
         self.assertIn("Pipeline request accepted", text)
+        self.assertNotIn("Move request blocked", text)
         self.assertIn("10 (100.0%)", text)
         self.assertNotIn("runnable breakdown", text)
         self.assertIn("Beta cutoffs by searched move rank", text)
@@ -264,6 +268,31 @@ class ReportTests(unittest.TestCase):
                 },
                 0,
             )
+
+    def test_move_wait_breakdown_is_reported_by_move_class(self):
+        metrics = sample_metrics()
+        metrics["threads.0.phases.1"] = 4
+        metrics["threads.0.phases.4"] = 6
+        metrics["threads.0.ready.dispatch"] = 4
+        metrics["threads.0.move_wait.noisy"] = 2
+        metrics["threads.0.move_wait.quiet"] = 4
+        report = build_profile_report(
+            {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+            metrics,
+            {
+                "best_move.from": 0, "best_move.to": 0, "best_move.promotion": 0,
+                "score": 0, "nodes": 5, "completed_depth": 0,
+                "deepest_search_ply": 0, "end_reason": 0, "error": 0,
+            },
+            1,
+        )
+        text = format_profile_report(report)
+        self.assertIn("Noisy move operation in flight", text)
+        self.assertIn("Quiet move operation in flight", text)
+        self.assertEqual(
+            report["threads"][0]["move_wait_breakdown"],
+            {"noisy": 2, "quiet": 4},
+        )
 
     def test_move_generator_operation_count_mismatch_fails(self):
         metrics = sample_metrics()
