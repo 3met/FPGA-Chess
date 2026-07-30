@@ -57,7 +57,7 @@ Captures use one shared bounded visible SEE calculation. The classifier compares
 | 1 | Negative-SEE captures of rooks or queens. |
 | 0 | Other negative-SEE captures, including losing en passant. |
 
-Only the 14-bit `Move` is stored. Scores, links, classes, and consumed masks are not retained. Ordering within a bucket is deterministic LIFO.
+Only the 14-bit `Move` is stored. Scores, links, classes, and consumed masks are not retained. Ordering within a bucket is deterministic LIFO. Both class pipelines select destinations in a fixed outside-to-inside order based on Manhattan distance from the four center squares, so otherwise equally bucketed moves toward the center are generated last and returned first. This destination preference never overrides bucket priority.
 
 ## Bucket RAMs and Stack-Arena Semantics
 

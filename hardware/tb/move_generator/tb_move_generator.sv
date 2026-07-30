@@ -426,6 +426,31 @@ module tb_move_generator;
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
         check(count == 0, "start position has no noisy moves");
 
+        // Static destination priority generates edge moves first, making the
+        // central move the first same-bucket result returned by LIFO storage.
+        empty_board(board);
+        board.tiles[10] = WHITE_KNIGHT;
+        board.tiles[0] = BLACK_PAWN;
+        board.tiles[27] = BLACK_PAWN;
+        board.tiles[63] = BLACK_KING;
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        pop_one(GOOD_NOISY_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
+        check(found && same_move(popped, make_move(Position'(10), Position'(27))),
+            "noisy LIFO returns central destination before edge destination");
+
+        empty_board(board);
+        board.tiles[10] = WHITE_KNIGHT;
+        board.tiles[56] = WHITE_KING;
+        board.tiles[63] = BLACK_KING;
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        pop_one(QUIET_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
+        check(found && same_move(popped, make_move(Position'(10), Position'(27))),
+            "quiet LIFO returns central destination before edge destination");
+
         // An enemy king is not capturable, even when a friendly slider attacks it.
         empty_board(board);
         board.tiles[0] = WHITE_KING;

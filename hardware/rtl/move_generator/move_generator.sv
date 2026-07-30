@@ -244,9 +244,31 @@ module move_generator_pipeline #(
     logic castle_candidate_pseudo_legal;
     logic castle_candidate_suppressed;
 
+    // Generate distant destinations first so the per-bucket LIFO stores return
+    // otherwise equally ranked moves toward the center before edge moves.
+    localparam Position DESTINATION_ORDER[0:63] = '{
+        Position'(0),  Position'(7),  Position'(56), Position'(63),
+        Position'(1),  Position'(6),  Position'(8),  Position'(15),
+        Position'(48), Position'(55), Position'(57), Position'(62),
+        Position'(2),  Position'(5),  Position'(9),  Position'(14),
+        Position'(16), Position'(23), Position'(40), Position'(47),
+        Position'(49), Position'(54), Position'(58), Position'(61),
+        Position'(3),  Position'(4),  Position'(10), Position'(13),
+        Position'(17), Position'(22), Position'(24), Position'(31),
+        Position'(32), Position'(39), Position'(41), Position'(46),
+        Position'(50), Position'(53), Position'(59), Position'(60),
+        Position'(11), Position'(12), Position'(18), Position'(21),
+        Position'(25), Position'(30), Position'(33), Position'(38),
+        Position'(42), Position'(45), Position'(51), Position'(52),
+        Position'(19), Position'(20), Position'(26), Position'(29),
+        Position'(34), Position'(37), Position'(43), Position'(44),
+        Position'(27), Position'(28), Position'(35), Position'(36)
+    };
+
     function automatic Position first_destination(input logic [63:0] mask);
-        for (int pos = 0; pos < 64; pos++)
-            if (mask[pos]) return Position'(pos);
+        for (int order_index = 0; order_index < 64; order_index++)
+            if (mask[DESTINATION_ORDER[order_index]])
+                return DESTINATION_ORDER[order_index];
         return Position'(0);
     endfunction
 
