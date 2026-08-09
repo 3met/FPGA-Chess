@@ -48,16 +48,16 @@ The controller schedules threads across:
 
 - [board update](board-update-pipeline.md)
 - [move generation](move-generator.md)
-- [static evaluation](static-evaluator.md)
+- [NNUE evaluation](nnue-evaluator.md)
 - [transposition-table lookup and store](transposition-table.md)
 - [repetition checking](repetition-checker.md)
 - [timer](timer.md)
 
 A thread has at most one in-flight request in each shared subsystem. Every request carries enough thread and operation metadata to route its completion independently of whichever thread is being dispatched when the response arrives.
 
-Ready threads are selected independently for different pipelines, allowing unrelated thread work to overlap. Lookup responses and returned child scores take priority because they unblock existing search work. TT stores are best-effort and never block a thread after the TT frontend accepts the publication.
+Ready threads are selected independently for different pipelines, allowing unrelated thread work to overlap. Lookup responses and returned child scores take priority because they unblock existing search work. TT stores are best-effort and never block a thread after the TT frontend accepts the publication. Before the run scheduler starts, NNUE initializes every thread's root independently through the existing update port; this avoids a cross-thread accumulator-memory port and guarantees that ordinary root children use deltas. Every NNUE child completion, including a rebuild, is tagged by thread and ply, allowing later child requests to remain in flight without globally draining the update pipeline. Child plans use rotating priority, start immediately when created against an idle planner, and hand off directly after their final request. Null children retain their live accumulator without creating an update plan. NNUE evaluation ownership is retained in a two-entry thread-and-ply tag FIFO, allowing the controller to prepare or submit a later snapshot before the preceding result returns.
 
-Reset, New Game, Kill, and search initialization invalidate outstanding tags, pending returns, and in-flight state so a late response cannot mutate a later operation.
+Reset, New Game, Kill, and search initialization invalidate outstanding tags, pending returns, and in-flight state so a late response cannot mutate a later operation. New Game also invalidates all NNUE state metadata and clears in-flight NNUE work; Kill clears the NNUE datapath while retaining only RAM contents that are already guarded by validity metadata.
 
 ## Node Lifecycle
 
@@ -73,7 +73,7 @@ At a search node, the controller:
 
 Move generation produces pseudo-legal candidates. The controller speculatively applies each candidate through board update and rejects it if the moving side remains in check. A rejected candidate does not alter thread state or increment the search node count.
 
-A legal child is written to repetition line history before TT lookup, evaluation, or deeper search. On return, the controller reverses the move and folds the child score into the saved parent. A real legal child increments the search node count even if repetition or a TT cutoff resolves it without deeper evaluation.
+A legal child is written to repetition line history and launches repetition lookup in parallel with NNUE accumulator construction before TT lookup, evaluation, or deeper search. Separate completion state joins the two operations, so neither can make a partially prepared child runnable. On return, the controller reverses the move and folds the child score into the saved parent. A real legal child increments the search node count even if repetition or a TT cutoff resolves it without deeper evaluation.
 
 A null probe is a synthetic child issued directly to board update after the TT probe and before move generation. It uses a reduced scout window, cannot follow another null child, and either returns a beta cutoff or restores the parent and resumes normal ordering. It bypasses legality, repetition, legal-node counting, best-move folding, and move-history heuristics.
 

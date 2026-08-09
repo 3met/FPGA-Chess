@@ -5,7 +5,7 @@ These metrics are useful for validating correctness, comparing search quality, a
 | Metric                         | Purpose                                                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | Cycles per engine state        | Find FSM stalls and unexpected waits.                                                                              |
-| Pipeline utilization           | Measure accepted requests per cycle for board update, move generation, static evaluation, TT lookup, and TT store. |
+| Pipeline utilization           | Measure accepted requests per cycle for board update, move generation, NNUE evaluation, TT lookup, and TT store. |
 | Cycles per node                | Compare search throughput across builds.                                                                           |
 | Nodes per second               | Compare host-visible engine speed.                                                                                 |
 | Effective branching factor     | Measure move ordering and pruning quality.                                                                         |

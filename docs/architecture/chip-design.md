@@ -19,7 +19,7 @@ The design has a parameterized number of search threads and a parameterized sear
 | Search controller          | Owns search threads, search stacks, alpha/beta state, pipeline dispatch, and result routing.                                                |
 | Board update pipeline      | Applies push move, commit move, reverse move, and board setup operations.                                                                   |
 | Move generation pipeline   | Produces one ordered candidate move per dispatch and reports whether that candidate is legal.                                               |
-| Static evaluation pipeline | Computes White-relative full-position evaluation terms from a board-state input.                                                            |
+| NNUE evaluator | Maintains direct 2-side by 6-piece by 64-square accumulators and computes a White-relative learned correction.                                     |
 | TT lookup pipeline         | Performs transposition-table lookup requests against external RAM and any internal cache.                                                   |
 | TT store pipeline          | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by lookups.                     |
 | External RAM interface     | Provides storage for the transposition table through a vendor-neutral wrapper around the selected SDRAM, DDR, or board memory interface.    |
@@ -41,7 +41,7 @@ flowchart LR
         Search["Search controller"]
         BoardUpdate["Board update pipeline"]
         MoveGen["Move generation pipeline"]
-        StaticEval["Static evaluation pipeline"]
+        NnueEval["NNUE evaluator"]
         TTLookup["TT lookup pipeline"]
         TTStore["TT store pipeline"]
     end
@@ -54,7 +54,7 @@ flowchart LR
 
     Search -->|"Board transforms"| BoardUpdate
     Search -->|"Candidate requests"| MoveGen
-    Search -->|"Leaf evaluation requests"| StaticEval
+    Search -->|"Leaf evaluation requests"| NnueEval
     Search -->|"Probe requests"| TTLookup
     Search -->|"Publish requests"| TTStore
 
@@ -73,9 +73,9 @@ flowchart LR
 
 ## Search Pipelines
 
-The five major search pipelines are board update, static evaluation, ordered move generation, TT lookup, and TT store.
+The five major search subsystems are board update, NNUE evaluation, ordered move generation, TT lookup, and TT store.
 
-Board update, static evaluation, and move generation are high-area pipelines kept busy with work from many search threads. Move generation is split into independent noisy/direct and quiet class pipelines. Each search thread has at most one in-flight request in each major component. This avoids duplicate work for the same thread position and lets pipeline results be routed by `thread_id` without a wider request ID.
+Board update and move generation are high-area pipelines kept busy with work from many search threads. Move generation is split into independent noisy/direct and quiet class pipelines. NNUE owns one physical feature-update path and serializes evaluation construction while other search components continue servicing threads. Each search thread has at most one in-flight request in each major component.
 
 Pipeline parallelism means different threads can occupy different stages of a pipeline at the same time, and different threads can concurrently use the noisy and quiet move-generation pipelines. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
 
@@ -87,9 +87,9 @@ The FPGA maintains active game state between commands. The host can send setup, 
 
 Search owns per-thread state. Each thread keeps an active search stack and move records for reverse traversal rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but does not own the engine position.
 
-Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. The remainder of the static evaluation is fully computed by the static evaluation pipeline on dispatch.
+Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. NNUE root state is built once; every child reads its parent accumulator and applies direct feature deltas, including ordinary king moves and castling's rook move.
 
-Raw static evaluation and incremental PST/material state are White-relative. Search normalizes scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
+Raw evaluation and incremental PST/material state are White-relative. Search normalizes scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
 
 ## Transposition Table
 

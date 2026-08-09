@@ -5,7 +5,7 @@ import chess_helper_funcs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 import move_generator_defs::*;
-import static_evaluator_defs::*;
+import nnue_defs::*;
 import tt_defs::*;
 
 module search_controller #(
@@ -51,12 +51,12 @@ module search_controller #(
     localparam int BOARD_WAIT_BITS = $clog2(BOARD_UPDATE_PIPELINE_STAGE_CNT + 1);
     localparam int MOVE_WAIT_CYCLES = 2;
     localparam int MOVE_WAIT_BITS = $clog2(MOVE_WAIT_CYCLES + 1);
-    localparam int EVAL_WAIT_CYCLES = STATIC_EVAL_PIPELINE_STAGE_CNT;
+    // Four MAC cycles plus one registered clipping/result cycle.
+    localparam int EVAL_WAIT_CYCLES = NNUE_OUTPUT_MAC_CYCLES + 1;
     localparam int EVAL_WAIT_BITS = $clog2(EVAL_WAIT_CYCLES + 1);
     localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1)
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
     localparam int SEARCH_MOVE_TAG_PIPE_LEN = (MOVE_WAIT_CYCLES <= 1) ? 1 : MOVE_WAIT_CYCLES;
-    localparam int SEARCH_EVAL_TAG_PIPE_LEN = EVAL_WAIT_CYCLES + 1;
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
@@ -124,6 +124,16 @@ module search_controller #(
         logic count_move_on_return;
         logic null_attempted;
         logic entered_by_null;
+        // Reversible NNUE delta retained in the normal per-ply search stack;
+        // this replaces a full accumulator copy at every search depth.
+        Position nnue_from;
+        Position nnue_to;
+        Position nnue_capture_pos;
+        Tile nnue_mover;
+        Tile nnue_placed;
+        Tile nnue_capture;
+        logic nnue_capture_valid;
+        logic nnue_delta_valid;
         logic [11:0] failed_quiet0;
         logic [11:0] failed_quiet1;
         logic [11:0] failed_quiet2;
@@ -149,6 +159,7 @@ module search_controller #(
         ST_REPETITION_INIT,
         ST_REPETITION_ROOT_WAIT,
         ST_SEARCH_ITER_START,
+        ST_SEARCH_ROOT_INIT,
         ST_SEARCH_RUN,
         ST_RESPOND,
         ST_FLUSH_RESPOND
@@ -204,16 +215,16 @@ module search_controller #(
     logic search_tt_store_inflight[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_response_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_pending[0:SEARCH_THREAD_COUNT-1];
+    logic search_repetition_done[0:SEARCH_THREAD_COUNT-1];
+    logic search_repetition_draw[0:SEARCH_THREAD_COUNT-1];
     TTLookupResponse search_tt_response[0:SEARCH_THREAD_COUNT-1];
     ThreadID search_board_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     BoardOp search_board_op_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     PlyIndex search_board_ply_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     ThreadID search_move_tag_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
     logic search_move_in_check_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
-    ThreadID search_eval_tag_pipe[0:SEARCH_EVAL_TAG_PIPE_LEN-1];
     logic search_board_tag_valid_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     logic search_move_tag_valid_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
-    logic search_eval_tag_valid_pipe[0:SEARCH_EVAL_TAG_PIPE_LEN-1];
 `ifndef SYNTHESIS
     ThreadID search_board_result_thread_id;
     ThreadID search_move_result_thread_id;
@@ -382,10 +393,50 @@ module search_controller #(
     logic [11:0] history_update_pending_failed2[0:SEARCH_THREAD_COUNT-1];
     logic [1:0] history_update_pending_failed_count[0:SEARCH_THREAD_COUNT-1];
 
-    // Shared static-evaluator pipeline request and result signals.
-    Tile eval_board_tiles[64];
-    EvalScore eval_base;
-    EvalScore static_eval_out;
+    // NNUE evaluations are serialized while one board is replayed through the
+    // physical feature-update port; search threads remain independently schedulable.
+    logic nnue_build_busy, nnue_build_draining, nnue_build_first;
+    logic nnue_build_wait_updates;
+    Position nnue_build_pos;
+    ThreadID nnue_build_thread;
+    logic nnue_roots_initialized, nnue_root_init_draining, nnue_root_init_first;
+    ThreadID nnue_root_init_thread;
+    Position nnue_root_init_pos;
+    logic nnue_clear;
+    logic nnue_update_valid, nnue_update_ready, nnue_update_idle;
+    NnueUpdateRequest nnue_update_req;
+    logic nnue_update_done_valid;
+    ThreadID nnue_update_done_thread;
+    PlyIndex nnue_update_done_ply;
+    logic nnue_eval_valid, nnue_eval_ready, nnue_result_valid;
+    EvalScore nnue_result;
+    ThreadID nnue_eval_tag_thread[2];
+    PlyIndex nnue_eval_tag_ply[2];
+    logic nnue_eval_tag_read_ptr, nnue_eval_tag_write_ptr;
+    logic [1:0] nnue_eval_tag_count;
+    localparam logic NNUE_PLAN_DELTA = 1'b0;
+    localparam logic NNUE_PLAN_REBUILD = 1'b1;
+    logic nnue_state_valid[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_pending[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_inflight[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_kind[0:SEARCH_THREAD_COUNT-1];
+    PlyIndex nnue_plan_child_ply[0:SEARCH_THREAD_COUNT-1];
+    Position nnue_plan_from[0:SEARCH_THREAD_COUNT-1];
+    Position nnue_plan_to[0:SEARCH_THREAD_COUNT-1];
+    Position nnue_plan_capture_pos[0:SEARCH_THREAD_COUNT-1];
+    Tile nnue_plan_mover[0:SEARCH_THREAD_COUNT-1];
+    Tile nnue_plan_placed[0:SEARCH_THREAD_COUNT-1];
+    Tile nnue_plan_capture[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_capture_valid[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_real_move[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_reverse[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_plan_any;
+    logic nnue_delta_busy, nnue_delta_draining, nnue_delta_replay, nnue_delta_first;
+    ThreadID nnue_delta_thread;
+    ThreadID nnue_plan_rr_ptr, nnue_plan_select_thread;
+    logic nnue_plan_select_valid;
+    logic [2:0] nnue_delta_step;
+    Position nnue_delta_pos;
 
     // Shared transposition-table frontend request and result signals.
     logic tt_clear;
@@ -454,8 +505,7 @@ module search_controller #(
 
     assign resp = resp_reg;
     assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
-        || (state == ST_IDLE)
-        || (state == ST_FLUSH_RESPOND);
+        || state == ST_IDLE;
 
     // Keep each thread in a separate one-dimensional RAM instance so both
     // Quartus and Vivado recognize the packed node records as block memory.
@@ -745,12 +795,30 @@ module search_controller #(
         .time_ms(elapsed_ms)
     );
 
-    static_evaluator static_evaluator (
+    nnue_evaluator #(
+        .STATE_THREAD_COUNT(SEARCH_THREAD_COUNT)
+    ) nnue_evaluator (
         .clk(clk),
-        .board_tiles(eval_board_tiles),
-        .base_eval(eval_base),
-        .static_eval(static_eval_out)
+        .rst_n(rst_n),
+        .clear(nnue_clear),
+        .update_valid(nnue_update_valid),
+        .update_ready(nnue_update_ready),
+        .update_idle(nnue_update_idle),
+        .update_req(nnue_update_req),
+        .update_done_valid(nnue_update_done_valid),
+        .update_done_thread(nnue_update_done_thread),
+        .update_done_ply(nnue_update_done_ply),
+        .eval_valid(nnue_eval_valid),
+        .eval_ready(nnue_eval_ready),
+        .eval_thread_id(nnue_build_thread),
+        .result_valid(nnue_result_valid),
+        .result(nnue_result)
     );
+
+    // Accumulator contents need not be erased because validity is tracked per
+    // state, but queued and in-flight work must not cross lifecycle boundaries.
+    assign nnue_clear = state == ST_NEW_CLEAR_START || state == ST_FLUSH_RESPOND
+        || (state == ST_SEARCH_ITER_START && !nnue_roots_initialized);
 
     function automatic logic is_null_move(input Move move);
         return move.from_pos == Position'(0) && move.to_pos == Position'(0);
@@ -941,6 +1009,20 @@ module search_controller #(
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
     endfunction : pov_eval
 
+    function automatic EvalScore add_nnue_correction(
+        input EvalScore material_pst,
+        input EvalScore correction
+    );
+        automatic logic signed [16:0] total =
+            $signed({material_pst[15], material_pst})
+            + $signed({correction[15], correction});
+        if (total > 17'sd30999)
+            return EvalScore'(30999);
+        if (total < -17'sd30999)
+            return EvalScore'(-30999);
+        return EvalScore'(total);
+    endfunction : add_nnue_correction
+
     // Clamp aspiration bounds before narrowing them to the score representation.
     function automatic EvalScore aspiration_lower_bound(input EvalScore score);
         automatic logic signed [16:0] bound =
@@ -978,6 +1060,14 @@ module search_controller #(
         entry.count_move_on_return = 1'b0;
         entry.null_attempted = 1'b0;
         entry.entered_by_null = 1'b0;
+        entry.nnue_from = Position'(0);
+        entry.nnue_to = Position'(0);
+        entry.nnue_capture_pos = Position'(0);
+        entry.nnue_mover = EMPTY_TILE;
+        entry.nnue_placed = EMPTY_TILE;
+        entry.nnue_capture = EMPTY_TILE;
+        entry.nnue_capture_valid = 1'b0;
+        entry.nnue_delta_valid = 1'b0;
         entry.failed_quiet0 = 12'd0;
         entry.failed_quiet1 = 12'd0;
         entry.failed_quiet2 = 12'd0;
@@ -1406,6 +1496,25 @@ module search_controller #(
         search_return_mask = '0;
         search_tt_response_mask = '0;
         search_null_mask = '0;
+        nnue_plan_any = 1'b0;
+        for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++)
+            nnue_plan_any |= nnue_plan_pending[idx];
+        // Rotate child-plan priority and exclude the plan currently being
+        // emitted so its final request can hand directly to another thread.
+        nnue_plan_select_valid = 1'b0;
+        nnue_plan_select_thread = ThreadID'(0);
+        for (int offset = 0; offset < SEARCH_THREAD_COUNT; offset++) begin
+            automatic int candidate = int'(nnue_plan_rr_ptr) + offset;
+            if (candidate >= SEARCH_THREAD_COUNT)
+                candidate -= SEARCH_THREAD_COUNT;
+            if (!nnue_plan_select_valid
+                    && nnue_plan_pending[candidate]
+                    && !nnue_plan_inflight[candidate]
+                    && (!nnue_delta_busy || ThreadID'(candidate) != nnue_delta_thread)) begin
+                nnue_plan_select_valid = 1'b1;
+                nnue_plan_select_thread = ThreadID'(candidate);
+            end
+        end
         for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++) begin
             search_ready_mask[idx] = search_thread_ready(idx);
             search_store_mask[idx] = search_thread_store_pending(idx);
@@ -1413,7 +1522,9 @@ module search_controller #(
                 || search_thread_reverse_pending(idx);
             search_move_mask[idx] = search_thread_move_issue_ready(idx);
             search_quiet_mask[idx] = search_thread_quiet_issue_ready(idx);
-            search_eval_mask[idx] = search_thread_eval_ready(idx);
+            search_eval_mask[idx] = search_thread_eval_ready(idx)
+                && (!(nnue_delta_busy || nnue_plan_any)
+                    || nnue_state_valid[idx]);
             search_tt_lookup_mask[idx] = search_thread_tt_lookup_ready(idx);
             search_return_mask[idx] = search_thread_return_pending(idx);
             search_tt_response_mask[idx] = search_thread_tt_response_pending(idx);
@@ -1439,6 +1550,7 @@ module search_controller #(
         search_quiet_issue_valid = (state == ST_SEARCH_RUN)
             && |search_quiet_mask;
         search_eval_issue_valid = (state == ST_SEARCH_RUN)
+            && !nnue_build_busy
             && |search_eval_mask;
         search_tt_lookup_issue_valid = (state == ST_SEARCH_RUN)
             && |search_tt_lookup_mask;
@@ -1636,13 +1748,178 @@ module search_controller #(
                 search_stack_top[search_quiet_issue_thread].bucket_tops;
         end
 
-        eval_base = (state == ST_SEARCH_RUN)
-            ? search_pst_eval[search_eval_issue_thread]
-            : search_pst_eval[search_thread_id];
-        for (int pos = 0; pos < 64; pos++) begin
-            eval_board_tiles[pos] = (state == ST_SEARCH_RUN)
-                ? search_board[search_eval_issue_thread].tiles[pos]
-                : search_board[search_thread_id].tiles[pos];
+        nnue_update_valid = 1'b0;
+        nnue_update_req = NnueUpdateRequest'('0);
+        if (state == ST_SEARCH_ROOT_INIT && !nnue_root_init_draining) begin
+            automatic Tile feature_tile =
+                search_board[nnue_root_init_thread].tiles[nnue_root_init_pos];
+            if (feature_tile.piece_type != NULL_PIECE) begin
+                nnue_update_valid = 1'b1;
+                nnue_update_req.thread_id = nnue_root_init_thread;
+                nnue_update_req.ply = PlyIndex'(0);
+                nnue_update_req.white_feature = nnue_feature_index(
+                    nnue_root_init_pos, feature_tile, WHITE);
+                nnue_update_req.black_feature = nnue_feature_index(
+                    nnue_root_init_pos, feature_tile, BLACK);
+                nnue_update_req.white_enable = 1'b1;
+                nnue_update_req.black_enable = 1'b1;
+                nnue_update_req.add = 1'b1;
+                nnue_update_req.clear = nnue_root_init_first;
+            end
+        end
+        nnue_eval_valid = nnue_build_busy && nnue_build_draining
+            && nnue_eval_tag_count != 2
+            && (!nnue_build_wait_updates || nnue_update_idle);
+        if (nnue_build_busy) begin
+            if (!nnue_build_draining) begin
+                automatic Tile feature_tile =
+                    search_board[nnue_build_thread].tiles[nnue_build_pos];
+                if (feature_tile.piece_type != NULL_PIECE) begin
+                    nnue_update_valid = 1'b1;
+                    nnue_update_req.thread_id = nnue_build_thread;
+                    nnue_update_req.ply = search_ply[nnue_build_thread];
+                    nnue_update_req.white_feature = nnue_feature_index(
+                        nnue_build_pos, feature_tile, WHITE);
+                    nnue_update_req.black_feature = nnue_feature_index(
+                        nnue_build_pos, feature_tile, BLACK);
+                    nnue_update_req.white_enable = 1'b1;
+                    nnue_update_req.black_enable = 1'b1;
+                    nnue_update_req.add = 1'b1;
+                    nnue_update_req.clear = nnue_build_first;
+                end
+            end
+        end
+        if ((!nnue_build_busy || nnue_build_draining) && nnue_delta_busy) begin
+            automatic ThreadID delta_thread = nnue_delta_thread;
+            automatic logic delta_kind = nnue_plan_kind[delta_thread];
+            automatic logic delta_reverse = nnue_plan_reverse[delta_thread];
+            // Standard castling always moves the rook from a/h to d/f on the
+            // king's rank, so it needs two additional incremental rows.
+            automatic logic delta_is_castle = nnue_plan_mover[delta_thread].piece_type == KING
+                && nnue_plan_from[delta_thread][2:0] == BoardFile'(4)
+                && (nnue_plan_to[delta_thread][2:0] == BoardFile'(2)
+                    || nnue_plan_to[delta_thread][2:0] == BoardFile'(6));
+            automatic Position castle_rook_from = {
+                nnue_plan_from[delta_thread][5:3],
+                nnue_plan_to[delta_thread][2:0] == BoardFile'(2)
+                    ? BoardFile'(0) : BoardFile'(7)
+            };
+            automatic Position castle_rook_to = {
+                nnue_plan_from[delta_thread][5:3],
+                nnue_plan_to[delta_thread][2:0] == BoardFile'(2)
+                    ? BoardFile'(3) : BoardFile'(5)
+            };
+            automatic Tile castle_rook = nnue_plan_mover[delta_thread].piece_color == WHITE
+                ? WHITE_ROOK : BLACK_ROOK;
+            automatic Tile feature_tile = EMPTY_TILE;
+            automatic Position feature_pos = Position'(0);
+            automatic logic feature_add = 1'b0;
+            nnue_update_valid = 1'b1;
+            nnue_update_req.thread_id = delta_thread;
+            nnue_update_req.ply = nnue_plan_child_ply[delta_thread];
+            nnue_update_req.white_enable = 1'b1;
+            nnue_update_req.black_enable = 1'b1;
+            if (nnue_delta_draining) begin
+                // An ordered no-op completion marker removes the rebuild's
+                // dependence on global FIFO/pipeline idle.
+                nnue_update_req.white_enable = 1'b0;
+                nnue_update_req.black_enable = 1'b0;
+                nnue_update_req.complete = 1'b1;
+            end else if (delta_kind == NNUE_PLAN_REBUILD) begin
+                feature_tile = search_board[delta_thread].tiles[nnue_delta_pos];
+                nnue_update_valid = feature_tile.piece_type != NULL_PIECE;
+                feature_pos = nnue_delta_pos;
+                feature_add = 1'b1;
+                nnue_update_req.white_enable = 1'b1;
+                nnue_update_req.black_enable = 1'b1;
+                nnue_update_req.clear = nnue_delta_first;
+            end else if (!delta_reverse) begin
+                case (nnue_delta_step)
+                    3'd0: begin
+                        feature_tile = nnue_plan_mover[delta_thread];
+                        feature_pos = nnue_plan_from[delta_thread];
+                    end
+                    3'd1: begin
+                        if (nnue_plan_capture_valid[delta_thread]) begin
+                            feature_tile = nnue_plan_capture[delta_thread];
+                            feature_pos = nnue_plan_capture_pos[delta_thread];
+                        end else begin
+                            feature_tile = nnue_plan_placed[delta_thread];
+                            feature_pos = nnue_plan_to[delta_thread];
+                            feature_add = 1'b1;
+                        end
+                    end
+                    3'd2: begin
+                        if (nnue_plan_capture_valid[delta_thread]) begin
+                            feature_tile = nnue_plan_placed[delta_thread];
+                            feature_pos = nnue_plan_to[delta_thread];
+                            feature_add = 1'b1;
+                        end else begin
+                            feature_tile = castle_rook;
+                            feature_pos = castle_rook_from;
+                        end
+                    end
+                    default: begin
+                        feature_tile = castle_rook;
+                        feature_pos = castle_rook_to;
+                        feature_add = 1'b1;
+                    end
+                endcase
+                nnue_update_req.white_enable = 1'b1;
+                nnue_update_req.black_enable = 1'b1;
+            end else begin
+                // Undo exactly the same physical rows in reverse order so a
+                // thread's single live accumulator returns to its parent.
+                case (nnue_delta_step)
+                    3'd0: begin
+                        feature_tile = nnue_plan_placed[delta_thread];
+                        feature_pos = nnue_plan_to[delta_thread];
+                    end
+                    3'd1: begin
+                        if (delta_is_castle) begin
+                            feature_tile = castle_rook;
+                            feature_pos = castle_rook_to;
+                        end else if (nnue_plan_capture_valid[delta_thread]) begin
+                            feature_tile = nnue_plan_capture[delta_thread];
+                            feature_pos = nnue_plan_capture_pos[delta_thread];
+                            feature_add = 1'b1;
+                        end else begin
+                            feature_tile = nnue_plan_mover[delta_thread];
+                            feature_pos = nnue_plan_from[delta_thread];
+                            feature_add = 1'b1;
+                        end
+                    end
+                    3'd2: begin
+                        if (delta_is_castle) begin
+                            feature_tile = castle_rook;
+                            feature_pos = castle_rook_from;
+                            feature_add = 1'b1;
+                        end else begin
+                            feature_tile = nnue_plan_mover[delta_thread];
+                            feature_pos = nnue_plan_from[delta_thread];
+                            feature_add = 1'b1;
+                        end
+                    end
+                    default: begin
+                        feature_tile = nnue_plan_mover[delta_thread];
+                        feature_pos = nnue_plan_from[delta_thread];
+                        feature_add = 1'b1;
+                    end
+                endcase
+            end
+            if (!nnue_delta_draining && nnue_update_valid) begin
+                nnue_update_req.white_feature = nnue_feature_index(
+                    feature_pos, feature_tile, WHITE);
+                nnue_update_req.black_feature = nnue_feature_index(
+                    feature_pos, feature_tile, BLACK);
+                nnue_update_req.add = feature_add;
+            end
+            if (!nnue_delta_draining && delta_kind == NNUE_PLAN_DELTA)
+                nnue_update_req.complete =
+                    delta_is_castle ? nnue_delta_step == 3'd3
+                    : (nnue_delta_step == 3'd1
+                        && !nnue_plan_capture_valid[delta_thread])
+                    || nnue_delta_step == 3'd2;
         end
 
         tt_clear = state == ST_NEW_CLEAR_START;
@@ -1677,6 +1954,7 @@ module search_controller #(
             || (state == ST_PERFT_REVERSE_ISSUE)
             || (state == ST_PERFT_REVERSE_WAIT))
             || (state == ST_SEARCH_ITER_START)
+            || (state == ST_SEARCH_ROOT_INIT)
             || (state == ST_SEARCH_RUN);
     end
 
@@ -1729,6 +2007,28 @@ module search_controller #(
             terminal_result_thread_pipe <= ThreadID'(0);
             terminal_result_ply_pipe <= PlyIndex'(0);
             terminal_result_score_pipe <= EvalScore'(0);
+            nnue_build_busy <= 1'b0;
+            nnue_build_draining <= 1'b0;
+            nnue_build_first <= 1'b0;
+            nnue_build_wait_updates <= 1'b0;
+            nnue_build_pos <= Position'(0);
+            nnue_build_thread <= ThreadID'(0);
+            nnue_roots_initialized <= 1'b0;
+            nnue_root_init_draining <= 1'b0;
+            nnue_root_init_first <= 1'b0;
+            nnue_root_init_thread <= ThreadID'(0);
+            nnue_root_init_pos <= Position'(0);
+            nnue_eval_tag_read_ptr <= 1'b0;
+            nnue_eval_tag_write_ptr <= 1'b0;
+            nnue_eval_tag_count <= 2'd0;
+            nnue_delta_busy <= 1'b0;
+            nnue_delta_draining <= 1'b0;
+            nnue_delta_replay <= 1'b0;
+            nnue_delta_first <= 1'b0;
+            nnue_delta_thread <= ThreadID'(0);
+            nnue_plan_rr_ptr <= ThreadID'(0);
+            nnue_delta_step <= 3'd0;
+            nnue_delta_pos <= Position'(0);
 `ifdef FPGA_CHESS_PROFILE
             profile_terminal_event <= 1'b0;
             profile_terminal_kind <= 2'd0;
@@ -1764,6 +2064,8 @@ module search_controller #(
                 search_tt_store_inflight[tid] <= 1'b0;
                 search_tt_response_pending[tid] <= 1'b0;
                 search_repetition_pending[tid] <= 1'b0;
+                search_repetition_done[tid] <= 1'b0;
+                search_repetition_draw[tid] <= 1'b0;
                 search_tt_response[tid] <= TTLookupResponse'('0);
                 search_pending_move[tid] <= NULL_MOVE;
                 search_board[tid] <= FullBoard'('0);
@@ -1778,6 +2080,14 @@ module search_controller #(
                 search_return_was_null[tid] <= 1'b0;
                 search_pvs_research[tid] <= 1'b0;
                 search_eval_is_stand_pat[tid] <= 1'b0;
+                nnue_plan_pending[tid] <= 1'b0;
+                nnue_plan_inflight[tid] <= 1'b0;
+                nnue_plan_kind[tid] <= NNUE_PLAN_REBUILD;
+                nnue_plan_child_ply[tid] <= PlyIndex'(0);
+                nnue_plan_capture_valid[tid] <= 1'b0;
+                nnue_plan_real_move[tid] <= 1'b0;
+                nnue_plan_reverse[tid] <= 1'b0;
+                nnue_state_valid[tid] <= 1'b0;
                 search_stack_top[tid] <= empty_search_stack_entry();
                 search_return_move[tid] <= NULL_MOVE;
                 history_update_pending[tid] <= 1'b0;
@@ -1801,10 +2111,6 @@ module search_controller #(
                 search_move_tag_valid_pipe[idx] <= 1'b0;
                 search_move_in_check_pipe[idx] <= 1'b0;
             end
-            for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
-                search_eval_tag_pipe[idx] <= ThreadID'(0);
-                search_eval_tag_valid_pipe[idx] <= 1'b0;
-            end
         end else begin
             resp_valid <= 1'b0;
             repetition_init_start <= 1'b0;
@@ -1820,6 +2126,18 @@ module search_controller #(
             profile_terminal_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
 `endif
+            if (state != ST_SEARCH_RUN) begin
+                nnue_build_busy <= 1'b0;
+                nnue_build_draining <= 1'b0;
+                nnue_build_first <= 1'b0;
+                nnue_build_wait_updates <= 1'b0;
+                nnue_eval_tag_read_ptr <= 1'b0;
+                nnue_eval_tag_write_ptr <= 1'b0;
+                nnue_eval_tag_count <= 2'd0;
+                nnue_delta_busy <= 1'b0;
+                nnue_delta_draining <= 1'b0;
+                nnue_delta_replay <= 1'b0;
+            end
 
             if (move_history_update_valid && move_history_update_ready) begin
                 automatic logic cleared_history_update;
@@ -1846,13 +2164,20 @@ module search_controller #(
 
             if (repetition_resp_valid && repetition_resp_epoch == repetition_epoch
                     && search_repetition_pending[repetition_resp_thread]) begin
+                automatic logic nnue_completes_now = nnue_update_done_valid
+                    && nnue_update_done_thread == repetition_resp_thread;
                 search_repetition_pending[repetition_resp_thread] <= 1'b0;
-                if (repetition_resp_is_draw) begin
-                    search_return_score[repetition_resp_thread] <= DRAW_EVAL_SCORE;
-                    search_return_valid[repetition_resp_thread] <= 1'b1;
-                    search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_REVERSE_WAIT;
-                end else begin
-                    search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_READY;
+                search_repetition_done[repetition_resp_thread] <= 1'b1;
+                search_repetition_draw[repetition_resp_thread] <= repetition_resp_is_draw;
+                if (!nnue_plan_pending[repetition_resp_thread] || nnue_completes_now) begin
+                    if (repetition_resp_is_draw) begin
+                        search_return_score[repetition_resp_thread] <= DRAW_EVAL_SCORE;
+                        search_return_valid[repetition_resp_thread] <= 1'b1;
+                        search_thread_phase[repetition_resp_thread]
+                            <= SEARCH_PHASE_REVERSE_WAIT;
+                    end else begin
+                        search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_READY;
+                    end
                 end
             end
 
@@ -1872,11 +2197,16 @@ module search_controller #(
                     search_tt_store_inflight[tid] <= 1'b0;
                     search_tt_response_pending[tid] <= 1'b0;
                     search_repetition_pending[tid] <= 1'b0;
+                    search_repetition_done[tid] <= 1'b0;
+                    search_repetition_draw[tid] <= 1'b0;
                     search_return_was_scout[tid] <= 1'b0;
                     search_return_was_reduced[tid] <= 1'b0;
                     search_return_was_null[tid] <= 1'b0;
                     search_pvs_research[tid] <= 1'b0;
                     history_update_pending[tid] <= 1'b0;
+                    nnue_plan_pending[tid] <= 1'b0;
+                    nnue_plan_inflight[tid] <= 1'b0;
+                    nnue_state_valid[tid] <= 1'b0;
                     search_thread_status[tid] <= SEARCH_THREAD_IDLE;
                     search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                 end
@@ -1890,10 +2220,6 @@ module search_controller #(
                     search_move_tag_pipe[idx] <= ThreadID'(0);
                     search_move_tag_valid_pipe[idx] <= 1'b0;
                     search_move_in_check_pipe[idx] <= 1'b0;
-                end
-                for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
-                    search_eval_tag_pipe[idx] <= ThreadID'(0);
-                    search_eval_tag_valid_pipe[idx] <= 1'b0;
                 end
                 state <= ST_FLUSH_RESPOND;
             end else begin
@@ -1932,7 +2258,18 @@ module search_controller #(
                                     search_tt_lookup_inflight[tid] <= 1'b0;
                                     search_tt_store_inflight[tid] <= 1'b0;
                                     search_tt_response_pending[tid] <= 1'b0;
+                                    search_repetition_pending[tid] <= 1'b0;
+                                    search_repetition_done[tid] <= 1'b0;
+                                    search_repetition_draw[tid] <= 1'b0;
                                     history_update_pending[tid] <= 1'b0;
+                                    nnue_plan_pending[tid] <= 1'b0;
+                                    nnue_plan_inflight[tid] <= 1'b0;
+                                    nnue_plan_kind[tid] <= NNUE_PLAN_REBUILD;
+                                    nnue_plan_child_ply[tid] <= PlyIndex'(0);
+                                    nnue_plan_capture_valid[tid] <= 1'b0;
+                                    nnue_plan_real_move[tid] <= 1'b0;
+                                    nnue_plan_reverse[tid] <= 1'b0;
+                                    nnue_state_valid[tid] <= 1'b0;
                                 end
                                 for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
                                     search_board_tag_pipe[idx] <= ThreadID'(0);
@@ -1944,10 +2281,6 @@ module search_controller #(
                                     search_move_tag_pipe[idx] <= ThreadID'(0);
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
                                     search_move_in_check_pipe[idx] <= 1'b0;
-                                end
-                                for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
-                                    search_eval_tag_pipe[idx] <= ThreadID'(0);
-                                    search_eval_tag_valid_pipe[idx] <= 1'b0;
                                 end
                                 tt_age <= tt_age + TTAge'(1);
                                 state <= ST_NEW_CLEAR_START;
@@ -2000,6 +2333,7 @@ module search_controller #(
                                     search_dispatch <= '0;
                                     search_active_thread_count <= ThreadCount'(0);
                                     search_nodes <= NodeCountType'(0);
+                                    nnue_roots_initialized <= 1'b0;
                                     search_best_move[search_thread_id] <= NULL_MOVE;
                                     search_pending_move[search_thread_id] <= NULL_MOVE;
                                     search_return_score[search_thread_id] <= EvalScore'(0);
@@ -2043,10 +2377,15 @@ module search_controller #(
                                         search_tt_store_inflight[tid] <= 1'b0;
                                         search_tt_response_pending[tid] <= 1'b0;
                                         search_repetition_pending[tid] <= 1'b0;
+                                        search_repetition_done[tid] <= 1'b0;
+                                        search_repetition_draw[tid] <= 1'b0;
                                         search_return_was_scout[tid] <= 1'b0;
                                         search_return_was_reduced[tid] <= 1'b0;
                                         search_return_was_null[tid] <= 1'b0;
                                         search_pvs_research[tid] <= 1'b0;
+                                        nnue_plan_pending[tid] <= 1'b0;
+                                        nnue_plan_inflight[tid] <= 1'b0;
+                                        nnue_state_valid[tid] <= 1'b0;
                                     end
                                     for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
                                         search_board_tag_pipe[idx] <= ThreadID'(0);
@@ -2058,10 +2397,6 @@ module search_controller #(
                                         search_move_tag_pipe[idx] <= ThreadID'(0);
                                         search_move_tag_valid_pipe[idx] <= 1'b0;
                                         search_move_in_check_pipe[idx] <= 1'b0;
-                                    end
-                                    for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
-                                        search_eval_tag_pipe[idx] <= ThreadID'(0);
-                                        search_eval_tag_valid_pipe[idx] <= 1'b0;
                                     end
                                     repetition_epoch <= repetition_epoch + 1'b1;
                                     repetition_init_start <= 1'b1;
@@ -2098,10 +2433,6 @@ module search_controller #(
                                     search_move_tag_pipe[idx] <= ThreadID'(0);
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
                                     search_move_in_check_pipe[idx] <= 1'b0;
-                                end
-                                for (int idx = 0; idx < SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
-                                    search_eval_tag_pipe[idx] <= ThreadID'(0);
-                                    search_eval_tag_valid_pipe[idx] <= 1'b0;
                                 end
                                 state <= ST_FLUSH_RESPOND;
                             end
@@ -2343,15 +2674,217 @@ module search_controller #(
                     search_thread_id <= ThreadID'(0);
                     search_dispatch <= '0;
                     search_active_thread_count <= ThreadCount'(SEARCH_THREAD_COUNT);
-                    state <= ST_SEARCH_RUN;
+                    if (!nnue_roots_initialized) begin
+                        nnue_root_init_thread <= ThreadID'(0);
+                        nnue_root_init_pos <= Position'(0);
+                        nnue_root_init_first <= 1'b1;
+                        nnue_root_init_draining <= 1'b0;
+                        state <= ST_SEARCH_ROOT_INIT;
+                    end else begin
+                        state <= ST_SEARCH_RUN;
+                    end
+                end
+
+                ST_SEARCH_ROOT_INIT: begin
+                    automatic Tile root_tile =
+                        search_board[nnue_root_init_thread].tiles[nnue_root_init_pos];
+                    if (!nnue_root_init_draining) begin
+                        if (root_tile.piece_type == NULL_PIECE
+                                || (nnue_update_valid && nnue_update_ready)) begin
+                            if (root_tile.piece_type != NULL_PIECE)
+                                nnue_root_init_first <= 1'b0;
+                            if (nnue_root_init_pos == Position'(63))
+                                nnue_root_init_draining <= 1'b1;
+                            else
+                                nnue_root_init_pos <= nnue_root_init_pos + Position'(1);
+                        end
+                    end else if (nnue_update_idle) begin
+                        nnue_state_valid[nnue_root_init_thread] <= 1'b1;
+                        if (int'(nnue_root_init_thread) == SEARCH_THREAD_COUNT - 1) begin
+                            nnue_roots_initialized <= 1'b1;
+                            nnue_root_init_draining <= 1'b0;
+                            state <= ST_SEARCH_RUN;
+                        end else begin
+                            nnue_root_init_thread <= nnue_root_init_thread + ThreadID'(1);
+                            nnue_root_init_pos <= Position'(0);
+                            nnue_root_init_first <= 1'b1;
+                            nnue_root_init_draining <= 1'b0;
+                        end
+                    end
                 end
 
                 ST_SEARCH_RUN: begin
                     automatic ThreadCount active_count_next;
                     automatic NodeCountType nodes_next;
+                    automatic logic nnue_eval_enqueued;
+                    automatic logic nnue_eval_dequeued;
 
                     active_count_next = search_active_thread_count;
                     nodes_next = search_nodes;
+                    nnue_eval_enqueued = nnue_eval_valid && nnue_eval_ready;
+                    nnue_eval_dequeued = nnue_result_valid;
+
+                    if (nnue_build_busy && !nnue_build_draining) begin
+                        automatic Tile build_tile =
+                            search_board[nnue_build_thread].tiles[nnue_build_pos];
+                        if (build_tile.piece_type == NULL_PIECE
+                                || (nnue_update_valid && nnue_update_ready)) begin
+                            if (build_tile.piece_type != NULL_PIECE)
+                                nnue_build_first <= 1'b0;
+                            if (nnue_build_pos == Position'(63)) begin
+                                nnue_build_draining <= 1'b1;
+                            end else begin
+                                nnue_build_pos <= nnue_build_pos + Position'(1);
+                            end
+                        end
+                    end
+                    if (nnue_eval_enqueued) begin
+                        nnue_eval_tag_thread[nnue_eval_tag_write_ptr] <= nnue_build_thread;
+                        nnue_eval_tag_ply[nnue_eval_tag_write_ptr]
+                            <= search_ply[nnue_build_thread];
+                        nnue_eval_tag_write_ptr <= !nnue_eval_tag_write_ptr;
+                        nnue_build_busy <= 1'b0;
+                        nnue_build_draining <= 1'b0;
+                        nnue_build_wait_updates <= 1'b0;
+                    end
+                    if (nnue_eval_dequeued)
+                        nnue_eval_tag_read_ptr <= !nnue_eval_tag_read_ptr;
+                    case ({nnue_eval_enqueued, nnue_eval_dequeued})
+                        2'b10: nnue_eval_tag_count <= nnue_eval_tag_count + 2'd1;
+                        2'b01: nnue_eval_tag_count <= nnue_eval_tag_count - 2'd1;
+                        default: nnue_eval_tag_count <= nnue_eval_tag_count;
+                    endcase
+
+                    if (!nnue_delta_busy && !nnue_build_busy
+                            && nnue_plan_select_valid) begin
+                        nnue_delta_busy <= 1'b1;
+                        nnue_delta_draining <= 1'b0;
+                        nnue_delta_replay <=
+                            nnue_plan_kind[nnue_plan_select_thread] == NNUE_PLAN_REBUILD;
+                        nnue_delta_first <= 1'b1;
+                        nnue_delta_thread <= nnue_plan_select_thread;
+                        nnue_delta_step <= 3'd0;
+                        nnue_delta_pos <= Position'(0);
+                        nnue_plan_rr_ptr <= search_thread_after(nnue_plan_select_thread);
+                    end
+
+                    if (nnue_delta_busy) begin
+                        automatic logic delta_kind =
+                            nnue_plan_kind[nnue_delta_thread];
+                        if (nnue_delta_draining) begin
+                            if (nnue_update_valid && nnue_update_ready) begin
+                                // The ordered marker now owns completion; hand
+                                // directly to another pending child if possible.
+                                nnue_plan_inflight[nnue_delta_thread] <= 1'b1;
+                                nnue_delta_draining <= 1'b0;
+                                if (nnue_plan_select_valid) begin
+                                    nnue_delta_busy <= 1'b1;
+                                    nnue_delta_replay <=
+                                        nnue_plan_kind[nnue_plan_select_thread]
+                                            == NNUE_PLAN_REBUILD;
+                                    nnue_delta_first <= 1'b1;
+                                    nnue_delta_thread <= nnue_plan_select_thread;
+                                    nnue_delta_step <= 3'd0;
+                                    nnue_delta_pos <= Position'(0);
+                                    nnue_plan_rr_ptr <=
+                                        search_thread_after(nnue_plan_select_thread);
+                                end else begin
+                                    nnue_delta_busy <= 1'b0;
+                                    nnue_delta_replay <= 1'b0;
+                                end
+                            end
+                        end else if (nnue_delta_replay) begin
+                            automatic Tile rebuild_tile =
+                                search_board[nnue_delta_thread].tiles[nnue_delta_pos];
+                            if (rebuild_tile.piece_type == NULL_PIECE
+                                    || (nnue_update_valid && nnue_update_ready)) begin
+                                if (rebuild_tile.piece_type != NULL_PIECE)
+                                    nnue_delta_first <= 1'b0;
+                                if (nnue_delta_pos == Position'(63)) begin
+                                    nnue_delta_draining <= 1'b1;
+                                    nnue_delta_replay <= 1'b0;
+                                end else begin
+                                    nnue_delta_pos <= nnue_delta_pos + Position'(1);
+                                end
+                            end
+                        end else if (nnue_update_valid && nnue_update_ready) begin
+                            automatic logic delta_is_castle =
+                                nnue_plan_mover[nnue_delta_thread].piece_type == KING
+                                && nnue_plan_from[nnue_delta_thread][2:0] == BoardFile'(4)
+                                && (nnue_plan_to[nnue_delta_thread][2:0] == BoardFile'(2)
+                                    || nnue_plan_to[nnue_delta_thread][2:0] == BoardFile'(6));
+                            automatic logic final_delta =
+                                (delta_is_castle && nnue_delta_step == 3'd3)
+                                || (!delta_is_castle && nnue_delta_step == 3'd1
+                                    && !nnue_plan_capture_valid[nnue_delta_thread])
+                                || (!delta_is_castle && nnue_delta_step == 3'd2);
+                            if (final_delta) begin
+                                // A tagged writeback completes this plan;
+                                // start the next plan without an arbitration
+                                // or request-issue bubble.
+                                nnue_plan_inflight[nnue_delta_thread] <= 1'b1;
+                                if (nnue_plan_select_valid) begin
+                                    nnue_delta_busy <= 1'b1;
+                                    nnue_delta_replay <=
+                                        nnue_plan_kind[nnue_plan_select_thread]
+                                            == NNUE_PLAN_REBUILD;
+                                    nnue_delta_first <= 1'b1;
+                                    nnue_delta_thread <= nnue_plan_select_thread;
+                                    nnue_delta_step <= 3'd0;
+                                    nnue_delta_pos <= Position'(0);
+                                    nnue_plan_rr_ptr <=
+                                        search_thread_after(nnue_plan_select_thread);
+                                end else begin
+                                    nnue_delta_busy <= 1'b0;
+                                    nnue_delta_replay <= 1'b0;
+                                end
+                            end else begin
+                                nnue_delta_step <= nnue_delta_step + 3'd1;
+                            end
+                        end
+                    end
+
+                    if (nnue_update_done_valid) begin
+                        automatic ThreadID completed_thread = nnue_update_done_thread;
+                        automatic PlyIndex completed_ply = nnue_update_done_ply;
+                        automatic logic repetition_completes_now =
+                            repetition_resp_valid
+                            && repetition_resp_epoch == repetition_epoch
+                            && repetition_resp_thread == completed_thread
+                            && search_repetition_pending[completed_thread];
+                        automatic logic repetition_is_draw =
+                            repetition_completes_now
+                                ? repetition_resp_is_draw
+                                : search_repetition_draw[completed_thread];
+`ifndef SYNTHESIS
+                        assert (nnue_plan_pending[completed_thread]
+                                && nnue_plan_inflight[completed_thread]
+                                && nnue_plan_child_ply[completed_thread] == completed_ply)
+                            else $fatal(1, "NNUE update completion tag does not own a child plan");
+`endif
+                        nnue_state_valid[completed_thread] <= 1'b1;
+                        nnue_plan_pending[completed_thread] <= 1'b0;
+                        nnue_plan_inflight[completed_thread] <= 1'b0;
+                        if (nnue_plan_reverse[completed_thread]) begin
+                            search_thread_phase[completed_thread] <= SEARCH_PHASE_MOVE_WAIT;
+                        end else if (nnue_plan_real_move[completed_thread]) begin
+                            if (search_repetition_done[completed_thread]
+                                    || repetition_completes_now) begin
+                                if (repetition_is_draw) begin
+                                    search_return_score[completed_thread]
+                                        <= DRAW_EVAL_SCORE;
+                                    search_return_valid[completed_thread] <= 1'b1;
+                                    search_thread_phase[completed_thread]
+                                        <= SEARCH_PHASE_REVERSE_WAIT;
+                                end else begin
+                                    search_thread_phase[completed_thread]
+                                        <= SEARCH_PHASE_READY;
+                                end
+                            end
+                        end else begin
+                            search_thread_phase[completed_thread] <= SEARCH_PHASE_READY;
+                        end
+                    end
 
                     // The two generators may complete together, but one thread owns only one move operation.
                     if (move_cmd_resp_valid && move_quiet_resp_valid)
@@ -2470,13 +3003,6 @@ module search_controller #(
                     for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
                         search_move_tag_valid_pipe[idx] <= 1'b0;
                     end
-                    for (int idx = SEARCH_EVAL_TAG_PIPE_LEN - 1; idx > 0; idx--) begin
-                        search_eval_tag_pipe[idx] <= search_eval_tag_pipe[idx - 1];
-                        search_eval_tag_valid_pipe[idx] <= search_eval_tag_valid_pipe[idx - 1];
-                    end
-                    search_eval_tag_pipe[0] <= search_eval_issue_thread;
-                    search_eval_tag_valid_pipe[0] <= search_eval_issue_valid;
-
                     if (search_stop_requested()) begin
                         automatic Move stop_best_move;
                         automatic EvalScore stop_score;
@@ -2586,7 +3112,50 @@ module search_controller #(
                                         <= search_stack_parent_q[board_thread_id].legal_move_count + 8'd1;
                                 end
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
-                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_MOVE_WAIT;
+                                if (search_stack_top[board_thread_id].nnue_delta_valid) begin
+                                    nnue_plan_pending[board_thread_id] <= 1'b1;
+                                    nnue_plan_inflight[board_thread_id] <= 1'b0;
+                                    nnue_plan_kind[board_thread_id] <= NNUE_PLAN_DELTA;
+                                    nnue_plan_child_ply[board_thread_id]
+                                        <= board_ply - PlyIndex'(1);
+                                    nnue_plan_from[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_from;
+                                    nnue_plan_to[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_to;
+                                    nnue_plan_capture_pos[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_capture_pos;
+                                    nnue_plan_mover[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_mover;
+                                    nnue_plan_placed[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_placed;
+                                    nnue_plan_capture[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_capture;
+                                    nnue_plan_capture_valid[board_thread_id]
+                                        <= search_stack_top[board_thread_id].nnue_capture_valid;
+                                    nnue_plan_real_move[board_thread_id] <= 1'b0;
+                                    nnue_plan_reverse[board_thread_id] <= 1'b1;
+                                    nnue_state_valid[board_thread_id] <= 1'b0;
+                                    // Start a newly created plan immediately when
+                                    // arbitration has no older work, saving one
+                                    // child-update-pending controller cycle.
+                                    if (!nnue_delta_busy && !nnue_build_busy
+                                            && !nnue_plan_select_valid) begin
+                                        nnue_delta_busy <= 1'b1;
+                                        nnue_delta_draining <= 1'b0;
+                                        nnue_delta_replay <= 1'b0;
+                                        nnue_delta_first <= 1'b1;
+                                        nnue_delta_thread <= board_thread_id;
+                                        nnue_delta_step <= 3'd0;
+                                        nnue_delta_pos <= Position'(0);
+                                        nnue_plan_rr_ptr <= search_thread_after(
+                                            board_thread_id);
+                                    end
+                                    search_thread_phase[board_thread_id]
+                                        <= SEARCH_PHASE_REPETITION_WAIT;
+                                end else begin
+                                    search_thread_phase[board_thread_id]
+                                        <= SEARCH_PHASE_MOVE_WAIT;
+                                end
                             end else if (null_push_complete) begin
                                 // Enter a synthetic child without legal-node or
                                 // repetition accounting.
@@ -2618,10 +3187,13 @@ module search_controller #(
                                 search_stack_top[board_thread_id].scout_search <= 1'b1;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b1;
+                                search_stack_top[board_thread_id].nnue_delta_valid <= 1'b0;
                                 search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
+                                // Null moves preserve the thread's live
+                                // accumulator and require no update-plan join.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else if (board_update_mover_in_check) begin
                                 // The board pipeline is stateless. Ignore the
@@ -2629,6 +3201,39 @@ module search_controller #(
                                 // overwritten by the next candidate at this ply.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else begin
+                                automatic Tile delta_mover =
+                                    search_board[board_thread_id].tiles[
+                                        search_pending_move[board_thread_id].from_pos];
+                                automatic Tile delta_capture =
+                                    search_board[board_thread_id].tiles[
+                                        search_pending_move[board_thread_id].to_pos];
+                                automatic Position delta_capture_pos =
+                                    search_pending_move[board_thread_id].to_pos;
+                                automatic logic delta_capture_valid =
+                                    delta_capture.piece_type != NULL_PIECE;
+                                automatic logic delta_is_ep =
+                                    delta_mover.piece_type == PAWN
+                                    && search_pending_move[board_thread_id].from_pos[2:0]
+                                        != search_pending_move[board_thread_id].to_pos[2:0]
+                                    && !delta_capture_valid;
+                                automatic logic parent_state_invalid =
+                                    !nnue_state_valid[board_thread_id];
+                                automatic PlyIndex child_repetition_start =
+                                    committed_move_is_irreversible(
+                                        search_board[board_thread_id],
+                                        board_update_out,
+                                        search_pending_move[board_thread_id])
+                                        ? child_ply
+                                        : search_stack_top[board_thread_id].repetition_start;
+                                if (delta_is_ep) begin
+                                    delta_capture_pos = {
+                                        search_pending_move[board_thread_id].from_pos[5:3],
+                                        search_pending_move[board_thread_id].to_pos[2:0]
+                                    };
+                                    delta_capture = search_board[board_thread_id].tiles[
+                                        delta_capture_pos];
+                                    delta_capture_valid = 1'b1;
+                                end
                                 // A node is entered only after a speculative push
                                 // proves legal. Count that committed child here so
                                 // TT cutoffs, draws, and terminal children count too.
@@ -2642,14 +3247,65 @@ module search_controller #(
                                 repetition_line_write_thread <= board_thread_id;
                                 repetition_line_write_ply <= child_ply;
                                 repetition_line_write_key <= board_update_zobrist_out;
+                                // Repetition lookup and NNUE construction are
+                                // independent; launch both from the legal board
+                                // result and join their tagged completions.
                                 repetition_req_valid <= 1'b1;
                                 repetition_req_thread <= board_thread_id;
                                 repetition_req_ply <= child_ply;
-                                repetition_req_start_ply <= committed_move_is_irreversible(
-                                    search_board[board_thread_id], board_update_out, search_pending_move[board_thread_id]
-                                ) ? child_ply : search_stack_top[board_thread_id].repetition_start;
+                                repetition_req_start_ply <= child_repetition_start;
                                 repetition_req_key <= board_update_zobrist_out;
                                 search_repetition_pending[board_thread_id] <= 1'b1;
+                                search_repetition_done[board_thread_id] <= 1'b0;
+                                search_repetition_draw[board_thread_id] <= 1'b0;
+                                nnue_plan_pending[board_thread_id] <= 1'b1;
+                                nnue_plan_inflight[board_thread_id] <= 1'b0;
+                                nnue_state_valid[board_thread_id] <= 1'b0;
+                                nnue_plan_kind[board_thread_id]
+                                    <= parent_state_invalid
+                                        ? NNUE_PLAN_REBUILD : NNUE_PLAN_DELTA;
+                                nnue_plan_child_ply[board_thread_id] <= child_ply;
+                                nnue_plan_from[board_thread_id]
+                                    <= search_pending_move[board_thread_id].from_pos;
+                                nnue_plan_to[board_thread_id]
+                                    <= search_pending_move[board_thread_id].to_pos;
+                                nnue_plan_capture_pos[board_thread_id] <= delta_capture_pos;
+                                nnue_plan_mover[board_thread_id] <= delta_mover;
+                                nnue_plan_placed[board_thread_id]
+                                    <= board_update_out.tiles[
+                                        search_pending_move[board_thread_id].to_pos];
+                                nnue_plan_capture[board_thread_id] <= delta_capture;
+                                nnue_plan_capture_valid[board_thread_id]
+                                    <= delta_capture_valid;
+                                nnue_plan_real_move[board_thread_id] <= 1'b1;
+                                nnue_plan_reverse[board_thread_id] <= 1'b0;
+                                // Bypass the next-cycle plan-selection stage when
+                                // the update planner is otherwise completely idle.
+                                if (!nnue_delta_busy && !nnue_build_busy
+                                        && !nnue_plan_select_valid) begin
+                                    nnue_delta_busy <= 1'b1;
+                                    nnue_delta_draining <= 1'b0;
+                                    nnue_delta_replay <= parent_state_invalid;
+                                    nnue_delta_first <= 1'b1;
+                                    nnue_delta_thread <= board_thread_id;
+                                    nnue_delta_step <= 3'd0;
+                                    nnue_delta_pos <= Position'(0);
+                                    nnue_plan_rr_ptr <= search_thread_after(
+                                        board_thread_id);
+                                end
+                                search_stack_top[board_thread_id].nnue_from
+                                    <= search_pending_move[board_thread_id].from_pos;
+                                search_stack_top[board_thread_id].nnue_to
+                                    <= search_pending_move[board_thread_id].to_pos;
+                                search_stack_top[board_thread_id].nnue_capture_pos
+                                    <= delta_capture_pos;
+                                search_stack_top[board_thread_id].nnue_mover <= delta_mover;
+                                search_stack_top[board_thread_id].nnue_placed
+                                    <= board_update_out.tiles[search_pending_move[board_thread_id].to_pos];
+                                search_stack_top[board_thread_id].nnue_capture <= delta_capture;
+                                search_stack_top[board_thread_id].nnue_capture_valid
+                                    <= delta_capture_valid;
+                                search_stack_top[board_thread_id].nnue_delta_valid <= 1'b1;
                                 search_stack_top[board_thread_id].move <= search_pending_move[board_thread_id];
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
@@ -2761,18 +3417,25 @@ module search_controller #(
                             end
                         end
 
-                        if (search_eval_tag_valid_pipe[SEARCH_EVAL_TAG_PIPE_LEN - 1]) begin
+                        if (nnue_result_valid) begin
                             automatic EvalScore eval_score;
                             automatic ThreadID eval_thread_id;
                             automatic PlyIndex eval_ply;
 
-                            eval_thread_id = search_eval_tag_pipe[SEARCH_EVAL_TAG_PIPE_LEN - 1];
-                            eval_ply = search_ply[eval_thread_id];
+`ifndef SYNTHESIS
+                            assert (nnue_eval_tag_count != 0)
+                                else $fatal(1, "NNUE result arrived without an ownership tag");
+`endif
+                            eval_thread_id = nnue_eval_tag_thread[nnue_eval_tag_read_ptr];
+                            eval_ply = nnue_eval_tag_ply[nnue_eval_tag_read_ptr];
                             search_eval_result_thread_id <= eval_thread_id;
                             search_eval_result_valid <= 1'b1;
                             search_eval_wait_count[eval_thread_id] <= EvalWaitCount'(0);
                             search_eval_inflight[eval_thread_id] <= 1'b0;
-                            eval_score = pov_eval(search_board[eval_thread_id], static_eval_out);
+                            eval_score = pov_eval(
+                                search_board[eval_thread_id],
+                                add_nnue_correction(search_pst_eval[eval_thread_id], nnue_result));
+                            nnue_state_valid[eval_thread_id] <= 1'b1;
 
                             if (search_eval_is_stand_pat[eval_thread_id]) begin
                                 search_stack_top[eval_thread_id].stand_pat_done <= 1'b1;
@@ -3120,6 +3783,15 @@ module search_controller #(
                                 && !search_board_in_check[search_eval_issue_thread]
                                 && !search_stack_top[search_eval_issue_thread].stand_pat_done;
                             search_dispatch.eval <= search_thread_after(search_eval_issue_thread);
+                            nnue_build_busy <= 1'b1;
+                            nnue_build_draining
+                                <= nnue_state_valid[search_eval_issue_thread];
+                            nnue_build_first
+                                <= !nnue_state_valid[search_eval_issue_thread];
+                            nnue_build_wait_updates
+                                <= !nnue_state_valid[search_eval_issue_thread];
+                            nnue_build_pos <= Position'(0);
+                            nnue_build_thread <= search_eval_issue_thread;
                         end
 
                         if (search_move_issue_valid

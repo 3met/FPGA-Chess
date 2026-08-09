@@ -20,13 +20,15 @@ module tb_engine_profile #(
     // controller edge places reads 8 ns into the SDRAM's 10 ns data cycle.
     localparam int MEMORY_READ_LAG_NS = 5;
     localparam int ENGINE_STATE_COUNT = 8;
-    localparam int CONTROLLER_STATE_COUNT = 21;
+    localparam int CONTROLLER_STATE_COUNT = 22;
     localparam int THREAD_PHASE_COUNT = 11;
     // Profiler-local copies of the stable state encodings avoid hierarchical
     // enum-item references, which trigger a Verilator width-analysis bug.
-    localparam int CONTROLLER_STATE_SEARCH_RUN = 18;
+    localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 18;
+    localparam int CONTROLLER_STATE_SEARCH_RUN = 19;
     localparam int THREAD_PHASE_READY = 1;
     localparam int THREAD_PHASE_MOVE_WAIT = 4;
+    localparam int THREAD_PHASE_REPETITION_WAIT = 7;
     localparam int MOVE_ORDER_STATE_COUNT = 7;
     localparam int ORDINAL_BUCKET_COUNT = 8;
     localparam int GENERATOR_STATE_COUNT = 8;
@@ -174,6 +176,7 @@ module tb_engine_profile #(
     longint unsigned engine_state_cycles[0:ENGINE_STATE_COUNT-1];
     longint unsigned controller_state_cycles[0:CONTROLLER_STATE_COUNT-1];
     longint unsigned thread_phase_cycles[0:SEARCH_THREAD_COUNT-1][0:THREAD_PHASE_COUNT-1];
+    longint unsigned thread_ready_nnue_init[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_ready_dispatch[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_ready_arbitration[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_ready_tt_blocked[0:SEARCH_THREAD_COUNT-1];
@@ -182,6 +185,9 @@ module tb_engine_profile #(
     longint unsigned thread_ready_transition[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_noisy_move_wait[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_quiet_move_wait[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_repetition_nnue_wait[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_repetition_overlap_wait[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned thread_repetition_checker_wait[0:SEARCH_THREAD_COUNT-1];
     longint unsigned thread_move_order_cycles[0:SEARCH_THREAD_COUNT-1][0:MOVE_ORDER_STATE_COUNT-1];
     longint unsigned thread_ply_cycles[0:SEARCH_THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
     longint unsigned active_thread_histogram[0:SEARCH_THREAD_COUNT];
@@ -211,6 +217,12 @@ module tb_engine_profile #(
     longint unsigned noisy_destinations_with_sources, quiet_destinations_with_sources;
     longint unsigned noisy_candidates_emitted, quiet_candidates_emitted;
     longint unsigned evaluations, eval_completions;
+    longint unsigned nnue_update_requests, nnue_root_rows, nnue_rebuild_rows;
+    longint unsigned nnue_rebuilds, nnue_delta_requests;
+    longint unsigned nnue_completion_markers;
+    longint unsigned nnue_recovery_rows, nnue_update_completions;
+    longint unsigned nnue_update_busy_cycles;
+    longint unsigned nnue_update_backpressure_cycles;
     longint unsigned repetition_requests, repetition_responses;
     longint unsigned tt_lookups, tt_hits, tt_stores;
     longint unsigned tt_bound_hits[0:2];
@@ -324,6 +336,10 @@ module tb_engine_profile #(
                 engine_state_cycles[int'(dut.command_layer.state)] + 1;
             controller_state_cycles[int'(dut.controller.state)] =
                 controller_state_cycles[int'(dut.controller.state)] + 1;
+            if (!dut.controller.nnue_update_idle)
+                nnue_update_busy_cycles = nnue_update_busy_cycles + 1;
+            if (dut.controller.nnue_update_valid && !dut.controller.nnue_update_ready)
+                nnue_update_backpressure_cycles = nnue_update_backpressure_cycles + 1;
             generator_state_cycles[int'(dut.controller.move_generator.noisy_pipeline.state)] =
                 generator_state_cycles[int'(dut.controller.move_generator.noisy_pipeline.state)] + 1;
             generator_state_cycles[int'(dut.controller.move_generator.quiet_pipeline.state)] =
@@ -358,6 +374,22 @@ module tb_engine_profile #(
                     else
                         thread_noisy_move_wait[tid] = thread_noisy_move_wait[tid] + 1;
                 end
+                // The controller's repetition-wait phase begins while the NNUE
+                // child state is prepared. Separate that work from an accepted,
+                // genuinely in-flight repetition lookup.
+                if (int'(dut.controller.search_thread_phase[tid])
+                        == THREAD_PHASE_REPETITION_WAIT) begin
+                    if (dut.controller.nnue_plan_pending[tid]
+                            && dut.controller.search_repetition_pending[tid])
+                        thread_repetition_overlap_wait[tid] =
+                            thread_repetition_overlap_wait[tid] + 1;
+                    else if (dut.controller.nnue_plan_pending[tid])
+                        thread_repetition_nnue_wait[tid] =
+                            thread_repetition_nnue_wait[tid] + 1;
+                    else if (dut.controller.search_repetition_pending[tid])
+                        thread_repetition_checker_wait[tid] =
+                            thread_repetition_checker_wait[tid] + 1;
+                end
                 // Split the broad READY phase into exclusive causes without
                 // adding profiler state to the synthesizable controller.
                 if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_READY) begin
@@ -379,7 +411,9 @@ module tb_engine_profile #(
                             && dut.controller.search_board_issue_thread == ThreadID'(tid));
                     automatic MoveOrderState order_state =
                         dut.controller.search_stack_top[tid].move_order_state;
-                    if (int'(dut.controller.state) != CONTROLLER_STATE_SEARCH_RUN
+                    if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_ROOT_INIT) begin
+                        thread_ready_nnue_init[tid] = thread_ready_nnue_init[tid] + 1;
+                    end else if (int'(dut.controller.state) != CONTROLLER_STATE_SEARCH_RUN
                             || order_state == MOVE_ORDER_DONE
                             || dut.controller.search_board[tid].halfmove_clock >= HalfmoveClock'(100)) begin
                         thread_ready_transition[tid] = thread_ready_transition[tid] + 1;
@@ -583,6 +617,35 @@ module tb_engine_profile #(
             // An accepted evaluator request is one static evaluation.
             if (dut.controller.search_eval_issue_valid) evaluations <= evaluations + 1;
             if (dut.controller.search_eval_result_valid) eval_completions <= eval_completions + 1;
+            if (dut.controller.nnue_update_valid && dut.controller.nnue_update_ready) begin
+                nnue_update_requests = nnue_update_requests + 1;
+                if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_ROOT_INIT) begin
+                    nnue_root_rows = nnue_root_rows + 1;
+                end else if (dut.controller.nnue_update_req.complete
+                        && !dut.controller.nnue_update_req.white_enable
+                        && !dut.controller.nnue_update_req.black_enable) begin
+                    nnue_completion_markers = nnue_completion_markers + 1;
+                end else if (dut.controller.nnue_delta_busy
+                        && dut.controller.nnue_delta_replay
+                        && dut.controller.nnue_plan_kind[dut.controller.nnue_delta_thread]
+                            == dut.controller.NNUE_PLAN_REBUILD) begin
+                    nnue_rebuild_rows = nnue_rebuild_rows + 1;
+                    if (dut.controller.nnue_update_req.clear)
+                        nnue_rebuilds = nnue_rebuilds + 1;
+                end else if (dut.controller.nnue_build_busy
+                        && !dut.controller.nnue_build_draining) begin
+                    nnue_recovery_rows = nnue_recovery_rows + 1;
+                end else begin
+                    nnue_delta_requests = nnue_delta_requests + 1;
+                end
+            end
+            if (dut.controller.nnue_update_done_valid)
+                nnue_update_completions = nnue_update_completions + 1;
+            if (dut.controller.nnue_delta_busy && dut.controller.nnue_delta_draining
+                    && dut.controller.nnue_update_idle
+                    && dut.controller.nnue_plan_kind[dut.controller.nnue_delta_thread]
+                        == dut.controller.NNUE_PLAN_REBUILD)
+                nnue_update_completions = nnue_update_completions + 1;
             if (dut.controller.repetition_req_valid) repetition_requests <= repetition_requests + 1;
             if (dut.controller.repetition_resp_valid) repetition_responses <= repetition_responses + 1;
             if (dut.controller.repetition_resp_valid && dut.controller.repetition_resp_is_draw)
@@ -752,6 +815,7 @@ module tb_engine_profile #(
             emit($sformatf("threads.%0d.nodes", tid), dut.controller.search_thread_nodes[tid]);
             for (int phase = 0; phase < THREAD_PHASE_COUNT; phase++)
                 emit($sformatf("threads.%0d.phases.%0d", tid, phase), thread_phase_cycles[tid][phase]);
+            emit($sformatf("threads.%0d.ready.nnue_init", tid), thread_ready_nnue_init[tid]);
             emit($sformatf("threads.%0d.ready.dispatch", tid), thread_ready_dispatch[tid]);
             emit($sformatf("threads.%0d.ready.arbitration", tid), thread_ready_arbitration[tid]);
             emit($sformatf("threads.%0d.ready.tt_blocked", tid), thread_ready_tt_blocked[tid]);
@@ -762,6 +826,12 @@ module tb_engine_profile #(
             emit($sformatf("threads.%0d.ready.transition", tid), thread_ready_transition[tid]);
             emit($sformatf("threads.%0d.move_wait.noisy", tid), thread_noisy_move_wait[tid]);
             emit($sformatf("threads.%0d.move_wait.quiet", tid), thread_quiet_move_wait[tid]);
+            emit($sformatf("threads.%0d.repetition_wait.nnue_update", tid),
+                thread_repetition_nnue_wait[tid]);
+            emit($sformatf("threads.%0d.repetition_wait.overlap", tid),
+                thread_repetition_overlap_wait[tid]);
+            emit($sformatf("threads.%0d.repetition_wait.checker", tid),
+                thread_repetition_checker_wait[tid]);
             for (int order = 0; order < MOVE_ORDER_STATE_COUNT; order++)
                 emit($sformatf("threads.%0d.move_order.%0d", tid, order), thread_move_order_cycles[tid][order]);
             for (int ply = 0; ply < MAX_PLY_COUNT; ply++)
@@ -821,6 +891,19 @@ module tb_engine_profile #(
             quiet_candidates_emitted);
         emit("components.eval.evaluations", evaluations);
         emit("components.eval.completions", eval_completions);
+        emit("components.eval.update_requests", nnue_update_requests);
+        emit("components.eval.root_rows", nnue_root_rows);
+        emit("components.eval.rebuild_rows", nnue_rebuild_rows);
+        emit("components.eval.rebuilds", nnue_rebuilds);
+        emit("components.eval.delta_requests", nnue_delta_requests);
+        emit("components.eval.completion_markers", nnue_completion_markers);
+        emit("components.eval.recovery_rows", nnue_recovery_rows);
+        emit("components.eval.update_completions", nnue_update_completions);
+        emit("components.eval.update_busy_cycles", nnue_update_busy_cycles);
+        emit("components.eval.update_backpressure_cycles",
+            nnue_update_backpressure_cycles);
+        emit("components.eval.accumulator_wrap_lanes",
+            dut.controller.nnue_evaluator.profile_accumulator_wrap_lanes);
         emit("components.repetition.requests", repetition_requests);
         emit("components.repetition.responses", repetition_responses);
         emit("stalls.move_not_ready", move_stall_cycles);
@@ -907,6 +990,7 @@ module tb_engine_profile #(
             move_command_active[tid] = 1'b0;
             move_command_operation[tid] = '0;
             move_command_start_cycle[tid] = 0;
+            thread_ready_nnue_init[tid] = 0;
             thread_ready_dispatch[tid] = 0;
             thread_ready_arbitration[tid] = 0;
             thread_ready_tt_blocked[tid] = 0;
@@ -915,6 +999,9 @@ module tb_engine_profile #(
             thread_ready_transition[tid] = 0;
             thread_noisy_move_wait[tid] = 0;
             thread_quiet_move_wait[tid] = 0;
+            thread_repetition_nnue_wait[tid] = 0;
+            thread_repetition_overlap_wait[tid] = 0;
+            thread_repetition_checker_wait[tid] = 0;
         end
         move_pop_start_cycle = 0;
         noisy_destinations_examined = 0;
@@ -923,6 +1010,20 @@ module tb_engine_profile #(
         quiet_destinations_with_sources = 0;
         noisy_candidates_emitted = 0;
         quiet_candidates_emitted = 0;
+        evaluations = 0;
+        eval_completions = 0;
+        nnue_update_requests = 0;
+        nnue_root_rows = 0;
+        nnue_rebuild_rows = 0;
+        nnue_rebuilds = 0;
+        nnue_delta_requests = 0;
+        nnue_completion_markers = 0;
+        nnue_recovery_rows = 0;
+        nnue_update_completions = 0;
+        nnue_update_busy_cycles = 0;
+        nnue_update_backpressure_cycles = 0;
+        repetition_requests = 0;
+        repetition_responses = 0;
         for (int operation = 0; operation < MOVE_OPERATION_COUNT; operation++) begin
             move_operation_count[operation] = 0;
             move_operation_cycles[operation] = 0;

@@ -35,6 +35,17 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "components.move.pop_misses": 0,
         "components.eval.evaluations": 1,
         "components.eval.completions": 1,
+        "components.eval.update_requests": 5,
+        "components.eval.root_rows": 2,
+        "components.eval.rebuild_rows": 0,
+        "components.eval.rebuilds": 0,
+        "components.eval.delta_requests": 3,
+        "components.eval.completion_markers": 0,
+        "components.eval.recovery_rows": 0,
+        "components.eval.update_completions": 2,
+        "components.eval.update_busy_cycles": 5,
+        "components.eval.update_backpressure_cycles": 2,
+        "components.eval.accumulator_wrap_lanes": 0,
         "components.repetition.requests": 1,
         "components.repetition.responses": 1,
         "stalls.move_not_ready": 2,
@@ -84,12 +95,13 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
     for index in range(len(ENGINE_STATES)):
         metrics[f"states.engine.{index}"] = search_cycles if index == 5 else 0
     for index in range(len(CONTROLLER_STATES)):
-        metrics[f"states.controller.{index}"] = search_cycles if index == 18 else 0
+        metrics[f"states.controller.{index}"] = search_cycles if index == 19 else 0
     for index in range(len(THREAD_PHASES)):
         metrics[f"threads.0.phases.{index}"] = search_cycles if index == 1 else 0
     for index in range(len(MOVE_ORDER_STATES)):
         metrics[f"threads.0.move_order.{index}"] = search_cycles if index == 0 else 0
     metrics["threads.0.nodes"] = 5
+    metrics["threads.0.ready.nnue_init"] = 0
     metrics["threads.0.ready.dispatch"] = search_cycles
     metrics["threads.0.ready.arbitration"] = 0
     metrics["threads.0.ready.tt_blocked"] = 0
@@ -98,6 +110,14 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
     metrics["threads.0.ready.transition"] = 0
     metrics["threads.0.move_wait.noisy"] = 0
     metrics["threads.0.move_wait.quiet"] = 0
+    metrics["threads.0.repetition_wait.nnue_update"] = 0
+    metrics["threads.0.repetition_wait.overlap"] = 0
+    metrics["threads.0.repetition_wait.checker"] = 0
+    metrics["concurrency.active_threads.0"] = 0
+    metrics["concurrency.active_threads.1"] = search_cycles
+    metrics["concurrency.inflight.0"] = search_cycles
+    for index in range(1, 6):
+        metrics[f"concurrency.inflight.{index}"] = 0
     for index in range(len(MOVE_BUCKETS)):
         metrics[f"move_order.bucket_writes.{index}"] = 1 if index == 2 else 0
         metrics[f"move_order.bucket_pops.{index}"] = 1 if index == 2 else 0
@@ -201,8 +221,10 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Legal candidates by searched rank", text)
         self.assertIn("Move generator busy; a generation request was waiting", text)
         self.assertIn("2 candidate pushes: 1 legal, 1 illegal; 0 reversals", text)
-        self.assertIn("static evaluator: 1 evaluations", text)
-        self.assertEqual(report["components"]["static_evaluator"]["evaluations"], 1)
+        self.assertIn("NNUE evaluator: 1 evaluations", text)
+        self.assertIn("updates: 5 accepted", text)
+        self.assertIn("update busy=5 cycles", text)
+        self.assertEqual(report["components"]["nnue_evaluator"]["evaluations"], 1)
         self.assertIn("Move generator operations", text)
         self.assertIn("Direct validation", text)
         self.assertIn("Move generation work", text)
@@ -230,6 +252,27 @@ class ReportTests(unittest.TestCase):
     def test_phase_total_mismatch_fails(self):
         metrics = sample_metrics()
         metrics["threads.0.phases.1"] = 9
+        with self.assertRaises(BuildError):
+            build_profile_report(
+                {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+                metrics,
+                {
+                    "best_move.from": 0,
+                    "best_move.to": 0,
+                    "best_move.promotion": 0,
+                    "score": 0,
+                    "nodes": 0,
+                    "completed_depth": 0,
+                    "deepest_search_ply": 0,
+                    "end_reason": 0,
+                    "error": 0,
+                },
+                0,
+            )
+
+    def test_controller_state_total_mismatch_fails(self):
+        metrics = sample_metrics()
+        metrics["states.controller.19"] = 9
         with self.assertRaises(BuildError):
             build_profile_report(
                 {"fen": "x", "threads": 1, "engine_clock_hz": 100},
@@ -293,6 +336,50 @@ class ReportTests(unittest.TestCase):
             report["threads"][0]["move_wait_breakdown"],
             {"noisy": 2, "quiet": 4},
         )
+
+    def test_repetition_wait_excludes_nnue_child_update(self):
+        metrics = sample_metrics()
+        metrics["threads.0.phases.1"] = 4
+        metrics["threads.0.phases.7"] = 6
+        metrics["threads.0.ready.dispatch"] = 4
+        metrics["threads.0.repetition_wait.nnue_update"] = 2
+        metrics["threads.0.repetition_wait.overlap"] = 3
+        metrics["threads.0.repetition_wait.checker"] = 1
+        report = build_profile_report(
+            {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+            metrics,
+            {
+                "best_move.from": 0, "best_move.to": 0, "best_move.promotion": 0,
+                "score": 0, "nodes": 5, "completed_depth": 0,
+                "deepest_search_ply": 0, "end_reason": 0, "error": 0,
+            },
+            1,
+        )
+        text = format_profile_report(report)
+        self.assertIn("NNUE child update pending", text)
+        self.assertIn("NNUE + repetition in flight", text)
+        self.assertIn("Repetition check in flight", text)
+        self.assertEqual(
+            report["threads"][0]["repetition_wait_breakdown"],
+            {"nnue_update": 2, "overlap": 3, "checker": 1},
+        )
+
+    def test_repetition_wait_breakdown_mismatch_fails(self):
+        metrics = sample_metrics()
+        metrics["threads.0.phases.1"] = 9
+        metrics["threads.0.phases.7"] = 1
+        metrics["threads.0.ready.dispatch"] = 9
+        with self.assertRaises(BuildError):
+            build_profile_report(
+                {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+                metrics,
+                {
+                    "best_move.from": 0, "best_move.to": 0, "best_move.promotion": 0,
+                    "score": 0, "nodes": 5, "completed_depth": 0,
+                    "deepest_search_ply": 0, "end_reason": 0, "error": 0,
+                },
+                1,
+            )
 
     def test_move_generator_operation_count_mismatch_fails(self):
         metrics = sample_metrics()

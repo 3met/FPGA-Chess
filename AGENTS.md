@@ -10,6 +10,7 @@ Relevant docs are under `docs/`. Start with [docs/README.md](docs/README.md), th
 * After any RTL changes, correct any docs if they are now invalid or out of date
 * This engine only plays standard chess games and does not need to support chess-960 type functionality or any positions that would not be possible in a standard chess game
 * When writing any chess-related RTL, consider if any properties of the game or game rules can be taken advantage of
+* Do not ever worry about backwards compatibility or version numbering unless instructed to
 
 ### Code Style
 

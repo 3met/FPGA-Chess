@@ -160,7 +160,7 @@ The total packed width is 272 bits.
 
 ### Evaluation Scores
 
-`EvalScore` is a signed 16-bit value. Raw static evaluation and incremental PST/material state are White-relative: positive scores are good for White and negative scores are good for Black. Search converts raw evaluation into side-to-move point-of-view scores at search boundaries.
+`EvalScore` is a signed 16-bit value. Raw evaluation and incremental PST/material state are White-relative: positive scores are good for White and negative scores are good for Black. Search converts raw evaluation into side-to-move point-of-view scores at search boundaries.
 
 `PstScore` is a signed 10-bit ROM-entry value. Board update sign-extends each entry to `EvalScore` before applying the incremental material/PST delta, so stored PST values use less block memory without narrowing accumulated or final evaluation scores.
 

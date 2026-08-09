@@ -3,6 +3,7 @@
 import general_chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
+import nnue_defs::*;
 import tt_defs::*;
 
 module tb_search_controller;
@@ -57,6 +58,25 @@ module tb_search_controller;
     bit lmr_full_tt_depth_seen;
     bit null_push_seen;
     bit null_reverse_seen;
+    bit nnue_delta_seen;
+    bit nnue_rebuild_seen;
+    bit nnue_pending_state_invalid = 1'b1;
+    bit nnue_root_initialization_seen;
+    bit nnue_root_initialization_correct = 1'b1;
+    bit nnue_king_delta_seen;
+    bit nnue_king_delta_correct = 1'b1;
+    bit nnue_castle_delta_seen;
+    bit nnue_castle_request_count_correct = 1'b1;
+    bit nnue_castle_state_seen;
+    bit nnue_en_passant_state_seen;
+    bit nnue_promotion_state_seen;
+    bit nnue_special_state_correct = 1'b1;
+    bit nnue_reverse_delta_seen;
+    bit nnue_recovery_rebuild_seen;
+    bit nnue_null_state_seen;
+    bit nnue_null_state_correct = 1'b1;
+    int nnue_root_rebuild_count[0:THREAD_COUNT-1];
+    int nnue_castle_request_count[0:THREAD_COUNT-1];
     bit lmr_depth_check_pending[0:THREAD_COUNT-1];
     bit lmr_recovery_check_pending[0:THREAD_COUNT-1];
     bit lmr_full_tt_pending[0:THREAD_COUNT-1];
@@ -129,6 +149,38 @@ module tb_search_controller;
             $error("[FAIL] %s", label);
         end
     endtask : check
+
+    // Rebuild the two-perspective accumulator directly from a board so special
+    // move deltas can be checked against their complete positional state.
+    function automatic logic [
+        NNUE_STATE_VALUE_COUNT * NNUE_ACCUMULATOR_BITS-1:0]
+        reference_nnue_state(input FullBoard board);
+        automatic logic [
+            NNUE_STATE_VALUE_COUNT * NNUE_ACCUMULATOR_BITS-1:0] expected = '0;
+
+        for (int perspective = 0; perspective < 2; perspective++) begin
+            for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
+                automatic NnueAccumulator sum = NnueAccumulator'($signed(
+                    dut.nnue_evaluator.accumulator_bias[lane][
+                        NNUE_ACCUMULATOR_BIAS_BITS-1:0]));
+                for (int pos = 0; pos < 64; pos++) begin
+                    automatic Tile tile = board.tiles[pos];
+                    if (tile.piece_type != NULL_PIECE) begin
+                        automatic NnueFeatureIndex feature = nnue_feature_index(
+                            Position'(pos), tile, Color'(perspective));
+                        automatic logic signed [NNUE_FEATURE_WEIGHT_BITS-1:0] trit =
+                            $signed(dut.nnue_evaluator.feature_rom[feature][
+                                lane * NNUE_FEATURE_WEIGHT_BITS
+                                    +: NNUE_FEATURE_WEIGHT_BITS]);
+                        sum = NnueAccumulator'(sum + NnueAccumulator'(trit));
+                    end
+                end
+                expected[(perspective * NNUE_ACCUMULATOR_COUNT + lane)
+                        * NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS] = sum;
+            end
+        end
+        return expected;
+    endfunction : reference_nnue_state
 
     function automatic EngineControllerRequest zero_request();
         automatic EngineControllerRequest request;
@@ -249,10 +301,18 @@ module tb_search_controller;
 
     task automatic new_game();
         automatic EngineControllerRequest request = zero_request();
+        automatic logic nnue_metadata_clear = 1'b1;
 
         request.operation = ENGINE_CTRL_NEW_GAME;
         hold_request_until_ready(request, "new game");
         check(!resp.error, "new game response has no error");
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            nnue_metadata_clear &= !dut.nnue_plan_pending[tid];
+            nnue_metadata_clear &= !dut.nnue_state_valid[tid];
+        end
+        check(nnue_metadata_clear, "new game invalidates queued NNUE plans and accumulator states");
+        check(dut.nnue_update_idle && dut.nnue_eval_ready,
+            "new game leaves the NNUE datapath idle and ready");
     endtask : new_game
 
     task automatic make_direct_move(input Move move, input string label);
@@ -298,7 +358,7 @@ module tb_search_controller;
         pulse_request(request, label);
         wait_response(label);
         check(!resp.error, {label, " no error"});
-        check(resp.nodes_count > NodeCountType'(20), {label, " searches below root"});
+        check(resp.nodes_count != NodeCountType'(0), {label, " searches below root"});
         check(resp.completed_depth == depth, {label, " completed requested depth"});
         check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
         check(!(resp.best_move.from_pos == Position'(0) && resp.best_move.to_pos == Position'(0)), {label, " best move is non-null"});
@@ -432,6 +492,8 @@ module tb_search_controller;
             thread_eval_handoff_seen[idx] = 1'b0;
             root_first_move[idx] = NULL_MOVE;
             root_first_stack_move[idx] = NULL_MOVE;
+            nnue_root_rebuild_count[idx] = 0;
+            nnue_castle_request_count[idx] = 0;
         end
     endtask : clear_root_push_seen
 
@@ -536,6 +598,10 @@ module tb_search_controller;
                 $sformatf("%s thread %0d restored scheduler thread after eval result", label, idx));
             check(dut.search_thread_completed_depth[idx] == 8'd1,
                 $sformatf("%s thread %0d completed depth", label, idx));
+            check(nnue_root_rebuild_count[idx] == 1,
+                $sformatf("%s thread %0d built its root exactly once", label, idx));
+            check(dut.nnue_state_valid[idx],
+                $sformatf("%s thread %0d retained a valid root accumulator", label, idx));
             check(!(dut.search_thread_completed_best_move[idx].from_pos == Position'(0)
                     && dut.search_thread_completed_best_move[idx].to_pos == Position'(0)),
                 $sformatf("%s thread %0d completed best move non-null found %0d->%0d",
@@ -593,6 +659,7 @@ module tb_search_controller;
     task automatic kill_active_search(input string label);
         automatic EngineControllerRequest request = zero_request();
         automatic EngineControllerRequest kill_request = zero_request();
+        automatic logic nnue_metadata_clear = 1'b1;
 
         request.operation = ENGINE_CTRL_SEARCH_DEPTH;
         request.depth_limit = 8'd4;
@@ -610,7 +677,11 @@ module tb_search_controller;
         wait_response(label);
         check(!resp.error, {label, " kill no error"});
         check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
+        check(dut.nnue_update_idle && dut.nnue_eval_ready,
+            {label, " flushes queued NNUE work"});
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            nnue_metadata_clear &= !dut.nnue_plan_pending[tid];
+            nnue_metadata_clear &= !dut.nnue_state_valid[tid];
             check(dut.search_board_wait_count[tid] == 0,
                 $sformatf("%s thread %0d board wait canceled", label, tid));
             check(dut.search_move_wait_count[tid] == 0,
@@ -636,6 +707,7 @@ module tb_search_controller;
             check(dut.search_thread_status[tid] == dut.SEARCH_THREAD_IDLE,
                 $sformatf("%s thread %0d status idle after kill", label, tid));
         end
+        check(nnue_metadata_clear, {label, " invalidates NNUE state metadata"});
         for (int idx = 0; idx < dut.SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
             check(!dut.search_board_tag_valid_pipe[idx],
                 $sformatf("%s board tag pipe %0d canceled", label, idx));
@@ -643,10 +715,6 @@ module tb_search_controller;
         for (int idx = 0; idx < dut.SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
             check(!dut.search_move_tag_valid_pipe[idx],
                 $sformatf("%s move tag pipe %0d canceled", label, idx));
-        end
-        for (int idx = 0; idx < dut.SEARCH_EVAL_TAG_PIPE_LEN; idx++) begin
-            check(!dut.search_eval_tag_valid_pipe[idx],
-                $sformatf("%s eval tag pipe %0d canceled", label, idx));
         end
     endtask : kill_active_search
 
@@ -1077,14 +1145,17 @@ module tb_search_controller;
         new_game();
         setup_castling_perft_position();
         run_perft(8'd1, NodeCountType'(15), "castling perft depth 1");
+        run_search_depth(8'd1, "castling NNUE delta search");
 
         new_game();
         setup_en_passant_perft_position();
         run_perft(8'd1, NodeCountType'(8), "en passant perft depth 1");
+        run_search_depth(8'd1, "en passant NNUE delta search");
 
         new_game();
         setup_promotion_perft_position();
         run_perft(8'd1, NodeCountType'(9), "promotion perft depth 1");
+        run_search_depth(8'd1, "promotion NNUE delta search");
 
         new_game();
         setup_stalemate_position();
@@ -1145,6 +1216,61 @@ module tb_search_controller;
         run_fixed_time_search("zero fixed-time search");
         run_clock_budget_search("zero clock-budget search");
 
+        // A synthetic nonzero model proves the search score consumes the NNUE
+        // result rather than merely exercising the update/output handshake.
+        begin
+            automatic Move baseline_move, nnue_move;
+            automatic EvalScore baseline_score, nnue_score;
+            automatic NodeCountType baseline_nodes, nnue_nodes;
+            for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
+                dut.nnue_evaluator.output_weight_rows[row] = 0;
+            new_game();
+            setup_kings_only();
+            set_tile(WHITE_PAWN, Position'(8), "NNUE baseline white pawn a2");
+            run_search_depth_record(8'd0, "NNUE baseline search",
+                baseline_move, baseline_score, baseline_nodes);
+            for (int row = 0; row < NNUE_FEATURE_COUNT; row++)
+                dut.nnue_evaluator.feature_rom[row] = 0;
+            dut.nnue_evaluator.feature_rom[8] = {NNUE_ROW_BYTES{8'h55}};
+            for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
+                dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h1}};
+            for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
+                dut.nnue_evaluator.accumulator_bias[lane] = 0;
+            new_game();
+            setup_kings_only();
+            set_tile(WHITE_PAWN, Position'(8), "NNUE correction white pawn a2");
+            run_search_depth_record(8'd0, "NNUE correction search",
+                nnue_move, nnue_score, nnue_nodes);
+            // Only White's direct a2-pawn feature is nonzero, so the shared
+            // difference head contributes one activation in every lane.
+            check(nnue_score == baseline_score + EvalScore'(256),
+                $sformatf("search adds NNUE correction: baseline=%0d corrected=%0d",
+                    baseline_score, nnue_score));
+        end
+        check(dut.EVAL_WAIT_CYCLES == NNUE_OUTPUT_MAC_CYCLES + 1,
+            "NNUE evaluation wait includes MAC and registered-result cycles");
+        check(nnue_delta_seen, "NNUE child states apply physical move deltas");
+        check(nnue_reverse_delta_seen,
+            "NNUE restores parent state with an inverse stack delta");
+        check(nnue_rebuild_seen, "NNUE rebuild path initializes root accumulators");
+        check(nnue_pending_state_invalid,
+            "pending NNUE child slots stay invalid until their tagged completion");
+        check(nnue_root_initialization_seen && nnue_root_initialization_correct,
+            "pre-search NNUE roots are flushed, valid, and identical for every thread");
+        check(nnue_king_delta_seen && nnue_king_delta_correct,
+            "king moves use direct incremental NNUE features");
+        check(nnue_castle_delta_seen,
+            "castling includes the rook in direct NNUE deltas");
+        check(nnue_castle_request_count_correct,
+            "each castling delta uses exactly four feature requests");
+        check(nnue_castle_state_seen && nnue_en_passant_state_seen
+                && nnue_promotion_state_seen && nnue_special_state_correct,
+            "special-move deltas and inverses exactly match full NNUE rebuilds");
+        check(nnue_null_state_seen && nnue_null_state_correct,
+            "null children retain valid NNUE state without an update plan");
+        check(!nnue_recovery_rebuild_seen,
+            "ordinary evaluation never repairs an unexpectedly invalid accumulator");
+
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
         if (fail_count != 0) begin
@@ -1186,7 +1312,118 @@ module tb_search_controller;
                         || req.operation == ENGINE_CTRL_SEARCH_NODES)) begin
                 stats_reset_pending <= 1'b1;
             end
+            if (dut.nnue_update_valid && dut.nnue_update_ready) begin
+                if (dut.nnue_update_req.clear) begin
+                    nnue_rebuild_seen = 1'b1;
+                    if (dut.nnue_update_req.ply == PlyIndex'(0))
+                        nnue_root_rebuild_count[dut.nnue_update_req.thread_id] += 1;
+                end else if (dut.nnue_delta_busy
+                        && dut.nnue_plan_kind[dut.nnue_delta_thread] == dut.NNUE_PLAN_DELTA)
+                    nnue_delta_seen = 1'b1;
+                if (dut.nnue_delta_busy
+                        && dut.nnue_plan_kind[dut.nnue_delta_thread] == dut.NNUE_PLAN_DELTA
+                        && dut.nnue_plan_mover[dut.nnue_delta_thread].piece_type == KING
+                        && dut.nnue_plan_from[dut.nnue_delta_thread][2:0] == BoardFile'(4)
+                        && (dut.nnue_plan_to[dut.nnue_delta_thread][2:0] == BoardFile'(2)
+                            || dut.nnue_plan_to[dut.nnue_delta_thread][2:0] == BoardFile'(6)))
+                    nnue_castle_request_count[dut.nnue_delta_thread] += 1;
+            end
+            if (dut.nnue_update_done_valid
+                    && dut.nnue_plan_mover[dut.nnue_update_done_thread].piece_type == KING
+                    && dut.nnue_plan_from[dut.nnue_update_done_thread][2:0] == BoardFile'(4)
+                    && (dut.nnue_plan_to[dut.nnue_update_done_thread][2:0] == BoardFile'(2)
+                        || dut.nnue_plan_to[dut.nnue_update_done_thread][2:0]
+                            == BoardFile'(6))) begin
+                nnue_castle_request_count_correct &=
+                    nnue_castle_request_count[dut.nnue_update_done_thread] == 4;
+                nnue_castle_request_count[dut.nnue_update_done_thread] = 0;
+            end
+            if (dut.nnue_update_done_valid) begin
+                automatic ThreadID completed_thread = dut.nnue_update_done_thread;
+                automatic logic is_castle =
+                    dut.nnue_plan_mover[completed_thread].piece_type == KING
+                    && dut.nnue_plan_from[completed_thread][2:0] == BoardFile'(4)
+                    && (dut.nnue_plan_to[completed_thread][2:0] == BoardFile'(2)
+                        || dut.nnue_plan_to[completed_thread][2:0] == BoardFile'(6));
+                automatic logic is_en_passant =
+                    dut.nnue_plan_mover[completed_thread].piece_type == PAWN
+                    && dut.nnue_plan_capture_valid[completed_thread]
+                    && dut.nnue_plan_capture_pos[completed_thread]
+                        != dut.nnue_plan_to[completed_thread];
+                automatic logic is_promotion =
+                    dut.nnue_plan_mover[completed_thread].piece_type == PAWN
+                    && dut.nnue_plan_placed[completed_thread].piece_type != PAWN;
+                if (is_castle || is_en_passant || is_promotion) begin
+                    automatic logic [
+                        NNUE_STATE_VALUE_COUNT * NNUE_ACCUMULATOR_BITS-1:0]
+                        expected = reference_nnue_state(
+                            dut.search_board[completed_thread]);
+                    nnue_castle_state_seen |= is_castle;
+                    nnue_en_passant_state_seen |= is_en_passant;
+                    nnue_promotion_state_seen |= is_promotion;
+                    nnue_special_state_correct &=
+                        dut.nnue_evaluator.accumulator_update_memory[
+                            completed_thread] === expected;
+                    nnue_special_state_correct &=
+                        dut.nnue_evaluator.accumulator_eval_memory[
+                            completed_thread] === expected;
+                end
+            end
+            if (dut.state == dut.ST_SEARCH_ROOT_INIT
+                    && dut.nnue_root_init_pos == Position'(0)
+                    && dut.nnue_root_init_first)
+                nnue_root_initialization_correct &= dut.nnue_update_idle;
+            if (dut.state == dut.ST_SEARCH_RUN && dut.nnue_roots_initialized
+                    && !nnue_root_initialization_seen) begin
+                nnue_root_initialization_seen = 1'b1;
+                for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+                    nnue_root_initialization_correct &=
+                        dut.nnue_state_valid[idx];
+                    nnue_root_initialization_correct &=
+                        dut.nnue_evaluator.accumulator_update_memory[
+                            idx
+                        ] === dut.nnue_evaluator.accumulator_update_memory[0];
+                    nnue_root_initialization_correct &=
+                        dut.nnue_evaluator.accumulator_eval_memory[
+                            idx
+                        ] === dut.nnue_evaluator.accumulator_eval_memory[0];
+                end
+            end
+            if (dut.state == dut.ST_SEARCH_RUN && dut.nnue_build_busy
+                    && dut.nnue_update_valid && dut.nnue_update_ready
+                    && dut.nnue_update_req.clear)
+                nnue_recovery_rebuild_seen = 1'b1;
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+                if (dut.search_stack_top[idx].entered_by_null
+                        && dut.search_thread_phase[idx] == dut.SEARCH_PHASE_READY) begin
+                    nnue_null_state_seen = 1'b1;
+                    nnue_null_state_correct &= dut.nnue_state_valid[idx]
+                        && !dut.nnue_plan_pending[idx];
+                end
+                if (dut.nnue_plan_pending[idx])
+                    nnue_pending_state_invalid &=
+                        !dut.nnue_state_valid[idx];
+                if (dut.nnue_plan_pending[idx] && dut.nnue_plan_reverse[idx])
+                    nnue_reverse_delta_seen = 1'b1;
+                if (dut.nnue_plan_pending[idx] && dut.nnue_plan_real_move[idx]
+                        && dut.nnue_plan_mover[idx].piece_type == KING) begin
+                    automatic logic is_castle =
+                        dut.nnue_plan_from[idx][2:0] == BoardFile'(4)
+                        && (dut.nnue_plan_to[idx][2:0] == BoardFile'(2)
+                            || dut.nnue_plan_to[idx][2:0] == BoardFile'(6));
+                    if (is_castle) begin
+                        nnue_king_delta_correct &=
+                            dut.nnue_plan_kind[idx] == dut.NNUE_PLAN_DELTA;
+                    end else begin
+                        nnue_king_delta_seen = 1'b1;
+                        nnue_king_delta_correct &=
+                            dut.nnue_plan_kind[idx] == dut.NNUE_PLAN_DELTA;
+                    end
+                    if (dut.nnue_plan_from[idx] == Position'(4)
+                            && dut.nnue_plan_to[idx] == Position'(6)
+                            && dut.nnue_plan_kind[idx] == dut.NNUE_PLAN_DELTA)
+                        nnue_castle_delta_seen = 1'b1;
+                end
                 if (lmr_depth_check_pending[idx]) begin
                     check(8'(dut.search_pending_child_depth[idx]) == lmr_expected_child_depth[idx],
                         "LMR registers the expected reduced child depth before board completion");

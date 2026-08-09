@@ -27,7 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
         if name != "train":
             subparser.add_argument("--run", help="Run ID or path; defaults to the latest applicable run")
         else:
-            subparser.add_argument("--resume", help="Resume a run ID or path from its latest checkpoint")
+            source = subparser.add_mutually_exclusive_group()
+            source.add_argument("--resume", help="Resume a run ID or path from its latest checkpoint")
+            source.add_argument(
+                "--initialize",
+                help="Start a new run from another run's best model with a fresh optimizer",
+            )
         if name == "engine-commit":
             subparser.add_argument("--dry-run", action="store_true", help="Show exported material without changing files")
     return parser
@@ -42,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.setdefault("WANDB_SILENT", "true")
             cache = build_cache(config)
             resume_run = resolve_run(root, args.resume) if args.resume else None
-            train(config, cache, resume_run=resume_run)
+            initialize_run = resolve_run(root, args.initialize) if args.initialize else None
+            train(config, cache, resume_run=resume_run, initialize_run=initialize_run)
             return 0
         if args.command == "view-report":
             print_report(resolve_run(root, args.run))

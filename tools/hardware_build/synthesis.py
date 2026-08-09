@@ -331,7 +331,7 @@ def collect_vivado_summary(build_dir: Path) -> list[str]:
 
 def synth_vivado(manifest: dict, target_name: str, target: dict, part: str | None) -> int:
     if not part:
-        raise BuildError("--part is required for vivado-generic")
+        raise BuildError(f"--part is required for {target_name}")
     require_tool("vivado")
     tcl = write_vivado_project(manifest, target_name, target, part)
     build_dir = tcl.parent

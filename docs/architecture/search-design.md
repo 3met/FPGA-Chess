@@ -22,7 +22,7 @@ Each thread owns its search stack, alpha/beta values, depth counters, node count
 
 Each thread also owns its current iterative-deepening target, root aspiration window, and completed-iteration result. The primary thread alone publishes the engine result and controls completion of a depth-limited search; helper completion never delays primary progress.
 
-Search node counts advance exactly when a speculative real-move push has passed the king-safety check and the controller enters its legal child position. The root, synthetic null children, and rejected pseudo-legal candidates are not counted; legal children count even when repetition, terminal scoring, or a TT cutoff avoids static evaluation.
+Search node counts advance exactly when a speculative real-move push has passed the king-safety check and the controller enters its legal child position. The root, synthetic null children, and rejected pseudo-legal candidates are not counted; legal children count even when repetition, terminal scoring, or a TT cutoff avoids NNUE evaluation.
 
 Search uses stack records for reverse traversal rather than storing a full board state at every ply. Each packed record includes the node's actual remaining main-search depth and an 8-bit saturating count of legal moves already searched. The actual depth controls qsearch entry and TT depth instead of deriving depth from ply. A push move sends the current board state and move into the board update pipeline, and a reverse move uses the stored move record to recover the previous state. A null push uses the same pipeline and history RAM but toggles only side-to-move state, clears en passant, and increments the halfmove clock; its otherwise-illegal same-square history record identifies the null operation without widening the move-record RAM.
 
@@ -30,9 +30,9 @@ A thread has at most one in-flight request per major pipeline. Requests and resp
 
 ## Pipeline Scheduling
 
-The search controller feeds five shared pipelines: board update, move generation, static evaluation, TT lookup, and TT store.
+The search controller feeds five shared subsystems: board update, move generation, NNUE evaluation, TT lookup, and TT store.
 
-Board update, move generation, and static evaluation are high-area pipelines kept busy by scheduling work across the available threads. These pipelines allow one accepted request per cycle when work is available. TT pipelines are constrained by external memory bandwidth.
+Board update and move generation accept independently scheduled thread work. NNUE has one streaming physical update port: each thread builds its root once per search and every child reads its live accumulator directly for incremental feature changes. A castling plan uses four consecutive feature requests to remove and add the king and rook at their standard square pairs, while a null child needs no request. The full-width update pipeline accepts one feature request per cycle, and rotating plan priority prevents a low thread identifier from monopolizing the port. A newly created plan starts immediately when the planner is idle. Repetition lookup starts alongside NNUE construction after a legal board result; the child becomes runnable only after both tagged operations finish. The independent accumulator read port allows the two-group output layer to evaluate one completed state while another thread's updates continue. TT pipelines are constrained by external memory bandwidth.
 
 Pipeline arbitration prioritizes captured TT lookup responses, parent-return folding, TT lookups, and normal ready search progress over TT stores, because lookups and returned child values block search progress while stores can be delayed. Delayed work remains associated with its thread and is retried by the scheduler.
 

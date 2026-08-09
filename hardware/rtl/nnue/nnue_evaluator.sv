@@ -1,0 +1,345 @@
+import general_chess_defs::*;
+import nnue_defs::*;
+
+module nnue_evaluator #(
+    parameter int STATE_THREAD_COUNT = THREAD_COUNT
+) (
+    input logic clk,
+    input logic rst_n,
+    input logic clear,
+    input logic update_valid,
+    output logic update_ready,
+    output logic update_idle,
+    input NnueUpdateRequest update_req,
+    output logic update_done_valid,
+    output ThreadID update_done_thread,
+    output PlyIndex update_done_ply,
+    input logic eval_valid,
+    output logic eval_ready,
+    input ThreadID eval_thread_id,
+    output logic result_valid,
+    output EvalScore result
+);
+
+    // Each thread owns one live accumulator. Search stores compact move deltas
+    // and applies their inverse while unwinding instead of retaining a copy per ply.
+    localparam int STATE_COUNT = STATE_THREAD_COUNT;
+    localparam int STATE_ADDR_BITS = (STATE_COUNT <= 1) ? 1 : $clog2(STATE_COUNT);
+    localparam int SOFT_OUTPUT_MAC_LANES = 3 * NNUE_OUTPUT_MAC_LANES / 4;
+    localparam int ACCUMULATOR_WORD_BITS =
+        NNUE_STATE_VALUE_COUNT * NNUE_ACCUMULATOR_BITS;
+    typedef logic [STATE_ADDR_BITS-1:0] StateAddress;
+    typedef logic signed [8:0] OutputProduct;
+    typedef logic signed [9:0] PairSum;
+    typedef logic signed [10:0] TripleSum;
+    typedef logic signed [11:0] SextetSum;
+    typedef logic signed [11:0] OctetSum;
+    typedef logic signed [12:0] SixteenSum;
+    typedef logic signed [13:0] ThirtyTwoSum;
+    typedef logic signed [14:0] SixtyFourSum;
+    typedef logic signed [15:0] MacGroupSum;
+    typedef logic signed [18:0] OutputSum;
+
+    NnueUpdateRequest active_update;
+    logic update_busy;
+    logic [NNUE_FEATURE_ROW_BITS-1:0] feature_row_white, feature_row_black;
+
+    // These are generic inferred memories; the paired attributes are advisory
+    // hints for Intel and AMD tools and unsupported hints may be ignored.
+    // The update mirror uses distributed RAM for its wide asynchronous read,
+    // while the evaluation mirror uses block RAM for its synchronous read.
+    // Both copies are written together to provide two independent read ports.
+    (* ramstyle = "MLAB", ram_style = "distributed" *)
+    logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_update_memory[STATE_COUNT];
+    (* ramstyle = "no_rw_check", ram_style = "block" *)
+    logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_eval_memory[STATE_COUNT];
+    logic [ACCUMULATOR_WORD_BITS-1:0] eval_accumulators;
+    logic eval_busy;
+    logic partial_pending;
+    logic result_pending;
+    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES + 1)-1:0] eval_cycle;
+    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] partial_cycle;
+    OctetSum partial_q[16];
+    OutputSum eval_sum;
+    OutputSum result_sum;
+
+    (* ram_style = "block" *)
+    logic [NNUE_ROW_BYTES * 8-1:0] feature_rom[NNUE_FEATURE_COUNT];
+    // Each row supplies one complete group of 128 packed signed-int4 weights.
+    (* ramstyle = "MLAB", ram_style = "distributed" *)
+    logic [NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS-1:0]
+        output_weight_rows[NNUE_OUTPUT_MAC_CYCLES];
+    // Hex files have nibble granularity; only the signed low three bits enter
+    // the datapath, avoiding loader truncation warnings without widening it.
+    logic [3:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
+`ifdef FPGA_CHESS_PROFILE
+    longint unsigned profile_accumulator_wrap_lanes;
+`endif
+
+    initial begin
+        $readmemh("hardware/data/nnue/feature_transformer.hex", feature_rom);
+        $readmemh("hardware/data/nnue/output_weights.hex", output_weight_rows);
+        $readmemh("hardware/data/nnue/accumulator_bias.hex", accumulator_bias);
+    end
+
+    function automatic StateAddress state_address(input ThreadID thread_id);
+        return StateAddress'(thread_id);
+    endfunction
+
+    // Expand most signed-int4 products into two's-complement partial
+    // products, balancing portable logic and DSP inference without primitives.
+    function automatic OutputProduct soft_output_product(
+        input logic signed [5:0] activation,
+        input logic signed [3:0] weight
+    );
+        automatic OutputProduct activation_extended = OutputProduct'(activation);
+        automatic OutputProduct product = '0;
+        if (weight[0])
+            product += activation_extended;
+        if (weight[1])
+            product += activation_extended <<< 1;
+        if (weight[2])
+            product += activation_extended <<< 2;
+        if (weight[3])
+            product -= activation_extended <<< 3;
+        return product;
+    endfunction
+
+    // Leave the remaining quarter as generic multiplication so each FPGA tool may
+    // use its native small-multiplier resource.
+    function automatic OutputProduct hard_output_product(
+        input logic signed [5:0] activation,
+        input logic signed [3:0] weight
+    );
+        return activation * weight;
+    endfunction
+
+    // The full-width update pipeline accepts one transformer row per cycle.
+    assign update_ready = 1'b1;
+    assign update_idle = !update_busy;
+    // Accept a new snapshot while the preceding registered partial sums drain.
+    assign eval_ready = !eval_busy || (eval_busy
+        && eval_cycle == NNUE_OUTPUT_MAC_CYCLES && partial_pending);
+
+    always_ff @(posedge clk) begin
+        if (!rst_n || clear) begin
+            update_busy <= 1'b0;
+            update_done_valid <= 1'b0;
+            update_done_thread <= '0;
+            update_done_ply <= '0;
+            eval_busy <= 1'b0;
+            partial_pending <= 1'b0;
+            result_pending <= 1'b0;
+            result_valid <= 1'b0;
+            result <= '0;
+`ifdef FPGA_CHESS_PROFILE
+            profile_accumulator_wrap_lanes <= 0;
+`endif
+        end else begin
+            result_valid <= 1'b0;
+            update_done_valid <= 1'b0;
+
+            if (update_valid) begin
+                active_update <= update_req;
+                feature_row_white <= feature_rom[update_req.white_feature];
+                feature_row_black <= feature_rom[update_req.black_feature];
+            end
+            update_busy <= update_valid;
+
+            if (update_busy) begin
+                automatic StateAddress destination_address =
+                    state_address(active_update.thread_id);
+                automatic logic [ACCUMULATOR_WORD_BITS-1:0] committed_state;
+`ifdef FPGA_CHESS_PROFILE
+                automatic longint unsigned wrapped_lanes = 0;
+`endif
+                for (int perspective = 0; perspective < 2; perspective++) begin
+                    for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
+                        automatic int source_bit_offset =
+                            (perspective * NNUE_ACCUMULATOR_COUNT + lane)
+                                * NNUE_ACCUMULATOR_BITS;
+                        automatic NnueAccumulator old_value = active_update.clear
+                            ? NnueAccumulator'($signed(accumulator_bias[lane][
+                                NNUE_ACCUMULATOR_BIAS_BITS-1:0]))
+                            : $signed(accumulator_update_memory[
+                                destination_address][
+                                source_bit_offset +: NNUE_ACCUMULATOR_BITS]);
+                        automatic logic signed [1:0] trit = perspective == 0
+                            ? $signed(feature_row_white[
+                                lane * NNUE_FEATURE_WEIGHT_BITS
+                                    +: NNUE_FEATURE_WEIGHT_BITS])
+                            : $signed(feature_row_black[
+                                lane * NNUE_FEATURE_WEIGHT_BITS
+                                    +: NNUE_FEATURE_WEIGHT_BITS]);
+                        automatic logic perspective_enable = perspective == 0
+                            ? active_update.white_enable : active_update.black_enable;
+                        automatic NnueAccumulator changed =
+                            active_update.add
+                                ? old_value + NnueAccumulator'(trit)
+                                : old_value - NnueAccumulator'(trit);
+`ifdef FPGA_CHESS_PROFILE
+                        automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
+                            old_extended = {old_value[NNUE_ACCUMULATOR_BITS-1], old_value};
+                        automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
+                            trit_extended =
+                                {{(NNUE_ACCUMULATOR_BITS-1){trit[1]}}, trit};
+                        automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
+                            exact_changed = active_update.add
+                                ? old_extended + trit_extended
+                                : old_extended - trit_extended;
+                        if (perspective_enable
+                                && (exact_changed > 7'sd31
+                                    || exact_changed < -7'sd32))
+                            wrapped_lanes++;
+`endif
+                        committed_state[source_bit_offset
+                                +: NNUE_ACCUMULATOR_BITS] =
+                            perspective_enable ? NnueAccumulator'(changed) : old_value;
+                    end
+                end
+                accumulator_update_memory[destination_address] <= committed_state;
+                accumulator_eval_memory[destination_address] <= committed_state;
+                if (active_update.complete) begin
+                    update_done_valid <= 1'b1;
+                    update_done_thread <= active_update.thread_id;
+                    update_done_ply <= active_update.ply;
+                end
+`ifdef FPGA_CHESS_PROFILE
+                profile_accumulator_wrap_lanes <=
+                    profile_accumulator_wrap_lanes + wrapped_lanes;
+`endif
+            end
+
+            // Clip from a dedicated result register so output timing is
+            // independent of the fourth MAC tree.
+            if (result_pending) begin
+                if (result_sum > 24'sd30999)
+                    result <= EvalScore'(30999);
+                else if (result_sum < -24'sd30999)
+                    result <= EvalScore'(-30999);
+                else
+                    result <= EvalScore'(result_sum);
+                result_valid <= 1'b1;
+                result_pending <= 1'b0;
+            end
+
+            // Keep the evaluation-memory read in one syntactic location so
+            // Intel and AMD tools infer a single synchronous read port.
+            if (eval_valid && eval_ready)
+                eval_accumulators <= accumulator_eval_memory[
+                    state_address(eval_thread_id)];
+
+            if (eval_busy) begin
+                automatic OutputProduct products[NNUE_OUTPUT_MAC_LANES];
+                automatic TripleSum triple_sums_a[16], triple_sums_b[16];
+                automatic PairSum pair_sums[16];
+                automatic SextetSum sextet_sums[16];
+                automatic SixteenSum sums_8[8];
+                automatic ThirtyTwoSum sums_4[4];
+                automatic SixtyFourSum sums_2[2];
+                automatic MacGroupSum lane_sum;
+                automatic OutputSum cycle_sum;
+                partial_pending <= 1'b0;
+
+                // Register sixteen partial sums to split the RAM/arithmetic path from
+                // the upper adder tree without retaining every DSP product.
+                if (eval_cycle < NNUE_OUTPUT_MAC_CYCLES) begin
+                    automatic logic [
+                        NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS-1:0]
+                        weight_row = output_weight_rows[eval_cycle];
+                    for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
+                        automatic int input_index =
+                            int'(eval_cycle) * NNUE_OUTPUT_MAC_LANES + lane;
+                        automatic NnueAccumulator white_accumulator =
+                            $signed(eval_accumulators[
+                                input_index * NNUE_ACCUMULATOR_BITS
+                                    +: NNUE_ACCUMULATOR_BITS]);
+                        automatic NnueAccumulator black_accumulator =
+                            $signed(eval_accumulators[
+                                (NNUE_ACCUMULATOR_COUNT + input_index)
+                                    * NNUE_ACCUMULATOR_BITS
+                                    +: NNUE_ACCUMULATOR_BITS]);
+                        automatic logic signed [5:0] white_activation =
+                            white_accumulator < 0
+                                ? 6'sd0 : {1'b0, white_accumulator[4:0]};
+                        automatic logic signed [5:0] black_activation =
+                            black_accumulator < 0
+                                ? 6'sd0 : {1'b0, black_accumulator[4:0]};
+                        automatic logic signed [5:0] activation =
+                            white_activation - black_activation;
+                        automatic logic signed [3:0] weight =
+                            $signed(weight_row[
+                                lane * NNUE_OUTPUT_WEIGHT_BITS
+                                    +: NNUE_OUTPUT_WEIGHT_BITS]);
+                        if (lane < SOFT_OUTPUT_MAC_LANES)
+                            products[lane] = soft_output_product(activation, weight);
+                        else
+                            products[lane] = hard_output_product(activation, weight);
+                    end
+                    // Reduce each registered eight-product chunk as 3+3+2.
+                    // This exposes natural small-multiplier groups to Intel,
+                    // AMD, and other tools without instantiating vendor DSP IP.
+                    for (int lane = 0; lane < 16; lane++) begin
+                        automatic int base = 8 * lane;
+                        triple_sums_a[lane] = TripleSum'(products[base])
+                            + TripleSum'(products[base + 1])
+                            + TripleSum'(products[base + 2]);
+                        triple_sums_b[lane] = TripleSum'(products[base + 3])
+                            + TripleSum'(products[base + 4])
+                            + TripleSum'(products[base + 5]);
+                        pair_sums[lane] = PairSum'(products[base + 6])
+                            + PairSum'(products[base + 7]);
+                        sextet_sums[lane] = SextetSum'(triple_sums_a[lane])
+                            + SextetSum'(triple_sums_b[lane]);
+                        partial_q[lane] <= OctetSum'(sextet_sums[lane])
+                            + OctetSum'(pair_sums[lane]);
+                    end
+                    partial_cycle <= eval_cycle[
+                        $clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0];
+                    partial_pending <= 1'b1;
+                    eval_cycle <= eval_cycle + 1'b1;
+                end
+
+                if (partial_pending) begin
+                    for (int lane = 0; lane < 8; lane++)
+                        sums_8[lane] = SixteenSum'(partial_q[2 * lane])
+                            + SixteenSum'(partial_q[2 * lane + 1]);
+                    for (int lane = 0; lane < 4; lane++)
+                        sums_4[lane] = ThirtyTwoSum'(sums_8[2 * lane])
+                            + ThirtyTwoSum'(sums_8[2 * lane + 1]);
+                    for (int lane = 0; lane < 2; lane++)
+                        sums_2[lane] = SixtyFourSum'(sums_4[2 * lane])
+                            + SixtyFourSum'(sums_4[2 * lane + 1]);
+                    lane_sum = MacGroupSum'(sums_2[0])
+                        + MacGroupSum'(sums_2[1]);
+                    cycle_sum = eval_sum + OutputSum'(lane_sum);
+                    if (partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1) begin
+                        result_sum <= cycle_sum;
+                        result_pending <= 1'b1;
+                        if (eval_valid && eval_ready) begin
+                            eval_cycle <= '0;
+                            eval_sum <= '0;
+                        end else begin
+                            eval_busy <= 1'b0;
+                        end
+                    end else begin
+                        eval_sum <= cycle_sum;
+                    end
+                end
+            end else if (eval_valid && eval_ready) begin
+                eval_cycle <= '0;
+                eval_sum <= '0;
+                partial_pending <= 1'b0;
+                eval_busy <= 1'b1;
+            end
+        end
+    end
+
+`ifndef SYNTHESIS
+    initial begin
+        assert (STATE_THREAD_COUNT >= 1 && STATE_THREAD_COUNT <= THREAD_COUNT)
+            else $fatal(1, "NNUE state thread count exceeds the ThreadID domain");
+    end
+`endif
+
+endmodule

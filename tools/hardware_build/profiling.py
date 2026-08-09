@@ -34,7 +34,8 @@ CONTROLLER_STATES = [
     "new_clear_wait", "new_setup_issue", "new_setup_wait", "new_done",
     "perft_gen_issue", "perft_gen_wait", "perft_push_issue", "perft_push_wait",
     "perft_reverse_issue", "perft_reverse_wait", "repetition_init",
-    "repetition_root_wait", "search_iter_start", "search_run", "respond", "kill_done",
+    "repetition_root_wait", "search_iter_start", "search_root_init", "search_run",
+    "respond", "kill_done",
 ]
 THREAD_PHASES = [
     "idle", "ready", "tt_wait", "eval_wait", "move_wait", "board_wait",
@@ -47,12 +48,13 @@ THREAD_PHASE_LABELS = {
     "eval_wait": "Evaluation in flight",
     "board_wait": "Board update in flight",
     "reverse_wait": "Reverse update in flight",
-    "repetition_wait": "Repetition check in flight",
+    "repetition_wait": "Child preparation/repetition wait",
     "store_publish": "TT store request pending",
     "terminal_wait": "Terminal scoring",
     "done": "Iteration handoff",
 }
 READY_BREAKDOWN_LABELS = {
+    "nnue_init": "NNUE root initialization",
     "dispatch": "Pipeline request accepted",
     "arbitration": "Shared-pipeline arbitration",
     "tt_blocked": "TT lookup request blocked",
@@ -172,6 +174,12 @@ def build_profile_report(
     """Build the stable JSON and all derived measurements."""
     search_cycles = metrics["cycles.search"]
     nodes = result_values["nodes"]
+    engine_states = _named_series(metrics, "states.engine", ENGINE_STATES)
+    controller_states = _named_series(metrics, "states.controller", CONTROLLER_STATES)
+    if sum(engine_states.values()) != search_cycles:
+        raise BuildError("Engine-state cycles do not match measured search cycles")
+    if sum(controller_states.values()) != search_cycles:
+        raise BuildError("Controller-state cycles do not match measured search cycles")
     simulated_seconds = search_cycles / configuration["engine_clock_hz"]
     memory_window_seconds = (
         search_cycles + metrics["cycles.drain"]
@@ -187,7 +195,7 @@ def build_profile_report(
         ready_breakdown = {
             name: metrics[f"threads.{tid}.ready.{name}"]
             for name in (
-                "dispatch", "arbitration", "tt_blocked", "noisy_move_blocked",
+                "nnue_init", "dispatch", "arbitration", "tt_blocked", "noisy_move_blocked",
                 "quiet_move_blocked", "transition"
             )
         }
@@ -203,6 +211,14 @@ def build_profile_report(
             raise BuildError(
                 f"Thread {tid} move-wait breakdown does not match move-wait cycles"
             )
+        repetition_wait_breakdown = {
+            kind: metrics[f"threads.{tid}.repetition_wait.{kind}"]
+            for kind in ("nnue_update", "overlap", "checker")
+        }
+        if sum(repetition_wait_breakdown.values()) != phases["repetition_wait"]:
+            raise BuildError(
+                f"Thread {tid} repetition-wait breakdown does not match repetition-wait cycles"
+            )
         threads.append(
             {
                 "id": tid,
@@ -211,6 +227,7 @@ def build_profile_report(
                 "phase_percent": {name: percent(value, search_cycles) for name, value in phases.items()},
                 "ready_breakdown": ready_breakdown,
                 "move_wait_breakdown": move_wait_breakdown,
+                "repetition_wait_breakdown": repetition_wait_breakdown,
                 "move_order_cycles": _named_series(
                     metrics, f"threads.{tid}.move_order", MOVE_ORDER_STATES
                 ),
@@ -344,6 +361,20 @@ def build_profile_report(
             }
         )
         previous_depth_nodes = depth_node_count
+    if sum(depth["cycles"] for depth in depth_breakdown) != search_cycles:
+        raise BuildError("Per-depth cycles do not match measured search cycles")
+
+    active_thread_histogram = {
+        str(index): metrics.get(f"concurrency.active_threads.{index}", 0)
+        for index in range(configuration["threads"] + 1)
+    }
+    inflight_histogram = {
+        str(index): metrics.get(f"concurrency.inflight.{index}", 0) for index in range(6)
+    }
+    if sum(active_thread_histogram.values()) != search_cycles:
+        raise BuildError("Active-thread histogram does not match measured search cycles")
+    if sum(inflight_histogram.values()) != search_cycles:
+        raise BuildError("In-flight histogram does not match measured search cycles")
 
     components = {
         "board_update": {
@@ -363,15 +394,52 @@ def build_profile_report(
                 metrics, "components.move_generator.states", GENERATOR_STATES
             ),
         },
-        "static_evaluator": {
+        "nnue_evaluator": {
             "evaluations": metrics["components.eval.evaluations"],
             "completions": metrics["components.eval.completions"],
+            "update_requests": metrics["components.eval.update_requests"],
+            "root_initialization_rows": metrics["components.eval.root_rows"],
+            "child_rebuild_rows": metrics["components.eval.rebuild_rows"],
+            "child_rebuilds": metrics["components.eval.rebuilds"],
+            "delta_feature_requests": metrics["components.eval.delta_requests"],
+            "completion_markers": metrics["components.eval.completion_markers"],
+            "recovery_rebuild_rows": metrics["components.eval.recovery_rows"],
+            "child_update_completions": metrics["components.eval.update_completions"],
+            "update_pipeline_busy_cycles": metrics["components.eval.update_busy_cycles"],
+            "update_backpressure_cycles":
+                metrics["components.eval.update_backpressure_cycles"],
+            "accumulator_wrap_lanes":
+                metrics["components.eval.accumulator_wrap_lanes"],
         },
         "repetition_checker": {
             "requests": metrics["components.repetition.requests"],
             "responses": metrics["components.repetition.responses"],
         },
     }
+    components["repetition_checker"]["inflight_child_thread_cycles"] = sum(
+        thread["repetition_wait_breakdown"]["overlap"]
+        + thread["repetition_wait_breakdown"]["checker"]
+        for thread in threads
+    )
+    nnue = components["nnue_evaluator"]
+    nnue_update_class_total = (
+        nnue["root_initialization_rows"]
+        + nnue["child_rebuild_rows"]
+        + nnue["delta_feature_requests"]
+        + nnue["completion_markers"]
+        + nnue["recovery_rebuild_rows"]
+    )
+    if nnue_update_class_total != nnue["update_requests"]:
+        raise BuildError("NNUE update classifications do not match accepted update requests")
+    if (
+        nnue["completions"] > nnue["evaluations"]
+        or nnue["update_pipeline_busy_cycles"] > search_cycles
+    ):
+        raise BuildError("NNUE completion or per-cycle counters exceed their measurement window")
+    nnue["root_initialization_cycles"] = controller_states["search_root_init"]
+    nnue["update_request_utilization_percent"] = percent(
+        nnue["update_requests"], search_cycles
+    )
     for values in components.values():
         values["issue_utilization_percent"] = percent(
             values.get(
@@ -414,19 +482,14 @@ def build_profile_report(
             "wall_to_simulated_time_ratio": rate(simulator_seconds, simulated_seconds),
         },
         "states": {
-            "engine": _named_series(metrics, "states.engine", ENGINE_STATES),
-            "controller": _named_series(metrics, "states.controller", CONTROLLER_STATES),
+            "engine": engine_states,
+            "controller": controller_states,
         },
         "threads": threads,
         "depth_breakdown": depth_breakdown,
         "concurrency": {
-            "active_threads": {
-                str(index): metrics.get(f"concurrency.active_threads.{index}", 0)
-                for index in range(configuration["threads"] + 1)
-            },
-            "inflight_components": {
-                str(index): metrics.get(f"concurrency.inflight.{index}", 0) for index in range(6)
-            },
+            "active_threads": active_thread_histogram,
+            "inflight_components": inflight_histogram,
         },
         "components": components,
         "stalls": {
@@ -566,6 +629,7 @@ def format_profile_report(report: dict) -> str:
     ]
     lifecycle_metrics = [
         (THREAD_PHASE_LABELS["idle"], "phase", "idle"),
+        (READY_BREAKDOWN_LABELS["nnue_init"], "ready", "nnue_init"),
         (READY_BREAKDOWN_LABELS["dispatch"], "ready", "dispatch"),
         (READY_BREAKDOWN_LABELS["tt_blocked"], "ready", "tt_blocked"),
         (READY_BREAKDOWN_LABELS["noisy_move_blocked"], "ready", "noisy_move_blocked"),
@@ -576,7 +640,9 @@ def format_profile_report(report: dict) -> str:
         ("Noisy move operation in flight", "move_wait", "noisy"),
         ("Quiet move operation in flight", "move_wait", "quiet"),
         (THREAD_PHASE_LABELS["board_wait"], "phase", "board_wait"),
-        (THREAD_PHASE_LABELS["repetition_wait"], "phase", "repetition_wait"),
+        ("NNUE child update pending", "repetition_wait", "nnue_update"),
+        ("NNUE + repetition in flight", "repetition_wait", "overlap"),
+        ("Repetition check in flight", "repetition_wait", "checker"),
         (THREAD_PHASE_LABELS["reverse_wait"], "phase", "reverse_wait"),
         (THREAD_PHASE_LABELS["terminal_wait"], "phase", "terminal_wait"),
         (THREAD_PHASE_LABELS["store_publish"], "phase", "store_publish"),
@@ -589,6 +655,8 @@ def format_profile_report(report: dict) -> str:
             return thread["phase_cycles"][key]
         if source == "move_wait":
             return thread["move_wait_breakdown"][key]
+        if source == "repetition_wait":
+            return thread["repetition_wait_breakdown"][key]
         return thread["ready_breakdown"][key]
 
     lifecycle_metrics = [
@@ -664,10 +732,35 @@ def format_profile_report(report: dict) -> str:
                 f"{values['reverses']:,} reversals)"
             )
             continue
-        if name == "static_evaluator":
+        if name == "nnue_evaluator":
             lines.append(
-                f"  static evaluator: {count:,} evaluations, "
+                f"  NNUE evaluator: {count:,} evaluations, "
                 f"{_format_percent(values['issue_utilization_percent'])} issue utilization"
+            )
+            lines.append(
+                f"    updates: {values['update_requests']:,} accepted "
+                f"({_format_percent(values['update_request_utilization_percent'])} request utilization); "
+                f"root initialization={values['root_initialization_cycles']:,} cycles; "
+                f"rows: {values['root_initialization_rows']:,} root, "
+                f"{values['delta_feature_requests']:,} delta rows, "
+                f"{values['child_rebuild_rows']:,} child-rebuild rows, "
+                f"{values['recovery_rebuild_rows']:,} recovery, "
+                f"{values['completion_markers']:,} completion markers"
+            )
+            lines.append(
+                f"    child completions={values['child_update_completions']:,}, "
+                f"rebuilds={values['child_rebuilds']:,}, "
+                f"accumulator wraps={values['accumulator_wrap_lanes']:,}, "
+                f"update busy={values['update_pipeline_busy_cycles']:,} cycles "
+                f"({_format_percent(percent(values['update_pipeline_busy_cycles'], timing['search_cycles']))})"
+            )
+            continue
+        if name == "repetition_checker":
+            lines.append(
+                f"  repetition checker: {count:,} issues, "
+                f"{_format_percent(values['issue_utilization_percent'])} issue utilization; "
+                f"child requests in flight={values['inflight_child_thread_cycles']:,} "
+                "thread-cycles"
             )
             continue
         lines.append(

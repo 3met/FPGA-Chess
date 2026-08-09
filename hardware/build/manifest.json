@@ -20,10 +20,10 @@
       "hardware/rtl/rx_decode.sv",
       "hardware/rtl/tx_encode.sv"
     ],
-    "static-evaluator": [
+    "nnue": [
       "@common",
-      "hardware/rtl/static_evaluator/defs.sv",
-      "hardware/rtl/static_evaluator/static_evaluator.sv"
+      "hardware/rtl/nnue/defs.sv",
+      "hardware/rtl/nnue/nnue_evaluator.sv"
     ],
     "move-generator": [
       "@common",
@@ -62,7 +62,7 @@
     "search-controller": [
       "@board-update-pipeline",
       "@move-generator",
-      "@static-evaluator",
+      "@nnue",
       "@tt-load-store",
       "@repetition-checker",
       "hardware/rtl/engine_defs.sv",
@@ -95,6 +95,9 @@
     "vivado-generic": [
       "@portable-rtl"
     ],
+    "vivado-nnue": [
+      "@nnue"
+    ],
     "engine-profile": [
       "@portable-rtl",
       "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
@@ -119,10 +122,10 @@
       "testbench": "hardware/tb/move_generator/tb_move_generator.sv",
       "top": "tb_move_generator"
     },
-    "static-evaluator": {
-      "source_set": "static-evaluator",
-      "testbench": "hardware/tb/static_evaluator/tb_static_evaluator.sv",
-      "top": "tb_static_evaluator"
+    "nnue": {
+      "source_set": "nnue",
+      "testbench": "hardware/tb/nnue/tb_nnue_evaluator.sv",
+      "top": "tb_nnue_evaluator"
     },
     "tt-load-store": {
       "source_set": "tt-load-store",
@@ -178,6 +181,14 @@
         "hardware/rtl/generated/evaluation_parameters.svh"
       ]
     },
+    "nnue-defaults": {
+      "script": "hardware/scripts/generate_nnue_defaults.py",
+      "outputs": [
+        "hardware/data/nnue/feature_transformer.hex",
+        "hardware/data/nnue/output_weights.hex",
+        "hardware/data/nnue/accumulator_bias.hex"
+      ]
+    },
     "zobrist-values": {
       "script": "hardware/scripts/generate_zobrist_values.py",
       "outputs": [
@@ -198,7 +209,7 @@
         "kind": "intel-pll",
         "template": "hardware/ip/pll"
       },
-      "seed": 1,
+      "seed": 5,
       "map_effort": "fast",
       "fit_effort": "standard",
       "message_disable": [10008, 10264, 12021, 12022, 12128, 12130, 12133, 12134, 144001, 169065, 169070, 286033, 292013, 334003, 334004],
@@ -213,6 +224,14 @@
       "seed": 1,
       "clock_port": "clk",
       "clock_period_ns": 10.0
+    },
+    "vivado-nnue": {
+      "tool": "vivado",
+      "top": "nnue_evaluator",
+      "source_set": "vivado-nnue",
+      "seed": 1,
+      "clock_port": "clk",
+      "clock_period_ns": 25.0
     }
   },
   "programming_targets": {

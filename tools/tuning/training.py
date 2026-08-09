@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import public_config
 from .data import CacheBatchLoader, available_cpus, cache_datasets
-from .model import PIECE_ORDER, StaticEvaluationModel
+from .model import EvaluationModel, NNUE_MODEL_VERSION, PIECE_ORDER
 from .reporting import atomic_json, create_run
 
 
@@ -81,7 +81,8 @@ def _loss(torch, prediction, target, settings):
 
 def _cpu_threads(settings) -> int:
     value = settings.get("cpu_threads", "auto")
-    return max(1, available_cpus() // 2) if value == "auto" else int(value)
+    # PyTorch's kernels can use SMT effectively for this memory-heavy workload.
+    return available_cpus() if value == "auto" else int(value)
 
 
 def _loader(_torch, dataset, settings, shuffle: bool):
@@ -94,14 +95,23 @@ def _loader(_torch, dataset, settings, shuffle: bool):
     )
 
 
+def _move_batch(codes, target, device):
+    """Use pinned host buffers for asynchronous CUDA transfer; keep CPU direct."""
+    if device.type == "cuda":
+        return (
+            codes.pin_memory().to(device, non_blocking=True),
+            target.pin_memory().to(device, non_blocking=True),
+        )
+    return codes.to(device), target.to(device)
+
+
 def _evaluate(torch, model, loader, settings, device):
     model.eval()
     total_loss = total_abs = total_squared = 0.0
     count = 0
     with torch.inference_mode():
         for codes, target in loader:
-            codes = codes.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
+            codes, target = _move_batch(codes, target, device)
             prediction = model(codes)
             loss = _loss(torch, prediction, target, settings)
             error = prediction - target
@@ -139,9 +149,40 @@ def _parameter_report(model) -> dict:
     }
 
 
-def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
+def _initialize_model(model, checkpoint: dict) -> int:
+    """Load a current model or project the former two-head model onto one difference head."""
+    version = checkpoint.get("nnue_model_version")
+    state = checkpoint["model"]
+    if version == NNUE_MODEL_VERSION:
+        model.load_state_dict(state)
+        return version
+    if version == 6:
+        old_weights = state["output_weights"]
+        if old_weights.numel() != 2 * model.output_weights.numel():
+            raise ValueError("version 6 checkpoint has an unexpected output-layer shape")
+        projected = dict(state)
+        projected["output_weights"] = (
+            old_weights[:model.output_weights.numel()]
+            - old_weights[model.output_weights.numel():]
+        ) / 2.0
+        projected.pop("output_bias", None)
+        model.load_state_dict(projected)
+        return version
+    raise ValueError(
+        f"checkpoint model version {version!r} cannot initialize version {NNUE_MODEL_VERSION}"
+    )
+
+
+def train(
+    config: dict,
+    cache: Path,
+    resume_run: Path | None = None,
+    initialize_run: Path | None = None,
+) -> Path:
     import torch
 
+    if resume_run is not None and initialize_run is not None:
+        raise ValueError("resume_run and initialize_run are mutually exclusive")
     settings = config["training"]
     torch.set_num_threads(_cpu_threads(settings))
     seed = settings["seed"]
@@ -181,7 +222,23 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
             f"device={device}, vectorized_cache=true, cpu_threads={torch.get_num_threads()}."
         )
         wandb_run = _start_wandb(config, run)
-        model = StaticEvaluationModel().to(device)
+        model = EvaluationModel().to(device)
+        if initialize_run is not None:
+            checkpoint_path = initialize_run / "best.pt"
+            if not checkpoint_path.exists():
+                raise ValueError(f"initialization run has no best checkpoint: {initialize_run.name}")
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            source_version = _initialize_model(model, checkpoint)
+            model.project_parameters()
+            report.update({
+                "initialized_from": initialize_run.name,
+                "initialized_from_model_version": source_version,
+            })
+            atomic_json(run / "report.json", report)
+            print(
+                f"Initialized model version {NNUE_MODEL_VERSION} from {initialize_run.name} "
+                f"version {source_version} best checkpoint; optimizer state was reset."
+            )
         optimizer = _optimizer(torch, model, settings, device)
         scheduler = _scheduler(torch, optimizer, settings)
         start_step = 0
@@ -190,6 +247,10 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
             if not checkpoint_path.exists():
                 raise ValueError(f"run has no resumable checkpoint: {run.name}")
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            if checkpoint.get("nnue_model_version") != NNUE_MODEL_VERSION:
+                raise ValueError(
+                    "checkpoint predates the current single-head NNUE model and cannot be resumed"
+                )
             try:
                 model.load_state_dict(checkpoint["model"])
             except RuntimeError as exc:
@@ -217,6 +278,31 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
         validation_loader = _loader(torch, validation_data, settings, shuffle=False)
         best_loss = float(report.get("best_validation_loss", float("inf")))
         best_step = int(report.get("best_step", 0))
+        if initialize_run is not None:
+            initial_loss, initial_mae, initial_rmse = _evaluate(
+                torch, compiled, validation_loader, settings, device
+            )
+            best_loss = initial_loss
+            best_step = 0
+            initial_metric = {
+                "step": 0,
+                "validation_loss": initial_loss,
+                "validation_mae": initial_mae,
+                "validation_rmse": initial_rmse,
+            }
+            torch.save({
+                "nnue_model_version": NNUE_MODEL_VERSION,
+                "model": model.state_dict(),
+                **initial_metric,
+            }, run / "best.pt")
+            report.update(initial_metric)
+            report.update({"best_validation_loss": best_loss, "best_step": best_step})
+            report.update(_parameter_report(model))
+            atomic_json(run / "report.json", report)
+            print(
+                f"Step 0/{settings['max_steps']:,}: validation={initial_loss:.4f}, "
+                f"MAE={initial_mae:.2f} cp (initialization candidate)."
+            )
         stale_validations = 0
         metrics_path = run / "metrics.jsonl"
         start_time = time.monotonic()
@@ -231,8 +317,7 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
                     if step >= settings["max_steps"]:
                         break
                     model.train()
-                    codes = codes.to(device, non_blocking=True)
-                    target = target.to(device, non_blocking=True)
+                    codes, target = _move_batch(codes, target, device)
                     optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(device_type=device.type, enabled=amp_enabled):
                         prediction = compiled(codes)
@@ -275,6 +360,7 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
                     if wandb_run is not None:
                         wandb_run.log(metric, step=step)
                     checkpoint = {
+                        "nnue_model_version": NNUE_MODEL_VERSION,
                         "model": model.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict() if scheduler is not None else None,
@@ -288,7 +374,11 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
                         torch.save(checkpoint, run / f"checkpoint-{step:08d}.pt")
                     if validation_loss < best_loss:
                         best_loss, best_step, stale_validations = validation_loss, step, 0
-                        torch.save({"model": model.state_dict(), **metric}, run / "best.pt")
+                        torch.save({
+                            "nnue_model_version": NNUE_MODEL_VERSION,
+                            "model": model.state_dict(),
+                            **metric,
+                        }, run / "best.pt")
                     else:
                         stale_validations += 1
                     report.update(metric)
@@ -312,7 +402,7 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
                         stop_early = True
                         break
             checkpoint = torch.load(run / "best.pt", map_location="cpu", weights_only=True)
-            best_model = StaticEvaluationModel()
+            best_model = EvaluationModel()
             best_model.load_state_dict(checkpoint["model"])
             best_model.project_parameters()
             best_material = best_model.material_cp().detach().cpu()
@@ -330,6 +420,15 @@ def train(config: dict, cache: Path, resume_run: Path | None = None) -> Path:
                     for index, piece in enumerate(PIECE_ORDER)
                 },
                 "combined_pst": best_weights.tolist(),
+                "nnue": {
+                    "model_version": NNUE_MODEL_VERSION,
+                    "encoding": "relative-2x6x64",
+                    "output_units": "pawn/128",
+                    "accumulator_bias": best_model.accumulator_bias.detach().cpu().tolist(),
+                    "feature_weights": best_model.feature_weights.detach().cpu().round()
+                        .clamp(-1, 1).to(torch.int8).tolist(),
+                    "output_weights": best_model.output_weights.detach().cpu().tolist(),
+                },
                 "best_step": best_step,
             }
             atomic_json(run / "parameters.json", parameters)

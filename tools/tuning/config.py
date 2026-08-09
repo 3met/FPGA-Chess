@@ -52,6 +52,8 @@ def _validate(config: dict[str, Any]) -> None:
     ):
         if key not in training:
             raise ConfigError(f"training.{key} is required")
+    if "nnue_output_heads" in training:
+        raise ConfigError("training.nnue_output_heads was removed; NNUE uses one output layer")
     positive = (
         "batch_size", "learning_rate", "max_steps", "shuffle_buffer",
         "validation_interval_steps", "checkpoint_interval_steps",
