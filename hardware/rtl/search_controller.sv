@@ -811,6 +811,7 @@ module search_controller #(
         .eval_valid(nnue_eval_valid),
         .eval_ready(nnue_eval_ready),
         .eval_thread_id(nnue_build_thread),
+        .eval_turn(search_board[nnue_build_thread].turn),
         .result_valid(nnue_result_valid),
         .result(nnue_result)
     );
@@ -3432,9 +3433,10 @@ module search_controller #(
                             search_eval_result_valid <= 1'b1;
                             search_eval_wait_count[eval_thread_id] <= EvalWaitCount'(0);
                             search_eval_inflight[eval_thread_id] <= 1'b0;
-                            eval_score = pov_eval(
-                                search_board[eval_thread_id],
-                                add_nnue_correction(search_pst_eval[eval_thread_id], nnue_result));
+                            eval_score = add_nnue_correction(
+                                pov_eval(search_board[eval_thread_id],
+                                    search_pst_eval[eval_thread_id]),
+                                nnue_result);
                             nnue_state_valid[eval_thread_id] <= 1'b1;
 
                             if (search_eval_is_stand_pat[eval_thread_id]) begin

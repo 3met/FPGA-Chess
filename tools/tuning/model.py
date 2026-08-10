@@ -18,9 +18,12 @@ FIXED_MATERIAL_CP = {"pawn": 100.0, "king": 0.0}
 NNUE_SIDES = 2
 NNUE_PIECE_CATEGORIES = 6
 NNUE_FEATURE_COUNT = NNUE_SIDES * NNUE_PIECE_CATEGORIES * 64
-NNUE_ACCUMULATORS = 256
+NNUE_ACCUMULATORS = 128
+NNUE_OUTPUT_INPUTS = NNUE_SIDES * NNUE_ACCUMULATORS
+NNUE_OUTPUT_WEIGHT_BITS = 3
+NNUE_OUTPUT_BIAS_BITS = 5
 NNUE_ENGINE_UNIT_CP = 100.0 / 128.0
-NNUE_MODEL_VERSION = 7
+NNUE_MODEL_VERSION = 9
 
 
 def engine_parameters_cp() -> tuple[torch.Tensor, torch.Tensor]:
@@ -71,7 +74,7 @@ class EvaluationModel(nn.Module):
             "material": nn.Parameter(material[1:5].clone()),
             "pst": nn.Parameter(pst.reshape(FEATURE_COUNT).clone()),
         })
-        # Pair-identical sparse ternary channels cancel against the alternating
+        # Pair-identical sparse channels cancel against the alternating
         # head at startup, while every quantized parameter still has a gradient.
         pair_rows = torch.arange(NNUE_FEATURE_COUNT, dtype=torch.int64)[:, None]
         pair_lanes = torch.arange(NNUE_ACCUMULATORS // 2, dtype=torch.int64)[None, :]
@@ -82,8 +85,9 @@ class EvaluationModel(nn.Module):
         # A positive activation and alternating nonzero output lanes preserve
         # an exact zero correction while avoiding dead quantized parameters.
         self.accumulator_bias = nn.Parameter(torch.ones(NNUE_ACCUMULATORS))
-        initial_output = torch.tensor([1.0, -1.0]).repeat(NNUE_ACCUMULATORS // 2)
+        initial_output = torch.tensor([1.0, -1.0]).repeat(NNUE_OUTPUT_INPUTS // 2)
         self.output_weights = nn.Parameter(initial_output)
+        self.output_bias = nn.Parameter(torch.tensor(0.0))
         pst_mask = torch.ones((6, 64), dtype=pst.dtype)
         pst_mask[0, :8] = 0
         pst_mask[0, 56:] = 0
@@ -121,15 +125,15 @@ class EvaluationModel(nn.Module):
         pst[5].sub_(king_center)
 
     @staticmethod
-    def _ternary(values: torch.Tensor) -> torch.Tensor:
-        """Use ternary values in the forward pass and a straight-through gradient."""
-        quantized = values.round().clamp(-1, 1)
+    def _feature_int2(values: torch.Tensor) -> torch.Tensor:
+        """Use every signed two-bit feature code with a straight-through gradient."""
+        quantized = values.round().clamp(-2, 1)
         return values + (quantized - values).detach()
 
     @staticmethod
-    def _int4(values: torch.Tensor) -> torch.Tensor:
-        """Quantize output weights to the deployed signed int4 representation."""
-        quantized = values.round().clamp(-8, 7)
+    def _int3(values: torch.Tensor) -> torch.Tensor:
+        """Quantize output weights to the deployed signed three-bit representation."""
+        quantized = values.round().clamp(-4, 3)
         return values + (quantized - values).detach()
 
     @staticmethod
@@ -137,6 +141,12 @@ class EvaluationModel(nn.Module):
         """Quantize the trained bias to its deployed signed three-bit range."""
         quantized = values.round().clamp(-4, 3)
         return values + (quantized - values).detach()
+
+    @staticmethod
+    def _output_bias_int5(value: torch.Tensor) -> torch.Tensor:
+        """Quantize the output bias to its deployed signed five-bit range."""
+        quantized = value.round().clamp(-16, 15)
+        return value + (quantized - value).detach()
 
     @staticmethod
     def nnue_indices(codes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -155,32 +165,49 @@ class EvaluationModel(nn.Module):
         indices = category * 64 + relative_square
         return indices, valid, mask
 
-    def nnue_correction(self, codes: torch.Tensor) -> torch.Tensor:
-        """Evaluate bias, clipped ReLU, and the direct output layer."""
+    def nnue_correction(
+        self,
+        codes: torch.Tensor,
+        white_to_move: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the side-to-move ordered activation pair and output layer."""
         indices, valid, _ = self.nnue_indices(codes)
-        ternary = self._ternary(self.feature_weights)
+        feature_weights = self._feature_int2(self.feature_weights)
         # Embedding-bag fuses the feature gather and 32-piece reduction, avoiding
         # a batch-by-perspective-by-piece-by-channel temporary tensor.
-        padded_weights = torch.cat((ternary.new_zeros((1, NNUE_ACCUMULATORS)), ternary))
+        padded_weights = torch.cat((
+            feature_weights.new_zeros((1, NNUE_ACCUMULATORS)), feature_weights
+        ))
         bag_indices = torch.where(valid, indices + 1, torch.zeros_like(indices))
         accumulators = torch.nn.functional.embedding_bag(
             bag_indices.reshape(-1, bag_indices.shape[-1]), padded_weights, mode="sum"
         ).reshape(codes.shape[0], 2, NNUE_ACCUMULATORS) + self._accumulator_bias_int3(
             self.accumulator_bias
         )
-        # Hardware retains the low six bits so add/remove deltas remain exact
-        # inverses even in the extremely rare event of an overflow.
-        accumulators = torch.remainder(accumulators + 32, 64) - 32
-        activations = accumulators.clamp(0, 31)
-        weights = self._int4(self.output_weights)
-        # A single head consumes the difference between color-relative
-        # perspectives, making the deployed correction exactly antisymmetric.
-        engine_units = ((activations[:, 0] - activations[:, 1]) * weights).sum(dim=1)
+        # Hardware retains the low five bits so add/remove deltas remain exact
+        # inverses even in the rare event of an overflow.
+        accumulators = torch.remainder(accumulators + 16, 32) - 16
+        activations = accumulators.clamp(0, 7)
+        white_to_move = white_to_move.to(device=codes.device, dtype=torch.bool)
+        first = torch.where(white_to_move[:, None], activations[:, 0], activations[:, 1])
+        second = torch.where(white_to_move[:, None], activations[:, 1], activations[:, 0])
+        ordered_activations = torch.cat((first, second), dim=1)
+        weights = self._int3(self.output_weights)
+        # Ordering by side to move makes color-flipped positions share exactly
+        # the same output without constraining the two halves of the head.
+        output_bias = self._output_bias_int5(self.output_bias)
+        engine_units = (ordered_activations * weights).sum(dim=1) + output_bias
         return engine_units.clamp(-30999, 30999) * NNUE_ENGINE_UNIT_CP
 
-    def forward(self, codes: torch.Tensor) -> torch.Tensor:
+    def forward(self, codes: torch.Tensor, white_to_move: torch.Tensor) -> torch.Tensor:
         mask = codes != 0
         indices = codes.abs().to(torch.long).sub(1).clamp_min(0)
         signs = codes.sign().to(self.terms["pst"].dtype)
         values = self.combined_cp().reshape(FEATURE_COUNT)[indices] * signs * mask
-        return values.sum(dim=1) + self.nnue_correction(codes)
+        white_relative = values.sum(dim=1)
+        stm_sign = torch.where(
+            white_to_move.to(device=codes.device, dtype=torch.bool),
+            white_relative.new_tensor(1.0),
+            white_relative.new_tensor(-1.0),
+        )
+        return white_relative + stm_sign * self.nnue_correction(codes, white_to_move)

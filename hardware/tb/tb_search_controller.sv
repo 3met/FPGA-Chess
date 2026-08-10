@@ -168,11 +168,13 @@ module tb_search_controller;
                     if (tile.piece_type != NULL_PIECE) begin
                         automatic NnueFeatureIndex feature = nnue_feature_index(
                             Position'(pos), tile, Color'(perspective));
-                        automatic logic signed [NNUE_FEATURE_WEIGHT_BITS-1:0] trit =
+                        automatic logic signed [NNUE_FEATURE_WEIGHT_BITS-1:0]
+                            feature_weight =
                             $signed(dut.nnue_evaluator.feature_rom[feature][
                                 lane * NNUE_FEATURE_WEIGHT_BITS
                                     +: NNUE_FEATURE_WEIGHT_BITS]);
-                        sum = NnueAccumulator'(sum + NnueAccumulator'(trit));
+                        sum = NnueAccumulator'(
+                            sum + NnueAccumulator'(feature_weight));
                     end
                 end
                 expected[(perspective * NNUE_ACCUMULATOR_COUNT + lane)
@@ -1224,6 +1226,7 @@ module tb_search_controller;
             automatic NodeCountType baseline_nodes, nnue_nodes;
             for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
                 dut.nnue_evaluator.output_weight_rows[row] = 0;
+            dut.nnue_evaluator.output_bias[0] = 0;
             new_game();
             setup_kings_only();
             set_tile(WHITE_PAWN, Position'(8), "NNUE baseline white pawn a2");
@@ -1233,7 +1236,7 @@ module tb_search_controller;
                 dut.nnue_evaluator.feature_rom[row] = 0;
             dut.nnue_evaluator.feature_rom[8] = {NNUE_ROW_BYTES{8'h55}};
             for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
-                dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h1}};
+                dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
                 dut.nnue_evaluator.accumulator_bias[lane] = 0;
             new_game();
@@ -1241,9 +1244,9 @@ module tb_search_controller;
             set_tile(WHITE_PAWN, Position'(8), "NNUE correction white pawn a2");
             run_search_depth_record(8'd0, "NNUE correction search",
                 nnue_move, nnue_score, nnue_nodes);
-            // Only White's direct a2-pawn feature is nonzero, so the shared
-            // difference head contributes one activation in every lane.
-            check(nnue_score == baseline_score + EvalScore'(256),
+            // Only White's direct a2-pawn feature is nonzero, so the ordered
+            // concatenation contributes one activation in every White lane.
+            check(nnue_score == baseline_score + EvalScore'(128),
                 $sformatf("search adds NNUE correction: baseline=%0d corrected=%0d",
                     baseline_score, nnue_score));
         end

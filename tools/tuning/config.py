@@ -10,6 +10,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path(__file__).with_name("default_config.json")
+CACHE_RECORD_FORMAT = "32-piece-turn-target"
 
 
 class ConfigError(ValueError):
@@ -119,6 +120,7 @@ def cache_key(config: dict[str, Any]) -> str:
         "validation_size": config["training"]["validation_size"],
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
+        "record_format": CACHE_RECORD_FORMAT,
     }
     raw = json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()[:16]

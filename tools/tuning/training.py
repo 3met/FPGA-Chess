@@ -95,14 +95,15 @@ def _loader(_torch, dataset, settings, shuffle: bool):
     )
 
 
-def _move_batch(codes, target, device):
+def _move_batch(codes, white_to_move, target, device):
     """Use pinned host buffers for asynchronous CUDA transfer; keep CPU direct."""
     if device.type == "cuda":
         return (
             codes.pin_memory().to(device, non_blocking=True),
+            white_to_move.pin_memory().to(device, non_blocking=True),
             target.pin_memory().to(device, non_blocking=True),
         )
-    return codes.to(device), target.to(device)
+    return codes.to(device), white_to_move.to(device), target.to(device)
 
 
 def _evaluate(torch, model, loader, settings, device):
@@ -110,9 +111,11 @@ def _evaluate(torch, model, loader, settings, device):
     total_loss = total_abs = total_squared = 0.0
     count = 0
     with torch.inference_mode():
-        for codes, target in loader:
-            codes, target = _move_batch(codes, target, device)
-            prediction = model(codes)
+        for codes, white_to_move, target in loader:
+            codes, white_to_move, target = _move_batch(
+                codes, white_to_move, target, device
+            )
+            prediction = model(codes, white_to_move)
             loss = _loss(torch, prediction, target, settings)
             error = prediction - target
             size = target.numel()
@@ -150,27 +153,16 @@ def _parameter_report(model) -> dict:
 
 
 def _initialize_model(model, checkpoint: dict) -> int:
-    """Load a current model or project the former two-head model onto one difference head."""
+    """Load a checkpoint only when it uses the current numerical model."""
     version = checkpoint.get("nnue_model_version")
     state = checkpoint["model"]
-    if version == NNUE_MODEL_VERSION:
-        model.load_state_dict(state)
-        return version
-    if version == 6:
-        old_weights = state["output_weights"]
-        if old_weights.numel() != 2 * model.output_weights.numel():
-            raise ValueError("version 6 checkpoint has an unexpected output-layer shape")
-        projected = dict(state)
-        projected["output_weights"] = (
-            old_weights[:model.output_weights.numel()]
-            - old_weights[model.output_weights.numel():]
-        ) / 2.0
-        projected.pop("output_bias", None)
-        model.load_state_dict(projected)
-        return version
-    raise ValueError(
-        f"checkpoint model version {version!r} cannot initialize version {NNUE_MODEL_VERSION}"
-    )
+    if version != NNUE_MODEL_VERSION:
+        raise ValueError(
+            f"checkpoint model version {version!r} cannot initialize version "
+            f"{NNUE_MODEL_VERSION}"
+        )
+    model.load_state_dict(state)
+    return version
 
 
 def train(
@@ -249,7 +241,7 @@ def train(
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
             if checkpoint.get("nnue_model_version") != NNUE_MODEL_VERSION:
                 raise ValueError(
-                    "checkpoint predates the current single-head NNUE model and cannot be resumed"
+                    "checkpoint does not match the current NNUE model and cannot be resumed"
                 )
             try:
                 model.load_state_dict(checkpoint["model"])
@@ -313,14 +305,16 @@ def train(
             interval_start = time.monotonic()
             stop_early = False
             while step < settings["max_steps"] and not stop_early:
-                for codes, target in train_loader:
+                for codes, white_to_move, target in train_loader:
                     if step >= settings["max_steps"]:
                         break
                     model.train()
-                    codes, target = _move_batch(codes, target, device)
+                    codes, white_to_move, target = _move_batch(
+                        codes, white_to_move, target, device
+                    )
                     optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                        prediction = compiled(codes)
+                        prediction = compiled(codes, white_to_move)
                         loss = _loss(torch, prediction, target, settings)
                     scaler.scale(loss).backward()
                     clip = settings.get("gradient_clip")
@@ -426,8 +420,9 @@ def train(
                     "output_units": "pawn/128",
                     "accumulator_bias": best_model.accumulator_bias.detach().cpu().tolist(),
                     "feature_weights": best_model.feature_weights.detach().cpu().round()
-                        .clamp(-1, 1).to(torch.int8).tolist(),
+                        .clamp(-2, 1).to(torch.int8).tolist(),
                     "output_weights": best_model.output_weights.detach().cpu().tolist(),
+                    "output_bias": float(best_model.output_bias.detach().cpu()),
                 },
                 "best_step": best_step,
             }

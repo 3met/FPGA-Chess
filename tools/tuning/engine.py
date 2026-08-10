@@ -16,6 +16,9 @@ from .model import (
     NNUE_ACCUMULATORS,
     NNUE_FEATURE_COUNT,
     NNUE_MODEL_VERSION,
+    NNUE_OUTPUT_BIAS_BITS,
+    NNUE_OUTPUT_INPUTS,
+    NNUE_OUTPUT_WEIGHT_BITS,
     PIECE_ORDER,
     PST_PATH,
 )
@@ -27,6 +30,7 @@ GENERATED_PATHS = (
 )
 NNUE_FEATURE_PATH = REPO_ROOT / "hardware/data/nnue/feature_transformer.hex"
 NNUE_OUTPUT_PATH = REPO_ROOT / "hardware/data/nnue/output_weights.hex"
+NNUE_OUTPUT_BIAS_PATH = REPO_ROOT / "hardware/data/nnue/output_bias.hex"
 NNUE_BIAS_PATH = REPO_ROOT / "hardware/data/nnue/accumulator_bias.hex"
 NNUE_OUTPUT_MAC_LANES = 128
 GENERATOR = REPO_ROOT / "hardware/scripts/generate_pst_values.py"
@@ -128,7 +132,7 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
         }, "legacy best checkpoint"
     if checkpoint.get("nnue_model_version") != NNUE_MODEL_VERSION:
         raise ValueError(
-            "checkpoint predates the current single-head NNUE model and cannot be exported"
+            "checkpoint does not match the current NNUE model and cannot be exported"
         )
     model = EvaluationModel()
     model.load_state_dict(state)
@@ -147,19 +151,31 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
             "output_units": "pawn/128",
             "accumulator_bias": model.accumulator_bias.detach().cpu().tolist(),
             "feature_weights": model.feature_weights.detach().cpu().round()
-                .clamp(-1, 1).to(torch.int8).tolist(),
+                .clamp(-2, 1).to(torch.int8).tolist(),
             "output_weights": model.output_weights.detach().cpu().tolist(),
+            "output_bias": float(model.output_bias.detach().cpu()),
         },
         "best_step": checkpoint.get("step"),
     }, "best checkpoint"
 
 
-def _clamp_int4(value: float) -> int:
-    return max(-8, min(7, round_ties_to_even(value)))
+def _clamp_output_weight(value: float) -> int:
+    return max(-4, min(3, round_ties_to_even(value)))
 
 
-def _pack_ternary_row(row: list[int]) -> str:
-    """Pack four signed two-bit ternary transformer weights per byte."""
+def _pack_output_row(row: list[float]) -> str:
+    """Pack one 128-lane signed-three-bit output row least-significant lane first."""
+    if len(row) != NNUE_OUTPUT_MAC_LANES:
+        raise ValueError(f"each NNUE output row must contain {NNUE_OUTPUT_MAC_LANES} weights")
+    packed = 0
+    for lane, weight in enumerate(row):
+        packed |= (_clamp_output_weight(weight) & 0x7) << (lane * NNUE_OUTPUT_WEIGHT_BITS)
+    digits = (NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS + 3) // 4
+    return f"{packed:0{digits}x}"
+
+
+def _pack_feature_row(row: list[int]) -> str:
+    """Pack four signed two-bit transformer weights per byte."""
     if len(row) != NNUE_ACCUMULATORS:
         raise ValueError(f"each NNUE feature row must contain {NNUE_ACCUMULATORS} weights")
     encoded = bytearray()
@@ -167,22 +183,23 @@ def _pack_ternary_row(row: list[int]) -> str:
         value = 0
         for index, weight in enumerate(row[offset:offset + 4]):
             integer = int(weight)
-            if integer not in (-1, 0, 1):
-                raise ValueError("NNUE feature weights must be ternary")
-            value |= ({0: 0, 1: 1, -1: 3}[integer]) << (2 * index)
+            if integer < -2 or integer > 1:
+                raise ValueError("NNUE feature weights must fit signed two-bit range")
+            value |= (integer & 0x3) << (2 * index)
         encoded.append(value)
     # readmemh maps the leftmost digits to the most-significant byte.
     return bytes(reversed(encoded)).hex()
 
 
-def export_nnue(parameters: dict) -> tuple[str, str, str]:
-    """Create packed feature, output-row, and accumulator-bias ROM images."""
+def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
+    """Create packed feature, output, and accumulator-bias ROM images."""
     nnue = parameters.get("nnue")
     if nnue is None:
         return (
             ("00" * (NNUE_ACCUMULATORS // 4) + "\n") * NNUE_FEATURE_COUNT,
             ("0" * NNUE_OUTPUT_MAC_LANES + "\n")
-                * (NNUE_ACCUMULATORS // NNUE_OUTPUT_MAC_LANES),
+                * (NNUE_OUTPUT_INPUTS // NNUE_OUTPUT_MAC_LANES),
+            "00\n",
             "0\n" * NNUE_ACCUMULATORS,
         )
     rows = nnue["feature_weights"]
@@ -192,16 +209,14 @@ def export_nnue(parameters: dict) -> tuple[str, str, str]:
         )
     if nnue.get("output_units") != "pawn/128":
         raise ValueError("NNUE output parameters must use pawn/128 hardware score units")
-    feature_text = "\n".join(_pack_ternary_row(row) for row in rows) + "\n"
+    feature_text = "\n".join(_pack_feature_row(row) for row in rows) + "\n"
     weights = nnue["output_weights"]
-    if len(weights) != NNUE_ACCUMULATORS:
-        raise ValueError(f"NNUE output layer must contain {NNUE_ACCUMULATORS} weights")
+    if len(weights) != NNUE_OUTPUT_INPUTS:
+        raise ValueError(f"NNUE output layer must contain {NNUE_OUTPUT_INPUTS} weights")
     output_lines = []
-    for offset in range(0, NNUE_ACCUMULATORS, NNUE_OUTPUT_MAC_LANES):
-        # readmemh maps the rightmost nibble to lane zero.
-        output_lines.append("".join(
-            f"{_clamp_int4(value) & 0xf:x}"
-            for value in reversed(weights[offset:offset + NNUE_OUTPUT_MAC_LANES])
+    for offset in range(0, NNUE_OUTPUT_INPUTS, NNUE_OUTPUT_MAC_LANES):
+        output_lines.append(_pack_output_row(
+            weights[offset:offset + NNUE_OUTPUT_MAC_LANES]
         ))
     biases = nnue["accumulator_bias"]
     if len(biases) != NNUE_ACCUMULATORS:
@@ -209,7 +224,12 @@ def export_nnue(parameters: dict) -> tuple[str, str, str]:
     bias_text = "\n".join(
         f"{max(-4, min(3, round_ties_to_even(value))) & 0x7:x}" for value in biases
     ) + "\n"
-    return feature_text, "\n".join(output_lines) + "\n", bias_text
+    output_bias = round_ties_to_even(nnue.get("output_bias", 0.0))
+    output_bias_min = -(1 << (NNUE_OUTPUT_BIAS_BITS - 1))
+    output_bias_max = (1 << (NNUE_OUTPUT_BIAS_BITS - 1)) - 1
+    output_bias = max(output_bias_min, min(output_bias_max, output_bias))
+    output_bias_text = f"{output_bias & ((1 << NNUE_OUTPUT_BIAS_BITS) - 1):02x}\n"
+    return feature_text, "\n".join(output_lines) + "\n", output_bias_text, bias_text
 
 
 def commit_parameters(run: Path, dry_run: bool = False) -> None:
@@ -228,16 +248,17 @@ def commit_parameters(run: Path, dry_run: bool = False) -> None:
     pst_document["material"] = dict(zip(PIECE_ORDER, material))
     pst_document["pst"] = pst
     new_pst = json.dumps(pst_document, indent=2) + "\n"
-    nnue_feature, nnue_output, nnue_bias = export_nnue(parameters)
+    nnue_feature, nnue_output, nnue_output_bias, nnue_bias = export_nnue(parameters)
     paths = (
         PST_PATH, *GENERATED_PATHS, NNUE_FEATURE_PATH, NNUE_OUTPUT_PATH,
-        NNUE_BIAS_PATH,
+        NNUE_OUTPUT_BIAS_PATH, NNUE_BIAS_PATH,
     )
     before = {path: path.read_bytes() for path in paths}
     try:
         atomic_write_text(PST_PATH, new_pst)
         atomic_write_text(NNUE_FEATURE_PATH, nnue_feature)
         atomic_write_text(NNUE_OUTPUT_PATH, nnue_output)
+        atomic_write_text(NNUE_OUTPUT_BIAS_PATH, nnue_output_bias)
         atomic_write_text(NNUE_BIAS_PATH, nnue_bias)
         result = subprocess.run(
             [sys.executable, str(GENERATOR)],

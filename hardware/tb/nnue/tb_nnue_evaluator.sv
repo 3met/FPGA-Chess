@@ -14,6 +14,7 @@ module tb_nnue_evaluator;
     PlyIndex update_done_ply;
     logic eval_valid, eval_ready, result_valid;
     ThreadID eval_thread_id;
+    Color eval_turn;
     EvalScore result;
     int pass_count = 0;
     int fail_count = 0;
@@ -23,7 +24,7 @@ module tb_nnue_evaluator;
     nnue_evaluator #(.STATE_THREAD_COUNT(9)) dut (
         .clk, .rst_n, .clear, .update_valid, .update_ready, .update_idle, .update_req,
         .update_done_valid, .update_done_thread, .update_done_ply,
-        .eval_valid, .eval_ready, .eval_thread_id,
+        .eval_valid, .eval_ready, .eval_thread_id, .eval_turn,
         .result_valid, .result
     );
 
@@ -61,10 +62,12 @@ module tb_nnue_evaluator;
         update_req = '0;
         eval_valid = 0;
         eval_thread_id = 0;
+        eval_turn = WHITE;
         #1;
         dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
-            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h1}};
+            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
+        dut.output_bias[0] = 0;
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
             dut.accumulator_bias[lane] = 0;
 
@@ -87,11 +90,11 @@ module tb_nnue_evaluator;
             "accumulator memory allocates one logical word per thread");
 
         // Both portable implementations must cover the complete reachable
-        // activation and signed-int4 domains exactly.
-        for (int activation = -31; activation <= 31; activation++) begin
-            for (int weight = -8; weight <= 7; weight++) begin
-                automatic logic signed [5:0] activation_bits = activation;
-                automatic logic signed [3:0] weight_bits = weight;
+        // activation and signed-three-bit domains exactly.
+        for (int activation = 0; activation <= 7; activation++) begin
+            for (int weight = -4; weight <= 3; weight++) begin
+                automatic logic signed [3:0] activation_bits = activation;
+                automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight_bits = weight;
                 check($signed(dut.soft_output_product(
                             activation_bits, weight_bits)) == activation * weight,
                     "soft output product is exact");
@@ -112,7 +115,18 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = ThreadID'(8);
-        evaluate(EvalScore'(256), "state memory supports thread IDs above seven");
+        evaluate(EvalScore'(128), "state memory supports thread IDs above seven");
+        dut.output_weight_rows[0] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
+        dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
+        evaluate(EvalScore'(128), "side to move selects the first concatenated perspective");
+        eval_turn = BLACK;
+        evaluate(EvalScore'(-128), "opponent perspective moves to the second half");
+        eval_turn = WHITE;
+        dut.output_bias[0] = 8'h17;
+        evaluate(EvalScore'(119), "signed output bias is added once");
+        dut.output_bias[0] = 0;
+        for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
+            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
 
         // A tagged child completion identifies the request that just committed.
         update_req = '0;
@@ -153,7 +167,7 @@ module tb_nnue_evaluator;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(256), "perspective differences feed the output layer");
+        evaluate(EvalScore'(128), "perspective activations feed the output layer");
         check(eval_ready, "evaluator becomes ready after its MAC and clipping cycles");
 
         update_req = '0;
@@ -217,11 +231,11 @@ module tb_nnue_evaluator;
         @(negedge clk);
         eval_valid = 0;
         wait (result_valid);
-        check(result == EvalScore'(256),
+        check(result == EvalScore'(128),
             "evaluation overlaps another thread's accumulator commit");
         wait (update_idle);
         eval_thread_id = ThreadID'(4);
-        evaluate(EvalScore'(512),
+        evaluate(EvalScore'(256),
             "overlapped update is visible in its destination thread");
 
         // Consecutive requests for one thread must observe each preceding
@@ -247,7 +261,7 @@ module tb_nnue_evaluator;
         wait (update_done_valid);
         wait (update_idle);
         eval_thread_id = ThreadID'(2);
-        evaluate(EvalScore'(768),
+        evaluate(EvalScore'(384),
             "full-width update pipeline commits back-to-back same-thread rows");
 
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
@@ -263,20 +277,21 @@ module tb_nnue_evaluator;
         update_req.clear = 1;
         enqueue(update_req);
         update_req.clear = 0;
-        for (int feature = 1; feature < 28; feature++)
+        for (int feature = 1; feature < 12; feature++)
             enqueue(update_req);
         wait (update_idle);
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
-                == NnueAccumulator'(31),
-            "six-bit accumulators retain the trained positive range");
-        evaluate(EvalScore'(7168), "perspective activation difference reaches 28");
+                == NnueAccumulator'(15),
+            "five-bit accumulators retain the trained positive range");
+        evaluate(EvalScore'(1280), "concatenated perspective activations reach the output");
         update_req.add = 0;
-        repeat (28)
+        repeat (12)
             enqueue(update_req);
         wait (update_idle);
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(3),
             "modular inverse deltas exactly restore the accumulator bias");
+        evaluate(EvalScore'(768), "both biased perspectives remain in the concatenated output");
 
         // Flush an accepted evaluation and queued update together, then prove
         // that no result or update survives and a fresh rebuild still works.
@@ -309,7 +324,7 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = ThreadID'(8);
-        evaluate(EvalScore'(256), "evaluation restarts correctly after clear");
+        evaluate(EvalScore'(128), "evaluation restarts correctly after clear");
 
         // Exercise the signed activation product extrema; an unsigned
         // multiply produces a non-clipped value with this model.
@@ -317,16 +332,20 @@ module tb_nnue_evaluator;
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
             dut.accumulator_bias[lane] = 3'd3;
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
-            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h8}};
+            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h4}};
         update_req.ply = PlyIndex'(1);
+        update_req.black_enable = 1;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
         update_req.clear = 0;
-        repeat (27)
+        repeat (11)
             enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(-30999), "signed activation products retain their full width");
+        evaluate(EvalScore'(-7168), "signed activation products retain their full width");
+        dut.output_bias[0] = 8'h10;
+        evaluate(EvalScore'(-7184), "minimum MAC sum and output bias retain their full width");
+        dut.output_bias[0] = 0;
 
         begin
             automatic time first_issue, second_issue;
@@ -349,7 +368,7 @@ module tb_nnue_evaluator;
             while (stream_results != 2) begin
                 @(negedge clk);
                 if (result_valid) begin
-                    check(result == EvalScore'(-30999),
+                    check(result == EvalScore'(-7168),
                         "pipelined evaluation preserves result ordering");
                     stream_results++;
                 end

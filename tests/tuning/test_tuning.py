@@ -33,6 +33,7 @@ from tools.tuning.model import (
     NNUE_ACCUMULATORS,
     NNUE_ENGINE_UNIT_CP,
     NNUE_MODEL_VERSION,
+    NNUE_OUTPUT_INPUTS,
     PIECE_ORDER,
     EvaluationModel,
     engine_combined_cp,
@@ -102,6 +103,7 @@ class TuningDataTests(unittest.TestCase):
             mate, filters(remove_mates=False, max_evaluation_cp=None, mate_score_cp=31000)
         )
         self.assertIsNone(reason)
+        self.assertTrue(sample.white_to_move)
         self.assertEqual(sample.target_cp, -31000)
         self.assertEqual(parse_record(record(depth=10), filters())[1], "minimum_depth")
         self.assertEqual(parse_record(record(cp=2001), filters())[1], "evaluation_magnitude")
@@ -180,24 +182,30 @@ class TuningModelAndExportTests(unittest.TestCase):
         codes = torch.tensor([encode_board(chess.Board(
             "4k3/8/8/8/8/8/P7/R3K3 w - -"
         ))], dtype=torch.int16)
-        correction = model.nnue_correction(codes)
+        white_to_move = torch.tensor([True])
+        correction = model.nnue_correction(codes, white_to_move)
         self.assertEqual(correction.item(), 0.0)
         correction.sub(50.0).square().backward()
         self.assertGreater(model.feature_weights.grad.abs().sum().item(), 0.0)
         self.assertGreater(model.accumulator_bias.grad.abs().sum().item(), 0.0)
         self.assertGreater(model.output_weights.grad.abs().sum().item(), 0.0)
+        self.assertGreater(model.output_bias.grad.abs().item(), 0.0)
 
     def test_nnue_output_uses_hardware_score_units(self):
         model = EvaluationModel()
         with torch.no_grad():
             model.feature_weights.zero_()
+            model.accumulator_bias.zero_()
             model.output_weights.zero_()
             model.output_weights[0] = 1
             model.feature_weights[8, 0] = 1
         codes = torch.tensor([
             encode_board(chess.Board("4k3/8/8/8/8/8/P7/4K3 w - -"))
         ], dtype=torch.int16)
-        self.assertEqual(model.nnue_correction(codes).item(), NNUE_ENGINE_UNIT_CP)
+        self.assertEqual(
+            model.nnue_correction(codes, torch.tensor([True])).item(),
+            NNUE_ENGINE_UNIT_CP,
+        )
 
     def test_nnue_cpu_embedding_bag_matches_masked_reference(self):
         """The CPU-optimized reduction must retain the original masked sum."""
@@ -210,19 +218,26 @@ class TuningModelAndExportTests(unittest.TestCase):
             rows = torch.arange(model.feature_weights.numel()).reshape_as(model.feature_weights)
             model.feature_weights.copy_((rows.remainder(3) - 1).to(torch.float32))
             model.accumulator_bias.copy_(torch.arange(NNUE_ACCUMULATORS).remainder(19) - 9)
-            model.output_weights.copy_(torch.arange(NNUE_ACCUMULATORS).remainder(17) - 8)
+            model.output_weights.copy_(torch.arange(NNUE_OUTPUT_INPUTS).remainder(17) - 8)
+            model.output_bias.copy_(torch.tensor(7.0))
         indices, valid, _ = model.nnue_indices(codes)
-        ternary = model._ternary(model.feature_weights)
-        reference_accumulators = (ternary[indices] * valid.unsqueeze(-1)).sum(dim=2)
+        feature_weights = model._feature_int2(model.feature_weights)
+        reference_accumulators = (feature_weights[indices] * valid.unsqueeze(-1)).sum(dim=2)
         reference_accumulators += model._accumulator_bias_int3(model.accumulator_bias)
-        reference_accumulators = torch.remainder(reference_accumulators + 32, 64) - 32
-        reference_activations = reference_accumulators.clamp(0, 31)
-        reference = (
-            (reference_activations[:, 0] - reference_activations[:, 1])
-            * model._int4(model.output_weights)
-        ).sum(dim=1)
+        reference_accumulators = torch.remainder(reference_accumulators + 16, 32) - 16
+        reference_activations = reference_accumulators.clamp(0, 7)
+        white_to_move = torch.tensor([True, False])
+        first = torch.where(
+            white_to_move[:, None], reference_activations[:, 0], reference_activations[:, 1]
+        )
+        second = torch.where(
+            white_to_move[:, None], reference_activations[:, 1], reference_activations[:, 0]
+        )
+        reference = (torch.cat((first, second), dim=1)
+            * model._int3(model.output_weights)).sum(dim=1)
+        reference += model._output_bias_int5(model.output_bias)
         reference = reference.clamp(-30999, 30999) * NNUE_ENGINE_UNIT_CP
-        self.assertTrue(torch.equal(model.nnue_correction(codes), reference))
+        self.assertTrue(torch.equal(model.nnue_correction(codes, white_to_move), reference))
 
     def test_direct_nnue_indices_and_king_delta_match_full_accumulation(self):
         original = torch.tensor([encode_board(chess.Board(
@@ -266,66 +281,70 @@ class TuningModelAndExportTests(unittest.TestCase):
                 full(moved_indices[0, perspective], moved_valid[0, perspective]),
             ))
 
-    def test_nnue_export_packs_trits_output_and_safe_bias(self):
+    def test_nnue_export_packs_signed_two_bit_weights_output_and_safe_bias(self):
         parameters = {
             "nnue": {
-                "feature_weights": [([-1, 0, 1, 0, -1] * 52)[:NNUE_ACCUMULATORS]] * 768,
+                "feature_weights": [([-2, -1, 0, 1] * 32)] * 768,
                 "accumulator_bias": [200.0] + [0.0] * (NNUE_ACCUMULATORS - 1),
                 "output_units": "pawn/128",
-                "output_weights": [0.0] * NNUE_ACCUMULATORS,
+                "output_weights": [0.0] * NNUE_OUTPUT_INPUTS,
+                "output_bias": -3.0,
             }
         }
         parameters["nnue"]["output_weights"][0] = 1.0
         parameters["nnue"]["output_weights"][1] = 8.0
-        features, outputs, biases = export_nnue(parameters)
+        features, outputs, output_bias, biases = export_nnue(parameters)
         self.assertEqual(len(features.splitlines()), 768)
-        self.assertEqual(len(features.splitlines()[0]), 128)
+        self.assertEqual(len(features.splitlines()[0]), 64)
+        self.assertTrue(features.splitlines()[0].endswith("4e"))
         self.assertEqual(len(outputs.splitlines()), 2)
-        self.assertTrue(all(len(row) == 128 for row in outputs.splitlines()))
-        self.assertEqual(outputs.splitlines()[0][-2:], "71")
+        self.assertTrue(all(len(row) == 96 for row in outputs.splitlines()))
+        self.assertEqual(outputs.splitlines()[0][-2:], "19")
+        self.assertEqual(output_bias, "1d\n")
         self.assertEqual(biases.splitlines()[0], "3")
         parameters["nnue"]["output_weights"][0:4] = [0.5, 1.5, 2.5, -0.5]
         parameters["nnue"]["accumulator_bias"][0:4] = [0.5, 1.5, 2.5, -0.5]
-        _, tied_outputs, tied_biases = export_nnue(parameters)
-        self.assertEqual(tied_outputs.splitlines()[0][-4:], "0220")
+        _, tied_outputs, tied_output_bias, tied_biases = export_nnue(parameters)
+        self.assertEqual(tied_outputs.splitlines()[0][-3:], "090")
         self.assertEqual(tied_biases.splitlines()[0:4], ["0", "2", "2", "0"])
+        self.assertEqual(tied_output_bias, "1d\n")
         parameters["nnue"]["output_units"] = "centipawns"
         with self.assertRaises(ValueError):
             export_nnue(parameters)
 
-    def test_nnue_correction_is_exactly_color_antisymmetric(self):
+    def test_nnue_correction_is_exactly_color_flip_invariant(self):
         model = EvaluationModel()
         with torch.no_grad():
             rows = torch.arange(model.feature_weights.numel()).reshape_as(model.feature_weights)
             model.feature_weights.copy_((rows.remainder(3) - 1).to(torch.float32))
             model.accumulator_bias.copy_(torch.arange(NNUE_ACCUMULATORS).remainder(8) - 4)
-            model.output_weights.copy_(torch.arange(NNUE_ACCUMULATORS).remainder(16) - 8)
+            model.output_weights.copy_(torch.arange(NNUE_OUTPUT_INPUTS).remainder(16) - 8)
+            model.output_bias.copy_(torch.tensor(13.0))
         board = chess.Board("r3k2r/pp1n1ppp/2p1pn2/3p4/3P4/2N1PN2/PP3PPP/R3K2R w KQkq -")
         swapped = board.mirror()
         codes = torch.tensor([encode_board(board), encode_board(swapped)], dtype=torch.int16)
-        corrections = model.nnue_correction(codes)
-        self.assertEqual(corrections[0].item(), -corrections[1].item())
+        white_to_move = torch.tensor([board.turn, swapped.turn])
+        corrections = model.nnue_correction(codes, white_to_move)
+        self.assertEqual(corrections[0].item(), corrections[1].item())
+        white_relative = model(codes, white_to_move)
+        stm_relative = torch.where(white_to_move, white_relative, -white_relative)
+        self.assertEqual(stm_relative[0].item(), stm_relative[1].item())
 
-    def test_version_six_heads_project_to_antisymmetric_component(self):
+    def test_old_nnue_checkpoint_is_rejected(self):
         model = EvaluationModel()
         old_state = dict(model.state_dict())
-        white = torch.arange(NNUE_ACCUMULATORS, dtype=torch.float32).remainder(8)
-        black = torch.arange(NNUE_ACCUMULATORS, dtype=torch.float32).remainder(7)
-        old_state["output_weights"] = torch.cat((white, black))
-        old_state["output_bias"] = torch.tensor(17.0)
-        source_version = _initialize_model(model, {
-            "nnue_model_version": 6,
-            "model": old_state,
-        })
-        self.assertEqual(source_version, 6)
-        self.assertTrue(torch.equal(model.output_weights, (white - black) / 2.0))
+        with self.assertRaises(ValueError):
+            _initialize_model(model, {
+                "nnue_model_version": NNUE_MODEL_VERSION - 1,
+                "model": old_state,
+            })
 
     def test_model_matches_manual_current_engine_evaluation(self):
         weights = engine_combined_cp()
         model = EvaluationModel(weights)
         board = chess.Board("8/8/8/3p4/4N3/8/8/K6k w - -")
         codes = torch.tensor([encode_board(board)], dtype=torch.int16)
-        prediction = model(codes).item()
+        prediction = model(codes, torch.tensor([True])).item()
         manual = 0.0
         for code in codes[0].tolist():
             if code:
@@ -387,7 +406,7 @@ class TuningModelAndExportTests(unittest.TestCase):
             run = Path(directory)
             model = EvaluationModel()
             torch.save({"model": model.state_dict(), "step": 11}, run / "best.pt")
-            with self.assertRaisesRegex(ValueError, "predates"):
+            with self.assertRaisesRegex(ValueError, "does not match"):
                 load_run_parameters(run)
             torch.save({
                 "nnue_model_version": NNUE_MODEL_VERSION,

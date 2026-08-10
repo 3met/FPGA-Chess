@@ -25,7 +25,7 @@ PIECE_COUNT = 6
 SQUARE_COUNT = 64
 FEATURE_COUNT = PIECE_COUNT * SQUARE_COUNT
 MAX_PIECES = 32
-RECORD = struct.Struct("<32hf")
+RECORD = struct.Struct("<32h?f")
 META_NAME = "metadata.json"
 DATA_NAME = "records.bin"
 _WORKER_FILTERS: dict | None = None
@@ -40,6 +40,7 @@ FEN_PIECES = {
 @dataclass(frozen=True)
 class Sample:
     codes: tuple[int, ...]
+    white_to_move: bool
     target_cp: float
 
 
@@ -141,7 +142,7 @@ def parse_record(record: dict, filters: dict) -> tuple[Sample | None, str | None
             return None, "capture"
         if filters["remove_checks"] and board.gives_check(first):
             return None, "check"
-        return Sample(encode_fen(record["fen"]), target), None
+        return Sample(encode_fen(record["fen"]), board.turn == chess.WHITE, target), None
     except (KeyError, TypeError, ValueError, IndexError):
         return None, "malformed"
 
@@ -160,7 +161,7 @@ def _open_lines(path: Path) -> tuple[BinaryIO, io.TextIOWrapper]:
 
 
 def _packed_sample(sample: Sample) -> bytes:
-    return RECORD.pack(*sample.codes, sample.target_cp)
+    return RECORD.pack(*sample.codes, sample.white_to_move, sample.target_cp)
 
 
 def _write_sample(handle: BinaryIO, sample: Sample | bytes) -> None:
@@ -320,7 +321,11 @@ class CacheDataset:
             self._handle = self.path.open("rb")
             self._map = mmap.mmap(self._handle.fileno(), 0, access=mmap.ACCESS_READ)
         values = RECORD.unpack_from(self._map, (self.start + index) * RECORD.size)
-        return torch.tensor(values[:MAX_PIECES], dtype=torch.int16), torch.tensor(values[-1], dtype=torch.float32)
+        return (
+            torch.tensor(values[:MAX_PIECES], dtype=torch.int16),
+            torch.tensor(values[-2], dtype=torch.bool),
+            torch.tensor(values[-1], dtype=torch.float32),
+        )
 
     def close(self) -> None:
         if self._map is not None:
@@ -359,7 +364,11 @@ class CacheBatchLoader:
         import numpy
         import torch
 
-        dtype = numpy.dtype([("codes", "<i2", (MAX_PIECES,)), ("target", "<f4")])
+        dtype = numpy.dtype([
+            ("codes", "<i2", (MAX_PIECES,)),
+            ("white_to_move", "?"),
+            ("target", "<f4"),
+        ])
         records = numpy.memmap(self.dataset.path, dtype=dtype, mode="r")
         start = self.dataset.start
         stop = start + len(self.dataset)
@@ -378,8 +387,11 @@ class CacheBatchLoader:
             for offset in range(0, len(indices), self.batch_size):
                 batch = records[indices[offset:offset + self.batch_size]]
                 codes = torch.from_numpy(numpy.array(batch["codes"], copy=True))
+                white_to_move = torch.from_numpy(
+                    numpy.array(batch["white_to_move"], copy=True)
+                )
                 target = torch.from_numpy(numpy.array(batch["target"], copy=True))
-                yield codes, target
+                yield codes, white_to_move, target
 
 
 class BufferedShuffleSampler:

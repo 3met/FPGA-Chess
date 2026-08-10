@@ -5,11 +5,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "hardware/data/nnue"
-ACCUMULATOR_COUNT = 256
+ACCUMULATOR_COUNT = 128
 FEATURE_COUNT = 2 * 6 * 64
 FEATURE_ROW_BYTES = ACCUMULATOR_COUNT * 2 // 8
 OUTPUT_MAC_LANES = 128
-OUTPUT_ROWS = ACCUMULATOR_COUNT // OUTPUT_MAC_LANES
+OUTPUT_WEIGHT_BITS = 3
+OUTPUT_ROWS = 2 * ACCUMULATOR_COUNT // OUTPUT_MAC_LANES
+OUTPUT_ROW_HEX_DIGITS = (OUTPUT_MAC_LANES * OUTPUT_WEIGHT_BITS + 3) // 4
 
 
 def has_geometry(path: Path, expected_lines: list[str]) -> bool:
@@ -29,7 +31,8 @@ def main() -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     defaults = {
         "feature_transformer.hex": ("00" * FEATURE_ROW_BYTES + "\n") * FEATURE_COUNT,
-        "output_weights.hex": ("0" * OUTPUT_MAC_LANES + "\n") * OUTPUT_ROWS,
+        "output_weights.hex": ("0" * OUTPUT_ROW_HEX_DIGITS + "\n") * OUTPUT_ROWS,
+        "output_bias.hex": "00\n",
         "accumulator_bias.hex": "0\n" * ACCUMULATOR_COUNT,
     }
     for name, contents in defaults.items():

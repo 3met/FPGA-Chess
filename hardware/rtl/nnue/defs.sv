@@ -5,22 +5,24 @@ package nnue_defs;
     localparam int NNUE_SIDE_COUNT = 2;
     localparam int NNUE_PIECE_CATEGORY_COUNT = 6;
     localparam int NNUE_FEATURE_COUNT = NNUE_SIDE_COUNT * NNUE_PIECE_CATEGORY_COUNT * 64;
-    localparam int NNUE_ACCUMULATOR_COUNT = 256;
+    localparam int NNUE_ACCUMULATOR_COUNT = 128;
     localparam int NNUE_FEATURE_WEIGHT_BITS = 2;
     localparam int NNUE_FEATURE_ROW_BITS =
         NNUE_ACCUMULATOR_COUNT * NNUE_FEATURE_WEIGHT_BITS;
     localparam int NNUE_ROW_BYTES = NNUE_FEATURE_ROW_BITS / 8;
     localparam int NNUE_STATE_VALUE_COUNT = NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT;
-    localparam int NNUE_OUTPUT_INPUT_COUNT = NNUE_ACCUMULATOR_COUNT;
-    localparam int NNUE_OUTPUT_WEIGHT_BITS = 4;
+    localparam int NNUE_OUTPUT_INPUT_COUNT =
+        NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT;
+    localparam int NNUE_OUTPUT_WEIGHT_BITS = 3;
+    localparam int NNUE_OUTPUT_BIAS_BITS = 5;
     localparam int NNUE_OUTPUT_MAC_LANES = 128;
     localparam int NNUE_OUTPUT_MAC_CYCLES =
         (NNUE_OUTPUT_INPUT_COUNT + NNUE_OUTPUT_MAC_LANES - 1) / NNUE_OUTPUT_MAC_LANES;
 
     typedef logic [9:0] NnueFeatureIndex;
-    // The trained distribution stays well inside signed six-bit state. Modular
+    // The trained distribution stays well inside signed five-bit state. Modular
     // updates preserve exact inverse deltas if a rare extreme wraps.
-    localparam int NNUE_ACCUMULATOR_BITS = 6;
+    localparam int NNUE_ACCUMULATOR_BITS = 5;
     localparam int NNUE_ACCUMULATOR_BIAS_BITS = 3;
     typedef logic signed [NNUE_ACCUMULATOR_BITS-1:0] NnueAccumulator;
     // Each perspective sees its own pieces first, followed by enemy pieces,

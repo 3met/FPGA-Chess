@@ -186,6 +186,7 @@
       "outputs": [
         "hardware/data/nnue/feature_transformer.hex",
         "hardware/data/nnue/output_weights.hex",
+        "hardware/data/nnue/output_bias.hex",
         "hardware/data/nnue/accumulator_bias.hex"
       ]
     },
