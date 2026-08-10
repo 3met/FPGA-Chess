@@ -489,10 +489,13 @@ module tb_engine_profile #(
                         lmr_reduced_issues <= lmr_reduced_issues + 1;
                 end
             end
-            // Sample the tagged pipeline completion directly. The controller's
-            // simulation result pulse is registered one cycle later, when both
+            // Sample the tagged pipeline completion only while the controller
+            // consumes it. ST_FLUSH_RESPOND freezes the tag pipe, so sampling a
+            // held valid tag there would count one completion multiple times.
+            // The simulation result pulse is registered one cycle later, when
             // check status and the parent's legal-move ordinal have moved on.
-            if (dut.controller.search_board_tag_valid_pipe[
+            if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_RUN
+                    && dut.controller.search_board_tag_valid_pipe[
                     SEARCH_BOARD_TAG_PIPE_LEN - 1
                 ]) begin
                 automatic int tid = int'(dut.controller.search_board_tag_pipe[

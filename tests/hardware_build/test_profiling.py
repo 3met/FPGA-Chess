@@ -423,6 +423,24 @@ class ReportTests(unittest.TestCase):
                 0,
             )
 
+    def test_incomplete_board_request_at_search_end_is_allowed(self):
+        metrics = sample_metrics()
+        metrics["components.board.issues"] = 3
+        metrics["algorithm.main_board_issues"] = 2
+        report = build_profile_report(
+            {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+            metrics,
+            {
+                "best_move.from": 0, "best_move.to": 0, "best_move.promotion": 0,
+                "score": 0, "nodes": 5, "completed_depth": 0,
+                "deepest_search_ply": 0, "end_reason": 0, "error": 0,
+            },
+            1,
+        )
+        self.assertEqual(report["components"]["board_update"]["issues"], 3)
+        self.assertEqual(report["components"]["board_update"]["legal_candidates"], 1)
+        self.assertEqual(report["components"]["board_update"]["illegal_candidates"], 1)
+
 
 class ProfileArgumentTests(unittest.TestCase):
     def namespace(self, **updates):
