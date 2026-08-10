@@ -63,6 +63,8 @@ module search_controller #(
     localparam int SEARCH_INF_VALUE = 32001;
     localparam int NULL_MIN_BETA_VALUE = -32000 + MAX_PLY_COUNT;
     localparam int ASPIRATION_DELTA_VALUE = 64;
+    localparam int TT_VALIDATE_MIN_DEPTH = 8;
+    localparam int TT_VALIDATE_MAX_BYPASS_HALFMOVE = 4;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam EvalScore NULL_MIN_BETA = EvalScore'(NULL_MIN_BETA_VALUE);
     localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_DELTA_VALUE);
@@ -217,6 +219,9 @@ module search_controller #(
     logic search_repetition_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_done[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_draw[0:SEARCH_THREAD_COUNT-1];
+    logic search_tt_validation_pending[0:SEARCH_THREAD_COUNT-1];
+    logic search_tt_validation_passed[0:SEARCH_THREAD_COUNT-1];
+    logic search_tt_validation_forced[0:SEARCH_THREAD_COUNT-1];
     TTLookupResponse search_tt_response[0:SEARCH_THREAD_COUNT-1];
     ThreadID search_board_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     BoardOp search_board_op_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
@@ -1464,6 +1469,15 @@ module search_controller #(
         return TTDepth'(search_stack_top[thread].remaining_depth);
     endfunction : search_remaining_depth
 
+    // Repetition history can affect a TT score only after enough reversible
+    // moves have accumulated; forced validation extends the depth check only.
+    function automatic logic tt_history_validation_required(input ThreadID thread);
+        return search_board[thread].halfmove_clock
+                > HalfmoveClock'(TT_VALIDATE_MAX_BYPASS_HALFMOVE)
+            && (search_tt_validation_forced[thread]
+                || search_remaining_depth(thread) >= TTDepth'(TT_VALIDATE_MIN_DEPTH));
+    endfunction : tt_history_validation_required
+
     function automatic TTBoundType tt_bound_for_score(
         input EvalScore score,
         input EvalScore original_alpha,
@@ -2067,6 +2081,9 @@ module search_controller #(
                 search_repetition_pending[tid] <= 1'b0;
                 search_repetition_done[tid] <= 1'b0;
                 search_repetition_draw[tid] <= 1'b0;
+                search_tt_validation_pending[tid] <= 1'b0;
+                search_tt_validation_passed[tid] <= 1'b0;
+                search_tt_validation_forced[tid] <= 1'b0;
                 search_tt_response[tid] <= TTLookupResponse'('0);
                 search_pending_move[tid] <= NULL_MOVE;
                 search_board[tid] <= FullBoard'('0);
@@ -2170,7 +2187,26 @@ module search_controller #(
                 search_repetition_pending[repetition_resp_thread] <= 1'b0;
                 search_repetition_done[repetition_resp_thread] <= 1'b1;
                 search_repetition_draw[repetition_resp_thread] <= repetition_resp_is_draw;
-                if (!nnue_plan_pending[repetition_resp_thread] || nnue_completes_now) begin
+                if (search_tt_validation_pending[repetition_resp_thread]) begin
+                    search_tt_validation_pending[repetition_resp_thread] <= 1'b0;
+                    if (repetition_resp_count != 2'd0) begin
+                        // Any prior occurrence gives this child a different
+                        // draw context from the cached search. Reject its score,
+                        // then run it through ordinary move search so immediate
+                        // and short forced repetitions remain selectable.
+                        search_stack_top[repetition_resp_thread].move_order_state
+                            <= MOVE_ORDER_DIRECT;
+                        search_stack_top[repetition_resp_thread].direct_attempted <= 1'b0;
+                        search_tt_validation_forced[repetition_resp_thread] <= 1'b1;
+                        search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_READY;
+                    end else begin
+                        // Replay the retained TT response now that its move has
+                        // passed pseudo-legality, king-safety, and repetition.
+                        search_tt_validation_passed[repetition_resp_thread] <= 1'b1;
+                        search_tt_response_pending[repetition_resp_thread] <= 1'b1;
+                        search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_TT_WAIT;
+                    end
+                end else if (!nnue_plan_pending[repetition_resp_thread] || nnue_completes_now) begin
                     if (repetition_resp_is_draw) begin
                         search_return_score[repetition_resp_thread] <= DRAW_EVAL_SCORE;
                         search_return_valid[repetition_resp_thread] <= 1'b1;
@@ -2200,6 +2236,9 @@ module search_controller #(
                     search_repetition_pending[tid] <= 1'b0;
                     search_repetition_done[tid] <= 1'b0;
                     search_repetition_draw[tid] <= 1'b0;
+                    search_tt_validation_pending[tid] <= 1'b0;
+                    search_tt_validation_passed[tid] <= 1'b0;
+                    search_tt_validation_forced[tid] <= 1'b0;
                     search_return_was_scout[tid] <= 1'b0;
                     search_return_was_reduced[tid] <= 1'b0;
                     search_return_was_null[tid] <= 1'b0;
@@ -2262,6 +2301,9 @@ module search_controller #(
                                     search_repetition_pending[tid] <= 1'b0;
                                     search_repetition_done[tid] <= 1'b0;
                                     search_repetition_draw[tid] <= 1'b0;
+                                    search_tt_validation_pending[tid] <= 1'b0;
+                                    search_tt_validation_passed[tid] <= 1'b0;
+                                    search_tt_validation_forced[tid] <= 1'b0;
                                     history_update_pending[tid] <= 1'b0;
                                     nnue_plan_pending[tid] <= 1'b0;
                                     nnue_plan_inflight[tid] <= 1'b0;
@@ -2380,6 +2422,9 @@ module search_controller #(
                                         search_repetition_pending[tid] <= 1'b0;
                                         search_repetition_done[tid] <= 1'b0;
                                         search_repetition_draw[tid] <= 1'b0;
+                                        search_tt_validation_pending[tid] <= 1'b0;
+                                        search_tt_validation_passed[tid] <= 1'b0;
+                                        search_tt_validation_forced[tid] <= 1'b0;
                                         search_return_was_scout[tid] <= 1'b0;
                                         search_return_was_reduced[tid] <= 1'b0;
                                         search_return_was_null[tid] <= 1'b0;
@@ -2666,6 +2711,9 @@ module search_controller #(
                         search_pvs_research[tid] <= 1'b0;
                         search_eval_is_stand_pat[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
+                        search_tt_validation_pending[tid] <= 1'b0;
+                        search_tt_validation_passed[tid] <= 1'b0;
+                        search_tt_validation_forced[tid] <= 1'b0;
                         search_stack_top[tid].remaining_depth <= search_thread_target_depth[tid];
                         search_stack_top[tid].alpha <= search_thread_root_alpha[tid];
                         search_stack_top[tid].orig_alpha <= search_thread_root_alpha[tid];
@@ -2969,6 +3017,9 @@ module search_controller #(
                                 search_pvs_research[tid] <= 1'b0;
                                 search_eval_is_stand_pat[tid] <= 1'b0;
                                 search_stack_top[tid] <= empty_search_stack_entry();
+                                search_tt_validation_pending[tid] <= 1'b0;
+                                search_tt_validation_passed[tid] <= 1'b0;
+                                search_tt_validation_forced[tid] <= 1'b0;
                                 search_stack_top[tid].remaining_depth
                                     <= aspiration_failed
                                         ? search_thread_target_depth[tid]
@@ -3196,6 +3247,42 @@ module search_controller #(
                                 // Null moves preserve the thread's live
                                 // accumulator and require no update-plan join.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                            end else if (search_tt_validation_pending[board_thread_id]) begin
+                                if (board_update_mover_in_check) begin
+                                    // A pseudo-legal TT move that leaves its king
+                                    // checked cannot authorize the stored score.
+                                    search_tt_validation_pending[board_thread_id] <= 1'b0;
+                                    search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                                end else if (board_update_out.halfmove_clock >= HalfmoveClock'(100)) begin
+                                    // Re-run an immediate 50-move draw as an
+                                    // ordinary child so it remains selectable.
+                                    search_tt_validation_pending[board_thread_id] <= 1'b0;
+                                    search_stack_top[board_thread_id].move_order_state
+                                        <= MOVE_ORDER_DIRECT;
+                                    search_stack_top[board_thread_id].direct_attempted <= 1'b0;
+                                    search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                                end else begin
+                                    automatic PlyIndex validation_repetition_start =
+                                        committed_move_is_irreversible(
+                                            search_board[board_thread_id],
+                                            board_update_out,
+                                            search_pending_move[board_thread_id])
+                                            ? child_ply
+                                            : search_stack_top[board_thread_id].repetition_start;
+                                    // The speculative child is discarded rather
+                                    // than entered, so it needs no NNUE update or
+                                    // board reversal after its repetition query.
+                                    repetition_req_valid <= 1'b1;
+                                    repetition_req_thread <= board_thread_id;
+                                    repetition_req_ply <= child_ply;
+                                    repetition_req_start_ply <= validation_repetition_start;
+                                    repetition_req_key <= board_update_zobrist_out;
+                                    search_repetition_pending[board_thread_id] <= 1'b1;
+                                    search_repetition_done[board_thread_id] <= 1'b0;
+                                    search_repetition_draw[board_thread_id] <= 1'b0;
+                                    search_thread_phase[board_thread_id]
+                                        <= SEARCH_PHASE_REPETITION_WAIT;
+                                end
                             end else if (board_update_mover_in_check) begin
                                 // The board pipeline is stateless. Ignore the
                                 // speculative result; its history entry will be
@@ -3368,6 +3455,7 @@ module search_controller #(
                                     search_pending_move[move_thread_id] <= move_cmd_resp_direct_move;
                                     search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                                 end else begin
+                                    search_tt_validation_pending[move_thread_id] <= 1'b0;
                                     search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
                                 end
                             end else begin
@@ -3484,6 +3572,8 @@ module search_controller #(
                         if (|search_tt_response_mask) begin
                             automatic EvalScore tt_alpha_after;
                             automatic logic tt_cutoff;
+                            automatic logic tt_score_usable;
+                            automatic logic tt_validation_required;
                             automatic ThreadID lookup_thread_id;
                             automatic PlyIndex lookup_ply;
                             automatic TTLookupResponse lookup_resp;
@@ -3496,9 +3586,15 @@ module search_controller #(
                             lookup_ply = search_ply[lookup_thread_id];
                             tt_alpha_after = search_stack_top[lookup_thread_id].alpha;
                             tt_cutoff = 1'b0;
+                            tt_score_usable = lookup_resp.hit
+                                && lookup_resp.depth >= search_remaining_depth(lookup_thread_id);
+                            tt_validation_required = tt_score_usable
+                                && tt_history_validation_required(lookup_thread_id)
+                                && !search_tt_validation_passed[lookup_thread_id];
                             search_thread_id <= lookup_thread_id;
                             search_dispatch.tt_response <= search_thread_after(lookup_thread_id);
                             search_tt_response_pending[lookup_thread_id] <= 1'b0;
+                            search_tt_validation_passed[lookup_thread_id] <= 1'b0;
 
                             // A matching TT move remains useful for ordering even when the
                             // stored depth is too shallow for its score/bound to be usable.
@@ -3506,7 +3602,9 @@ module search_controller #(
                                 search_stack_top[lookup_thread_id].tt_move <= lookup_resp.best_move;
                                 search_stack_top[lookup_thread_id].has_tt_move <= !is_null_move(lookup_resp.best_move);
                             end
-                            if (lookup_resp.hit && lookup_resp.depth >= search_remaining_depth(lookup_thread_id)) begin
+                            if (tt_score_usable && (!tt_validation_required
+                                    || (search_tt_validation_passed[lookup_thread_id]
+                                        && lookup_resp.score > DRAW_EVAL_SCORE))) begin
                                 if (lookup_resp.bound_type == TT_BOUND_EXACT) begin
                                     search_return_score[lookup_thread_id] <= lookup_resp.score;
                                     search_return_valid[lookup_thread_id] <= 1'b1;
@@ -3528,7 +3626,22 @@ module search_controller #(
                                         tt_cutoff = 1'b1;
                                     end
                                 end
+                            end else if (tt_validation_required
+                                    && lookup_resp.score > DRAW_EVAL_SCORE
+                                    && !is_null_move(lookup_resp.best_move)) begin
+                                // A deep history-bearing hit must prove that its
+                                // stored move is legal and does not immediately
+                                // enter a drawn child before its score is usable.
+                                search_tt_validation_pending[lookup_thread_id] <= 1'b1;
+                                search_pending_move[lookup_thread_id] <= lookup_resp.best_move;
                             end
+`ifndef SYNTHESIS
+                            if (tt_cutoff
+                                    && tt_history_validation_required(lookup_thread_id)) begin
+                                assert (search_tt_validation_passed[lookup_thread_id])
+                                    else $fatal(1, "deep TT score bypassed child validation");
+                            end
+`endif
 
                             if (tt_cutoff) begin
                                 if (lookup_ply == PlyIndex'(0)) begin

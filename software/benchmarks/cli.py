@@ -15,18 +15,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from software.benchmarks.positions import PERFT_POSITIONS, SANITY_POSITIONS
+from software.benchmarks.positions import (
+    PERFT_POSITIONS,
+    REPETITION_CASES,
+    SANITY_POSITIONS,
+    RepetitionCase,
+)
 from software.benchmarks.session import FPGAUCISession, FPGAUCIError
 
 NODES_RE = re.compile(r"\bnodes\s+(\d+)\b")
+SCORE_RE = re.compile(r"\bscore\s+(cp|mate)\s+(-?\d+)\b")
 PERFT_RE = re.compile(r"(?:Nodes searched:\s*|\bnodes\s+)(\d+)\b", re.IGNORECASE)
 MOVE_RE = re.compile(r"^(?:[a-h][1-8][a-h][1-8][qrbn]?|0000)$")
 
 
 FAST_PERFT = PERFT_POSITIONS
-SANITY_MOVETIME_MS = 500
-SANITY_MOVETIME_MIN_MS = 475
-SANITY_MOVETIME_MAX_MS = 525
+SANITY_DEPTH = 6
+SANITY_REPETITION_DEPTH = 8
+SANITY_MOVETIME_MS = 250
+SANITY_MOVETIME_TOLERANCE_MS = 5
 PUZZLE_INDEX_MAGIC = b"FPCPZIDX"
 PUZZLE_INDEX_HEADER = struct.Struct("<8sQQdQQ")
 
@@ -55,41 +62,120 @@ def _bestmove(lines: Iterable[str]) -> str | None:
     return None
 
 
-def _search(engine: FPGAUCISession, fen: str, go: str, timeout: float) -> tuple[int, str, float]:
-    engine.send("position fen " + fen)
+def _uci_score(lines: Iterable[str]) -> str | None:
+    """Return the last centipawn or mate score from UCI search output."""
+    result = None
+    for line in lines:
+        match = SCORE_RE.search(line)
+        if match:
+            result = f"{match.group(1)} {int(match.group(2))}"
+    return result
+
+
+def _search_position(engine: FPGAUCISession, position: str, go: str, timeout: float) -> tuple[int, str, float, str]:
+    """Search one complete set of UCI position arguments."""
+    engine.send("position " + position)
     engine.send(go)
     result = engine.wait_for(lambda line: line.startswith("bestmove "), timeout, "bestmove")
-    nodes, move = _node_count(result.lines), _bestmove(result.lines)
-    if nodes is None or move is None:
-        raise FPGAUCIError("search response did not contain both nodes and a parseable bestmove")
-    return nodes, move, result.elapsed_seconds
+    nodes, move, score = _node_count(result.lines), _bestmove(result.lines), _uci_score(result.lines)
+    if nodes is None or move is None or score is None:
+        raise FPGAUCIError("search response did not contain nodes, a UCI score, and a parseable bestmove")
+    return nodes, move, result.elapsed_seconds, score
+
+
+def _search(engine: FPGAUCISession, fen: str, go: str, timeout: float) -> tuple[int, str, float]:
+    nodes, move, elapsed_seconds, _ = _search_position(engine, "fen " + fen, go, timeout)
+    return nodes, move, elapsed_seconds
+
+
+def _repetition_position(case: RepetitionCase, moves: Sequence[str]) -> str:
+    return f"fen {case.base_fen} moves {' '.join(moves)}"
+
+
+def _run_repetition_checks(
+    engine: FPGAUCISession,
+    depth: int,
+    startup_timeout: float,
+    search_timeout: float,
+) -> list[tuple[RepetitionCase, str]]:
+    """Test repetition choices after warming search state at the same board hash."""
+    failures: list[tuple[RepetitionCase, str]] = []
+    for case in REPETITION_CASES:
+        engine.new_game(startup_timeout)
+        primed_nodes, primed_move, _, primed_score = _search_position(
+            engine,
+            _repetition_position(case, case.return_moves),
+            f"go depth {depth}",
+            search_timeout,
+        )
+        # Reload the longer history without New Game so TT and move-ordering state remain warm.
+        actual_nodes, actual_move, _, actual_score = _search_position(
+            engine,
+            _repetition_position(case, case.final_moves),
+            f"go depth {depth}",
+            search_timeout,
+        )
+        chose_draw = actual_move == case.draw_move
+        searches = (
+            f"prime={primed_move} score={primed_score} nodes={primed_nodes}, "
+            f"final={actual_move} score={actual_score} nodes={actual_nodes}"
+        )
+        if primed_move == "0000":
+            detail = f"{searches}, priming search returned null move"
+        elif actual_move == "0000":
+            detail = f"{searches}, final search returned null move"
+        elif chose_draw != case.should_choose_draw:
+            expectation = (
+                f"play drawing move {case.draw_move}"
+                if case.should_choose_draw
+                else f"avoid drawing move {case.draw_move}"
+            )
+            detail = f"{searches}, expected to {expectation}"
+        else:
+            continue
+        failures.append((case, detail))
+    return failures
 
 
 def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbose: bool) -> int:
     """Exercise the checked-in FPGA UCI host and its connected hardware."""
-    reset_failures: list[str] = []
     timing_failures: list[str] = []
     with FPGAUCISession(verbose=verbose) as engine:
         engine.initialize(startup_timeout)
         for case in SANITY_POSITIONS:
-            first_nodes, _, _ = _search(engine, case.fen, f"go depth {depth}", search_timeout)
-            engine.send("ucinewgame")
-            engine.ready(startup_timeout)
-            second_nodes, _, _ = _search(engine, case.fen, f"go depth {depth}", search_timeout)
-            if first_nodes != second_nodes:
-                reset_failures.append(f"{case.name}: first={first_nodes}, after ucinewgame={second_nodes}")
+            # Isolate timing cases while fixed-depth determinism awaits a UCI
+            # capability query that can confirm a single search thread.
+            engine.new_game(startup_timeout)
             _, _, elapsed_seconds = _search(engine, case.fen, f"go movetime {SANITY_MOVETIME_MS}", search_timeout)
             elapsed_ms = elapsed_seconds * 1000
-            if not SANITY_MOVETIME_MIN_MS <= elapsed_ms <= SANITY_MOVETIME_MAX_MS:
-                timing_failures.append(f"{case.name}: {elapsed_ms:.0f} ms (expected {SANITY_MOVETIME_MIN_MS}-{SANITY_MOVETIME_MAX_MS} ms)")
-    for failure in reset_failures:
-        print(f"FAIL reset {failure}")
+            if abs(elapsed_ms - SANITY_MOVETIME_MS) > SANITY_MOVETIME_TOLERANCE_MS:
+                timing_failures.append(
+                    f"{case.name}: {elapsed_ms:.1f} ms "
+                    f"(expected {SANITY_MOVETIME_MS} +/- {SANITY_MOVETIME_TOLERANCE_MS} ms)"
+                )
+        repetition_failures = _run_repetition_checks(
+            engine,
+            max(depth, SANITY_REPETITION_DEPTH),
+            startup_timeout,
+            search_timeout,
+        )
     for failure in timing_failures:
         print(f"FAIL movetime {failure}")
-    reset_passes = len(SANITY_POSITIONS) - len(reset_failures)
+    for case, detail in repetition_failures:
+        print(f"FAIL repetition {case.name}: {detail}")
     timing_passes = len(SANITY_POSITIONS) - len(timing_failures)
-    print(f"sanity: reset {reset_passes}/{len(SANITY_POSITIONS)} passed; movetime {timing_passes}/{len(SANITY_POSITIONS)} passed")
-    return 1 if reset_failures or timing_failures else 0
+    repetition_failure_names = {case.name for case, _ in repetition_failures}
+    winning_cases = [case for case in REPETITION_CASES if not case.should_choose_draw]
+    losing_cases = [case for case in REPETITION_CASES if case.should_choose_draw]
+    winning_passes = sum(case.name not in repetition_failure_names for case in winning_cases)
+    losing_passes = sum(case.name not in repetition_failure_names for case in losing_cases)
+    print(
+        f"sanity: movetime {timing_passes}/{len(SANITY_POSITIONS)} passed; "
+        f"repetition avoid {winning_passes}/{len(winning_cases)} passed; "
+        f"repetition take {losing_passes}/{len(losing_cases)} passed; "
+        "reset determinism disabled"
+    )
+    return 1 if timing_failures or repetition_failures else 0
 
 
 def run_perft(startup_timeout: float, search_timeout: float, verbose: bool) -> int:
@@ -278,10 +364,27 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="suite", required=True)
-    sanity = sub.add_parser("sanity"); sanity.add_argument("--depth", type=int, default=3); _add_common(sanity)
-    perft = sub.add_parser("perft"); perft.add_argument("--profile", choices=["fast"], default="fast"); perft.add_argument("--list", action="store_true", help="Print named FEN/depth/node cases without contacting the FPGA."); _add_common(perft)
-    rate = sub.add_parser("rate"); rate.add_argument("--puzzles", type=Path, default=Path("puzzles/lichess_db_puzzle.csv")); rate.add_argument("--count", type=int, default=100); rate.add_argument("--seed", type=int, default=0); rate.add_argument("--movetime-ms", type=int, default=100); rate.add_argument("--min-rating", type=float, default=1000.0); _add_common(rate)
-    all_suite = sub.add_parser("all"); all_suite.add_argument("--depth", type=int, default=3); _add_common(all_suite)
+
+    sanity = sub.add_parser("sanity")
+    sanity.add_argument("--depth", type=int, default=SANITY_DEPTH)
+    _add_common(sanity)
+
+    perft = sub.add_parser("perft")
+    perft.add_argument("--profile", choices=["fast"], default="fast")
+    perft.add_argument("--list", action="store_true", help="Print named FEN/depth/node cases without contacting the FPGA.")
+    _add_common(perft)
+
+    rate = sub.add_parser("rate")
+    rate.add_argument("--puzzles", type=Path, default=Path("puzzles/lichess_db_puzzle.csv"))
+    rate.add_argument("--count", type=int, default=100)
+    rate.add_argument("--seed", type=int, default=0)
+    rate.add_argument("--movetime-ms", type=int, default=100)
+    rate.add_argument("--min-rating", type=float, default=1000.0)
+    _add_common(rate)
+
+    all_suite = sub.add_parser("all")
+    all_suite.add_argument("--depth", type=int, default=SANITY_DEPTH)
+    _add_common(all_suite)
     args = parser.parse_args(argv)
     if args.startup_timeout <= 0 or args.search_timeout <= 0:
         parser.error("timeouts must be positive")

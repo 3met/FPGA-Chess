@@ -18,6 +18,8 @@ Every accepted lookup produces one tagged response. A response reports whether t
 
 A matching entry may provide a move-ordering hint even when its depth or bound is insufficient for a cutoff. The search controller validates that move through the normal board-update legality path.
 
+Repetition history is not part of the Zobrist key. At remaining depth eight or greater with a halfmove clock above four, the controller therefore rejects non-positive scores and validates positive scores by requiring the stored move to be legal and its child to have no previous occurrence or immediate 50-move draw. Shallower scores retain the direct path until a validation discovers a repeated child; subsequent hits in that iteration are validated at every depth while the halfmove clock remains above four so a shallow descendant entry cannot hide the forced completion of the repetition. Positions with shorter reversible history always retain the direct path. A rejected score may still provide its legal move as an ordering hint.
+
 Lookup requests take priority over queued stores because a requesting thread cannot proceed until its response arrives.
 
 ## Store

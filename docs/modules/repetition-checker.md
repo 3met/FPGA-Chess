@@ -23,7 +23,7 @@ The per-thread line history is banked by ply so all prior same-parity positions 
 
 ## Request and Response
 
-A request identifies the thread, current ply, reversible-history boundary, request epoch, and full Zobrist key. The response returns the thread and epoch for routing, a previous-occurrence count saturated at two, and a draw flag.
+A request identifies the thread, current ply, reversible-history boundary, request epoch, and full Zobrist key. The response returns the thread and epoch for routing, a previous-occurrence count saturated at two, and a draw flag. In addition to ordinary searched children, the controller queries the speculative child of a positive deep TT score when enough reversible history exists to require validation. Any previous occurrence rejects that score because even a nonterminal second occurrence can put a forced continuation one cycle away from a draw.
 
 The epoch distinguishes a valid response from work invalidated by a search restart or flush. The controller accepts `resp_is_draw` only for the matching live request.
 

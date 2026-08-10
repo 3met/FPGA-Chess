@@ -31,6 +31,11 @@ module tb_search_controller;
     int fail_count = 0;
     int tt_lookup_count = 0;
     int tt_store_count = 0;
+    int tt_validation_repetition_count = 0;
+    int tt_validation_pass_count = 0;
+    int tt_validation_repeat_reject_count = 0;
+    int tt_validation_nonpositive_reject_count = 0;
+    int tt_validation_illegal_reject_count = 0;
     bit tt_thread_seen[0:THREAD_COUNT-1];
     bit tt_response_thread_seen[0:THREAD_COUNT-1];
     bit root_push_seen[0:THREAD_COUNT-1];
@@ -426,6 +431,200 @@ module tb_search_controller;
         check(second_score == first_score, {label, " second search same score"});
         check(second_move == first_move, {label, " second search same best move"});
     endtask : run_tt_reuse_test
+
+    // Install a controlled exact root entry without paying to search its depth.
+    task automatic preload_root_tt(
+        input Move best_move,
+        input EvalScore score,
+        input TTDepth depth
+    );
+        automatic int index = int'(dut.active_zobrist_key[3:0]);
+        dut.internal_tt_gen.tt_load_store.entry_memory.mem[index] = tt_make_entry(
+            dut.active_zobrist_key,
+            best_move,
+            score,
+            depth,
+            TT_BOUND_EXACT,
+            dut.tt_age
+        );
+    endtask : preload_root_tt
+
+    task automatic kill_running_search(input string label);
+        automatic EngineControllerRequest kill_request = zero_request();
+
+        kill_request.operation = ENGINE_CTRL_KILL;
+        req = kill_request;
+        req_valid = 1'b1;
+        #1;
+        check(req_ready, {label, " kill accepted"});
+        do_clock(1);
+        req_valid = 1'b0;
+        req = zero_request();
+        wait_response(label);
+        check(!resp.error, {label, " kill no error"});
+        check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
+    endtask : kill_running_search
+
+    task automatic start_search_depth(input logic [7:0] depth, input string label);
+        automatic EngineControllerRequest request = zero_request();
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = depth;
+        pulse_request(request, label);
+    endtask : start_search_depth
+
+    task automatic wait_for_counter(
+        ref int counter,
+        input int previous_value,
+        input string label
+    );
+        automatic int cycles = 0;
+        while (counter == previous_value && cycles < 20_000) begin
+            do_clock(1);
+            cycles += 1;
+        end
+        check(counter > previous_value, label);
+    endtask : wait_for_counter
+
+    // Depth and halfmove thresholds retain cheap TT reuse, while a deep entry
+    // with meaningful reversible history validates its legal non-drawing child.
+    task automatic run_tt_child_validation_policy_test(input string label);
+        automatic Move cached_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
+        automatic Move best_move;
+        automatic EvalScore score;
+        automatic NodeCountType nodes;
+        automatic int validations_before;
+        automatic int passes_before;
+
+        new_game();
+        set_halfmove_clock(HalfmoveClock'(5), {label, " shallow halfmove"});
+        preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
+        validations_before = tt_validation_repetition_count;
+        run_search_depth_record(8'd7, {label, " shallow depth bypass"},
+            best_move, score, nodes);
+        check(nodes == NodeCountType'(0), {label, " shallow depth accepts TT score"});
+        check(best_move == cached_move, {label, " shallow depth returns TT move"});
+        check(tt_validation_repetition_count == validations_before,
+            {label, " shallow depth skips child validation"});
+
+        new_game();
+        set_halfmove_clock(HalfmoveClock'(4), {label, " low halfmove"});
+        dut.search_board[0].halfmove_clock = HalfmoveClock'(4);
+        dut.search_tt_validation_forced[0] = 1'b1;
+        #1;
+        check(!dut.tt_history_validation_required(ThreadID'(0)),
+            {label, " low halfmove bypass survives forced depth validation"});
+        dut.search_tt_validation_forced[0] = 1'b0;
+        preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
+        validations_before = tt_validation_repetition_count;
+        run_search_depth_record(8'd8, {label, " low halfmove bypass"},
+            best_move, score, nodes);
+        check(nodes == NodeCountType'(0), {label, " low halfmove accepts TT score"});
+        check(best_move == cached_move, {label, " low halfmove returns TT move"});
+        check(tt_validation_repetition_count == validations_before,
+            {label, " low halfmove skips child validation"});
+
+        new_game();
+        set_halfmove_clock(HalfmoveClock'(5), {label, " deep halfmove"});
+        preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
+        validations_before = tt_validation_repetition_count;
+        passes_before = tt_validation_pass_count;
+        run_search_depth_record(8'd8, {label, " deep legal child"},
+            best_move, score, nodes);
+        check(nodes == NodeCountType'(0), {label, " validation avoids child search"});
+        check(best_move == cached_move, {label, " validated TT move returned"});
+        check(score == EvalScore'(600), {label, " validated TT score returned"});
+        check(tt_validation_repetition_count == validations_before + 1,
+            {label, " deep hit checks child repetition"});
+        check(tt_validation_pass_count == passes_before + 1,
+            {label, " legal non-draw child accepts TT score"});
+    endtask : run_tt_child_validation_policy_test
+
+    // Build C-R-C-R so the cached R->C move enters C for the third time.
+    task automatic run_tt_immediate_draw_rejection_test(input string label);
+        automatic Move white_out = make_move(Position'(6), Position'(21), PROMO_QUEEN);
+        automatic Move black_out = make_move(Position'(62), Position'(45), PROMO_QUEEN);
+        automatic Move white_back = make_move(Position'(21), Position'(6), PROMO_QUEEN);
+        automatic Move black_back = make_move(Position'(45), Position'(62), PROMO_QUEEN);
+        automatic int rejects_before;
+
+        new_game();
+        make_direct_move(white_out, {label, " establish C"});
+        set_halfmove_clock(HalfmoveClock'(5), {label, " reset history at C"});
+        make_direct_move(black_out, {label, " first black out"});
+        make_direct_move(white_back, {label, " first white back"});
+        make_direct_move(black_back, {label, " establish R"});
+        make_direct_move(white_out, {label, " second C"});
+        make_direct_move(black_out, {label, " second black out"});
+        make_direct_move(white_back, {label, " second white back"});
+        make_direct_move(black_back, {label, " second R"});
+        preload_root_tt(white_out, EvalScore'(600), TTDepth'(9));
+        rejects_before = tt_validation_repeat_reject_count;
+        start_search_depth(8'd8, {label, " search"});
+        wait_for_counter(tt_validation_repeat_reject_count, rejects_before,
+            {label, " rejects immediate threefold TT score"});
+        do_clock(1);
+        check(dut.search_tt_validation_forced[0],
+            {label, " forces validation below depth threshold"});
+        kill_running_search({label, " stop after rejection"});
+    endtask : run_tt_immediate_draw_rejection_test
+
+    // The stored move need not draw immediately: entering any previously seen
+    // child can put a forced reply one step away from the terminal occurrence.
+    task automatic run_tt_repeated_child_rejection_test(input string label);
+        automatic Move white_out = make_move(Position'(6), Position'(21), PROMO_QUEEN);
+        automatic Move black_out = make_move(Position'(62), Position'(45), PROMO_QUEEN);
+        automatic Move white_back = make_move(Position'(21), Position'(6), PROMO_QUEEN);
+        automatic Move black_back = make_move(Position'(45), Position'(62), PROMO_QUEEN);
+        automatic int rejects_before;
+
+        new_game();
+        make_direct_move(white_out, {label, " establish I"});
+        make_direct_move(black_out, {label, " establish B"});
+        set_halfmove_clock(HalfmoveClock'(5), {label, " reset history at B"});
+        make_direct_move(white_back, {label, " first white back"});
+        make_direct_move(black_back, {label, " establish R"});
+        make_direct_move(white_out, {label, " first I"});
+        make_direct_move(black_out, {label, " second B"});
+        make_direct_move(white_back, {label, " second white back"});
+        make_direct_move(black_back, {label, " second R"});
+        preload_root_tt(white_out, EvalScore'(600), TTDepth'(9));
+        rejects_before = tt_validation_repeat_reject_count;
+        start_search_depth(8'd8, {label, " search"});
+        wait_for_counter(tt_validation_repeat_reject_count, rejects_before,
+            {label, " rejects nonterminal repeated child TT score"});
+        do_clock(1);
+        check(dut.search_tt_validation_forced[0],
+            {label, " forces validation below depth threshold"});
+        kill_running_search({label, " stop after rejection"});
+    endtask : run_tt_repeated_child_rejection_test
+
+    task automatic run_tt_nonpositive_score_rejection_test(input string label);
+        automatic Move cached_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
+        automatic int rejects_before;
+
+        new_game();
+        set_halfmove_clock(HalfmoveClock'(5), {label, " halfmove"});
+        preload_root_tt(cached_move, EvalScore'(-600), TTDepth'(9));
+        rejects_before = tt_validation_nonpositive_reject_count;
+        start_search_depth(8'd8, {label, " search"});
+        wait_for_counter(tt_validation_nonpositive_reject_count, rejects_before,
+            {label, " rejects non-positive deep TT score"});
+        kill_running_search({label, " stop after rejection"});
+    endtask : run_tt_nonpositive_score_rejection_test
+
+    task automatic run_tt_illegal_move_rejection_test(input string label);
+        automatic Move illegal_move = make_move(Position'(12), Position'(36), PROMO_QUEEN);
+        automatic int rejects_before;
+
+        new_game();
+        set_halfmove_clock(HalfmoveClock'(5), {label, " halfmove"});
+        preload_root_tt(illegal_move, EvalScore'(600), TTDepth'(9));
+        rejects_before = tt_validation_illegal_reject_count;
+        start_search_depth(8'd8, {label, " search"});
+        wait_for_counter(tt_validation_illegal_reject_count, rejects_before,
+            {label, " rejects illegal TT move"});
+        kill_running_search({label, " stop after rejection"});
+    endtask : run_tt_illegal_move_rejection_test
 
     task automatic run_shallow_tt_move_ordering_test(input string label);
         automatic Move best_move;
@@ -1206,6 +1405,12 @@ module tb_search_controller;
         repeat_knight_shuffle_once("second repetition cycle");
         run_repetition_draw_search("threefold root search");
 
+        run_tt_child_validation_policy_test("TT child validation policy");
+        run_tt_immediate_draw_rejection_test("TT immediate draw validation");
+        run_tt_repeated_child_rejection_test("TT repeated child validation");
+        run_tt_nonpositive_score_rejection_test("TT non-positive score validation");
+        run_tt_illegal_move_rejection_test("TT illegal move validation");
+
         new_game();
         run_tt_reuse_test("startpos TT reuse");
         run_shallow_tt_move_ordering_test("shallow TT move ordering");
@@ -1619,6 +1824,47 @@ module tb_search_controller;
                     shallow_tt_target_pending[int'(dut.tt_lookup_resp.thread_id)] = 1'b1;
                     shallow_tt_target_move[int'(dut.tt_lookup_resp.thread_id)] = dut.tt_lookup_resp.best_move;
                 end
+            end
+            if (dut.repetition_req_valid
+                    && dut.search_tt_validation_pending[int'(dut.repetition_req_thread)]) begin
+                tt_validation_repetition_count += 1;
+            end
+            for (int idx = 0; idx < THREAD_COUNT; idx++) begin
+                if (dut.search_tt_validation_passed[idx]) begin
+                    tt_validation_pass_count += 1;
+                end
+            end
+            if (dut.repetition_resp_valid
+                    && dut.search_tt_validation_pending[int'(dut.repetition_resp_thread)]
+                    && dut.repetition_resp_count != 2'd0) begin
+                tt_validation_repeat_reject_count += 1;
+            end
+            if (dut.state == dut.ST_SEARCH_RUN && |dut.search_tt_response_mask) begin
+                automatic ThreadID validation_tid = dut.search_select_thread(
+                    dut.search_tt_response_mask,
+                    dut.search_dispatch.tt_response
+                );
+                if (dut.search_tt_response[validation_tid].hit
+                        && dut.search_tt_response[validation_tid].depth
+                            >= dut.search_remaining_depth(validation_tid)
+                        && dut.search_remaining_depth(validation_tid)
+                            >= dut.TT_VALIDATE_MIN_DEPTH
+                        && dut.search_board[validation_tid].halfmove_clock
+                            > HalfmoveClock'(dut.TT_VALIDATE_MAX_BYPASS_HALFMOVE)
+                        && dut.search_tt_response[validation_tid].score <= DRAW_EVAL_SCORE
+                        && !dut.search_tt_validation_passed[validation_tid]) begin
+                    tt_validation_nonpositive_reject_count += 1;
+                end
+            end
+            if (dut.move_cmd_resp_valid
+                    && dut.search_tt_validation_pending[int'(dut.move_cmd_resp_thread)]
+                    && !dut.move_cmd_resp_direct_valid) begin
+                tt_validation_illegal_reject_count += 1;
+            end
+            if (dut.search_board_result_valid
+                    && dut.search_tt_validation_pending[int'(dut.search_board_result_thread_id)]
+                    && dut.board_update_mover_in_check) begin
+                tt_validation_illegal_reject_count += 1;
             end
             if (dut.move_cmd_valid && dut.move_cmd_ready
                     && dut.move_cmd == move_generator_defs::MOVE_GEN_VALIDATE_DIRECT

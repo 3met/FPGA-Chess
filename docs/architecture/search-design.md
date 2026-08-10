@@ -48,6 +48,8 @@ Host-supplied game-position commands are assumed valid because the Python host v
 
 The TT is required for Lazy SMP communication between threads. Its lookup, score, and replacement semantics are defined in [transposition-table.md](../modules/transposition-table.md), and its physical backends are defined in [tt-memory.md](../modules/tt-memory.md).
 
+Because repetition history is absent from the board hash, a deep TT score can be stale when a draw has become available. Scores with remaining depth below eight are accepted directly, as are scores when the current halfmove clock is at most four. Otherwise non-positive scores are rejected because another move may have newly become a draw; a positive score is usable only after its stored move passes the normal direct-move pseudo-legality check, board-update king-safety check, 50-move check, and a child repetition query that finds no previous occurrence. A legal history-independent child authorizes the retained response without a subtree search; an illegal or repeated child rejects the score, while a repeated child is replayed through ordinary move search so it remains selectable. Discovering a repeated child forces this validation below depth eight for the remainder of the iteration while the halfmove clock remains above four, so a shallow child TT hit cannot bypass a drawing forced reply.
+
 ## Mate and Draw Scores
 
 Use `MATE_SCORE = 32000` and `MATE_THRESHOLD = 31000`. Non-mate evaluation scores must be clamped inside `[-MATE_THRESHOLD + 1, MATE_THRESHOLD - 1]`.
