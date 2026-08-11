@@ -30,7 +30,7 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 
 ## State Ownership
 
-The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`; shared pipelines do not retain canonical positions.
+The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`, including its cached king squares; shared pipelines do not retain canonical positions.
 
 Each search thread owns its current board and incremental state, alpha/beta window, iterative-deepening state, node count, lifecycle phase, and block-RAM search stack. Stack records hold enough state to reverse a child and resume its parent instead of storing a complete board at every ply. Each node records actual remaining depth because reductions and quiescence entry make it independent of ply.
 

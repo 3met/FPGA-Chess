@@ -242,15 +242,6 @@ module board_update_pipeline #(
             || (piece == BISHOP && isDirDiag(dir));
     endfunction : is_line_attacker
 
-    function automatic Position find_king(input FullBoard board, input Color king_color);
-        for (int pos = 0; pos < 64; pos++) begin
-            if (board.tiles[pos] == Tile'({king_color, KING})) begin
-                return Position'(pos);
-            end
-        end
-        return Position'('x);
-    endfunction : find_king
-
     function automatic Tile pushed_tile(input FullBoard board, input MoveEffects effects, input Position pos);
         automatic Tile tile = board.tiles[pos];
 
@@ -328,7 +319,7 @@ module board_update_pipeline #(
         if (board.tiles[move.from_pos].piece_type == KING) begin
             return move.to_pos;
         end
-        return find_king(board, board.turn);
+        return kingPosition(board, board.turn);
     endfunction : pushed_king_square
 
     task automatic plan_side_delta(
@@ -359,6 +350,10 @@ module board_update_pipeline #(
 
         pst_eval += signed_piece_score(placed_tile, new_pst) - signed_piece_score(old_tile, old_pst);
         board.tiles[pos] = placed_tile;
+        // Legal positions contain one king per color, so placing a king also
+        // establishes that color's canonical cached square.
+        if (placed_tile.piece_type == KING)
+            board.king_positions[placed_tile.piece_color] = pos;
     endtask : replace_tile
 
     task automatic replace_side_data(
@@ -488,8 +483,7 @@ module board_update_pipeline #(
         next_ctx_pipe[0].thread_id   = thread_id;
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
-        // Locate the mover's king one stage before the attack scan so neither
-        // operation sits in series on the same timing path.
+        // Select the tracked post-move king square before the attack scan.
         next_ctx_pipe[0].mover_king_square = (board_op == BOARD_PUSH_MOVE_OP)
             ? pushed_king_square(board_in, move_in)
             : Position'(0);

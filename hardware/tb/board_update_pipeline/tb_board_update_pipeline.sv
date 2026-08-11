@@ -157,6 +157,7 @@ module tb_board_update_pipeline;
             board.tiles[pos] = EMPTY_TILE;
         end
 
+        board.king_positions = KingPositions'(0);
         board.turn = WHITE;
         board.castle_perms = CastlePerms'(4'b0000);
         board.has_ep = 1'b0;
@@ -230,7 +231,10 @@ module tb_board_update_pipeline;
     endtask
 
     task automatic ref_apply_set_tile(input Move move, input logic [6:0] data);
-        ref_board.tiles[move.to_pos] = norm_tile(Tile'(data[3:0]));
+        automatic Tile tile = norm_tile(Tile'(data[3:0]));
+        ref_board.tiles[move.to_pos] = tile;
+        if (tile.piece_type == KING)
+            ref_board.king_positions[tile.piece_color] = move.to_pos;
     endtask
 
     task automatic ref_apply_set_turn(input logic [6:0] data);
@@ -282,6 +286,8 @@ module tb_board_update_pipeline;
 
         ref_board.tiles[from_pos] = EMPTY_TILE;
         ref_board.tiles[to_pos] = placed_tile;
+        if (start_tile.piece_type == KING)
+            ref_board.king_positions[moved_color] = to_pos;
 
         if (is_ep) begin
             ref_board.tiles[ep_capture_pos] = EMPTY_TILE;
@@ -331,6 +337,8 @@ module tb_board_update_pipeline;
         if (from_pos != to_pos) begin
             ref_board.tiles[from_pos] = restored_mover;
             ref_board.tiles[to_pos] = restored_capture;
+            if (restored_mover.piece_type == KING)
+                ref_board.king_positions[moved_color] = from_pos;
 
             if (is_ep) begin
                 ref_board.tiles[to_pos] = EMPTY_TILE;
@@ -539,6 +547,9 @@ module tb_board_update_pipeline;
         set_en_passant(1'b0, BoardFile'(0), "setup en passant", 1'b0);
         set_halfmove_clock(HalfmoveClock'(0), "setup halfmove clock", 1'b0);
         expect_ref_state("start position setup");
+        expect_equal(ref_board.king_positions[WHITE] == Position'(4)
+                && ref_board.king_positions[BLACK] == Position'(60),
+            "start position tracks both king squares");
         expect_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0", "start position");
     endtask
 
@@ -560,6 +571,8 @@ module tb_board_update_pipeline;
         push_move(Position'(44), Position'(51), PROMO_QUEEN, "e6d7");
         expect_fen("rnbqkb1r/pppP2pp/5n2/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0", "after e6d7");
         push_move(Position'(60), Position'(53), PROMO_QUEEN, "e8f7");
+        expect_equal(ref_board.king_positions[BLACK] == Position'(53),
+            "black king move updates tracked square");
         expect_fen("rnbq1b1r/pppP1kpp/5n2/8/8/8/PPPP1PPP/RNBQKBNR w KQ - 1", "after e8f7");
         push_move(Position'(51), Position'(58), PROMO_QUEEN, "d7c8q");
         expect_fen("rnQq1b1r/ppp2kpp/5n2/8/8/8/PPPP1PPP/RNBQKBNR b KQ - 0", "after promotion");
@@ -574,12 +587,16 @@ module tb_board_update_pipeline;
         push_move(Position'(59), Position'(60), PROMO_QUEEN, "d8e8");
         expect_fen("1nQ1qb1r/1pp2kpp/r4n2/p7/8/5N2/PPPPBPPP/RNBQK2R w KQ - 4", "after d8e8");
         push_move(Position'(4), Position'(6), PROMO_QUEEN, "e1g1 castle");
+        expect_equal(ref_board.king_positions[WHITE] == Position'(6),
+            "castling updates tracked king square");
         expect_fen("1nQ1qb1r/1pp2kpp/r4n2/p7/8/5N2/PPPPBPPP/RNBQ1RK1 b - - 5", "after white kingside castle");
         push_move(Position'(53), Position'(62), PROMO_QUEEN, "f7g8");
         expect_fen("1nQ1qbkr/1pp3pp/r4n2/p7/8/5N2/PPPPBPPP/RNBQ1RK1 w - - 6", "after f7g8");
 
         reverse_move("reverse f7g8");
         reverse_move("reverse e1g1 castle");
+        expect_equal(ref_board.king_positions[WHITE] == Position'(4),
+            "reversing castling restores tracked king square");
         reverse_move("reverse d8e8");
         reverse_move("reverse g1f3");
         reverse_move("reverse a8a6");

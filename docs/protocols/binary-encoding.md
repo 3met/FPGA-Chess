@@ -54,7 +54,7 @@ En passant is encoded in a 4-bit field as `{ep_file[2:0], has_ep}`.
 
 ## FullBoard Encoding
 
-`FullBoard` command payloads use 36 bytes. The byte-aligned format is intentionally simple for the engine command layer to parse.
+`FullBoard` command payloads use 36 bytes. The byte-aligned format is intentionally simple for the engine command layer to parse. The internal cached king squares are derived from Set Tile operations and are not transmitted.
 
 | Bytes | Meaning |
 | ----- | ------- |

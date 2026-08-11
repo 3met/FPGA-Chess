@@ -469,6 +469,7 @@ module move_generator_pipeline #(
             ? move.from_pos + Position'(1) : move.from_pos - Position'(1);
         result.tiles[move.from_pos] = EMPTY_TILE;
         result.tiles[transit] = Tile'({board.turn, KING});
+        result.king_positions[board.turn] = transit;
         return result;
     endfunction
 
@@ -489,6 +490,7 @@ module move_generator_pipeline #(
         result.tiles[rook_from] = EMPTY_TILE;
         result.tiles[move.to_pos] = Tile'({board.turn, KING});
         result.tiles[rook_to] = Tile'({board.turn, ROOK});
+        result.king_positions[board.turn] = move.to_pos;
         return result;
     endfunction
 

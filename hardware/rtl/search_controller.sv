@@ -842,21 +842,6 @@ module search_controller #(
         return (piece == QUEEN || (piece == ROOK && isDirCardinal(dir)) || (piece == BISHOP && isDirDiag(dir)));
     endfunction : is_line_attacker
 
-    function automatic Position find_king(input FullBoard board, input Color king_color);
-        automatic Position king_pos;
-
-        // A legal chess board has exactly one king of each colour. OR-ing the
-        // matching square indices lets synthesis use a balanced reduction
-        // instead of a 64-entry priority mux.
-        king_pos = Position'(0);
-        for (int pos = 0; pos < 64; pos++) begin
-            if (board.tiles[pos] == Tile'({king_color, KING})) begin
-                king_pos |= Position'(pos);
-            end
-        end
-        return king_pos;
-    endfunction : find_king
-
     function automatic logic square_attacked(input FullBoard board, input Position square, input Color attacker_color);
         automatic Position test_pos;
         automatic Tile test_tile;
@@ -901,7 +886,7 @@ module search_controller #(
     endfunction : square_attacked
 
     function automatic logic side_in_check(input FullBoard board);
-        return square_attacked(board, find_king(board, board.turn), Color'(~board.turn));
+        return square_attacked(board, kingPosition(board, board.turn), Color'(~board.turn));
     endfunction : side_in_check
 
     function automatic logic committed_move_is_irreversible(

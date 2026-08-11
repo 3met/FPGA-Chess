@@ -160,6 +160,7 @@ module tb_move_generator;
     task automatic empty_board(output FullBoard board, input Color turn = WHITE);
         board = FullBoard'('0);
         for (int pos = 0; pos < 64; pos++) board.tiles[pos] = EMPTY_TILE;
+        board.king_positions = KingPositions'(0);
         board.turn = turn;
         board.castle_perms = CastlePerms'(0);
         board.has_ep = 1'b0;
@@ -187,6 +188,8 @@ module tb_move_generator;
         board.tiles[61] = BLACK_BISHOP;
         board.tiles[62] = BLACK_KNIGHT;
         board.tiles[63] = BLACK_ROOK;
+        board.king_positions[WHITE] = Position'(4);
+        board.king_positions[BLACK] = Position'(60);
         board.castle_perms = CastlePerms'('1);
     endtask
 
@@ -228,9 +231,16 @@ module tb_move_generator;
         output Move direct_move,
         output MoveBucketTops tops_out
     );
+        automatic FullBoard tracked_board = board;
+        // Directed fixtures are assembled tile by tile; derive their cached
+        // king squares before presenting a complete position to the DUT.
+        for (int pos = 0; pos < 64; pos++) begin
+            if (board.tiles[pos].piece_type == KING)
+                tracked_board.king_positions[board.tiles[pos].piece_color] = Position'(pos);
+        end
         while (!cmd_ready) tick();
         cmd = operation;
-        cmd_board = board;
+        cmd_board = tracked_board;
         cmd_suppress_valid = suppress_valid;
         cmd_suppress_move = suppress_move;
         cmd_bucket_tops = tops_in;

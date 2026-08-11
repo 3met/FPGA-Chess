@@ -33,8 +33,13 @@ package chess_helper_funcs;
 	endfunction
 
     // Mirrors a position between the black and white sides of the board
-	function Position mirrorPos(Position in);
+    function Position mirrorPos(Position in);
 		return Position'({~getRank(in), getFile(in)});
+	endfunction
+
+    // Returns the incrementally maintained king square for one color.
+    function Position kingPosition(input FullBoard board, input Color color);
+		return Position'(board.king_positions[color]);
 	endfunction
 
     // Function returns true if direction is cardinal

@@ -53,6 +53,8 @@ package general_chess_defs;
 	// -- Data Types for Board Positioning --
 	// Board Position (0-63)
 	typedef logic [5:0] Position;
+	// Cached king squares indexed by Color.
+	typedef logic [1:0][5:0] KingPositions;
 
 	// Board rank and file data types
 	typedef logic [2:0] BoardRank;
@@ -208,6 +210,7 @@ package general_chess_defs;
 	// -- A Structure with Complete Board Positional Information --
 	typedef struct packed {
 		Tile [63:0] tiles;
+		KingPositions king_positions;
 		Color turn;
 		CastlePerms castle_perms;
 		logic has_ep;

@@ -77,6 +77,8 @@ Both are 3 bits wide.
 
 The helper functions `getRank`, `getFile`, and `getPosition` follow the same convention.
 
+`KingPositions` contains two `Position` values indexed by `Color`. `king_positions[WHITE]` and `king_positions[BLACK]` are maintained with the tiles for every complete legal position.
+
 ## Packed Structs
 
 ### `Tile`
@@ -135,15 +137,16 @@ The canonical internal representation is two fields:
 | Field | Width | Meaning |
 | ----- | ----- | ------- |
 | `tiles` | `64 * 4` | Board tiles indexed by `Position`. |
+| `king_positions` | 12 | Cached White and Black king squares indexed by `Color`. |
 | `turn` | 1 | Side to move. |
 | `castle_perms` | 4 | Castling permissions. |
 | `has_ep` | 1 | Whether en passant is available. |
 | `ep_file` | 3 | En passant file if available. |
 | `halfmove_clock` | 7 | Halfmove clock for the 50-move rule. |
 
-The total packed width is 272 bits.
+The total packed width is 284 bits.
 
-`FullBoard` does not include the fullmove number, Zobrist key, PST score, search history, or repetition history. Those values are tracked separately when needed.
+`FullBoard` does not include the fullmove number, Zobrist key, PST score, search history, or repetition history. Those values are tracked separately when needed. King squares are derived while a position is loaded and are not separate NNUE inputs or features.
 
 ## Search, Evaluation, and Metric Types
 

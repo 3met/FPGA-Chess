@@ -39,7 +39,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 | Pipeline Stage | Description                                                               |
 | -------------- | ------------------------------------------------------------------------- |
-| 0              | Register inputs, locate the mover's post-move king square, fetch reverse history, decode move effects, and launch table reads. |
+| 0              | Register inputs, select the mover's tracked post-move king square, fetch reverse history, decode move effects, and launch table reads. |
 | 1              | Align synchronous table outputs with the registered request and decoded effects, and evaluate push-move king safety. |
 | 2              | Apply tile, side-data, Zobrist, and PST updates, register outputs including push legality, and write pushed move history. |
 
@@ -51,7 +51,7 @@ The engine sets up a board through Set Tile, Set Turn, Set Castle Perms, Set En 
 
 Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. The deterministic generator produces the ROM data and SystemVerilog reference package used by RTL; pawn entries on unreachable ranks are zero.
 
-The pipeline always maintains both the Zobrist key and incremental material/PST evaluation.
+The pipeline always maintains the cached king squares, Zobrist key, and incremental material/PST evaluation. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
 
 ## PST Tables
 
