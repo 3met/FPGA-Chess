@@ -18,7 +18,7 @@ An attempted direct move is suppressed from later generation only after successf
 
 ## Generation
 
-Generation is destination-centric. Each class pipeline selects relevant destination squares, derives plausible sources from board geometry, and emits explicit candidates. Empty or unproductive destinations are skipped without producing a move. Promotions emit all four legal choices.
+Generation is destination-centric. Each class pipeline selects relevant destination squares, then builds the ray and knight context from the registered destination before emitting explicit candidates. Empty or unproductive destinations are skipped without producing a move. Promotions emit all four legal choices.
 
 Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 

@@ -16,7 +16,7 @@ python -m tools.hardware_build profile --time-ms 100 --event-trace --waveform
 python -m tools.hardware_build profile --simulator modelsim --depth 3
 ```
 
-Exactly one of `--depth`, `--nodes`, or `--time-ms` selects the search limit. Hardware configuration options allow thread count, stack depth, and clock settings to be varied without changing the production target. Use `--output` to choose the artifact directory, `--timeout` to bound simulator wall time, and `--force-rebuild` to bypass the simulator build cache.
+Exactly one of `--depth`, `--nodes`, or `--time-ms` selects the search limit. The profiler defaults to the production 50 MHz engine clock; hardware configuration options allow thread count, stack depth, and clock settings to be varied without changing the production target. Use `--output` to choose the artifact directory, `--timeout` to bound simulator wall time, and `--force-rebuild` to bypass the simulator build cache.
 
 Event traces and waveforms are optional because they can be large and slow simulation. `--simulator verilator` and `--simulator modelsim` select a backend explicitly; the two backends must produce the same engine result and measurement events even if clock-edge scheduling assigns an occasional sample to an adjacent internal state.
 

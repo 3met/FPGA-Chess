@@ -245,6 +245,8 @@ def synth_quartus(
     project_name = project.name
     parallel_arg = f"--parallel={parallel_processors}"
     map_args = [f"--effort={target['map_effort']}"] if "map_effort" in target else []
+    if "map_optimization" in target:
+        map_args.append(f"--optimize={target['map_optimization']}")
     fit_args = [f"--effort={target['fit_effort']}"] if "fit_effort" in target else []
     if "seed" in target:
         fit_args.append(f"--seed={target['seed']}")

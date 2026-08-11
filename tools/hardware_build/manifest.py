@@ -90,6 +90,12 @@ def validate_manifest(manifest: object) -> None:
         if "seed" in target and (not isinstance(target["seed"], int) or target["seed"] < 1):
             raise BuildError(f"Synthesis target '{name}' seed must be a positive integer")
         if target["tool"] == "quartus":
+            if target.get("map_effort") not in {None, "auto", "fast"}:
+                raise BuildError(f"Synthesis target '{name}' uses unsupported Quartus map_effort")
+            if target.get("map_optimization") not in {None, "area", "speed", "balanced"}:
+                raise BuildError(f"Synthesis target '{name}' uses unsupported Quartus map_optimization")
+            if target.get("fit_effort") not in {None, "standard", "fast", "auto"}:
+                raise BuildError(f"Synthesis target '{name}' uses unsupported Quartus fit_effort")
             clock_generator = target.get("clock_generator")
             if clock_generator is not None:
                 if not isinstance(clock_generator, dict):

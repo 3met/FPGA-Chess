@@ -62,8 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser.add_argument("--threads", type=int, default=1, help="Search threads; defaults to the DE1 value 1")
     profile_parser.add_argument("--stack-depth", type=int, default=32, help="Stack plies; defaults to 32")
     profile_parser.add_argument(
-        "--engine-clock-hz", type=int, default=40_000_000,
-        help="Engine clock frequency; defaults to the DE1 value 40000000",
+        "--engine-clock-hz", type=int, default=50_000_000,
+        help="Engine clock frequency; defaults to the DE1 value 50000000",
     )
     profile_parser.add_argument("--timeout", type=float, default=600, help="Simulator wall-clock timeout")
     profile_parser.add_argument("--output", help="Artifact directory; defaults to a timestamped build directory")

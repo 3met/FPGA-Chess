@@ -93,7 +93,7 @@ ALGORITHM_LABELS = {
 }
 GENERATOR_STATES = [
     "idle", "direct", "select_destination", "expand_source",
-    "score", "history_wait", "castle", "finish",
+    "build_context", "history_wait", "castle", "finish",
 ]
 MOVE_GENERATOR_OPERATIONS = [
     "direct_validation", "noisy_generation", "quiet_generation", "bucket_pop",

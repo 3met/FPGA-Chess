@@ -93,7 +93,7 @@ module move_generator_pipeline #(
         GEN_DIRECT,
         GEN_SELECT_DEST,
         GEN_EXPAND_SOURCE,
-        GEN_SCORE,
+        GEN_BUILD_CONTEXT,
         GEN_HISTORY_WAIT,
         GEN_CASTLE,
         GEN_FINISH
@@ -265,11 +265,30 @@ module move_generator_pipeline #(
         Position'(27), Position'(28), Position'(35), Position'(36)
     };
 
+    function automatic logic [2:0] first_set_lane(input logic [7:0] mask);
+        for (int lane = 0; lane < 8; lane++)
+            if (mask[lane]) return 3'(lane);
+        return 3'd0;
+    endfunction
+
+    // Encode the fixed destination preference in two balanced eight-entry
+    // levels instead of a timing-critical 64-entry priority chain.
     function automatic Position first_destination(input logic [63:0] mask);
-        for (int order_index = 0; order_index < 64; order_index++)
-            if (mask[DESTINATION_ORDER[order_index]])
-                return DESTINATION_ORDER[order_index];
-        return Position'(0);
+        automatic logic [63:0] ordered_mask;
+        automatic logic [7:0] group_mask;
+        automatic logic [7:0] lane_mask;
+        automatic logic [2:0] group_index;
+        automatic logic [2:0] lane_index;
+        automatic logic [5:0] order_index;
+        for (int index = 0; index < 64; index++)
+            ordered_mask[index] = mask[DESTINATION_ORDER[index]];
+        for (int group = 0; group < 8; group++)
+            group_mask[group] = |ordered_mask[group*8 +: 8];
+        group_index = first_set_lane(group_mask);
+        lane_mask = ordered_mask[int'(group_index)*8 +: 8];
+        lane_index = first_set_lane(lane_mask);
+        order_index = {group_index, lane_index};
+        return DESTINATION_ORDER[order_index];
     endfunction
 
     // Avoid scheduling pawn-only noisy destinations that have no possible source.
@@ -758,40 +777,34 @@ module move_generator_pipeline #(
 
     always_comb source_select_index = first_source(source_mask);
 
-    // Build the next destination context from the remaining mask. The same
-    // combinational network serves ordinary selection and final-source
-    // lookahead, so lookahead does not add another ray-analysis lane.
+    // Build ray and knight context from a registered destination so the fixed
+    // priority encoder and board scan occupy separate timing stages.
     always_comb begin
         selected_destination = first_destination(destination_mask);
         selected_destination_tile = job_board.tiles[selected_destination];
         selected_source_mask = 16'd0;
         for (int dir = 0; dir < 8; dir++) begin
             selected_context_ray[dir] =
-                nearest_ray(job_board, selected_destination, Direction'(dir));
+                nearest_ray(job_board, context_destination, Direction'(dir));
             selected_context_knight[dir] =
-                isKnightShiftOnBoard(selected_destination, KnightDirection'(dir))
+                isKnightShiftOnBoard(context_destination, KnightDirection'(dir))
                     ? job_board.tiles[
-                        shiftKnightPos(selected_destination, KnightDirection'(dir))
+                        shiftKnightPos(context_destination, KnightDirection'(dir))
                     ] : EMPTY_TILE;
             selected_source_mask[dir] = potential_ray_source(
-                job_board, selected_destination, selected_destination_tile,
+                job_board, context_destination, context_destination_tile,
                 Direction'(dir), selected_context_ray[dir]
             );
             selected_source_mask[dir + 8] = potential_knight_source(
-                job_board, selected_destination_tile, selected_context_knight[dir]
+                job_board, context_destination_tile, selected_context_knight[dir]
             );
         end
     end
 
     // These combinational events keep optional counters and simulation
-    // profiling exact when a destination is consumed by lookahead.
+    // profiling exact when a registered destination is analyzed.
     always_comb begin
-        automatic logic final_source_cycle = state == GEN_EXPAND_SOURCE
-            && candidate_slot_ready && source_mask != 16'd0
-            && (source_mask & ~(16'b1 << source_select_index)) == 16'd0;
-        destination_examined_event =
-            (state == GEN_SELECT_DEST && destination_mask != 64'd0)
-            || (final_source_cycle && destination_mask != 64'd0);
+        destination_examined_event = state == GEN_BUILD_CONTEXT;
         destination_with_source_event =
             destination_examined_event && selected_source_mask != 16'd0;
     end
@@ -1264,16 +1277,9 @@ module move_generator_pipeline #(
                     GEN_SELECT_DEST: begin
                         if (destination_mask != 64'd0) begin
                             destination_mask[selected_destination] <= 1'b0;
-                            for (int dir = 0; dir < 8; dir++) begin
-                                context_ray[dir] <= selected_context_ray[dir];
-                                context_knight[dir] <= selected_context_knight[dir];
-                            end
-                            if (selected_source_mask != 16'd0) begin
-                                context_destination <= selected_destination;
-                                context_destination_tile <= selected_destination_tile;
-                                source_mask <= selected_source_mask;
-                                state <= GEN_EXPAND_SOURCE;
-                            end
+                            context_destination <= selected_destination;
+                            context_destination_tile <= selected_destination_tile;
+                            state <= GEN_BUILD_CONTEXT;
                         end else if (candidate_finishes_write) begin
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
                                     && (kingside_castle_permitted(job_board)
@@ -1348,21 +1354,13 @@ module move_generator_pipeline #(
                                 end
                             end
                             if (remaining_mask == 16'd0 && destination_mask != 64'd0) begin
-                                // Consume the next destination while the final
-                                // current source enters writeback.
+                                // Select the next destination while the final
+                                // current source enters writeback, then build
+                                // its board context in the following cycle.
                                 destination_mask[selected_destination] <= 1'b0;
-                                if (selected_source_mask != 16'd0) begin
-                                    context_destination <= selected_destination;
-                                    context_destination_tile <= selected_destination_tile;
-                                    source_mask <= selected_source_mask;
-                                    for (int dir = 0; dir < 8; dir++) begin
-                                        context_ray[dir] <= selected_context_ray[dir];
-                                        context_knight[dir] <= selected_context_knight[dir];
-                                    end
-                                    state <= GEN_EXPAND_SOURCE;
-                                end else begin
-                                    state <= GEN_SELECT_DEST;
-                                end
+                                context_destination <= selected_destination;
+                                context_destination_tile <= selected_destination_tile;
+                                state <= GEN_BUILD_CONTEXT;
                             end else begin
                                 state <= remaining_mask == 16'd0
                                     ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
@@ -1370,10 +1368,17 @@ module move_generator_pipeline #(
                         end
                     end
 
-                    GEN_SCORE: begin
-                        // Retained encoding for stable profiling; new commands
-                        // never enter this state.
-                        state <= GEN_SELECT_DEST;
+                    GEN_BUILD_CONTEXT: begin
+                        for (int dir = 0; dir < 8; dir++) begin
+                            context_ray[dir] <= selected_context_ray[dir];
+                            context_knight[dir] <= selected_context_knight[dir];
+                        end
+                        if (selected_source_mask != 16'd0) begin
+                            source_mask <= selected_source_mask;
+                            state <= GEN_EXPAND_SOURCE;
+                        end else begin
+                            state <= GEN_SELECT_DEST;
+                        end
                     end
 
                     GEN_HISTORY_WAIT: begin

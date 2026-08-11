@@ -37,7 +37,7 @@ Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`
 
 Synthesis verifies generated data before invoking the vendor flow. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Every run records portable status and timing metadata in `synthesis.json` beside the vendor reports, allowing `synth-report` to summarize completed, failed, and interrupted runs.
 
-The DE1-SoC target generates its Quartus project, configured PLL IP, build ID, and engine clock metadata under `work/build/quartus-de1-soc/`. Its manifest clock setting is the single source of truth for both PLL configuration and `engine.CLOCK_FREQ`. The portable RTL and TT memory protocol remain independent of the board-specific clocks, pins, and external-memory wrapper.
+The DE1-SoC target runs the engine at 50 MHz with timing-driven, speed-optimized synthesis and generates its Quartus project, configured PLL IP, build ID, and engine clock metadata under `work/build/quartus-de1-soc/`. Its manifest clock setting is the single source of truth for both PLL configuration and `engine.CLOCK_FREQ`. The portable RTL and TT memory protocol remain independent of the board-specific clocks, pins, and external-memory wrapper.
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 
