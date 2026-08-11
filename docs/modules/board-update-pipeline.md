@@ -43,43 +43,22 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | 1              | Align synchronous table outputs with the registered request and decoded effects, and evaluate push-move king safety. |
 | 2              | Apply tile, side-data, Zobrist, and PST updates, register outputs including push legality, and write pushed move history. |
 
-```mermaid
-flowchart LR
-    In["Request inputs:\nboard, side data, op, move, thread, ply"]
-    Out["Outputs:\nboard_out, zobrist_key_out,\npst_eval_out, mover_in_check_out"]
-    History["Per-thread move history"]
-    Tables["Zobrist and PST tables"]
-
-    subgraph Pipe["Three-stage fixed-latency pipeline"]
-        S0["0. Register inputs,\ndecode effects, launch reads"]
-        S1["1. Align synchronous\ntable outputs"]
-        S2["2. Apply updates, register\noutputs, write history"]
-    end
-
-    In --> S0 --> S1 --> S2 --> Out
-    History -->|"Reverse Move read"| S0
-    S2 -->|"Push Move write"| History
-    Tables -->|"Incremental deltas"| S2
-```
-
 ## Board Setup
 
 The engine sets up a board through Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
 
 ## Hashing
 
-Zobrist hashing is implemented with 64-bit keys. Tile, turn, castling, and en passant hash components are updated incrementally as part of board operations.
+Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. The deterministic generator produces the ROM data and SystemVerilog reference package used by RTL; pawn entries on unreachable ranks are zero.
 
-The Zobrist constants are generated from the same deterministic source into `hardware/data/zobrist/zobrist_values.hex` and `hardware/rtl/generated/zobrist_values_pkg.sv`. Two replicated synchronous true-dual-port ROMs provide four piece-hash reads, sufficient for castling's two king and two rook deltas. A third dual-port ROM supplies the old and new en-passant file keys, while fixed turn and castling keys are XORed as constants. The portable ROM template carries Intel and Xilinx block-RAM inference hints. The generated SystemVerilog package remains a reference representation of the same data. Regenerate both files with `python hardware/scripts/generate_zobrist_values.py`. Pawn entries on ranks 1 and 8 are intentionally zero because those pieces cannot occur in legal board states.
-
-The pipeline always maintains Zobrist keys and incremental PST/material evaluation.
+The pipeline always maintains both the Zobrist key and incremental material/PST evaluation.
 
 ## PST Tables
 
-Material and piece-square-table constants are maintained together in `hardware/data/pst_values/pst_values.json`. Generation produces `hardware/data/pst_values/pst_values.hex` for the PST ROMs and `hardware/rtl/generated/evaluation_parameters.svh` for the material table. PST entries are signed 10-bit values and are sign-extended to the 16-bit incremental evaluation score before use. The board-update RTL reads the `.hex` data through two replicated synchronous true-dual-port ROMs, providing the four simultaneous reads needed for castling while preserving the three-stage external pipeline latency. The portable ROM template carries Intel and Xilinx block-RAM inference hints. Regenerate them with `python hardware/scripts/generate_pst_values.py`.
+Material and piece-square parameters are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces the ROM data and material definitions consumed by RTL. PST entries are sign-extended to `EvalScore` before being applied, so table storage width does not narrow the accumulated score.
 
 ## Move History
 
-Push Move writes enough data to reverse the move later, including origin, destination, captured piece, castling permissions, en passant state, halfmove clock, and special-move flag. Push Null writes the same prior side state and uses an impossible same-square origin/destination pair as its record marker, preserving the 32-bit history width. Reverse Move reads the record for `thread_id` and `search_ply - 1` and restores either operation.
+Push Move records the move effects and previous side data needed to reverse it. Push Null uses a reserved history encoding and records the same restorable side data. Reverse Move reads the prior ply record for the selected thread and restores either operation.
 
 Each thread may have one reversible move per ply. Search must reverse accepted pushed moves before reusing that ply record for a different line. A speculative push rejected for leaving the moving king in check is never accepted as thread state; its record may be overwritten by the next candidate at the same ply.

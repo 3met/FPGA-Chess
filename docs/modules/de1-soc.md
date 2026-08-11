@@ -1,34 +1,30 @@
 # DE1-SoC Top Level (`de1_soc`)
 
-The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It maps physical pins and board-specific clocking to the vendor-neutral `engine`.
+The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It connects physical clocks, reset controls, UART, SDR SDRAM, and diagnostics to the vendor-neutral engine and portable memory controller.
 
-The DE1 build uses the FPGA-side 64 MiB IS42S16320D-compatible, 32M-by-16 SDR SDRAM as the backing store for the transposition table. Its physical organization is four banks with 13 row bits and 10 column bits. The portable controller performs a 200 us JEDEC power-up delay, all-bank precharge, two AUTO REFRESH commands, CAS-2 full-page sequential mode programming, a serial validity-word sweep, open-row burst accesses, and distributed refresh. Runtime writes are fully staged before the physical WRITE command and reads are fully captured before applying backend backpressure, because a physical SDR burst cannot pause. Requests crossing a 1024-word row boundary are split into separate bursts. The engine remains in reset until memory initialization completes.
+## External Memory
 
-The SDRAM controller parameter `SKIP_INITIAL_CLEAR` defaults to zero and must remain zero in hardware builds. The engine profiling testbench sets it only because its simulator memory model is guaranteed to begin cleared, avoiding millions of irrelevant startup cycles while retaining the production runtime controller.
+The DE1 build uses the FPGA-side 64 MiB SDR SDRAM as the primary transposition-table store. The portable controller performs JEDEC initialization, validity initialization, open-row burst access, and refresh before reporting memory ready. The engine remains in reset until the memory path is initialized.
 
-## Clocking
+The controller's simulator-only initialization shortcut must not be enabled in hardware builds. Runtime TT behavior and the memory protocol are described in [tt-memory.md](tt-memory.md) and [sdr-sdram-controller.md](sdr-sdram-controller.md).
 
-`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter plus a fresh 64-bit `FPGA_BUILD_ID` for `engine`. The DE1 target uses a 40 MHz engine clock. The UART uses the PLL's zero-phase 100 MHz memory-domain output.
+## Clocking and Reset
 
-After configuration, a `CLOCK_50` startup controller asserts PLL reset for 1024 cycles, requires lock to remain asserted for 256 cycles, and retries automatically if lock is not acquired within 20 ms or is subsequently lost. Engine, SDRAM, and UART logic each release reset through a local-clock synchronizer only after the PLL reaches the running state. UART BREAK applies the same stretched local reset to the engine, SDRAM path, and UART transmitter, so normal remote recovery does not require either physical reset button.
+`CLOCK_50` is the board reference clock. The synthesis flow configures board-specific Intel PLL IP from the target's engine-clock setting and generates matching `ENGINE_CLOCK_FREQ` and `FPGA_BUILD_ID` constants. The PLL also supplies the SDRAM and UART clock domains and the phase relationships required by SDRAM I/O timing.
 
-The same PLL produces a 100 MHz SDRAM-controller clock, a `DRAM_CLK` that leads it by 3 ns, and a read-capture clock 5 ns behind it. Commands and write data therefore settle for 7 ns before the SDRAM sampling edge, while returned data is sampled 8 ns after that edge, near the center of the CAS-2 data window. The controller uses conservative 20 ns tRP/tRCD, 70 ns refresh-recovery timing, and begins refresh service early enough to keep AUTO REFRESH commands no more than 7.8125 us apart even when a transaction must finish first. The TT path crosses between the engine and memory domains through shallow asynchronous FIFOs sized for their traffic: four commands, four write words, eight read words, and two completions. The board SDC checks the related SDRAM clocks and device I/O delays while declaring only the true engine/memory and engine/UART crossings asynchronous. These clocks are confined to the DE1 wrapper so another FPGA family can provide equivalents with its PLL or MMCM.
+A startup controller holds the design in reset until the PLL is stable and retries if lock is lost. Each clock domain releases reset through a local synchronizer. UART BREAK resets the engine, memory path, and transmitter so the board can recover remotely without a physical reset.
 
-The geometry, command timing, refresh interval, and clock relationship follow the [Intel DE1-SoC SDRAM tutorial](https://ftp.intel.com/Public/Pub/fpgaup/pub/Teaching_Materials/current/Tutorials/VHDL/DE1-SoC/Using_the_SDRAM.pdf) and the [ISSI IS42S16320D datasheet](https://www.issi.com/WW/pdf/42-45R-S_86400D-16320D-32160D.pdf).
+Clock generation and device-specific constraints remain confined to this wrapper. A new board wrapper may use another vendor's PLL/MMCM or a suitable board clock, but it must set `engine.CLOCK_FREQ` to the frequency actually driven on `engine.clk`.
 
-To select another legal PLL rate, change `hardware/build/manifest.json`'s `quartus-de1-soc.engine_clock_mhz` and rerun synthesis. The integer-N PLL accepts only rates its VCO and output counters can realize; Quartus rejects unsupported values. The source PLL template remains unchanged; the configured vendor IP and `engine_build_config.svh` metadata include are generated under `work/build/quartus-de1-soc/` for that build.
+The SDRAM geometry and timing follow the [Intel DE1-SoC SDRAM tutorial](https://ftp.intel.com/Public/Pub/fpgaup/pub/Teaching_Materials/current/Tutorials/VHDL/DE1-SoC/Using_the_SDRAM.pdf) and [ISSI IS42S16320D datasheet](https://www.issi.com/WW/pdf/42-45R-S_86400D-16320D-32160D.pdf).
 
-The core does not depend on the Intel PLL: a new board wrapper should generate its intended engine clock with its vendor's PLL/MMCM (or use a suitable board clock), connect it to `engine.clk`, and set `engine.CLOCK_FREQ` to the exact resulting frequency. Do not override the DE1-SoC clock-rate constant independently of its PLL output.
+## Board Interface
 
-## On-Board Interface
-
-| Resource | Required Behavior |
-| -------- | ----------------- |
-| Clock | Accept board reference clock and generate the engine clock through a vendor-specific PLL wrapper. |
-| Reset button | `KEY[3]` forces the automatic startup controller and all logic domains back into reset. |
-| PLL reset button | `KEY[2]` forces a PLL reset; release starts the automatic lock-and-retry sequence. |
-| UART GPIO | Route host RX/TX pins to `rx_decode` and `tx_encode`. |
-| FPGA SDRAM | Route `DRAM_*` to the portable SDR SDRAM controller for the off-chip TT. |
-| LEDs | `LEDR[7:0]` show the most recently received byte, `LEDR[8]` indicates any RX, remote-reset, TX-full, or engine error, and `LEDR[9]` indicates PLL unlock. |
-| 7-segment displays | `HEX1:HEX0` show the most recently received byte in hexadecimal. `HEX2` shows `{engine_error, tx_full, rx_error}` and `HEX3` shows `{remote_reset, engine_ready, pll_locked}` in hexadecimal. `HEX5:HEX4` show a wrapping count of engine response bytes accepted by the UART TX path. |
-| Display blanking | `SW[9]` turns off all LEDs and seven-segment displays when high. |
+| Resource | Role |
+| -------- | ---- |
+| `CLOCK_50` | Reference for board-specific clock generation. |
+| `KEY` | Physical reset and PLL-restart controls. |
+| UART GPIO | Host RX/TX connection through `rx_decode` and `tx_encode`. |
+| `DRAM_*` | External transposition-table memory interface. |
+| LEDs and seven-segment displays | Optional visibility into traffic, readiness, errors, and PLL status. |
+| `SW[9]` | Blanks the diagnostic displays. |

@@ -4,13 +4,13 @@ The input decoder receives UART bytes, buffers command/data bytes, and exposes a
 
 ## Behavior
 
-The input decoder contains an 8-bit asynchronous FIFO with parameterized depth. The default depth is 1024 words.
+The input decoder crosses UART bytes into the engine clock domain through a parameterized asynchronous FIFO.
 
 If the FIFO is empty, `rx_stream_valid` is deasserted. The decoder does not emit a synthetic idle command byte as valid data.
 
 Normal bytes are dropped and `error` is latched if the FIFO is full. The host is responsible for avoiding overflow by respecting engine readiness. UART BREAK is recognized even when the normal FIFO is full, pulses `remote_reset` in the engine clock domain, and clears the RX FIFO.
 
-The default UART side uses `UART_CLOCK_FREQ = 100_000_000` and `BAUD_RATE = 2_000_000`, which gives exactly 50 UART clock cycles per bit. The receiver takes a three-sample majority vote around each bit center to reject isolated input glitches.
+UART clock and baud rate are parameters; the production settings are defined by the host protocol and board wrapper. The receiver samples around each bit center and reports framing errors.
 
 ## Ports
 

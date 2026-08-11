@@ -39,7 +39,7 @@ Lookups take priority over queued stores. One lookup probe or miss may be buffer
 
 On a cache miss, the frontend reads the existing external entry before responding to a lookup or deciding whether a store may replace it. A replacement write is held separately after the store read, allowing a waiting lookup miss to use external memory before the low-priority write. Accepted replacements update the cache and external memory. The cache is therefore a write-through performance layer, not an independent source of TT state.
 
-The direct-mapped cache packs each line's data, complete external-index tag, and validity into one block-RAM array. Cache probes share one physical read port; arbitration guarantees that a store probe and a lookup probe are never issued together. This avoids replicating the cache merely to provide a second read port.
+Each direct-mapped cache line stores entry data, the complete external-index tag, and validity. Lookup and store probes are arbitrated through the cache without changing the logical TT semantics.
 
 ## Clearing
 

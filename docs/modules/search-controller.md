@@ -1,50 +1,44 @@
 # Search Controller (`search_controller`)
 
-The search controller owns the active position, hardware search threads, search stacks, alpha/beta state, repetition state, shared-pipeline scheduling, and result selection. The search algorithm is specified in [search-design.md](../architecture/search-design.md); this document defines the controller boundary and orchestration responsibilities.
+The search controller owns the active position, search threads and stacks, repetition state, shared-pipeline scheduling, and result selection. The search algorithm is specified in [search-design.md](../architecture/search-design.md); this document defines the controller boundary and orchestration responsibilities.
 
 ## Operations
 
 | Operation | Behavior |
 | --------- | -------- |
-| Direct Board | Applies a setup or game move operation to the active position. |
-| New Game | Cancels active work, clears game-dependent search state, advances the TT generation, and restores the standard starting position. |
-| Search Depth | Searches the active position to a bounded fixed depth. |
-| Search Fixed Time | Searches until the fixed-time budget expires. |
-| Search on Clock | Derives and enforces a budget from the supplied clock and increment. |
-| Search Nodes | Searches until the node budget is reached. |
-| Perft | Counts strictly legal leaf positions through the normal move-generation and board-update paths without modifying the active position. |
-| Kill | Cancels active search or perft work and drains or invalidates outstanding pipeline responses. |
+| Direct Board | Apply a setup or game move to the active position. |
+| New Game | Cancel active work, clear game-dependent state, advance the TT generation, and restore the starting position. |
+| Search Depth | Search to a fixed depth. |
+| Search Fixed Time | Search until a fixed-time budget expires. |
+| Search on Clock | Derive and enforce a budget from clock and increment values. |
+| Search Nodes | Search until the node budget is reached. |
+| Perft | Count legal leaves through the production move and board paths without changing the active position. |
+| Kill | Cancel active search or perft work and invalidate or drain outstanding responses. |
 
-The request uses a ready/valid handshake. `req_ready` means the complete typed request was captured. Exactly one `resp_valid` completion is produced for every accepted operation.
+Requests and responses use ready/valid handshakes. Every accepted operation produces exactly one completion.
 
 ## Ports
 
 | Direction | Port | Description |
 | --------- | ---- | ----------- |
 | Input | `clk`, `rst_n` | Controller clock and synchronous active-low reset. |
-| Input | `req_valid`, `req` | Typed operation request from the engine command layer. |
+| Input | `req_valid`, `req` | Typed operation request from the command layer. |
 | Output | `req_ready` | Request acceptance. |
 | Output | `resp_valid`, `resp` | Operation completion and result. |
 | Input | `tt_memory_ready`, `tt_memory_error` | Selected TT backend status. |
-| Request/response | `tt_mem_*` | Vendor-neutral TT burst-memory channels described in [tt-memory.md](tt-memory.md). |
+| Request/response | `tt_mem_*` | Vendor-neutral TT memory channels described in [tt-memory.md](tt-memory.md). |
 
 ## State Ownership
 
-The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`; pipeline modules do not retain canonical positions.
+The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`; shared pipelines do not retain canonical positions.
 
-Each search thread owns a current board, Zobrist key, incremental evaluation state, alpha/beta state, iterative-deepening target and aspiration window, node count, lifecycle phase, and a block-RAM search stack. Stack records hold the information needed to resume a parent after reversing a child, rather than storing a complete board at every ply.
+Each search thread owns its current board and incremental state, alpha/beta window, iterative-deepening state, node count, lifecycle phase, and block-RAM search stack. Stack records hold enough state to reverse a child and resume its parent instead of storing a complete board at every ply. Each node records actual remaining depth because reductions and quiescence entry make it independent of ply.
 
-Each node records its actual remaining depth. That value controls main-search versus quiescence behavior, late-move reductions, and TT depth; it is not inferred from ply.
-
-Each packed node record also retains the first three ordinary quiet moves that were searched completely without cutting off. The count is cleared when a node is entered, while the stale move-address fields need not be cleared. A quiet is appended only after all PVS or LMR re-searches for that logical move are complete; qsearch, illegal moves, captures, promotions, and unsearched moves are excluded.
-
-The primary thread owns the reported principal variation, score, and completed depth. Helper threads cooperate through the shared TT and never overwrite the primary result directly. Every thread immediately advances its own iterative-deepening loop after a successful pass or retries the same depth after an aspiration failure; there is no all-thread iteration barrier.
-
-Primary-thread root completions from the shared subsystems are mutually exclusive in reachable controller states. A completion is registered in the primary context, then published or used to restart the thread on the following cycle so root score computation and response selection do not share a timing path.
+The primary thread owns the reported move, score, and completed depth. Helpers cooperate only through the TT and never delay or overwrite the primary result. Threads retry aspiration failures or begin new iterations independently.
 
 ## Shared-Pipeline Scheduling
 
-The controller schedules threads across:
+The controller schedules work across:
 
 - [board update](board-update-pipeline.md)
 - [move generation](move-generator.md)
@@ -53,46 +47,37 @@ The controller schedules threads across:
 - [repetition checking](repetition-checker.md)
 - [timer](timer.md)
 
-A thread has at most one in-flight request in each shared subsystem. Every request carries enough thread and operation metadata to route its completion independently of whichever thread is being dispatched when the response arrives.
+A thread has at most one in-flight request in each subsystem. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
-Ready threads are selected independently for different pipelines, allowing unrelated thread work to overlap. Lookup responses and returned child scores take priority because they unblock existing search work. TT stores are best-effort and never block a thread after the TT frontend accepts the publication. Before the run scheduler starts, NNUE initializes every thread's root independently through the existing update port; this avoids a cross-thread accumulator-memory port and guarantees that ordinary root children use deltas. Every NNUE child completion, including a rebuild, is tagged by thread and ply, allowing later child requests to remain in flight without globally draining the update pipeline. Child plans use rotating priority, start immediately when created against an idle planner, and hand off directly after their final request. Null children retain their live accumulator without creating an update plan. NNUE evaluation ownership is retained in a two-entry thread-and-ply tag FIFO, allowing the controller to prepare or submit a later snapshot before the preceding result returns.
-
-Reset, New Game, Kill, and search initialization invalidate outstanding tags, pending returns, and in-flight state so a late response cannot mutate a later operation. New Game also invalidates all NNUE state metadata and clears in-flight NNUE work; Kill clears the NNUE datapath while retaining only RAM contents that are already guarded by validity metadata.
+Before search, NNUE builds a valid root accumulator for every thread. Legal child preparation joins NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator. Reset, New Game, Kill, and search restart invalidate tags and pending returns so late responses cannot mutate a later operation.
 
 ## Node Lifecycle
 
-At a search node, the controller:
+A main-search node follows this logical order:
 
-1. Checks draw state and probes the TT.
-2. Tries an eligible reduced null-move probe.
-3. Tries the TT or previous-iteration ordering move directly when available.
-4. Generates and searches noisy moves.
-5. Generates and searches quiet moves.
-6. Searches deferred bad captures.
-7. Scores checkmate, stalemate, or the completed alpha/beta result.
+1. Check terminal draw state and probe the TT.
+2. Try eligible pruning operations and direct ordering moves.
+3. Generate and search noisy moves.
+4. Generate and search quiet moves.
+5. Search deferred unfavorable captures.
+6. Return checkmate, stalemate, or the completed alpha/beta result.
 
-TT scores with remaining depth below eight, or with a current halfmove clock at most four, retain the direct cutoff path. At greater depth with longer reversible history, non-positive scores are rejected so they cannot hide a newly available drawing alternative. Positive scores send the stored move through direct-move validation and a speculative board push. An illegal move, a 50-move draw, or any previous occurrence of the child rejects the score. A legal child with no previous occurrence authorizes the retained TT response without entering the child or updating NNUE state; a repeated child is replayed through ordinary move search so it remains a candidate. Once a repeated child is observed, validation is forced below depth eight for the remainder of that iteration while the halfmove clock remains above four, covering short forced continuations whose next ply completes the draw.
+Move generation is pseudo-legal. The controller speculatively applies each candidate and rejects it if the moving side remains in check. A legal child is recorded in repetition history and prepares its NNUE state before TT lookup, evaluation, or deeper search. On return, the controller reverses the board and accumulator changes and folds the child score into the saved parent.
 
-Move generation produces pseudo-legal candidates. The controller speculatively applies each candidate through board update and rejects it if the moving side remains in check. A rejected candidate does not alter thread state or increment the search node count.
+History-sensitive TT scores are validated according to [transposition-table.md](transposition-table.md). A rejected score may still supply a legal ordering move. Null children bypass ordinary legality, repetition, legal-node counting, best-move selection, and move-history updates.
 
-A legal child is written to repetition line history and launches repetition lookup in parallel with NNUE accumulator construction before TT lookup, evaluation, or deeper search. Separate completion state joins the two operations, so neither can make a partially prepared child runnable. On return, the controller reverses the move and folds the child score into the saved parent. A real legal child increments the search node count even if repetition or a TT cutoff resolves it without deeper evaluation.
-
-A null probe is a synthetic child issued directly to board update after the TT probe and before move generation. It uses a reduced scout window, cannot follow another null child, and either returns a beta cutoff or restores the parent and resumes normal ordering. It bypasses legality, repetition, legal-node counting, best-move folding, and move-history heuristics.
-
-When a searched quiet move causes a beta cutoff, the controller snapshots the winner, the node's retained failed quiets, color, and depth into the existing per-thread best-effort history-update slot. Search never waits for that slot or for history RAM maintenance; an event is dropped if the thread's slot is still occupied.
-
-Quiescence search uses captures and promotions and omits quiet generation and direct TT move ordering. Perft uses the same legality and board-update paths but counts fixed-depth leaves instead of evaluating positions.
+Quiescence omits quiet generation except for legal evasions while in check. Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. Every thread uses an aspiration window around its own previous completed iteration from depth two onward. A failed narrow pass is retried at the same depth with the full window; if the shared time or node budget expires, the controller returns the primary thread's previous completed result instead. The reported depth is the deepest fully completed primary-thread iteration. If a deeper primary iteration is interrupted, the controller preserves the completed result and may also retain a legal root move whose child result completed during the partial iteration.
+Depth, node, and time limits are checked at safe search boundaries. If a pass is interrupted, the controller returns the primary thread's most recent fully completed iteration when one exists. The reported depth is therefore a completed depth rather than the deepest partial work reached.
 
-Kill stops issuing new search work, invalidates work that cannot safely complete, and produces a completion only after late responses can no longer alter the active operation.
+Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation.
 
-Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal search results. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
+Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
 
 ## Configuration and Instrumentation
 
-Thread count, stack depth, repetition-history depth, LMR constants, clock frequency, TT backend selection, and optional statistics are synthesis parameters. Capacity types define the maximum encodable thread and ply identifiers; a target may instantiate fewer contexts.
+Thread count, stack depth, repetition capacity, LMR policy, clock frequency, TT backend, and optional statistics are synthesis parameters. Capacity types define the largest encodable thread and ply identifiers; a target may instantiate fewer contexts.
 
-Optional statistics report pipeline activity, search phases, TT/cache behavior, move-generation activity, and overflow state through the engine debug interface. Statistics do not affect search semantics.
+Optional statistics report pipeline activity, search phases, TT/cache behavior, move-generation work, and overflow state without affecting search semantics.

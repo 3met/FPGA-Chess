@@ -1,29 +1,38 @@
 # NNUE Evaluator (`nnue_evaluator`)
 
-The NNUE evaluator produces a side-to-move-relative correction which is added after the existing incremental material plus PST score is converted to side-to-move point of view. It stores one live accumulator per search thread; callers must finish in-flight updates before requesting that thread's evaluation.
+The NNUE evaluator produces a side-to-move-relative correction that search adds to material plus PST after converting the latter to side-to-move point of view. It stores one live accumulator per search thread; callers must preserve per-thread update ordering and wait for outstanding updates before evaluating that thread.
 
 ## Encoding
 
-Each perspective uses a direct 768-feature encoding: own pawn, knight, bishop, rook, queen, and king followed by the opposing six piece types, each over 64 vertically oriented squares. The Black perspective flips ranks before indexing, so both views use the same 768-row transformer. Both kings are ordinary piece features; there are no king buckets or horizontal mirroring.
+Each perspective uses 768 direct piece-square features: six friendly and six opposing piece types over 64 vertically oriented squares. The Black perspective flips ranks before indexing, so both perspectives share one transformer. Kings are ordinary features; there are no king buckets or horizontal mirroring.
 
-## Feature Transformer and Updates
+Transformer rows contain 128 signed two-bit weights packed four per byte. Each feature addition or removal updates both perspectives. Direct features make every legal board change incremental, including castling; null moves require no feature change.
 
-Each row contains 128 signed two-bit weights packed as 32 bytes with four least-significant-first values per byte. Encodings zero through three represent weights zero, one, minus two, and minus one. A logical dual-read ROM supplies the White and Black perspective rows. The direct format avoids replicated decoder memories while each feature addition or removal updates both perspectives without multipliers or DSP blocks.
+## Accumulator Updates
 
-Requests feed a registered feature-ROM stage. The update engine reads its distributed state mirror asynchronously, applies all 128 lanes from both perspectives in parallel, and commits the registered request on the following cycle. It can accept another request every cycle; the preceding write is visible before the next registered feature row commits, so consecutive requests for one thread need neither a forwarding word nor vendor-specific block-memory read-during-write behavior. A clear request starts either or both perspectives from the signed three-bit accumulator bias before applying its feature row. Signed five-bit state uses modular arithmetic, so feature removal remains the exact inverse of addition even if a rare extreme wraps. Quantization-aware training uses the same modular range and profile instrumentation reports runtime wraps. Before search begins, the controller flushes stale datapath work and replays the root once into every thread's single accumulator. An ordinary child updates that live state directly: a quiet move uses two physical feature requests and a capture uses three. The compact move delta is stored alongside the existing per-ply search record, then inverted after board reverse to restore the parent accumulator. Null children leave the accumulator valid and issue no update requests.
+Each thread owns White and Black accumulator vectors. A clear starts a perspective from the trained bias, while add and remove requests apply one transformer row. Accumulator arithmetic is modular and matches quantization-aware training, so removing a feature exactly reverses adding it even across a wrap.
 
-Direct features make every move, including castling, an incremental update. A castling plan emits exactly four consecutive requests: king removal/addition followed by the standard a/h-to-d/f rook removal/addition. This is the minimum request count for the single-row-per-cycle transformer port and needs no replay or completion-marker cycle.
+Before search, the controller builds the root accumulator for every thread. An ordinary move applies compact feature deltas to the live child state, stores the reversible delta with the ply record, and applies its inverse after board reversal. Castling updates the king and rook features; a null child keeps the parent accumulator unchanged.
 
-The last physical request for an ordinary child carries a completion marker. A full or one-perspective replay appends an ordered no-op completion marker after its last board row. Writeback returns the tagged thread and ply when that request commits. Round-robin plan selection can hand consecutive plans to the streaming update port without an issue bubble.
+The final request in an update plan marks completion and returns the tagged thread and ply. Requests from different thread plans share one streaming update port, while evaluation uses a logically independent accumulator read path. The storage implementation is portable inferred memory and does not depend on vendor primitives.
 
-Accumulator state is one logical 1280-bit word per thread. Two mirrored 1R1W arrays implement the required 2R1W logical store portably: both receive every write, a distributed asynchronous-read array supplies updates, and a synchronous block-memory array supplies evaluation. This logical replication preserves concurrent evaluation and update without vendor-specific multiport behavior. The same structure is retained for every configured thread count because the production architecture assumes many active search threads rather than a special one-thread implementation.
+Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumulator RAM contents need not be erased because the controller tracks which per-thread state is valid.
 
-The NNUE datapath instantiates no vendor primitives. Generic signed multiplication, synchronous and asynchronous inferred-memory templates, and standard `$readmemh` initialization provide the functional behavior; paired Intel `ramstyle` and AMD/Xilinx `ram_style` annotations are only resource-selection hints. Intel block memories are not named by device family, so Quartus may select M9K, M10K, M20K, or another native block type, while unsupported hints can be ignored without changing behavior.
+## Output Layer
 
-Reset and lifecycle clear discard in-flight update stages and evaluation results without erasing the accumulator RAM. The search controller invalidates each thread's live-state metadata on New Game and search initialization, while Kill flushes the datapath before accepting later work.
+Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. The result is clipped to the finite search-score range.
 
-## Activation and Output
+Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
 
-Evaluation reads the two 128-value accumulators, applies the trained signed-three-bit bias already present in accumulator state, and clips each activation to the range zero through seven. The side-to-move perspective is concatenated before the opposing perspective and a direct 256-to-1 layer with a signed five-bit output bias uses 128 signed-three-bit MAC lanes over two groups. Swapping every piece color, vertically flipping the board, and flipping the turn leaves this ordered activation vector and the resulting score unchanged. One quarter of the lanes use generic signed multiplication, while the other three quarters expand signed-three-bit multiplication into portable two's-complement shift/add partial products; this balances dedicated multipliers against logic without vendor primitives or changing numerical behavior. Each eight-product chunk reduces as two triples plus one pair before sixteen registered partial sums split the state-memory and arithmetic path from the upper adder tree. A dedicated result register performs score clipping. The next snapshot may be accepted while the preceding final partial sums drain, giving a three-cycle initiation interval.
+## Model Data
 
-The generated model files are `hardware/data/nnue/feature_transformer.hex`, `hardware/data/nnue/accumulator_bias.hex`, `hardware/data/nnue/output_weights.hex`, and `hardware/data/nnue/output_bias.hex`. The output weights are two 384-bit rows, one per 128-weight MAC group; this avoids multi-read ROM inference even when a new evaluation is accepted during the previous evaluation's final MAC cycle. `python hardware/scripts/generate_nnue_defaults.py` creates a legal zero-correction model.
+Generated parameters live under `hardware/data/nnue/`:
+
+| File | Contents |
+| ---- | -------- |
+| `feature_transformer.hex` | Packed transformer rows. |
+| `accumulator_bias.hex` | Per-lane accumulator bias. |
+| `output_weights.hex` | Packed output-layer weights. |
+| `output_bias.hex` | Output bias. |
+
+The tuning and export workflow is described in [evaluation-tuning.md](../development/evaluation-tuning.md). `python hardware/scripts/generate_nnue_defaults.py` creates a legal zero-correction model for development and tests.

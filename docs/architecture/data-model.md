@@ -77,10 +77,6 @@ Both are 3 bits wide.
 
 The helper functions `getRank`, `getFile`, and `getPosition` follow the same convention.
 
-### Display Order
-
-`SHOW_ORDER` lists positions in human board-display order from `a8` through `h1`. This is useful for debug output and displays.
-
 ## Packed Structs
 
 ### `Tile`
@@ -162,7 +158,7 @@ The total packed width is 272 bits.
 
 `EvalScore` is a signed 16-bit value. Incremental PST/material state is White-relative: positive scores are good for White and negative scores are good for Black. Search converts it to side-to-move point of view before adding the side-to-move-relative NNUE correction.
 
-`PstScore` is a signed 10-bit ROM-entry value. Board update sign-extends each entry to `EvalScore` before applying the incremental material/PST delta, so stored PST values use less block memory without narrowing accumulated or final evaluation scores.
+`PstScore` is the signed 10-bit ROM-entry type used by the generated piece-square tables. Board update sign-extends entries to `EvalScore` before applying incremental deltas.
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
@@ -175,7 +171,7 @@ Material values are available in two forms:
 
 | Array | Unit | Values by piece type |
 | ----- | ---- | -------------------- |
-| `PIECE_VALS_128` | 1/128 pawn | Generated from `hardware/data/pst_values/pst_values.json`: null `0`, the six canonical material values, and spare `x`. |
+| `PIECE_VALS_128` | 1/128 pawn | Generated canonical material values indexed by piece type. |
 
 ### Time and Node Counts
 
@@ -191,26 +187,11 @@ Material values are available in two forms:
 | Name               | Value                         | Description                                                                                             |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `ZobristKey`       | `64` bits                     | Zobrist-style position key.                                                                             |
-| `THREAD_COUNT`     | `16`                          | Supported thread-ID capacity and default instantiated search-thread count. |
-| `SEARCH_THREAD_COUNT` | Controller parameter       | Number of active search contexts configured for a `search_controller` instance. Defaults to `THREAD_COUNT`. |
-| `SEARCH_STACK_DEPTH` | Controller parameter       | Number of plies allocated in a `search_controller` instance. Defaults to `MAX_PLY_COUNT`. |
+| `THREAD_COUNT`     | `16`                          | Supported thread-ID capacity and width source. |
+| `SEARCH_THREAD_COUNT` | Controller parameter       | Number of active search contexts in a controller instance. |
+| `SEARCH_STACK_DEPTH` | Controller parameter       | Number of plies allocated in a controller instance. |
 | `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |
 | `ThreadID`         | `THREAD_ID_BITS` bits         | Hardware search thread identifier.                                                                      |
-
-### Transposition-Table Format Parameters
-
-These parameters control TT storage format rather than the live Zobrist key. The implemented slice defines the matching SystemVerilog constants and structs in `hardware/rtl/tt/tt_defs.sv`. The default favors compact entries unless a target profile or external-memory interface naturally moves 128-bit entries.
-
-| Name | Default | Description |
-| ---- | ------- | ----------- |
-| `TT_COMPACT_ENTRY_BITS` | `94` | Logical TT entry width for the compact profile. |
-| `TT_FULL_ENTRY_BITS` | `126` | Logical TT entry width for the full-key profile. |
-| `TT_ENTRY_BITS` | `94` | Default compact entry width. |
-| `TT_VERIFY_BITS` | `48` | Number of high hash bits stored in each compact TT entry for hit verification. |
-| `TT_DEPTH_BITS` | `6` | Stored depth width. |
-| `TT_AGE_BITS` | `8` | Replacement generation/age width. |
-
-The compact RTL stores one 94-bit entry per inferred-RAM word, indexes entries with low Zobrist bits, and verifies hits with the high `TT_VERIFY_BITS` Zobrist bits. The optional full-key RTL profile stores one 126-bit entry per inferred-RAM word and verifies all 64 Zobrist bits after index selection.
 
 ## Directions
 

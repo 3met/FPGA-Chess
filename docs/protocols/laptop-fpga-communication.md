@@ -24,30 +24,6 @@ The engine asserts `ready` when it can accept the next command byte. During fixe
 
 The host should send no normal command while the engine is searching. The expected mid-search communication is the in-band Kill command, UART BREAK for remote reset, or output-flow control.
 
-```mermaid
-sequenceDiagram
-    participant Host
-    participant RX as RX decode
-    participant Engine
-    participant Search as Search controller
-    participant TX as TX encode
-
-    Host->>RX: Opcode and fixed-size payload
-    RX->>Engine: data_in, data_in_valid
-    Engine->>Search: Start operation
-    Search-->>Engine: Request captured / search active
-    Note over Host,Engine: Host sends no normal command while search is active
-    opt Stop or reset
-        Host->>RX: Kill opcode or UART BREAK
-        RX->>Engine: In-band kill byte or remote_reset pulse
-        Engine->>Search: Kill request
-    end
-    Search-->>Engine: Result and end reason
-    Engine->>TX: Response bytes
-    Note over Engine,TX: Stream advances only when ready_for_result is asserted
-    TX-->>Host: UART response stream
-```
-
 ## Commands
 
 | Opcode | Command | Payload | Response |

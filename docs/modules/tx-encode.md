@@ -4,11 +4,11 @@ The output encoder buffers response bytes from the engine and transmits them ove
 
 ## Behavior
 
-The output encoder contains an 8-bit asynchronous FIFO with parameterized depth. The default depth is 1024 words.
+The output encoder crosses engine response bytes into the UART clock domain through a parameterized asynchronous FIFO.
 
 The engine writes bytes when `tx_stream_valid` is asserted and `full` is deasserted. If `full` is asserted, the engine must pause response streaming until space is available.
 
-The default UART side uses `UART_CLOCK_FREQ = 100_000_000` and `BAUD_RATE = 2_000_000`, which gives exactly 50 UART clock cycles per bit.
+UART clock and baud rate are parameters; the production settings are defined by the host protocol and board wrapper.
 
 ## Ports
 

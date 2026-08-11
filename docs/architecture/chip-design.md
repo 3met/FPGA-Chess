@@ -6,7 +6,7 @@ The FPGA maintains the active game/search state between commands and performs th
 
 The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
 
-The design has a parameterized number of search threads and a parameterized search stack depth. Perft, Zobrist hashing, the transposition table, and incremental piece-square-table evaluation are core engine paths. The current controller defaults are `SEARCH_THREAD_COUNT = THREAD_COUNT` and `SEARCH_STACK_DEPTH = MAX_PLY_COUNT`, with `THREAD_COUNT = 8` and 32 plies in the multi-thread RTL tests.
+The number of search threads and search stack depth are build parameters. Perft, Zobrist hashing, the transposition table, and incremental evaluation use the same core datapaths as normal search.
 
 ## Major Blocks
 
@@ -18,68 +18,22 @@ The design has a parameterized number of search threads and a parameterized sear
 | Engine                     | Contains the command layer and search controller, receives host commands, maintains engine/search state, and returns results.               |
 | Search controller          | Owns search threads, search stacks, alpha/beta state, pipeline dispatch, and result routing.                                                |
 | Board update pipeline      | Applies push move, commit move, reverse move, and board setup operations.                                                                   |
-| Move generation pipeline   | Produces one ordered candidate move per dispatch and reports whether that candidate is legal.                                               |
-| NNUE evaluator | Maintains direct 2-side by 6-piece by 64-square accumulators and computes a White-relative learned correction.                                     |
+| Move generation pipeline   | Produces ordered pseudo-legal candidates for later king-safety validation.                                                                  |
+| NNUE evaluator             | Maintains per-thread incremental accumulators and computes a learned evaluation correction.                                               |
 | TT lookup pipeline         | Performs transposition-table lookup requests against external RAM and any internal cache.                                                   |
 | TT store pipeline          | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by lookups.                     |
 | External RAM interface     | Provides storage for the transposition table through a vendor-neutral wrapper around the selected SDRAM, DDR, or board memory interface.    |
 | FPGA platform wrappers     | Isolate vendor-specific RAM, ROM, PLL, FIFO, UART, and external-memory IP so Intel/Altera and Xilinx builds can share the same logical RTL. |
 
-```mermaid
-flowchart LR
-    subgraph HostSide["Host side"]
-        Host["Host Python process"]
-    end
-
-    subgraph IO["Byte-stream boundary"]
-        RX["RX decode"]
-        Engine["Engine"]
-        TX["TX encode"]
-    end
-
-    subgraph SearchCore["Inside engine"]
-        Search["Search controller"]
-        BoardUpdate["Board update pipeline"]
-        MoveGen["Move generation pipeline"]
-        NnueEval["NNUE evaluator"]
-        TTLookup["TT lookup pipeline"]
-        TTStore["TT store pipeline"]
-    end
-
-    RAM["External RAM interface"]
-
-    Host -->|"Command bytes"| RX
-    RX -->|"Decoded command stream\nand remote reset"| Engine
-    Engine -->|"Operations and limits"| Search
-
-    Search -->|"Board transforms"| BoardUpdate
-    Search -->|"Candidate requests"| MoveGen
-    Search -->|"Leaf evaluation requests"| NnueEval
-    Search -->|"Probe requests"| TTLookup
-    Search -->|"Publish requests"| TTStore
-
-    BoardUpdate -->|"Updated board state\nand side data"| Search
-    MoveGen -->|"Candidate move\nand legality"| Search
-    StaticEval -->|"White-relative score"| Search
-    TTLookup -->|"Hit, bound,\nand best move"| Search
-
-    TTLookup -->|"Prioritized reads"| RAM
-    TTStore -->|"Delayed writes"| RAM
-
-    Search -->|"Search result"| Engine
-    Engine -->|"Response bytes"| TX
-    TX -->|"UART output"| Host
-```
-
 ## Search Pipelines
 
 The five major search subsystems are board update, NNUE evaluation, ordered move generation, TT lookup, and TT store.
 
-Board update and move generation are high-area pipelines kept busy with work from many search threads. Move generation is split into independent noisy/direct and quiet class pipelines. NNUE owns one physical feature-update path and serializes evaluation construction while other search components continue servicing threads. Each search thread has at most one in-flight request in each major component.
+Board update and move generation are shared across search threads. Move generation has independent noisy/direct and quiet paths, while NNUE serializes feature updates through one shared path. Each search thread has at most one in-flight request in each major component.
 
 Pipeline parallelism means different threads can occupy different stages of a pipeline at the same time, and different threads can concurrently use the noisy and quiet move-generation pipelines. It does not mean a single thread issues multiple simultaneous board updates, evaluations, or move-generation requests for the same active position.
 
-The main pipelines are designed for throughput and can accept a new request each cycle when input work is available and downstream resources are not stalled. TT lookup/store throughput is limited by external memory bandwidth.
+The main pipelines are designed for throughput, subject to their ready/valid interfaces and downstream stalls. TT throughput is limited by external-memory bandwidth.
 
 ## State Ownership
 
@@ -87,7 +41,7 @@ The FPGA maintains active game state between commands. The host can send setup, 
 
 Search owns per-thread state. Each thread keeps an active search stack and move records for reverse traversal rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but does not own the engine position.
 
-Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. NNUE root state is built once; every child reads its parent accumulator and applies direct feature deltas, including ordinary king moves and castling's rook move.
+Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. NNUE root state is built once per thread and child states are maintained through reversible feature deltas.
 
 Raw evaluation and incremental PST/material state are White-relative. Search normalizes scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
 
@@ -95,8 +49,8 @@ Raw evaluation and incremental PST/material state are White-relative. Search nor
 
 The transposition table used to store previously computed information is required for Lazy SMP multithreading. The DE1 implementation stores the primary TT in its FPGA-side SDR SDRAM behind a vendor-neutral burst interface and uses a small direct-mapped BRAM cache. Other targets can connect a different memory controller to the same logical interface or retain the inferred-BRAM fallback.
 
-TT lookups are more latency-sensitive than TT stores and receive priority when lookup/store bandwidth conflicts. Stores enter a parameterized best-effort frontend FIFO and drain opportunistically; overflow stores are dropped so memory pressure never blocks search after publication. Memory arbitration and FIFO depth are target parameters selected using measured search throughput.
+TT lookups are more latency-sensitive than stores and receive priority when memory bandwidth conflicts. Stores are best-effort and may be dropped under pressure so publication never blocks search.
 
 ## Vendor Support
 
-The logical design is FPGA-vendor neutral. Vendor-specific resources are isolated behind wrappers or generated modules with stable logical interfaces. RAMs, FIFOs, external memory controllers, clocking, and board-level I/O support both Intel/Altera and Xilinx implementations.
+The logical design attempts to be FPGA-vendor neutral. Vendor-specific resources are isolated behind wrappers or generated modules with stable logical interfaces. RAMs, FIFOs, external memory controllers, clocking, and board-level I/O support both Intel/Altera and Xilinx implementations.
