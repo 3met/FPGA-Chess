@@ -284,13 +284,16 @@ module tb_move_generator;
         automatic logic found;
         automatic Move move;
         automatic MoveBucketIndex bucket;
+        automatic bit duplicate_seen = 1'b0;
         count = 0;
         seen = '0;
         for (int iteration = 0; iteration < 512; iteration++) begin
             pop_one(eligible, tops, lower, found, move, bucket);
-            if (!found) return;
-            check(!seen[14'(move)], $sformatf("move %0d->%0d/%0d returned once",
-                move.from_pos, move.to_pos, move.promo_piece));
+            if (!found) begin
+                check(!duplicate_seen, "bucket collection returns each move once");
+                return;
+            end
+            duplicate_seen |= seen[14'(move)];
             seen[14'(move)] = 1'b1;
             count++;
         end

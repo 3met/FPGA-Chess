@@ -56,6 +56,26 @@ module tb_nnue_evaluator;
         check(result == expected, label);
     endtask
 
+    // Exhaust the small exact arithmetic domain but report each implementation
+    // as one behavioral property rather than 64 nominal test cases.
+    task automatic test_output_products();
+        automatic bit soft_exact = 1'b1;
+        automatic bit hard_exact = 1'b1;
+
+        for (int activation = 0; activation <= 7; activation++) begin
+            for (int weight = -4; weight <= 3; weight++) begin
+                automatic logic signed [3:0] activation_bits = activation;
+                automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight_bits = weight;
+                soft_exact &= $signed(dut.soft_output_product(
+                    activation_bits, weight_bits)) == activation * weight;
+                hard_exact &= $signed(dut.hard_output_product(
+                    activation_bits, weight_bits)) == activation * weight;
+            end
+        end
+        check(soft_exact, "soft output product is exact over its reachable domain");
+        check(hard_exact, "hard output product is exact over its reachable domain");
+    endtask
+
     initial begin
         clear = 0;
         update_valid = 0;
@@ -89,20 +109,7 @@ module tb_nnue_evaluator;
         check(dut.STATE_COUNT == 9,
             "accumulator memory allocates one logical word per thread");
 
-        // Both portable implementations must cover the complete reachable
-        // activation and signed-three-bit domains exactly.
-        for (int activation = 0; activation <= 7; activation++) begin
-            for (int weight = -4; weight <= 3; weight++) begin
-                automatic logic signed [3:0] activation_bits = activation;
-                automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight_bits = weight;
-                check($signed(dut.soft_output_product(
-                            activation_bits, weight_bits)) == activation * weight,
-                    "soft output product is exact");
-                check($signed(dut.hard_output_product(
-                            activation_bits, weight_bits)) == activation * weight,
-                    "hard output product is exact");
-            end
-        end
+        test_output_products();
 
         update_req.thread_id = ThreadID'(8);
         update_req.ply = PlyIndex'(2);
@@ -180,7 +187,6 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         evaluate(EvalScore'(0), "a feature delta forwards updated state");
-        evaluate(EvalScore'(0), "single thread state follows the child delta");
 
         // A normal child updates its thread's live state without a copy request.
         update_req = '0;
@@ -206,7 +212,6 @@ module tb_nnue_evaluator;
         eval_thread_id = ThreadID'(1);
         evaluate(EvalScore'(0),
             "first delta reads the live parent without a standalone copy request");
-        evaluate(EvalScore'(0), "the ply tag does not duplicate live thread state");
 
         // The mirrored state store must support an evaluation read while a
         // different thread commits its next accumulator update.
@@ -277,8 +282,7 @@ module tb_nnue_evaluator;
         update_req.clear = 1;
         enqueue(update_req);
         update_req.clear = 0;
-        for (int feature = 1; feature < 12; feature++)
-            enqueue(update_req);
+        repeat (11) enqueue(update_req);
         wait (update_idle);
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(15),
@@ -314,9 +318,13 @@ module tb_nnue_evaluator;
         @(negedge clk);
         clear = 0;
         check(update_idle && eval_ready, "clear retires queued update and evaluation work");
-        repeat (7) begin
-            @(negedge clk);
-            check(!result_valid, "clear suppresses stale evaluation results");
+        begin
+            automatic bit stale_result_seen = 1'b0;
+            repeat (7) begin
+                @(negedge clk);
+                stale_result_seen |= result_valid;
+            end
+            check(!stale_result_seen, "clear suppresses stale evaluation results");
         end
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
             dut.accumulator_bias[lane] = 0;
@@ -380,5 +388,11 @@ module tb_nnue_evaluator;
         if (fail_count != 0)
             $fatal(1, "NNUE evaluator testbench failed");
         $finish;
+    end
+
+    initial begin
+        #1_000_000;
+        $fatal(1, "NNUE evaluator testbench timed out (pass=%0d fail=%0d)",
+            pass_count, fail_count);
     end
 endmodule

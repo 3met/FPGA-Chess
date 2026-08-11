@@ -3,7 +3,7 @@
 module tb_tx_encode;
 
     localparam int UART_CLOCK_FREQ = 100_000_000;
-    localparam int ENGINE_CLOCK_FREQ = 100_000_000;
+    localparam int ENGINE_CLOCK_FREQ = 80_000_000;
     localparam int BAUD_RATE = 2_000_000;
     localparam real UART_CLK_NS = 1_000_000_000.0 / UART_CLOCK_FREQ;
     localparam real ENGINE_CLK_NS = 1_000_000_000.0 / ENGINE_CLOCK_FREQ;
@@ -58,12 +58,12 @@ module tb_tx_encode;
     endtask : reset_dut
 
     task automatic enqueue_byte(input logic [7:0] value);
-        wait (!full);
-        @(posedge clk);
-        tx_stream <= value;
-        tx_stream_valid <= 1'b1;
-        @(posedge clk);
-        tx_stream_valid <= 1'b0;
+        @(negedge clk);
+        while (full) @(negedge clk);
+        tx_stream = value;
+        tx_stream_valid = 1'b1;
+        @(negedge clk);
+        tx_stream_valid = 1'b0;
     endtask : enqueue_byte
 
     task automatic expect_uart_byte(input logic [7:0] expected);
@@ -86,34 +86,24 @@ module tb_tx_encode;
         check(uart_tx == 1'b1, "UART TX idles high");
         check(!full, "TX FIFO not full after reset");
 
+        saw_full = 1'b0;
         fork
             begin
-                enqueue_byte(8'h01);
-                enqueue_byte(8'h23);
-                enqueue_byte(8'h45);
-                enqueue_byte(8'h67);
+                for (int idx = 0; idx < 8; idx++) begin
+                    enqueue_byte(8'(8'h01 + idx * 8'h22));
+                end
             end
             begin
-                expect_uart_byte(8'h01);
-                expect_uart_byte(8'h23);
-                expect_uart_byte(8'h45);
-                expect_uart_byte(8'h67);
+                for (int idx = 0; idx < 8; idx++) begin
+                    expect_uart_byte(8'(8'h01 + idx * 8'h22));
+                end
             end
-        join
-
-        saw_full = 1'b0;
-        for (int idx = 0; idx < 32; idx += 1) begin
-            @(posedge clk);
-            tx_stream <= idx[7:0];
-            tx_stream_valid <= !full;
-            if (full) begin
+            begin
+                wait (full);
                 saw_full = 1'b1;
             end
-        end
-        @(posedge clk);
-        tx_stream_valid <= 1'b0;
-        repeat (20) @(posedge clk);
-        check(saw_full || full, "TX FIFO reports full during rapid enqueue");
+        join
+        check(saw_full, "TX FIFO applies backpressure without losing byte order");
 
         reset_dut();
         enqueue_byte(8'hde);

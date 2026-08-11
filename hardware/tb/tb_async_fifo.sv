@@ -57,23 +57,33 @@ module tb_async_fifo;
         repeat (4) @(posedge rd_clk);
     endtask : reset_fifo
 
+    // Drive between active edges so the testbench cannot race the DUT sampler.
     task automatic write_byte(input logic [7:0] value);
-        @(posedge wr_clk);
-        wr_data <= value;
-        wr_en <= 1'b1;
-        @(posedge wr_clk);
-        wr_en <= 1'b0;
+        @(negedge wr_clk);
+        while (full) @(negedge wr_clk);
+        wr_data = value;
+        wr_en = 1'b1;
+        @(negedge wr_clk);
+        wr_en = 1'b0;
     endtask : write_byte
 
     task automatic read_byte(input logic [7:0] expected);
         wait (!empty);
-        #1;
+        @(negedge rd_clk);
         check(rd_data === expected, $sformatf("read data 0x%02h", expected));
-        @(posedge rd_clk);
-        rd_en <= 1'b1;
-        @(posedge rd_clk);
-        rd_en <= 1'b0;
+        rd_en = 1'b1;
+        @(negedge rd_clk);
+        rd_en = 1'b0;
     endtask : read_byte
+
+    task automatic attempt_write_while_full(input logic [7:0] value);
+        wait (full);
+        @(negedge wr_clk);
+        wr_data = value;
+        wr_en = 1'b1;
+        @(negedge wr_clk);
+        wr_en = 1'b0;
+    endtask : attempt_write_while_full
 
     initial begin
         reset_fifo();
@@ -95,35 +105,22 @@ module tb_async_fifo;
         write_byte(8'ha3);
         repeat (4) @(posedge wr_clk);
         check(full, "FIFO full after depth writes");
-
+        attempt_write_while_full(8'hee);
         read_byte(8'ha0);
         repeat (6) @(posedge wr_clk);
         check(!full, "FIFO not full after one read");
+        write_byte(8'ha4);
         read_byte(8'ha1);
         read_byte(8'ha2);
         read_byte(8'ha3);
-
-        write_byte(8'ha4);
-        write_byte(8'ha5);
-        write_byte(8'ha6);
-        write_byte(8'ha7);
         read_byte(8'ha4);
-        read_byte(8'ha5);
-        read_byte(8'ha6);
-        read_byte(8'ha7);
 
         write_byte(8'h55);
         write_byte(8'h66);
-        wait (!empty);
-        @(posedge wr_clk);
-        wr_data <= 8'h77;
-        wr_en <= 1'b1;
-        @(posedge rd_clk);
-        rd_en <= 1'b1;
-        @(posedge wr_clk);
-        wr_en <= 1'b0;
-        @(posedge rd_clk);
-        rd_en <= 1'b0;
+        fork
+            write_byte(8'h77);
+            read_byte(8'h55);
+        join
         read_byte(8'h66);
         read_byte(8'h77);
 

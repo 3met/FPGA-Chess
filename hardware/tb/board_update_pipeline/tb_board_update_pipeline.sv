@@ -1,7 +1,3 @@
-// Run in Questa/ModelSim from the repository root after compiling RTL and this file:
-// vsim -t ns work.tb_board_update_pipeline
-// run -all
-
 `timescale 1ns/1ns
 
 import general_chess_defs::*;
@@ -35,7 +31,7 @@ module tb_board_update_pipeline;
     ZobristKey ref_zobrist;
 
     int pass_count = 0;
-    int error_count = 0;
+    int fail_count = 0;
 
     board_update_pipeline dut (
         .clk(clk),
@@ -198,7 +194,7 @@ module tb_board_update_pipeline;
     endtask
 
     task automatic record_fail(input string message);
-        error_count += 1;
+        fail_count += 1;
         $error("[%6t] %s", $time, message);
     endtask
 
@@ -387,7 +383,13 @@ module tb_board_update_pipeline;
         refresh_ref_scores();
     endtask
 
-    task automatic run_op(input BoardOp op, input Move move, input logic [6:0] data, input string test_name);
+    task automatic run_op(
+        input BoardOp op,
+        input Move move,
+        input logic [6:0] data,
+        input string test_name,
+        input bit verify = 1'b1
+    );
         automatic FullBoard old_board = ref_board;
         automatic ZobristKey old_zobrist = ref_zobrist;
         automatic EvalScore old_pst = ref_pst;
@@ -407,7 +409,7 @@ module tb_board_update_pipeline;
         do_clock(1);
         drive_idle();
         do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-        expect_ref_state(test_name);
+        if (verify) expect_ref_state(test_name);
     endtask
 
     task automatic run_raw_op(
@@ -440,36 +442,54 @@ module tb_board_update_pipeline;
         out_pst = pst_eval_out;
     endtask
 
-    task automatic set_tile(input Tile tile, input Position pos, input string test_name);
+    task automatic set_tile(
+        input Tile tile,
+        input Position pos,
+        input string test_name,
+        input bit verify = 1'b1
+    );
         automatic Move move = NULL_MOVE;
         automatic logic [6:0] data = 7'd0;
         move.to_pos = pos;
         data[3:0] = tile;
-        run_op(BOARD_SET_TILE_OP, move, data, test_name);
+        run_op(BOARD_SET_TILE_OP, move, data, test_name, verify);
     endtask
 
-    task automatic set_turn(input Color color, input string test_name);
+    task automatic set_turn(input Color color, input string test_name, input bit verify = 1'b1);
         automatic logic [6:0] data = 7'd0;
         data[0] = color;
-        run_op(BOARD_SET_TURN_OP, NULL_MOVE, data, test_name);
+        run_op(BOARD_SET_TURN_OP, NULL_MOVE, data, test_name, verify);
     endtask
 
-    task automatic set_castle_perms(input CastlePerms castle_perms, input string test_name);
+    task automatic set_castle_perms(
+        input CastlePerms castle_perms,
+        input string test_name,
+        input bit verify = 1'b1
+    );
         automatic logic [6:0] data = 7'd0;
         data[3:0] = castle_perms;
-        run_op(BOARD_SET_CASTLE_PERMS_OP, NULL_MOVE, data, test_name);
+        run_op(BOARD_SET_CASTLE_PERMS_OP, NULL_MOVE, data, test_name, verify);
     endtask
 
-    task automatic set_en_passant(input logic has_ep, input BoardFile ep_file, input string test_name);
+    task automatic set_en_passant(
+        input logic has_ep,
+        input BoardFile ep_file,
+        input string test_name,
+        input bit verify = 1'b1
+    );
         automatic logic [6:0] data = 7'd0;
         data[0] = has_ep;
         data[3:1] = ep_file;
-        run_op(BOARD_SET_EN_PASSANT_OP, NULL_MOVE, data, test_name);
+        run_op(BOARD_SET_EN_PASSANT_OP, NULL_MOVE, data, test_name, verify);
     endtask
 
-    task automatic set_halfmove_clock(input HalfmoveClock halfmove_clock, input string test_name);
+    task automatic set_halfmove_clock(
+        input HalfmoveClock halfmove_clock,
+        input string test_name,
+        input bit verify = 1'b1
+    );
         automatic logic [6:0] data = halfmove_clock;
-        run_op(BOARD_SET_HALFMOVE_CLOCK_OP, NULL_MOVE, data, test_name);
+        run_op(BOARD_SET_HALFMOVE_CLOCK_OP, NULL_MOVE, data, test_name, verify);
     endtask
 
     task automatic push_move(input Position from_pos, input Position to_pos, input PromoType promo, input string test_name);
@@ -492,32 +512,33 @@ module tb_board_update_pipeline;
         reset_ref_model();
         drive_idle();
 
-        set_tile(WHITE_ROOK,   Position'(0),  "setup a1");
-        set_tile(WHITE_KNIGHT, Position'(1),  "setup b1");
-        set_tile(WHITE_BISHOP, Position'(2),  "setup c1");
-        set_tile(WHITE_QUEEN,  Position'(3),  "setup d1");
-        set_tile(WHITE_KING,   Position'(4),  "setup e1");
-        set_tile(WHITE_BISHOP, Position'(5),  "setup f1");
-        set_tile(WHITE_KNIGHT, Position'(6),  "setup g1");
-        set_tile(WHITE_ROOK,   Position'(7),  "setup h1");
+        set_tile(WHITE_ROOK,   Position'(0),  "setup a1", 1'b0);
+        set_tile(WHITE_KNIGHT, Position'(1),  "setup b1", 1'b0);
+        set_tile(WHITE_BISHOP, Position'(2),  "setup c1", 1'b0);
+        set_tile(WHITE_QUEEN,  Position'(3),  "setup d1", 1'b0);
+        set_tile(WHITE_KING,   Position'(4),  "setup e1", 1'b0);
+        set_tile(WHITE_BISHOP, Position'(5),  "setup f1", 1'b0);
+        set_tile(WHITE_KNIGHT, Position'(6),  "setup g1", 1'b0);
+        set_tile(WHITE_ROOK,   Position'(7),  "setup h1", 1'b0);
         for (int pos = 8; pos < 16; pos++) begin
-            set_tile(WHITE_PAWN, Position'(pos), $sformatf("setup white pawn %0d", pos));
+            set_tile(WHITE_PAWN, Position'(pos), $sformatf("setup white pawn %0d", pos), 1'b0);
         end
         for (int pos = 48; pos < 56; pos++) begin
-            set_tile(BLACK_PAWN, Position'(pos), $sformatf("setup black pawn %0d", pos));
+            set_tile(BLACK_PAWN, Position'(pos), $sformatf("setup black pawn %0d", pos), 1'b0);
         end
-        set_tile(BLACK_ROOK,   Position'(56), "setup a8");
-        set_tile(BLACK_KNIGHT, Position'(57), "setup b8");
-        set_tile(BLACK_BISHOP, Position'(58), "setup c8");
-        set_tile(BLACK_QUEEN,  Position'(59), "setup d8");
-        set_tile(BLACK_KING,   Position'(60), "setup e8");
-        set_tile(BLACK_BISHOP, Position'(61), "setup f8");
-        set_tile(BLACK_KNIGHT, Position'(62), "setup g8");
-        set_tile(BLACK_ROOK,   Position'(63), "setup h8");
-        set_turn(WHITE, "setup turn");
-        set_castle_perms(CastlePerms'(4'b1111), "setup castle perms");
-        set_en_passant(1'b0, BoardFile'(0), "setup en passant");
-        set_halfmove_clock(HalfmoveClock'(0), "setup halfmove clock");
+        set_tile(BLACK_ROOK,   Position'(56), "setup a8", 1'b0);
+        set_tile(BLACK_KNIGHT, Position'(57), "setup b8", 1'b0);
+        set_tile(BLACK_BISHOP, Position'(58), "setup c8", 1'b0);
+        set_tile(BLACK_QUEEN,  Position'(59), "setup d8", 1'b0);
+        set_tile(BLACK_KING,   Position'(60), "setup e8", 1'b0);
+        set_tile(BLACK_BISHOP, Position'(61), "setup f8", 1'b0);
+        set_tile(BLACK_KNIGHT, Position'(62), "setup g8", 1'b0);
+        set_tile(BLACK_ROOK,   Position'(63), "setup h8", 1'b0);
+        set_turn(WHITE, "setup turn", 1'b0);
+        set_castle_perms(CastlePerms'(4'b1111), "setup castle perms", 1'b0);
+        set_en_passant(1'b0, BoardFile'(0), "setup en passant", 1'b0);
+        set_halfmove_clock(HalfmoveClock'(0), "setup halfmove clock", 1'b0);
+        expect_ref_state("start position setup");
         expect_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0", "start position");
     endtask
 
@@ -598,19 +619,20 @@ module tb_board_update_pipeline;
         drive_idle();
 
         if (color == WHITE) begin
-            set_tile(WHITE_KING, Position'(4), "castle setup white king");
-            set_tile(WHITE_ROOK, kingside ? Position'(7) : Position'(0), "castle setup white rook");
-            set_turn(WHITE, "castle setup white turn");
-            set_castle_perms(kingside ? CastlePerms'(4'b1000) : CastlePerms'(4'b0100), "castle setup white perms");
+            set_tile(WHITE_KING, Position'(4), "castle setup white king", 1'b0);
+            set_tile(WHITE_ROOK, kingside ? Position'(7) : Position'(0), "castle setup white rook", 1'b0);
+            set_turn(WHITE, "castle setup white turn", 1'b0);
+            set_castle_perms(kingside ? CastlePerms'(4'b1000) : CastlePerms'(4'b0100), "castle setup white perms", 1'b0);
         end else begin
-            set_tile(BLACK_KING, Position'(60), "castle setup black king");
-            set_tile(BLACK_ROOK, kingside ? Position'(63) : Position'(56), "castle setup black rook");
-            set_turn(BLACK, "castle setup black turn");
-            set_castle_perms(kingside ? CastlePerms'(4'b0010) : CastlePerms'(4'b0001), "castle setup black perms");
+            set_tile(BLACK_KING, Position'(60), "castle setup black king", 1'b0);
+            set_tile(BLACK_ROOK, kingside ? Position'(63) : Position'(56), "castle setup black rook", 1'b0);
+            set_turn(BLACK, "castle setup black turn", 1'b0);
+            set_castle_perms(kingside ? CastlePerms'(4'b0010) : CastlePerms'(4'b0001), "castle setup black perms", 1'b0);
         end
 
-        set_en_passant(1'b0, BoardFile'(0), "castle setup ep");
-        set_halfmove_clock(HalfmoveClock'(0), "castle setup halfmove");
+        set_en_passant(1'b0, BoardFile'(0), "castle setup ep", 1'b0);
+        set_halfmove_clock(HalfmoveClock'(0), "castle setup halfmove", 1'b0);
+        expect_ref_state("castle setup");
     endtask
 
     task automatic test_castle_direction(input Color color, input bit kingside, input Position from_pos, input Position to_pos, input string fen_after, input string name);
@@ -806,9 +828,9 @@ module tb_board_update_pipeline;
 
         $display("Testbench run complete.");
         $display("Pass Count: %0d", pass_count);
-        $display("Fail Count: %0d", error_count);
+        $display("Fail Count: %0d", fail_count);
 
-        if (error_count != 0) $fatal(1, "board_update_pipeline testbench failed");
+        if (fail_count != 0) $fatal(1, "board_update_pipeline testbench failed");
         $finish;
     end
 

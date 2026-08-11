@@ -95,19 +95,19 @@ module tb_repetition_checker;
                 req_valid = 0;
             end
             begin
-                received = 0;
-                while (received < 4) begin
+                while (!(resp_valid && resp_epoch >= 1 && resp_epoch <= 4)) begin
                     @(negedge clk);
-                    if (resp_valid && resp_epoch >= 1 && resp_epoch <= 4) begin
-                        received++;
-                        check(resp_epoch == 4'(received), "burst response order");
-                        case (received)
-                            1: check(resp_previous_count == 2, "burst root hit count");
-                            2: check(resp_previous_count == 0, "burst root miss count");
-                            3: check(resp_previous_count == 2, "burst odd-parity hit count");
-                            4: check(resp_previous_count == 0, "burst odd-parity miss count");
-                        endcase
-                    end
+                end
+                for (received = 1; received <= 4; received++) begin
+                    check(resp_valid, "burst response has no pipeline bubble");
+                    check(resp_epoch == 4'(received), "burst response order");
+                    case (received)
+                        1: check(resp_previous_count == 2, "burst root hit count");
+                        2: check(resp_previous_count == 0, "burst root miss count");
+                        3: check(resp_previous_count == 2, "burst odd-parity hit count");
+                        4: check(resp_previous_count == 0, "burst odd-parity miss count");
+                    endcase
+                    @(negedge clk);
                 end
             end
         join

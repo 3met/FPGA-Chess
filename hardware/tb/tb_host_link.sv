@@ -189,15 +189,16 @@ module tb_host_link;
         expect_uart_byte(8'h00);
     endtask : expect_idle_status
 
-    initial begin
+    task automatic start_link();
         repeat (5) @(posedge uart_clk);
         domain_rst_n = 1'b1;
         wait (engine_rst_n && uart_tx_rst_n);
-        check(uart_tx && !rx_stream_valid, "link starts idle after synchronized reset release");
-
+        check(uart_tx && !rx_stream_valid,
+            "link starts idle after synchronized reset release");
         expect_idle_status();
+    endtask : start_link
 
-        // Reset a parser that is part-way through a long fixed-size payload.
+    task automatic test_break_during_payload();
         send_uart_byte(ENGINE_CMD_SET_BOARD);
         send_uart_byte(8'h24);
         send_uart_byte(8'h53);
@@ -205,24 +206,32 @@ module tb_host_link;
         send_uart_byte(ENGINE_CMD_NEW_GAME);
         expect_uart_byte(ENGINE_RESP_ACK);
         expect_uart_byte(8'h01);
+    endtask : test_break_during_payload
 
-        // A framing error invalidates the stream and keeps the command core
-        // inactive until the same BREAK recovery path clears it.
+    task automatic test_framing_error_recovery();
         send_bad_stop(ENGINE_CMD_GET_STATUS);
         wait (rx_error);
         @(posedge clk);
         #1;
-        check(!engine_core_rst_n && !engine_ready, "framing error fails the command core closed");
+        check(!engine_core_rst_n && !engine_ready,
+            "framing error fails the command core closed");
         send_break();
         expect_idle_status();
+    endtask : test_framing_error_recovery
 
-        // Interrupt a long response, discard it as the host does, and verify
-        // the next post-BREAK command begins at a clean response boundary.
+    task automatic test_break_during_response();
         send_uart_byte(ENGINE_CMD_GET_BUILD_INFO);
         wait (uart_tx == 1'b0);
         #(BIT_NS * 2.0);
         send_break();
         expect_idle_status();
+    endtask : test_break_during_response
+
+    initial begin
+        start_link();
+        test_break_during_payload();
+        test_framing_error_recovery();
+        test_break_during_response();
 
         check(!engine_error && !rx_error, "recovered link ends without latched errors");
         $display("Pass Count: %0d", pass_count);

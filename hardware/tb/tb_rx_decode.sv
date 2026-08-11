@@ -1,73 +1,55 @@
 `timescale 1ns/1ps
 
-module tb_uart_primitives;
+module tb_rx_decode;
 
-    localparam int CLOCK_FREQ = 100_000_000;
+    localparam int UART_CLOCK_FREQ = 100_000_000;
+    localparam int ENGINE_CLOCK_FREQ = 80_000_000;
     localparam int BAUD_RATE = 2_000_000;
-    localparam real CLK_NS = 1_000_000_000.0 / CLOCK_FREQ;
+    localparam real UART_CLK_NS = 1_000_000_000.0 / UART_CLOCK_FREQ;
+    localparam real ENGINE_CLK_NS = 1_000_000_000.0 / ENGINE_CLOCK_FREQ;
     localparam real BIT_NS = 1_000_000_000.0 / BAUD_RATE;
 
     logic clk = 1'b0;
+    logic uart_clk = 1'b0;
     logic rst_n = 1'b1;
     logic uart_rx = 1'b1;
+    logic mark_read = 1'b0;
     logic [7:0] rx_stream;
     logic rx_stream_valid;
-    logic uart_violation;
-    logic break_active;
-
-    logic [7:0] tx_stream = '0;
-    logic tx_stream_valid = 1'b0;
-    logic tx_ready;
-    logic uart_tx;
-    logic rx_seen;
-    logic rx_error_seen;
-    logic [7:0] last_rx_stream;
+    logic remote_reset;
+    logic error;
+    logic remote_reset_seen;
 
     int pass_count = 0;
     int fail_count = 0;
 
-    always #(CLK_NS / 2.0) clk = ~clk;
+    always #(ENGINE_CLK_NS / 2.0) clk = ~clk;
+    always #(UART_CLK_NS / 2.0) uart_clk = ~uart_clk;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            rx_seen <= 1'b0;
-            rx_error_seen <= 1'b0;
-            last_rx_stream <= '0;
-        end else begin
-            if (rx_stream_valid) begin
-                rx_seen <= 1'b1;
-                last_rx_stream <= rx_stream;
-            end
-            if (uart_violation) begin
-                rx_error_seen <= 1'b1;
-            end
+            remote_reset_seen <= 1'b0;
+        end else if (remote_reset) begin
+            remote_reset_seen <= 1'b1;
         end
     end
 
-    uart_receiver #(
+    rx_decode #(
         .BAUD_RATE(BAUD_RATE),
-        .CLOCK_FREQ(CLOCK_FREQ),
+        .UART_CLOCK_FREQ(UART_CLOCK_FREQ),
+        .FIFO_DEPTH(4),
         .BREAK_BIT_COUNT(20)
-    ) rx_dut (
+    ) dut (
         .clk(clk),
-        .rst_n(rst_n),
+        .uart_clk(uart_clk),
+        .engine_rst_n(rst_n),
+        .uart_rst_n(rst_n),
         .uart_rx(uart_rx),
+        .mark_read(mark_read),
         .rx_stream(rx_stream),
         .rx_stream_valid(rx_stream_valid),
-        .uart_violation(uart_violation),
-        .break_active(break_active)
-    );
-
-    uart_transmitter #(
-        .BAUD_RATE(BAUD_RATE),
-        .CLOCK_FREQ(CLOCK_FREQ)
-    ) tx_dut (
-        .clk(clk),
-        .rst_n(rst_n),
-        .tx_stream(tx_stream),
-        .tx_stream_valid(tx_stream_valid),
-        .ready(tx_ready),
-        .uart_tx(uart_tx)
+        .remote_reset(remote_reset),
+        .error(error)
     );
 
     task automatic check(input logic condition, input string label);
@@ -79,21 +61,22 @@ module tb_uart_primitives;
         end
     endtask : check
 
-    task automatic reset_duts();
+    task automatic reset_dut();
         rst_n = 1'b0;
         uart_rx = 1'b1;
-        tx_stream_valid = 1'b0;
-        repeat (5) @(posedge clk);
+        mark_read = 1'b0;
+        remote_reset_seen = 1'b0;
+        repeat (8) @(posedge clk);
+        repeat (8) @(posedge uart_clk);
         rst_n = 1'b1;
-        repeat (5) @(posedge clk);
-    endtask : reset_duts
+        repeat (8) @(posedge clk);
+        repeat (8) @(posedge uart_clk);
+    endtask : reset_dut
 
-    task automatic clear_rx_events();
-        @(posedge clk);
-        rx_seen <= 1'b0;
-        rx_error_seen <= 1'b0;
-        @(posedge clk);
-    endtask : clear_rx_events
+    task automatic clear_remote_reset_seen();
+        @(negedge clk);
+        remote_reset_seen = 1'b0;
+    endtask : clear_remote_reset_seen
 
     task automatic send_uart_byte(input logic [7:0] value);
         uart_rx = 1'b0;
@@ -105,25 +88,6 @@ module tb_uart_primitives;
         uart_rx = 1'b1;
         #(BIT_NS);
     endtask : send_uart_byte
-
-    task automatic send_uart_byte_with_center_glitch(input logic [7:0] value);
-        uart_rx = 1'b0;
-        #(BIT_NS);
-        for (int idx = 0; idx < 8; idx += 1) begin
-            uart_rx = value[idx];
-            if (idx == 3) begin
-                #(BIT_NS / 2.0 - CLK_NS / 2.0);
-                uart_rx = ~value[idx];
-                #(CLK_NS);
-                uart_rx = value[idx];
-                #(BIT_NS / 2.0 - CLK_NS / 2.0);
-            end else begin
-                #(BIT_NS);
-            end
-        end
-        uart_rx = 1'b1;
-        #(BIT_NS);
-    endtask : send_uart_byte_with_center_glitch
 
     task automatic send_bad_stop(input logic [7:0] value);
         uart_rx = 1'b0;
@@ -138,94 +102,78 @@ module tb_uart_primitives;
         #(BIT_NS);
     endtask : send_bad_stop
 
-    task automatic expect_rx_byte(input logic [7:0] expected);
-        check(rx_seen, $sformatf("RX valid for 0x%02h", expected));
-        check(last_rx_stream === expected, $sformatf("RX byte 0x%02h", expected));
-        check(!rx_error_seen, $sformatf("RX no error for 0x%02h", expected));
-        @(posedge clk);
-    endtask : expect_rx_byte
-
-    task automatic transmit_byte(input logic [7:0] value);
-        wait (tx_ready);
-        #1;
-        tx_stream = value;
-        tx_stream_valid = 1'b1;
-        @(posedge clk);
-        tx_stream_valid = 1'b0;
-    endtask : transmit_byte
-
-    task automatic expect_tx_byte(input logic [7:0] expected);
-        wait (uart_tx == 1'b0);
-        #(BIT_NS / 2.0);
-        check(uart_tx == 1'b0, "TX start bit");
-        #(BIT_NS);
-        for (int idx = 0; idx < 8; idx += 1) begin
-            check(uart_tx == expected[idx], $sformatf("TX data bit %0d for 0x%02h", idx, expected));
-            #(BIT_NS);
-        end
-        check(uart_tx == 1'b1, "TX stop bit");
-        #(BIT_NS / 2.0);
-    endtask : expect_tx_byte
+    task automatic pop_byte(input logic [7:0] expected);
+        wait (rx_stream_valid);
+        @(negedge clk);
+        check(rx_stream === expected, $sformatf("rx_decode byte 0x%02h", expected));
+        mark_read = 1'b1;
+        @(negedge clk);
+        mark_read = 1'b0;
+    endtask : pop_byte
 
     initial begin
-        reset_duts();
+        reset_dut();
+        check(!rx_stream_valid, "RX FIFO empty after reset");
 
-        #($urandom_range(0, 19));
-        clear_rx_events();
-        send_uart_byte(8'h00);
-        expect_rx_byte(8'h00);
-        clear_rx_events();
-        send_uart_byte(8'hff);
-        expect_rx_byte(8'hff);
-        clear_rx_events();
-        send_uart_byte(8'ha5);
-        expect_rx_byte(8'ha5);
-        clear_rx_events();
-        send_uart_byte(8'h3c);
-        expect_rx_byte(8'h3c);
+        send_uart_byte(8'h10);
+        send_uart_byte(8'h1f);
+        send_uart_byte(8'h20);
+        pop_byte(8'h10);
+        pop_byte(8'h1f);
+        pop_byte(8'h20);
+        repeat (8) @(posedge clk);
+        check(!rx_stream_valid, "RX FIFO empty after reads");
 
-        clear_rx_events();
-        send_uart_byte_with_center_glitch(8'ha5);
-        expect_rx_byte(8'ha5);
+        send_uart_byte(8'h30);
+        wait (rx_stream_valid);
+        repeat (10) @(posedge clk);
+        check(rx_stream_valid && rx_stream === 8'h30, "mark_read low holds head byte");
+        pop_byte(8'h30);
 
-        clear_rx_events();
+        send_bad_stop(8'h44);
+        wait (error);
+        check(error, "framing error latches");
+
+        clear_remote_reset_seen();
         uart_rx = 1'b0;
-        #(BIT_NS / 4.0);
+        #(BIT_NS * 25.0);
+        check(remote_reset_seen && remote_reset, "BREAK holds remote_reset active");
+        check(!error, "BREAK clears error latch");
         uart_rx = 1'b1;
         #(BIT_NS * 3.0);
-        check(!rx_seen && !rx_error_seen, "false start rejected");
+        repeat (8) @(posedge clk);
+        check(!remote_reset, "remote_reset releases after BREAK ends");
+        check(!rx_stream_valid, "BREAK clears RX FIFO");
+        send_uart_byte(8'h04);
+        pop_byte(8'h04);
 
-        clear_rx_events();
-        send_bad_stop(8'h5a);
-        check(rx_error_seen, "bad stop bit reports framing violation");
-        @(posedge clk);
-
-        uart_rx = 1'b0;
-        #(BIT_NS * 21.0);
-        check(break_active, "BREAK active after low interval");
-        uart_rx = 1'b1;
-        #(BIT_NS * 2.0);
-        check(!break_active, "BREAK clears after high line");
-
-        fork
-            begin
-                transmit_byte(8'h12);
-            end
-            begin
-                expect_tx_byte(8'h12);
-            end
-        join
+        send_uart_byte(8'h00);
+        send_uart_byte(8'h01);
+        send_uart_byte(8'h02);
+        send_uart_byte(8'h03);
+        send_uart_byte(8'h04);
+        send_uart_byte(8'h05);
+        send_uart_byte(8'h06);
+        send_uart_byte(8'h07);
+        wait (error);
+        check(error, "RX overflow latches error");
+        pop_byte(8'h00);
+        pop_byte(8'h01);
+        pop_byte(8'h02);
+        pop_byte(8'h03);
+        repeat (8) @(posedge clk);
+        check(!rx_stream_valid, "RX overflow preserves only the accepted FIFO prefix");
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
-        if (fail_count != 0) $fatal(1, "tb_uart_primitives failed");
+        if (fail_count != 0) $fatal(1, "tb_rx_decode failed");
         $finish;
     end
 
     initial begin
         #200_000;
         fail_count += 1;
-        $fatal(1, "tb_uart_primitives timed out (pass=%0d fail=%0d)", pass_count, fail_count);
+        $fatal(1, "tb_rx_decode timed out (pass=%0d fail=%0d)", pass_count, fail_count);
     end
 
-endmodule : tb_uart_primitives
+endmodule : tb_rx_decode

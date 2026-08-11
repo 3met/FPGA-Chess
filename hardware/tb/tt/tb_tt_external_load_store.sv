@@ -110,7 +110,8 @@ module tb_tt_external_load_store;
         input logic expected_hit,
         input ThreadID thread_id,
         input EvalScore expected_score = EvalScore'(123),
-        input PlyIndex ply = PlyIndex'(0)
+        input PlyIndex ply = PlyIndex'(0),
+        input string label = "lookup"
     );
         lookup_req = TTLookupRequest'('0); lookup_req.zobrist_key = key; lookup_req.thread_id = thread_id;
         lookup_req.ply = ply;
@@ -118,9 +119,9 @@ module tb_tt_external_load_store;
         do @(posedge clk); while (!lookup_req_ready);
         lookup_req_valid = 0;
         do @(posedge clk); while (!lookup_resp_valid);
-        check(lookup_resp.thread_id == thread_id, "lookup response retained thread tag");
-        check(lookup_resp.hit == expected_hit, expected_hit ? "lookup hit" : "lookup miss");
-        if (expected_hit) check(lookup_resp.score == expected_score, "lookup score");
+        check(lookup_resp.thread_id == thread_id, {label, " retained thread tag"});
+        check(lookup_resp.hit == expected_hit, {label, expected_hit ? " hit" : " miss"});
+        if (expected_hit) check(lookup_resp.score == expected_score, {label, " score"});
     endtask
 
     initial begin
@@ -132,7 +133,8 @@ module tb_tt_external_load_store;
         check(request_count == 2, "store used read and write bursts");
         do_store(64'h0123_4567_89ab_cdef);
         check(request_count == 3, "cache-resident store skipped replacement read");
-        do_lookup(64'h0123_4567_89ab_cdef, 1'b1, ThreadID'(1));
+        do_lookup(64'h0123_4567_89ab_cdef, 1'b1, ThreadID'(1),
+            EvalScore'(123), PlyIndex'(0), "cache-resident lookup");
         @(posedge clk);
         check(request_count == 3, "cache hit avoided SDRAM");
         check(store_cache_access_count == 2, "store cache probes identified separately");
@@ -193,14 +195,18 @@ module tb_tt_external_load_store;
         do @(posedge clk); while (!lookup_req_ready);
         lookup_req_valid = 0;
         do @(posedge clk); while (!read_active);
-        for (int idx = 0; idx < 3; idx++) begin
-            store_req = TTStoreRequest'('0);
-            store_req.zobrist_key = 64'h2000_0000_0000_0000 + idx;
-            store_req.depth = TTDepth'(idx + 1);
-            store_req.bound_type = TT_BOUND_EXACT;
-            store_req_valid = 1;
-            @(posedge clk);
-            check(store_req_ready, "busy frontend consumed store publication");
+        begin
+            automatic bit all_stores_accepted = 1'b1;
+            for (int idx = 0; idx < 3; idx++) begin
+                store_req = TTStoreRequest'('0);
+                store_req.zobrist_key = 64'h2000_0000_0000_0000 + idx;
+                store_req.depth = TTDepth'(idx + 1);
+                store_req.bound_type = TT_BOUND_EXACT;
+                store_req_valid = 1;
+                @(posedge clk);
+                all_stores_accepted &= store_req_ready;
+            end
+            check(all_stores_accepted, "busy frontend consumed every store publication");
         end
         store_req_valid = 0;
         check(dut.store_fifo_count == 2, "external store FIFO bounded overflow by dropping");
@@ -222,7 +228,8 @@ module tb_tt_external_load_store;
         check(dut.generation == old_generation + TTAge'(1), "busy clear pulse advanced generation");
 
         clear = 1; @(posedge clk); clear = 0; repeat (2) @(posedge clk);
-        do_lookup(64'h0123_4567_89ab_cdef, 1'b0, ThreadID'(0));
+        do_lookup(64'h0123_4567_89ab_cdef, 1'b0, ThreadID'(0),
+            EvalScore'(123), PlyIndex'(0), "post-clear lookup");
         check(mem_req_address < 96 && mem_req_length == 6, "bounded aligned burst mapping");
 
         // An old-generation result survives a much shallower publication. This
@@ -239,13 +246,14 @@ module tb_tt_external_load_store;
         request_count = 0;
         do_store(64'h4567_89ab_cdef_0123, TTDepth'(8), EvalScore'(211), TT_BOUND_EXACT);
         check(request_count == 1, "equal-depth exact result replaced upper bound");
-        do_lookup(64'h4567_89ab_cdef_0123, 1'b1, ThreadID'(0), EvalScore'(211));
+        do_lookup(64'h4567_89ab_cdef_0123, 1'b1, ThreadID'(0),
+            EvalScore'(211), PlyIndex'(0), "exact replacement lookup");
 
         // Stored mate distance is node-relative and restored for the lookup ply.
         do_store(64'h5678_9abc_def0_1234, TTDepth'(4),
             EvalScore'(MATE_SCORE - 5), TT_BOUND_EXACT, PlyIndex'(5));
         do_lookup(64'h5678_9abc_def0_1234, 1'b1, ThreadID'(0),
-            EvalScore'(MATE_SCORE - 2), PlyIndex'(2));
+            EvalScore'(MATE_SCORE - 2), PlyIndex'(2), "mate-distance lookup");
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);

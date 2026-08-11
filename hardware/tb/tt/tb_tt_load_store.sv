@@ -1,7 +1,3 @@
-// Run in Questa/ModelSim from the repository root after compiling RTL and this file:
-// vsim -t ns work.tb_tt_load_store
-// run -all
-
 `timescale 1ns/1ns
 
 import general_chess_defs::*;
@@ -41,7 +37,7 @@ module tb_tt_load_store;
     TTStoreRequest full_store_req;
 
     int pass_count = 0;
-    int error_count = 0;
+    int fail_count = 0;
 
     tt_load_store #(
         .TT_INDEX_BITS(TEST_TT_INDEX_BITS),
@@ -138,7 +134,7 @@ module tb_tt_load_store;
     endtask
 
     task automatic record_fail(input string message);
-        error_count += 1;
+        fail_count += 1;
         $error("[%6t] %s", $time, message);
     endtask
 
@@ -537,9 +533,9 @@ module tb_tt_load_store;
         test_full_key_profile();
 
         $display("Pass Count: %0d", pass_count);
-        $display("Fail Count: %0d", error_count);
+        $display("Fail Count: %0d", fail_count);
 
-        if (error_count != 0) $fatal(1, "TT load/store testbench failed");
+        if (fail_count != 0) $fatal(1, "TT load/store testbench failed");
         $finish;
     end
 

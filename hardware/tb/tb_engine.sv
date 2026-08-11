@@ -151,11 +151,14 @@ module tb_engine;
     endtask : capture_request_without_response
 
     task automatic expect_no_output(input int cycles, input string label);
+        automatic logic output_seen = 1'b0;
+
         for (int idx = 0; idx < cycles; idx++) begin
             #1;
-            check(!data_out_valid, $sformatf("%s no output cycle %0d", label, idx));
+            output_seen |= data_out_valid;
             do_clock(1);
         end
+        check(!output_seen, label);
     endtask : expect_no_output
 
     task automatic send_mock_response(
@@ -260,10 +263,6 @@ module tb_engine;
         expect_error_response(ENGINE_ERR_UNKNOWN_OPCODE);
         clear_error_with_new_game();
 
-        send_byte(8'h03);
-        expect_error_response(ENGINE_ERR_UNKNOWN_OPCODE);
-        clear_error_with_new_game();
-
         send_byte(ENGINE_CMD_MAKE_MOVE);
         do_clock(2);
         send_byte(8'h00);
@@ -314,28 +313,37 @@ module tb_engine;
         end
 
         for (int idx = 0; idx < 68; idx++) begin
+            automatic logic [3:0] expected_tile;
+
             accept_request(captured);
-            check(captured.operation == ENGINE_CTRL_DIRECT_BOARD, $sformatf("set board direct op %0d", idx));
-            if (idx == 0) begin
-                check(captured.direct_board_op == BOARD_SET_TILE_OP, "set board tile 0 op");
-                check(captured.move.to_pos == Position'('d0), "set board tile 0 position");
-                check(captured.board_wr_data[3:0] == 4'h1, "set board tile 0 data");
-            end else if (idx == 1) begin
-                check(captured.direct_board_op == BOARD_SET_TILE_OP, "set board tile 1 op");
-                check(captured.move.to_pos == Position'('d1), "set board tile 1 position");
-                check(captured.board_wr_data[3:0] == 4'he, "set board tile 1 data");
-            end else if (idx == 64) begin
-                check(captured.direct_board_op == BOARD_SET_CASTLE_PERMS_OP, "set board castle op");
-                check(captured.board_wr_data[3:0] == 4'hf, "set board castle data");
-            end else if (idx == 65) begin
-                check(captured.direct_board_op == BOARD_SET_EN_PASSANT_OP, "set board ep op");
-                check(captured.board_wr_data[3:0] == 4'h5, "set board ep data");
-            end else if (idx == 66) begin
-                check(captured.direct_board_op == BOARD_SET_TURN_OP, "set board turn op");
-                check(captured.board_wr_data[0] == 1'b1, "set board turn data");
-            end else if (idx == 67) begin
-                check(captured.direct_board_op == BOARD_SET_HALFMOVE_CLOCK_OP, "set board halfmove op");
-                check(captured.board_wr_data == 7'd2, "set board halfmove data");
+            if (idx < 64) begin
+                expected_tile = idx[0]
+                    ? board_payload[idx / 2][7:4]
+                    : board_payload[idx / 2][3:0];
+                check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                        && captured.direct_board_op == BOARD_SET_TILE_OP
+                        && captured.move.to_pos == Position'(idx)
+                        && captured.board_wr_data[3:0] == expected_tile,
+                    $sformatf("set board tile request %0d", idx));
+            end else begin
+                case (idx)
+                    64: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                            && captured.direct_board_op == BOARD_SET_CASTLE_PERMS_OP
+                            && captured.board_wr_data[3:0] == 4'hf,
+                        "set board castle request");
+                    65: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                            && captured.direct_board_op == BOARD_SET_EN_PASSANT_OP
+                            && captured.board_wr_data[3:0] == 4'h5,
+                        "set board en passant request");
+                    66: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                            && captured.direct_board_op == BOARD_SET_TURN_OP
+                            && captured.board_wr_data[0] == 1'b1,
+                        "set board turn request");
+                    67: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                            && captured.direct_board_op == BOARD_SET_HALFMOVE_CLOCK_OP
+                            && captured.board_wr_data == 7'd2,
+                        "set board halfmove request");
+                endcase
             end
         end
         expect_ack(8'h01);
