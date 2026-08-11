@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -18,6 +18,7 @@ from software.engine.protocol import (
     BAUD_RATE,
     BITS_TO_PROMOTION,
     BuildInfoResponse,
+    Command,
     ErrorResponse,
     DebugStatResponse,
     DebugStatAddress,
@@ -51,9 +52,8 @@ SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
 # BREAK restarts the DE1 SDRAM path. Startup time is negligible beside search
 # time, so wait for board initialization instead of queuing across reset.
 RESET_RECOVERY_SECONDS = 1.0
-# A missing startup reply indicates stale byte-stream state, not a slow normal
-# operation. Recover promptly instead of consuming the UCI startup deadline.
 INITIAL_STATUS_TIMEOUT_SECONDS = 1.0
+INITIALIZATION_ATTEMPTS = 3
 # These values mirror hardware/rtl/tt/tt_defs.sv. Scores in this range encode
 # a forced mate as MATE_SCORE minus the distance in plies.
 MATE_SCORE = 32_000
@@ -76,6 +76,10 @@ class HostError(RuntimeError):
     """Raised for UCI-host-level errors."""
 
 
+class FPGACommunicationError(HostError):
+    """Raised when a transaction leaves the unframed byte stream at an unknown position."""
+
+
 class FPGAClient:
     """Synchronous command/response client for the FPGA protocol."""
 
@@ -83,46 +87,138 @@ class FPGAClient:
         self.transport = transport
         self.response_timeout = response_timeout
         self._normal_command_lock = threading.Lock()
+        self._synchronized = False
+
+    @property
+    def synchronized(self) -> bool:
+        return self._synchronized
 
     def close(self) -> None:
+        self._synchronized = False
         self.transport.close()
 
     def request(self, command: bytes, timeout: float | None = None):
         with self._normal_command_lock:
-            self.transport.write(command)
-            return read_response(lambda size: self.transport.read_exact(size, timeout or self.response_timeout))
+            if not self._synchronized:
+                raise FPGACommunicationError("FPGA byte stream needs reset synchronization")
+            return self._exchange(command, self.response_timeout if timeout is None else timeout)
 
-    def search_request(self, command: bytes):
+    def search_request(self, command: bytes, command_sent: Callable[[], None] | None = None):
         with self._normal_command_lock:
-            self.transport.write(command)
-            return read_response(lambda size: self.transport.read_exact(size, SEARCH_TIMEOUT_SECONDS))
+            if not self._synchronized:
+                raise FPGACommunicationError("FPGA byte stream needs reset synchronization")
+            return self._exchange(command, SEARCH_TIMEOUT_SECONDS, search=True, command_sent=command_sent)
 
     def kill(self) -> None:
-        self.transport.write(cmd_kill())
+        if not self._synchronized:
+            raise FPGACommunicationError("FPGA byte stream needs reset synchronization")
+        try:
+            self.transport.write(cmd_kill())
+        except Exception as exc:
+            self._synchronized = False
+            raise FPGACommunicationError(f"Could not send FPGA Kill command: {exc}") from exc
 
-    def remote_reset(self) -> None:
-        """Reset the FPGA transport state and discard any pre-reset reply bytes."""
+    @staticmethod
+    def _expected_response(command: bytes, search: bool = False) -> tuple[type, ...]:
+        """Return the only response classes valid for a completed command."""
+        if not command:
+            raise ValueError("FPGA command cannot be empty")
+        try:
+            opcode = Command(command[0])
+        except ValueError as exc:
+            raise ValueError(f"Unknown FPGA command opcode 0x{command[0]:02x}") from exc
+
+        if opcode == Command.GET_STATUS or opcode == Command.KILL:
+            expected = (StatusResponse,)
+        elif opcode in {Command.SET_BOARD, Command.MAKE_MOVE, Command.NEW_GAME}:
+            expected = (AckResponse,)
+        elif opcode in {
+            Command.SEARCH_DEPTH,
+            Command.SEARCH_FIXED_TIME,
+            Command.SEARCH_ON_CLOCK,
+            Command.SEARCH_NODES,
+        }:
+            expected = (SearchResultResponse, StatusResponse) if search else (SearchResultResponse,)
+        elif opcode == Command.PERFT:
+            expected = (PerftResultResponse, StatusResponse) if search else (PerftResultResponse,)
+        elif opcode == Command.GET_SEARCH_RESULT:
+            expected = (SearchResultResponse,)
+        elif opcode == Command.GET_DEBUG_STAT:
+            expected = (DebugStatResponse,)
+        elif opcode == Command.GET_BUILD_INFO:
+            expected = (BuildInfoResponse,)
+        else:
+            raise ValueError(f"No response contract for FPGA opcode 0x{opcode:02x}")
+        return (*expected, ErrorResponse)
+
+    def _exchange(
+        self,
+        command: bytes,
+        timeout: float,
+        search: bool = False,
+        command_sent: Callable[[], None] | None = None,
+    ):
+        """Perform one transaction and poison the stream after any ambiguous failure."""
+        expected = self._expected_response(command, search=search)
+        try:
+            self.transport.write(command)
+            if command_sent is not None:
+                command_sent()
+            response = read_response(lambda size: self.transport.read_exact(size, timeout))
+        except Exception as exc:
+            self._synchronized = False
+            raise FPGACommunicationError(
+                f"FPGA transaction 0x{command[0]:02x} failed; byte-stream position is unknown: {exc}"
+            ) from exc
+        if not isinstance(response, expected):
+            self._synchronized = False
+            raise FPGACommunicationError(
+                f"FPGA command 0x{command[0]:02x} returned unexpected {type(response).__name__}"
+            )
+        return response
+
+    def _remote_reset(self) -> None:
+        """Clear queued host bytes, hold FPGA reset with BREAK, and discard the interrupted reply."""
+        self._synchronized = False
+        self.transport.reset_output_buffer()
+        self.transport.reset_input_buffer()
         self.transport.send_break()
         self.transport.reset_input_buffer()
         time.sleep(RESET_RECOVERY_SECONDS)
 
+    def remote_reset(self) -> None:
+        with self._normal_command_lock:
+            self._remote_reset()
+
     def initialize(self) -> None:
-        """Synchronize with a running FPGA, using BREAK only for recovery."""
-        self.transport.reset_input_buffer()
-        try:
-            status = self.request(cmd_get_status(), timeout=INITIAL_STATUS_TIMEOUT_SECONDS)
-        except (ProtocolError, SerialTimeoutError):
-            status = None
-        if not isinstance(status, StatusResponse):
-            self.remote_reset()
-        try:
-            response = self.request(cmd_new_game())
-        except SerialTimeoutError as exc:
-            if isinstance(status, StatusResponse):
-                raise HostError(f"FPGA answered status but New Game did not respond: {exc}") from exc
-            raise HostError(f"FPGA did not respond after BREAK recovery: {exc}") from exc
-        if not isinstance(response, AckResponse):
-            raise HostError(f"FPGA initialization returned unexpected response: {response}")
+        """Deterministically reset, verify, and initialize the FPGA command stream."""
+        last_error: Exception | None = None
+        with self._normal_command_lock:
+            for _attempt in range(INITIALIZATION_ATTEMPTS):
+                try:
+                    self._remote_reset()
+                    # The command is deliberately queued only after the recovery
+                    # delay, when SDRAM and every reset domain should be ready.
+                    startup_timeout = max(INITIAL_STATUS_TIMEOUT_SECONDS, self.response_timeout)
+                    status = self._exchange(cmd_get_status(), startup_timeout)
+                    if (
+                        not isinstance(status, StatusResponse)
+                        or status.status != 0x01
+                        or status.error != 0
+                        or status.active_operation != 0
+                    ):
+                        raise FPGACommunicationError(f"FPGA reset verification returned unhealthy status: {status}")
+                    response = self._exchange(cmd_new_game(), self.response_timeout)
+                    if not isinstance(response, AckResponse):
+                        raise FPGACommunicationError(f"FPGA New Game returned unexpected response: {response}")
+                    self._synchronized = True
+                    return
+                except Exception as exc:
+                    self._synchronized = False
+                    last_error = exc
+        raise HostError(
+            f"Could not initialize FPGA after {INITIALIZATION_ATTEMPTS} reset attempts: {last_error}"
+        ) from last_error
 
 
 class FPGAUCIHost:
@@ -160,6 +256,8 @@ class FPGAUCIHost:
             print(line, flush=True)
 
     def connect(self) -> FPGAClient:
+        if self.client is not None and not self.client.synchronized:
+            self._invalidate_client()
         if self.client is None:
             transport = SerialByteTransport(
                 port=self.port,
@@ -168,8 +266,8 @@ class FPGAUCIHost:
             )
             client = FPGAClient(transport, response_timeout=self.response_timeout)
             try:
-                # Probe an already-reset FPGA first; BREAK is reserved for
-                # recovering an unknown or partially received protocol state.
+                # Every new OS connection begins from a deterministic BREAK;
+                # an unframed stream cannot otherwise prove its byte position.
                 client.initialize()
             except Exception:
                 client.close()
@@ -178,6 +276,18 @@ class FPGAUCIHost:
             self.position_synced = False
             self.logger.info("Connected to FPGA serial port %s at %d baud", transport.port, self.baudrate)
         return self.client
+
+    def _invalidate_client(self) -> None:
+        """Drop an uncertain connection and require a full board resync after reconnect."""
+        client = self.client
+        self.client = None
+        self.build_info = None
+        self.position_synced = False
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                self.logger.exception("Failed to close invalid FPGA connection")
 
     def close(self) -> None:
         self.stop_search(wait=True)
@@ -197,12 +307,15 @@ class FPGAUCIHost:
             active = self._search_active
             hardware_inflight = self._hardware_search_inflight
             thread = self._search_thread
-        if active:
-            self._stop_event.set()
-        if active and hardware_inflight and self.client is not None:
+            kill_needed = active and not self._stop_event.is_set()
+            if active:
+                self._stop_event.set()
+        if kill_needed and hardware_inflight and self.client is not None:
             try:
                 self.client.kill()
             except Exception as exc:
+                if isinstance(exc, FPGACommunicationError):
+                    self._invalidate_client()
                 self.emit(f"info string stop failed: {exc}")
                 self.logger.exception("Failed to send kill")
         if wait and thread is not None:
@@ -262,6 +375,10 @@ class FPGAUCIHost:
             elif command == "quit":
                 self.close()
                 return False
+        except FPGACommunicationError as exc:
+            self._invalidate_client()
+            self.emit(f"info string communication error: {exc}")
+            self.logger.exception("UCI command lost FPGA synchronization: %s", stripped)
         except Exception as exc:
             self.emit(f"info string error: {exc}")
             self.logger.exception("UCI command failed: %s", stripped)
@@ -278,6 +395,8 @@ class FPGAUCIHost:
             self._emit_fixed_spin_option("Clock Frequency Hz", build_info.clock_frequency_hz)
             self._emit_fixed_spin_option("Search Stack Depth", build_info.search_stack_depth)
         except Exception as exc:
+            if isinstance(exc, FPGACommunicationError):
+                self._invalidate_client()
             self.emit(f"info string FPGA build information unavailable: {exc}")
             self.logger.exception("Could not read FPGA build information during UCI initialization")
         self.emit("uciok")
@@ -305,7 +424,12 @@ class FPGAUCIHost:
             if response.error_latched:
                 self.emit(f"info string engine error latched: {response.error}")
                 return
+            if not response.ready or response.search_active or response.output_pending:
+                self.emit(f"info string hardware not ready: status=0x{response.status:02x}")
+                return
         except Exception as exc:
+            if isinstance(exc, FPGACommunicationError):
+                self._invalidate_client()
             self.emit(f"info string hardware not ready: {exc}")
             self.logger.exception("Readiness check failed")
             return
@@ -574,10 +698,12 @@ class FPGAUCIHost:
 
     def _search_worker(self, command: bytes, is_perft: bool, board_snapshot: Any, wait_for_stop: bool) -> None:
         try:
-            with self._search_lock:
-                self._hardware_search_inflight = True
+            client = self.connect()
             search_start = time.monotonic()
-            response = self.connect().search_request(command)
+            response = client.search_request(
+                command,
+                command_sent=lambda: self._mark_hardware_search_started(client),
+            )
             search_elapsed = time.monotonic() - search_start
             with self._search_lock:
                 self._hardware_search_inflight = False
@@ -599,6 +725,11 @@ class FPGAUCIHost:
                 kind = "perft" if is_perft else "search"
                 self.emit(f"info string unexpected {kind} response: {response}")
                 self.emit("bestmove 0000")
+        except FPGACommunicationError as exc:
+            self._invalidate_client()
+            self.emit(f"info string search failed: {exc}")
+            self.logger.exception("Search worker lost FPGA synchronization")
+            self.emit("bestmove 0000")
         except Exception as exc:
             self.emit(f"info string search failed: {exc}")
             self.logger.exception("Search worker failed")
@@ -613,13 +744,19 @@ class FPGAUCIHost:
             self._search_active = False
             self._search_thread = None
 
+    def _mark_hardware_search_started(self, client: FPGAClient) -> None:
+        """Publish a completed search write and honor any stop that raced ahead of it."""
+        with self._search_lock:
+            self._hardware_search_inflight = True
+            stop_already_requested = self._stop_event.is_set()
+        if stop_already_requested:
+            client.kill()
+
     def _perft_divide_worker(self, depth: int, board_snapshot: Any) -> None:
         """Run FPGA perft below each locally generated root move and print a divide table."""
         total_nodes = 1 if depth == 0 else 0
         perft_complete = False
         try:
-            with self._search_lock:
-                self._hardware_search_inflight = True
             client = self.connect()
             if depth > 0:
                 root_moves = sorted(
@@ -635,7 +772,15 @@ class FPGAUCIHost:
                     if not isinstance(setup_response, AckResponse):
                         self._raise_on_error_response(setup_response, f"perft setup {move.uci()}")
                         raise HostError(f"perft setup {move.uci()} returned unexpected response: {setup_response}")
-                    response = client.search_request(cmd_perft(depth - 1))
+                    with self._search_lock:
+                        if self._stop_event.is_set():
+                            break
+                    response = client.search_request(
+                        cmd_perft(depth - 1),
+                        command_sent=lambda: self._mark_hardware_search_started(client),
+                    )
+                    with self._search_lock:
+                        self._hardware_search_inflight = False
                     if not isinstance(response, PerftResultResponse):
                         self._raise_on_error_response(response, f"perft {move.uci()}")
                         raise HostError(f"perft {move.uci()} returned unexpected response: {response}")
@@ -643,6 +788,8 @@ class FPGAUCIHost:
                     self.emit(f"{move.uci()}: {response.nodes}")
             perft_complete = not self._stop_event.is_set()
         except Exception as exc:
+            if isinstance(exc, FPGACommunicationError):
+                self._invalidate_client()
             self.emit(f"info string perft failed: {exc}")
             self.logger.exception("Perft divide worker failed")
         finally:
@@ -653,6 +800,8 @@ class FPGAUCIHost:
                     raise HostError(f"perft position restore returned unexpected response: {response}")
                 self.position_synced = True
             except Exception as exc:
+                if isinstance(exc, FPGACommunicationError):
+                    self._invalidate_client()
                 self.position_synced = False
                 self.emit(f"info string perft position restore failed: {exc}")
                 self.logger.exception("Failed to restore position after perft divide")
@@ -713,6 +862,8 @@ class FPGAUCIHost:
                 self._emit_search_result(response, board_snapshot)
                 return
         except Exception as exc:
+            if isinstance(exc, FPGACommunicationError):
+                self._invalidate_client()
             self.logger.exception("Failed to fetch cached search result after kill")
             self.emit(f"info string cached result unavailable after stop: {exc}")
         self.emit("bestmove 0000")

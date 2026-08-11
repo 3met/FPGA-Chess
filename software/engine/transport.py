@@ -16,6 +16,10 @@ if __package__ in (None, ""):
 from software.engine.protocol import BAUD_RATE
 
 
+AUTO_SELECT_MIN_SCORE = 20
+BREAK_BITS = 20
+
+
 class SerialDependencyError(RuntimeError):
     """Raised when pyserial is required but unavailable."""
 
@@ -85,7 +89,7 @@ def _port_score(port: SerialPortInfo) -> int:
         score += 30
     if "usb" in fields:
         score += 25
-    for token in ("uart", "serial", "ftdi", "cp210", "ch340", "ch341", "pl2303", "silicon labs", "wch", "digilent"):
+    for token in ("uart", "ftdi", "cp210", "ch340", "ch341", "pl2303", "silicon labs", "wch", "digilent"):
         if token in fields:
             score += 12
     for prefix in ("COM", "/dev/ttyUSB", "/dev/ttyACM", "/dev/serial/by-id"):
@@ -106,13 +110,11 @@ def get_serial_port(interactive: bool = False, env_var: str = "FPGA_CHESS_PORT")
         return env_port
 
     ports = list_serial_ports()
-    if len(ports) == 1:
-        return ports[0].device
     if not ports:
         raise SerialDependencyError("No serial ports were found.")
 
     ranked = sorted(((port, _port_score(port)) for port in ports), key=lambda item: item[1], reverse=True)
-    if ranked[0][1] > 0 and (len(ranked) == 1 or ranked[0][1] >= ranked[1][1] + 10):
+    if ranked[0][1] >= AUTO_SELECT_MIN_SCORE and (len(ranked) == 1 or ranked[0][1] >= ranked[1][1] + 10):
         return ranked[0][0].device
 
     if not interactive:
@@ -204,7 +206,12 @@ class SerialByteTransport:
         self._serial.reset_output_buffer()
 
     def send_break(self, duration: float = 0.01) -> None:
-        self._serial.send_break(duration)
+        if duration < 0:
+            raise ValueError("BREAK duration must be nonnegative")
+        # Enforce the receiver's protocol threshold even if a caller asks for
+        # a shorter pulse. The generous default also tolerates adapter timing.
+        actual_duration = max(duration, BREAK_BITS / self.baudrate)
+        self._serial.send_break(actual_duration)
         # Some USB-UART adapters otherwise apply the first queued start bit
         # immediately after BREAK. Give the FPGA receiver an observable
         # mark-high interval so it can leave BREAK before the next byte.

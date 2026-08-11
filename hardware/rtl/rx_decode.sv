@@ -215,13 +215,11 @@ module rx_decode #(
 
     logic break_engine_meta;
     logic break_engine_sync;
-    logic break_engine_sync_prev;
-
     logic engine_fifo_rst_n;
     logic uart_fifo_rst_n;
 
-    // A BREAK clears both sides of the byte FIFO before the reset event is
-    // reported to the engine clock domain.
+    // A BREAK clears each FIFO side in its local domain and keeps the read
+    // side clear once the synchronized BREAK reaches the engine clock.
     assign engine_fifo_rst_n = engine_rst_n && !break_engine_sync;
     assign uart_fifo_rst_n = uart_rst_n && !break_active_uart;
 
@@ -262,13 +260,11 @@ module rx_decode #(
         if (!engine_rst_n) begin
             break_engine_meta <= 1'b0;
             break_engine_sync <= 1'b0;
-            break_engine_sync_prev <= 1'b0;
             uart_error_engine_meta <= 1'b0;
             uart_error_engine_sync <= 1'b0;
         end else begin
             break_engine_meta <= break_active_uart;
             break_engine_sync <= break_engine_meta;
-            break_engine_sync_prev <= break_engine_sync;
             uart_error_engine_meta <= uart_error_latched;
             uart_error_engine_sync <= uart_error_engine_meta;
         end
@@ -291,6 +287,8 @@ module rx_decode #(
     end
 
     assign rx_stream_valid = !rx_fifo_empty;
-    assign remote_reset = break_engine_sync && !break_engine_sync_prev;
+    // Keep every downstream domain reset for the full BREAK instead of
+    // relying on a one-cycle pulse to cross unrelated clocks.
+    assign remote_reset = break_engine_sync;
 
 endmodule : rx_decode

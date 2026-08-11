@@ -19,11 +19,14 @@ from software.engine.protocol import (
     cmd_get_status,
     cmd_get_build_info,
     cmd_new_game,
+    cmd_search_depth,
 )
 from software.engine.host import (
     FPGAClient,
+    FPGACommunicationError,
     FPGAUCIHost,
     HostError,
+    INITIALIZATION_ATTEMPTS,
     INITIAL_STATUS_TIMEOUT_SECONDS,
     RESET_RECOVERY_SECONDS,
 )
@@ -225,6 +228,33 @@ class UCIHostDiagnosticTests(unittest.TestCase):
 
         self.assertEqual(lines, ["info string hardware not ready: no response"])
 
+    def test_repeated_stop_sends_only_one_in_band_kill(self):
+        host = object.__new__(FPGAUCIHost)
+        host._search_lock = threading.Lock()
+        host._search_active = True
+        host._hardware_search_inflight = True
+        host._search_thread = None
+        host._stop_event = threading.Event()
+        host.client = mock.Mock()
+
+        host.stop_search()
+        host.stop_search()
+
+        host.client.kill.assert_called_once_with()
+
+    def test_stop_before_search_write_is_honored_after_write(self):
+        host = object.__new__(FPGAUCIHost)
+        host._search_lock = threading.Lock()
+        host._hardware_search_inflight = False
+        host._stop_event = threading.Event()
+        host._stop_event.set()
+        client = mock.Mock()
+
+        host._mark_hardware_search_started(client)
+
+        self.assertTrue(host._hardware_search_inflight)
+        client.kill.assert_called_once_with()
+
     def test_status_diagnostic_formats_protocol_state(self):
         class Client:
             def request(self, command):
@@ -302,63 +332,110 @@ class FPGAClientInitializationTests(unittest.TestCase):
         with mock.patch("software.engine.host.time.sleep") as sleep:
             client.remote_reset()
 
+        transport.reset_output_buffer.assert_called_once_with()
         transport.send_break.assert_called_once_with()
-        transport.reset_input_buffer.assert_called_once_with()
+        self.assertEqual(transport.reset_input_buffer.call_count, 2)
         sleep.assert_called_once_with(RESET_RECOVERY_SECONDS)
 
-    def test_initialize_uses_responsive_fpga_without_break(self):
+    def test_initialize_always_breaks_then_verifies_status_and_new_game(self):
         transport = mock.Mock()
         client = FPGAClient(transport)
-        client.request = mock.Mock(
+        client._exchange = mock.Mock(
             side_effect=[
                 StatusResponse(status=0x01, error=EngineError.NONE, active_operation=0),
                 AckResponse(status=0x01),
             ]
         )
-        client.remote_reset = mock.Mock()
+        client._remote_reset = mock.Mock()
 
         client.initialize()
 
         self.assertEqual(
-            client.request.call_args_list,
+            client._exchange.call_args_list,
             [
-                mock.call(cmd_get_status(), timeout=INITIAL_STATUS_TIMEOUT_SECONDS),
-                mock.call(cmd_new_game()),
+                mock.call(cmd_get_status(), max(INITIAL_STATUS_TIMEOUT_SECONDS, client.response_timeout)),
+                mock.call(cmd_new_game(), client.response_timeout),
             ],
         )
-        client.remote_reset.assert_not_called()
+        client._remote_reset.assert_called_once_with()
+        self.assertTrue(client.synchronized)
 
-    def test_initialize_uses_break_after_failed_probe(self):
+    def test_initialize_retries_the_full_reset_sequence_after_failed_verification(self):
         transport = mock.Mock()
         client = FPGAClient(transport)
-        client.request = mock.Mock(
-            side_effect=[SerialTimeoutError("no status"), AckResponse(status=0x01)]
-        )
-        client.remote_reset = mock.Mock()
-
-        client.initialize()
-
-        client.remote_reset.assert_called_once_with()
-        self.assertEqual(
-            client.request.call_args_list,
-            [
-                mock.call(cmd_get_status(), timeout=INITIAL_STATUS_TIMEOUT_SECONDS),
-                mock.call(cmd_new_game()),
-            ],
-        )
-
-    def test_initialize_reports_when_status_works_but_new_game_times_out(self):
-        transport = mock.Mock()
-        client = FPGAClient(transport)
-        client.request = mock.Mock(
+        client._exchange = mock.Mock(
             side_effect=[
+                SerialTimeoutError("no status"),
                 StatusResponse(status=0x01, error=EngineError.NONE, active_operation=0),
-                SerialTimeoutError("no ack"),
+                AckResponse(status=0x01),
             ]
         )
+        client._remote_reset = mock.Mock()
 
-        with self.assertRaisesRegex(RuntimeError, "answered status but New Game did not respond"):
+        client.initialize()
+
+        self.assertEqual(client._remote_reset.call_count, 2)
+        self.assertEqual(
+            client._exchange.call_args_list,
+            [
+                mock.call(cmd_get_status(), max(INITIAL_STATUS_TIMEOUT_SECONDS, client.response_timeout)),
+                mock.call(cmd_get_status(), max(INITIAL_STATUS_TIMEOUT_SECONDS, client.response_timeout)),
+                mock.call(cmd_new_game(), client.response_timeout),
+            ],
+        )
+        self.assertTrue(client.synchronized)
+
+    def test_initialize_reports_after_all_reset_attempts_fail(self):
+        transport = mock.Mock()
+        client = FPGAClient(transport)
+        client._exchange = mock.Mock(side_effect=SerialTimeoutError("no status"))
+        client._remote_reset = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, f"after {INITIALIZATION_ATTEMPTS} reset attempts"):
             client.initialize()
+
+        self.assertEqual(client._remote_reset.call_count, INITIALIZATION_ATTEMPTS)
+        self.assertFalse(client.synchronized)
+
+    def test_partial_response_poisons_stream_until_reinitialized(self):
+        transport = mock.Mock()
+        transport.read_exact.side_effect = [bytes([0x80]), SerialTimeoutError("partial status")]
+        client = FPGAClient(transport)
+        client._synchronized = True
+
+        with self.assertRaisesRegex(FPGACommunicationError, "byte-stream position is unknown"):
+            client.request(cmd_get_status())
+        self.assertFalse(client.synchronized)
+        with self.assertRaisesRegex(FPGACommunicationError, "needs reset synchronization"):
+            client.request(cmd_get_status())
+        transport.write.assert_called_once_with(cmd_get_status())
+
+    def test_unexpected_response_type_poisons_stream(self):
+        transport = mock.Mock()
+        client = FPGAClient(transport)
+        client._synchronized = True
+
+        with mock.patch("software.engine.host.read_response", return_value=AckResponse(status=0x01)):
+            with self.assertRaisesRegex(FPGACommunicationError, "unexpected AckResponse"):
+                client.request(cmd_get_status())
+
+        self.assertFalse(client.synchronized)
+
+    def test_search_callback_runs_after_command_write_before_response_read(self):
+        events: list[str] = []
+        transport = mock.Mock()
+        transport.write.side_effect = lambda _command: events.append("write")
+        client = FPGAClient(transport)
+        client._synchronized = True
+
+        def response_reader(_read_exact):
+            events.append("read")
+            return StatusResponse(status=0x01, error=EngineError.NONE, active_operation=0)
+
+        with mock.patch("software.engine.host.read_response", side_effect=response_reader):
+            client.search_request(cmd_search_depth(1), command_sent=lambda: events.append("sent"))
+
+        self.assertEqual(events, ["write", "sent", "read"])
 
 
 if __name__ == "__main__":

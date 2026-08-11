@@ -124,7 +124,7 @@ class Move:
 @dataclass(frozen=True)
 class StatusResponse:
     status: int
-    error: EngineError | int
+    error: EngineError
     active_operation: int
 
     @property
@@ -155,7 +155,7 @@ class SearchResultResponse:
     score: int
     nodes: int
     completed_depth: int
-    end_reason: EndReason | int
+    end_reason: EndReason
 
 
 @dataclass(frozen=True)
@@ -166,7 +166,7 @@ class PerftResultResponse:
 
 @dataclass(frozen=True)
 class ErrorResponse:
-    error: EngineError | int
+    error: EngineError
     status: int
 
 
@@ -195,11 +195,17 @@ EngineResponse = (
 )
 
 
-def _enum_or_int(enum_type: type[IntEnum], value: int) -> IntEnum | int:
+def _known_enum(enum_type: type[IntEnum], value: int, field: str) -> IntEnum:
+    """Reject unknown wire values so corruption cannot masquerade as a valid response."""
     try:
         return enum_type(value)
-    except ValueError:
-        return value
+    except ValueError as exc:
+        raise ProtocolError(f"Unknown {field} value {value}") from exc
+
+
+def _validate_status(status: int, field: str) -> None:
+    if status & 0xF0:
+        raise ProtocolError(f"{field} reserved status bits are set")
 
 
 def square_name_to_index(square: str) -> int:
@@ -442,12 +448,19 @@ def decode_response(packet: bytes) -> EngineResponse:
 
     payload = packet[1:]
     if response_type == ResponseType.STATUS:
+        _validate_status(payload[0], "Status response")
+        error = _known_enum(EngineError, payload[1], "engine error")
+        if bool(payload[0] & 0x08) != (error != EngineError.NONE):
+            raise ProtocolError("Status response error flag and error code disagree")
         return StatusResponse(
             status=payload[0],
-            error=_enum_or_int(EngineError, payload[1]),
+            error=error,
             active_operation=payload[2],
         )
     if response_type == ResponseType.ACK:
+        _validate_status(payload[0], "Ack response")
+        if payload[0] != 0x01:
+            raise ProtocolError(f"Ack response has invalid status 0x{payload[0]:02x}")
         return AckResponse(status=payload[0])
     if response_type == ResponseType.SEARCH_RESULT:
         return SearchResultResponse(
@@ -455,7 +468,7 @@ def decode_response(packet: bytes) -> EngineResponse:
             score=int.from_bytes(payload[2:4], "little", signed=True),
             nodes=int.from_bytes(payload[4:9], "little", signed=False),
             completed_depth=payload[9],
-            end_reason=_enum_or_int(EndReason, payload[10]),
+            end_reason=_known_enum(EndReason, payload[10], "search end reason"),
         )
     if response_type == ResponseType.PERFT_RESULT:
         return PerftResultResponse(
@@ -474,10 +487,11 @@ def decode_response(packet: bytes) -> EngineResponse:
             clock_frequency_hz=int.from_bytes(payload[9:13], "little", signed=False),
             search_stack_depth=payload[13],
         )
-    return ErrorResponse(
-        error=_enum_or_int(EngineError, payload[0]),
-        status=payload[1],
-    )
+    _validate_status(payload[1], "Error response")
+    error = _known_enum(EngineError, payload[0], "engine error")
+    if error == EngineError.NONE or not payload[1] & 0x08:
+        raise ProtocolError("Error response does not carry a latched error")
+    return ErrorResponse(error=error, status=payload[1])
 
 
 def read_response(read_exact: Callable[[int], bytes]) -> EngineResponse:

@@ -516,6 +516,10 @@ module tb_engine;
         check(captured.operation == ENGINE_CTRL_KILL, "in-band kill request op");
         expect_status_response(8'h01, ENGINE_ERR_NONE, 8'h00);
 
+        send_byte(ENGINE_CMD_KILL);
+        do_clock(3);
+        check(ready && !data_out_valid, "late idle kill is ignored without a stale response");
+
         send_byte(ENGINE_CMD_SEARCH_DEPTH);
         send_byte(8'd4);
         accept_request(captured);

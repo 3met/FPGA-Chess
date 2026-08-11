@@ -24,6 +24,8 @@ The engine asserts `ready` when it can accept the next command byte. During fixe
 
 The host should send no normal command while the engine is searching. The expected mid-search communication is the in-band Kill command, UART BREAK for remote reset, or output-flow control.
 
+Kill stops an active search and produces one Status response after the controller retires. A Kill byte received while no search is active is ignored without a response; this prevents a late or repeated UCI `stop` from leaving a stale packet ahead of the next synchronous response.
+
 ## Commands
 
 | Opcode | Command | Payload | Response |
@@ -52,9 +54,11 @@ Perft is a supported hardware command in the engine/controller protocol and is e
 
 Ack responses for Set Board, Make Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
 
-UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. The host must leave RX high for at least two bit times after BREAK before transmitting another byte so the receiver can observe BREAK release before the next start bit, and board-specific hosts may wait longer for memories and other reset domains to reinitialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads. BREAK clears the RX FIFO and resets the engine-side command, search-controller, SDRAM, and TX path state.
+UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. The FPGA holds the RX FIFO, engine-side command layer, search controller, memory path, and transmitter in reset for the full BREAK interval. The host must leave RX high for at least two bit times after BREAK before transmitting another byte so every domain can observe release, and board-specific hosts may wait longer for memories to reinitialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads.
 
-At startup, the Python host gives its initial status probe one second to respond. A missing or malformed response indicates unknown byte-stream state, so the host sends BREAK and then uses the normal command timeout after board reinitialization.
+Every new Python host connection starts by clearing queued host output, sending BREAK, clearing interrupted input, and waiting for board initialization. It then requires a clean idle Status response followed by a successful New Game acknowledgment. The complete reset-and-verification sequence is retried up to three times.
+
+Because packets have no request ID, length field, or checksum, a timeout, partial response, malformed response, or response of the wrong type makes the byte-stream position unknowable. The host marks that connection unusable, closes it, and requires the next connection to complete the BREAK sequence before sending normal commands. It never retries an ambiguous command in place. Repeated UCI `stop` commands produce at most one in-band Kill byte for a search.
 
 ## Responses
 
@@ -116,4 +120,4 @@ Error byte values:
 
 Engine output is valid only when `data_out_valid` is asserted. If the host-side output path cannot accept another byte, the engine pauses response streaming until `ready_for_result` is asserted again.
 
-If the RX FIFO is full, normal incoming bytes may be dropped and RX overflow is latched. The host must avoid this by respecting `ready` and by not streaming commands faster than the FPGA can accept them. UART BREAK is still recognized as remote reset when the FIFO is full.
+If the RX FIFO is full, normal incoming bytes may be dropped and RX overflow is latched. A board-level framing or overflow error holds the engine inactive until BREAK because the command boundary can no longer be trusted. The host avoids overflow by serializing synchronous commands and not streaming commands faster than the FPGA can accept them. UART BREAK is still recognized when the FIFO is full.

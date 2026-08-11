@@ -5,6 +5,7 @@ from software.engine.protocol import (
     EndReason,
     DebugStatResponse,
     Move,
+    ProtocolError,
     SearchResultResponse,
     STARTPOS_FEN,
     cmd_make_move,
@@ -76,6 +77,16 @@ class ProtocolEncodingTests(unittest.TestCase):
                 search_stack_depth=24,
             ),
         )
+
+    def test_response_reserved_bits_and_unknown_enums_are_rejected(self):
+        with self.assertRaisesRegex(ProtocolError, "reserved status bits"):
+            decode_response(bytes.fromhex("80900000"))
+        with self.assertRaisesRegex(ProtocolError, "Unknown engine error"):
+            decode_response(bytes.fromhex("80010600"))
+        with self.assertRaisesRegex(ProtocolError, "Unknown search end reason"):
+            decode_response(bytes.fromhex("820000000000000000000006"))
+        with self.assertRaisesRegex(ProtocolError, "error flag and error code disagree"):
+            decode_response(bytes.fromhex("80090000"))
 
 
 if __name__ == "__main__":

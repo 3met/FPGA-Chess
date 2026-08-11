@@ -14,6 +14,9 @@
     "async-fifo": [
       "hardware/rtl/memory/async_fifo.sv"
     ],
+    "reset-control": [
+      "hardware/rtl/reset_release.sv"
+    ],
     "uart": [
       "@common",
       "@async-fifo",
@@ -75,6 +78,13 @@
       "hardware/rtl/engine_defs.sv",
       "hardware/rtl/engine_command_layer.sv",
       "hardware/rtl/engine.sv"
+    ],
+    "host-link": [
+      "@uart",
+      "@reset-control",
+      "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
+      "hardware/rtl/engine_defs.sv",
+      "hardware/rtl/engine_command_layer.sv"
     ],
     "engine": [
       "@search-controller",
@@ -147,6 +157,11 @@
       "testbench": "hardware/tb/tb_async_fifo.sv",
       "top": "tb_async_fifo"
     },
+    "reset-control": {
+      "source_set": "reset-control",
+      "testbench": "hardware/tb/tb_reset_control.sv",
+      "top": "tb_reset_control"
+    },
     "uart-primitives": {
       "source_set": "uart",
       "testbench": "hardware/tb/tb_rx_decode.sv",
@@ -166,6 +181,11 @@
       "source_set": "engine",
       "testbench": "hardware/tb/tb_engine.sv",
       "top": "tb_engine"
+    },
+    "host-link": {
+      "source_set": "host-link",
+      "testbench": "hardware/tb/tb_host_link.sv",
+      "top": "tb_host_link"
     },
     "search-controller": {
       "source_set": "search-controller",

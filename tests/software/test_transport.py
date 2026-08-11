@@ -40,6 +40,12 @@ class SerialPortDetectionTests(unittest.TestCase):
             with self.assertRaises(SerialDependencyError):
                 get_serial_port(interactive=False)
 
+    def test_lone_generic_system_serial_port_is_not_guessed(self):
+        ports = [SerialPortInfo(device="COM1", description="Standard Serial Port")]
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch("software.engine.transport.list_serial_ports", return_value=ports):
+            with self.assertRaises(SerialDependencyError):
+                get_serial_port(interactive=False)
+
 
 class SerialBreakTests(unittest.TestCase):
     def test_break_waits_for_idle_high_recovery(self):
@@ -53,6 +59,17 @@ class SerialBreakTests(unittest.TestCase):
 
         serial_port.send_break.assert_called_once_with(0.01)
         sleep.assert_called_once_with(0.001)
+
+    def test_break_enforces_receiver_threshold(self):
+        serial_port = mock.Mock()
+        transport = object.__new__(SerialByteTransport)
+        transport.baudrate = 2_000_000
+        transport._serial = serial_port
+
+        with mock.patch("software.engine.transport.time.sleep"):
+            transport.send_break(0.0)
+
+        serial_port.send_break.assert_called_once_with(20 / 2_000_000)
 
 
 if __name__ == "__main__":

@@ -417,9 +417,10 @@ module engine_command_layer #(
             end
 
             ENGINE_CMD_KILL: begin
-                active_operation <= ENGINE_CMD_KILL;
-                req.operation = ENGINE_CTRL_KILL;
-                issue_single_request(req, RESP_STATUS, 1'b0, 1'b0);
+                // A late or repeated host stop may arrive after the search
+                // response completed. Ignore it so no stale Status packet can
+                // be mistaken for the next synchronous command's response.
+                active_operation <= 8'h00;
             end
 
             ENGINE_CMD_GET_SEARCH_RESULT: begin

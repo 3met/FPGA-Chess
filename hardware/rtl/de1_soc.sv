@@ -39,10 +39,9 @@ module de1_soc(input CLOCK_50,
 	wire memory_output_clk;
 	wire memory_read_clk;
 	wire uart_clk;
-	// Hold the PLL in reset immediately when configuration enters user mode,
-	// before the startup controller receives its first reference-clock edge.
-	logic pll_reset = 1'b1;
+	logic pll_reset;
 	wire pll_locked_status;
+	wire pll_clocks_ready;
 	pll_ip pll_1(.refclk(CLOCK_50), .rst(pll_reset), .outclk_0(clk),
 		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(memory_read_clk),
 		.locked(pll_locked_status));
@@ -56,102 +55,16 @@ module de1_soc(input CLOCK_50,
 	// Reuse the PLL's zero-phase 100 MHz memory clock for finer UART sampling.
 	assign uart_clk = memory_clk;
 
-	localparam int PLL_RESET_HOLD_CYCLES = 1024;
-	localparam int PLL_LOCK_STABLE_CYCLES = 256;
-	localparam int PLL_LOCK_TIMEOUT_CYCLES = 1_000_000;
-
-	typedef enum logic [1:0] {
-		PLL_HOLD_RESET,
-		PLL_WAIT_LOCK,
-		PLL_RUNNING
-	} PllStartupState;
-
-	PllStartupState pll_startup_state = PLL_HOLD_RESET;
-	logic [19:0] pll_timeout_count = '0;
-	logic [9:0] pll_reset_count = '0;
-	logic [7:0] pll_lock_count = '0;
-	logic pll_locked_meta = 1'b0;
-	logic pll_locked_sync = 1'b0;
-
-	// Automatically reset and retry the PLL so JTAG configuration never
-	// depends on either board reset button having been pressed.
-	always_ff @(posedge CLOCK_50) begin
-		if (!rst_n) begin
-			pll_locked_meta <= 1'b0;
-			pll_locked_sync <= 1'b0;
-		end else begin
-			pll_locked_meta <= pll_locked_status;
-			pll_locked_sync <= pll_locked_meta;
-		end
-	end
-
-	always_ff @(posedge CLOCK_50) begin
-		if (!rst_n || !KEY[2]) begin
-			pll_startup_state <= PLL_HOLD_RESET;
-			pll_timeout_count <= '0;
-			pll_reset_count <= '0;
-			pll_lock_count <= '0;
-			pll_reset <= 1'b1;
-		end else begin
-			case (pll_startup_state)
-				PLL_HOLD_RESET: begin
-					pll_reset <= 1'b1;
-					pll_timeout_count <= '0;
-					pll_lock_count <= '0;
-					if (pll_reset_count == 10'(PLL_RESET_HOLD_CYCLES - 1)) begin
-						pll_reset_count <= '0;
-						pll_reset <= 1'b0;
-						pll_startup_state <= PLL_WAIT_LOCK;
-					end else begin
-						pll_reset_count <= pll_reset_count + 10'd1;
-					end
-				end
-
-				PLL_WAIT_LOCK: begin
-					pll_reset <= 1'b0;
-					pll_timeout_count <= pll_timeout_count + 20'd1;
-					if (pll_locked_sync) begin
-						if (pll_lock_count == 8'(PLL_LOCK_STABLE_CYCLES - 1)) begin
-							pll_lock_count <= '0;
-							pll_startup_state <= PLL_RUNNING;
-						end else begin
-							pll_lock_count <= pll_lock_count + 8'd1;
-						end
-					end else begin
-						pll_lock_count <= '0;
-					end
-					if (pll_timeout_count == 20'(PLL_LOCK_TIMEOUT_CYCLES - 1)) begin
-						pll_startup_state <= PLL_HOLD_RESET;
-						pll_timeout_count <= '0;
-						pll_reset_count <= '0;
-						pll_lock_count <= '0;
-						pll_reset <= 1'b1;
-					end
-				end
-
-				PLL_RUNNING: begin
-					pll_reset <= 1'b0;
-					pll_timeout_count <= '0;
-					if (pll_locked_sync) begin
-						pll_lock_count <= '0;
-					end else if (pll_lock_count == 8'(PLL_LOCK_STABLE_CYCLES - 1)) begin
-						pll_startup_state <= PLL_HOLD_RESET;
-						pll_reset_count <= '0;
-						pll_lock_count <= '0;
-						pll_reset <= 1'b1;
-					end else begin
-						pll_lock_count <= pll_lock_count + 8'd1;
-					end
-				end
-
-				default: begin
-					pll_startup_state <= PLL_HOLD_RESET;
-					pll_reset_count <= '0;
-					pll_reset <= 1'b1;
-				end
-			endcase
-		end
-	end
+	// One shared LFSR handles the slow PLL phases; configuration power-up
+	// values make startup independent of either physical reset button.
+	pll_startup_controller pll_startup (
+		.clk(CLOCK_50),
+		.reset_n(rst_n),
+		.restart_n(KEY[2]),
+		.pll_locked(pll_locked_status),
+		.pll_reset(pll_reset),
+		.clocks_ready(pll_clocks_ready)
+	);
 
 	// --- UART Input Decoding ---
 	wire [7:0] rx_stream;
@@ -168,6 +81,7 @@ module de1_soc(input CLOCK_50,
 	wire engine_core_rst_n;
 	wire tx_full;
 	wire engine_ready;
+	wire engine_command_ready;
 	wire engine_error;
 	wire [7:0] engine_data_out;
 	wire engine_data_out_valid;
@@ -190,19 +104,22 @@ module de1_soc(input CLOCK_50,
 	logic [15:0] backend_read_data;
 	logic backend_done_valid, backend_done_ready, backend_done_error;
 	logic tt_memory_ready_backend, tt_memory_error_backend;
-	assign engine_core_rst_n = engine_rst_n && tt_memory_ready && !tt_memory_error;
+	// Any transport error means byte-stream position is unknowable. Fail closed
+	// until the host's next BREAK clears the RX path and restarts every domain.
+	assign engine_core_rst_n = engine_rst_n && tt_memory_ready && !tt_memory_error && !rx_error;
+	assign engine_ready = engine_core_rst_n && engine_command_ready;
 
 	// Each domain releases reset on its own clock only after PLL lock has
 	// remained stable. UART BREAK then applies the same stretched reset to
 	// the engine, memory bridge/controller, and transmit path.
 	reset_release engine_startup_reset (
 		.clk(clk),
-		.async_reset_n(rst_n && pll_startup_state == PLL_RUNNING),
+		.async_reset_n(rst_n && pll_clocks_ready),
 		.reset_n(engine_domain_rst_n)
 	);
 	reset_release uart_startup_reset (
 		.clk(uart_clk),
-		.async_reset_n(rst_n && pll_startup_state == PLL_RUNNING),
+		.async_reset_n(rst_n && pll_clocks_ready),
 		.reset_n(uart_domain_rst_n)
 	);
 	reset_release engine_operational_reset (
@@ -212,7 +129,7 @@ module de1_soc(input CLOCK_50,
 	);
 	reset_release memory_operational_reset (
 		.clk(memory_clk),
-		.async_reset_n(rst_n && pll_startup_state == PLL_RUNNING && !remote_reset),
+		.async_reset_n(rst_n && pll_clocks_ready && !remote_reset),
 		.reset_n(memory_rst_n)
 	);
 	reset_release uart_tx_operational_reset (
@@ -247,7 +164,7 @@ module de1_soc(input CLOCK_50,
 	);
 
 	always_ff @(posedge clk) begin
-		if (~rst_n) begin
+		if (!engine_rst_n) begin
 			mem <= 0;
 		end else if (rx_stream_valid) begin
 			mem <= rx_stream;
@@ -271,7 +188,7 @@ module de1_soc(input CLOCK_50,
 		.data_in_valid(rx_stream_valid),
 		.ready_for_result(!tx_full),
 		.error_flag(engine_error),
-		.ready(engine_ready),
+		.ready(engine_command_ready),
 		.data_out(engine_data_out),
 		.data_out_valid(engine_data_out_valid),
 		.tt_memory_ready(tt_memory_ready), .tt_memory_error(tt_memory_error),
