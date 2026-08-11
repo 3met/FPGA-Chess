@@ -5,6 +5,7 @@ import engine_defs::*;
 import tt_defs::*;
 
 module engine #(
+    parameter logic [63:0] BUILD_ID = 64'h0000_0000_0000_0000,
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT,
@@ -50,7 +51,12 @@ module engine #(
     logic [7:0] debug_stat_address;
     logic [39:0] debug_stat_value;
 
-    engine_command_layer command_layer (
+    engine_command_layer #(
+        .BUILD_ID(BUILD_ID),
+        .CLOCK_FREQ(CLOCK_FREQ),
+        .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT),
+        .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH)
+    ) command_layer (
         .clk(clk),
         .rst_n(rst_n),
         .data_in(data_in),

@@ -8,7 +8,7 @@ The SDRAM controller parameter `SKIP_INITIAL_CLEAR` defaults to zero and must re
 
 ## Clocking
 
-`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter for `engine`. The DE1 target uses a 40 MHz engine clock. The UART uses the PLL's zero-phase 100 MHz memory-domain output.
+`CLOCK_50` is the DE1-SoC's 50 MHz reference clock. The build copies the target-specific Intel PLL template at `hardware/ip/pll/`, configures its output from `synthesis_targets.quartus-de1-soc.engine_clock_mhz`, and generates the matching `ENGINE_CLOCK_FREQ` parameter plus a fresh 64-bit `FPGA_BUILD_ID` for `engine`. The DE1 target uses a 40 MHz engine clock. The UART uses the PLL's zero-phase 100 MHz memory-domain output.
 
 After configuration, a `CLOCK_50` startup controller asserts PLL reset for 1024 cycles, requires lock to remain asserted for 256 cycles, and retries automatically if lock is not acquired within 20 ms or is subsequently lost. Engine, SDRAM, and UART logic each release reset through a local-clock synchronizer only after the PLL reaches the running state. UART BREAK applies the same stretched local reset to the engine, SDRAM path, and UART transmitter, so normal remote recovery does not require either physical reset button.
 
@@ -16,7 +16,7 @@ The same PLL produces a 100 MHz SDRAM-controller clock, a `DRAM_CLK` that leads 
 
 The geometry, command timing, refresh interval, and clock relationship follow the [Intel DE1-SoC SDRAM tutorial](https://ftp.intel.com/Public/Pub/fpgaup/pub/Teaching_Materials/current/Tutorials/VHDL/DE1-SoC/Using_the_SDRAM.pdf) and the [ISSI IS42S16320D datasheet](https://www.issi.com/WW/pdf/42-45R-S_86400D-16320D-32160D.pdf).
 
-To select another legal PLL rate, change `hardware/build/manifest.json`'s `quartus-de1-soc.engine_clock_mhz` and rerun synthesis. The integer-N PLL accepts only rates its VCO and output counters can realize; Quartus rejects unsupported values. The source PLL template remains unchanged; the configured vendor IP and engine timing include are generated under `work/build/quartus-de1-soc/` for that build.
+To select another legal PLL rate, change `hardware/build/manifest.json`'s `quartus-de1-soc.engine_clock_mhz` and rerun synthesis. The integer-N PLL accepts only rates its VCO and output counters can realize; Quartus rejects unsupported values. The source PLL template remains unchanged; the configured vendor IP and `engine_build_config.svh` metadata include are generated under `work/build/quartus-de1-soc/` for that build.
 
 The core does not depend on the Intel PLL: a new board wrapper should generate its intended engine clock with its vendor's PLL/MMCM (or use a suitable board clock), connect it to `engine.clk`, and set `engine.CLOCK_FREQ` to the exact resulting frequency. Do not override the DE1-SoC clock-rate constant independently of its PLL output.
 

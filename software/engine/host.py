@@ -17,6 +17,7 @@ from software.engine.protocol import (
     AckResponse,
     BAUD_RATE,
     BITS_TO_PROMOTION,
+    BuildInfoResponse,
     ErrorResponse,
     DebugStatResponse,
     DebugStatAddress,
@@ -28,6 +29,7 @@ from software.engine.protocol import (
     cmd_get_search_result,
     cmd_get_status,
     cmd_get_debug_stat,
+    cmd_get_build_info,
     cmd_kill,
     cmd_make_move,
     cmd_new_game,
@@ -139,6 +141,7 @@ class FPGAUCIHost:
         self.response_timeout = response_timeout
         self.logger = logger
         self.client: FPGAClient | None = None
+        self.build_info: BuildInfoResponse | None = None
         self.board = chess.Board()
         self.position_synced = False
         self.debug = False
@@ -178,6 +181,7 @@ class FPGAUCIHost:
         if self.client is not None:
             self.client.close()
             self.client = None
+            self.build_info = None
 
     def wait_for_search(self) -> None:
         thread = self._search_thread
@@ -265,7 +269,19 @@ class FPGAUCIHost:
         self.emit("id author Emet Behrendt")
         self.emit("option name Port type string default auto")
         self.emit(f"option name Baud type spin default {BAUD_RATE} min 9600 max 4000000")
+        try:
+            build_info = self._get_build_info()
+            self._emit_fixed_spin_option("Threads", build_info.thread_count)
+            self._emit_fixed_spin_option("Clock Frequency Hz", build_info.clock_frequency_hz)
+            self._emit_fixed_spin_option("Search Stack Depth", build_info.search_stack_depth)
+        except Exception as exc:
+            self.emit(f"info string FPGA build information unavailable: {exc}")
+            self.logger.exception("Could not read FPGA build information during UCI initialization")
         self.emit("uciok")
+
+    def _emit_fixed_spin_option(self, name: str, value: int) -> None:
+        """Advertise immutable synthesized configuration through standard UCI option syntax."""
+        self.emit(f"option name {name} type spin default {value} min {value} max {value}")
 
     def _handle_help(self) -> None:
         """Print the supported host commands for interactive use."""
@@ -307,6 +323,15 @@ class FPGAUCIHost:
             self.port = None if value.lower() == "auto" else value
         elif name == "baud":
             self.baudrate = int(value)
+        elif name in {"threads", "clock frequency hz", "search stack depth"}:
+            build_info = self._get_build_info()
+            fixed_values = {
+                "threads": build_info.thread_count,
+                "clock frequency hz": build_info.clock_frequency_hz,
+                "search stack depth": build_info.search_stack_depth,
+            }
+            if int(value) != fixed_values[name]:
+                raise HostError(f"{name} is fixed at {fixed_values[name]} in this FPGA build")
         elif self.debug:
             self.emit(f"info string unknown option ignored: {name}")
 
@@ -321,7 +346,7 @@ class FPGAUCIHost:
         """Handle manual diagnostics requested through the UCI debug command."""
 
         if not args or args[0].lower() in {"help", "?"}:
-            self.emit("info string debug commands: status, result, stats, board, sync, reset")
+            self.emit("info string debug commands: build, status, result, stats, board, sync, reset")
             return
 
         subcommand = args[0].lower()
@@ -358,6 +383,13 @@ class FPGAUCIHost:
                 f"ready={int(response.ready)} search_active={int(response.search_active)} "
                 f"output_pending={int(response.output_pending)} error={self._enum_name(response.error)} "
                 f"operation={response.active_operation}"
+            )
+            return
+        if subcommand == "build":
+            response = self._get_build_info()
+            self.emit(
+                f"info string build id={response.build_id:016x} threads={response.thread_count} "
+                f"clock_hz={response.clock_frequency_hz} stack_depth={response.search_stack_depth}"
             )
             return
         if subcommand == "result":
@@ -708,6 +740,15 @@ class FPGAUCIHost:
             raise HostError(f"{context} failed with hardware error {response.error}")
         if isinstance(response, StatusResponse) and response.error_latched:
             raise HostError(f"{context} left hardware error latched: {response.error}")
+
+    def _get_build_info(self) -> BuildInfoResponse:
+        """Read and cache immutable metadata for the connected FPGA image."""
+        if self.build_info is None:
+            response = self.connect().request(cmd_get_build_info())
+            if not isinstance(response, BuildInfoResponse):
+                raise HostError(f"build information returned unexpected response: {response}")
+            self.build_info = response
+        return self.build_info
 
     def _is_search_active(self) -> bool:
         with self._search_lock:

@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import re
+import secrets
 import shutil
 from pathlib import Path
 
@@ -105,11 +106,20 @@ def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: flo
     return destination / "pll_ip.qip"
 
 
-def write_engine_clock_config(build_dir: Path, engine_clock_mhz: float) -> Path:
-    """Generate the engine timing parameter from the target's clock setting."""
-    config = build_dir / "engine_clock_config.svh"
+def new_build_id() -> int:
+    """Return a fresh nonzero 64-bit identifier for one synthesis invocation."""
+    build_id = 0
+    while build_id == 0:
+        build_id = secrets.randbits(64)
+    return build_id
+
+
+def write_engine_build_config(build_dir: Path, engine_clock_mhz: float, build_id: int) -> Path:
+    """Generate constant engine metadata for the exact synthesized image."""
+    config = build_dir / "engine_build_config.svh"
     config.write_text(
-        "// Generated from synthesis_targets.<target>.engine_clock_mhz; do not edit.\n"
+        "// Generated for this synthesis invocation; do not edit.\n"
+        f"localparam logic [63:0] FPGA_BUILD_ID = 64'h{build_id:016x};\n"
         f"localparam int ENGINE_CLOCK_FREQ = {engine_clock_values(engine_clock_mhz)[1]:_};\n",
         encoding="utf-8",
     )
@@ -126,15 +136,21 @@ def quartus_negative_slack(build_dir: Path) -> list[str]:
     return failures
 
 
-def write_quartus_project(manifest: dict, target: dict, build_dir: Path, parallel_processors: int) -> Path:
+def write_quartus_project(
+    manifest: dict,
+    target: dict,
+    build_dir: Path,
+    parallel_processors: int,
+    build_id: int,
+) -> Path:
     build_dir.mkdir(parents=True, exist_ok=True)
     project = build_dir / "fpga_chess"
     qpf = project.with_suffix(".qpf")
     qsf = project.with_suffix(".qsf")
     sources = expand_source_set(manifest, target["source_set"])
-    generated_clock_config = None
+    generated_build_config = None
     if "engine_clock_mhz" in target:
-        generated_clock_config = write_engine_clock_config(build_dir, target["engine_clock_mhz"])
+        generated_build_config = write_engine_build_config(build_dir, target["engine_clock_mhz"], build_id)
     generated_outputs = [
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
@@ -169,8 +185,8 @@ def write_quartus_project(manifest: dict, target: dict, build_dir: Path, paralle
         lines.append(f"set_global_assignment -name MESSAGE_DISABLE {message_id}")
     assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
-    if generated_clock_config is not None:
-        lines.append(qsf_assignment_for_source(generated_clock_config))
+    if generated_build_config is not None:
+        lines.append(qsf_assignment_for_source(generated_build_config))
     lines.extend(
         qsf_assignment_for_source(copied_generated_outputs[output])
         for output in generated_outputs
@@ -220,9 +236,12 @@ def synth_quartus(
         clean_dir(build_dir)
     else:
         build_dir.mkdir(parents=True, exist_ok=True)
-    project = write_quartus_project(manifest, target, build_dir, parallel_processors)
+    build_id = new_build_id()
+    project = write_quartus_project(manifest, target, build_dir, parallel_processors, build_id)
     metadata = begin_synth_metadata(build_dir, target_name, target)
+    metadata["build_id"] = f"{build_id:016x}"
     metadata["parallel_processors"] = parallel_processors
+    write_synth_metadata(build_dir, metadata)
     project_name = project.name
     parallel_arg = f"--parallel={parallel_processors}"
     map_args = [f"--effort={target['map_effort']}"] if "map_effort" in target else []

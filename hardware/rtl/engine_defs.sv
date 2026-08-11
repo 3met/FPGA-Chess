@@ -17,12 +17,14 @@ package engine_defs;
     localparam logic [7:0] ENGINE_CMD_KILL              = 8'h1f;
     localparam logic [7:0] ENGINE_CMD_GET_SEARCH_RESULT = 8'h20;
     localparam logic [7:0] ENGINE_CMD_GET_DEBUG_STAT    = 8'h21;
+    localparam logic [7:0] ENGINE_CMD_GET_BUILD_INFO    = 8'h22;
 
     localparam logic [7:0] ENGINE_RESP_STATUS        = 8'h80;
     localparam logic [7:0] ENGINE_RESP_ACK           = 8'h81;
     localparam logic [7:0] ENGINE_RESP_SEARCH_RESULT = 8'h82;
     localparam logic [7:0] ENGINE_RESP_PERFT_RESULT  = 8'h83;
     localparam logic [7:0] ENGINE_RESP_DEBUG_STAT    = 8'h84;
+    localparam logic [7:0] ENGINE_RESP_BUILD_INFO    = 8'h85;
     localparam logic [7:0] ENGINE_RESP_ERROR         = 8'hff;
 
     localparam logic [7:0] ENGINE_STAT_ENABLED          = 8'd0;

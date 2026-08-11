@@ -4,7 +4,12 @@ import general_chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 
-module engine_command_layer (
+module engine_command_layer #(
+    parameter logic [63:0] BUILD_ID = 64'h0000_0000_0000_0000,
+    parameter int CLOCK_FREQ = 100_000_000,
+    parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
+    parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT
+) (
     input wire clk,
     input wire rst_n,
     input logic [7:0] data_in,
@@ -25,6 +30,9 @@ module engine_command_layer (
 );
 
     localparam int SET_BOARD_PAYLOAD_BYTES = 36;
+    localparam logic [31:0] BUILD_CLOCK_FREQ = CLOCK_FREQ;
+    localparam logic [7:0] BUILD_THREAD_COUNT = SEARCH_THREAD_COUNT;
+    localparam logic [7:0] BUILD_SEARCH_STACK_DEPTH = SEARCH_STACK_DEPTH;
 
     typedef enum logic [2:0] {
         ST_IDLE,
@@ -44,7 +52,8 @@ module engine_command_layer (
         RESP_SEARCH,
         RESP_PERFT,
         RESP_DEBUG,
-        RESP_ERROR
+        RESP_ERROR,
+        RESP_BUILD_INFO
     } ResponseKind;
 
     EngineState state;
@@ -101,6 +110,7 @@ module engine_command_layer (
             ENGINE_CMD_KILL,
             ENGINE_CMD_GET_SEARCH_RESULT: return 1'b1;
             ENGINE_CMD_GET_DEBUG_STAT: return 1'b1;
+            ENGINE_CMD_GET_BUILD_INFO: return 1'b1;
             ENGINE_CMD_PERFT: return 1'b1;
             default: return 1'b0;
         endcase
@@ -128,6 +138,7 @@ module engine_command_layer (
             RESP_PERFT:  return 4'd7;
             RESP_DEBUG:  return 4'd7;
             RESP_ERROR:  return 4'd3;
+            RESP_BUILD_INFO: return 4'd15;
             default:     return 4'd0;
         endcase
     endfunction : response_len
@@ -140,6 +151,7 @@ module engine_command_layer (
             RESP_PERFT:  return ENGINE_RESP_PERFT_RESULT;
             RESP_DEBUG:  return ENGINE_RESP_DEBUG_STAT;
             RESP_ERROR:  return ENGINE_RESP_ERROR;
+            RESP_BUILD_INFO: return ENGINE_RESP_BUILD_INFO;
             default:     return 8'h00;
         endcase
     endfunction : response_type_for
@@ -317,6 +329,27 @@ module engine_command_layer (
                     endcase
                 end
 
+                // Build metadata is constant-folded from engine parameters and needs no storage RAM.
+                RESP_BUILD_INFO: begin
+                    case (response_index)
+                        5'd1:  data_out = BUILD_ID[7:0];
+                        5'd2:  data_out = BUILD_ID[15:8];
+                        5'd3:  data_out = BUILD_ID[23:16];
+                        5'd4:  data_out = BUILD_ID[31:24];
+                        5'd5:  data_out = BUILD_ID[39:32];
+                        5'd6:  data_out = BUILD_ID[47:40];
+                        5'd7:  data_out = BUILD_ID[55:48];
+                        5'd8:  data_out = BUILD_ID[63:56];
+                        5'd9:  data_out = BUILD_THREAD_COUNT;
+                        5'd10: data_out = BUILD_CLOCK_FREQ[7:0];
+                        5'd11: data_out = BUILD_CLOCK_FREQ[15:8];
+                        5'd12: data_out = BUILD_CLOCK_FREQ[23:16];
+                        5'd13: data_out = BUILD_CLOCK_FREQ[31:24];
+                        5'd14: data_out = BUILD_SEARCH_STACK_DEPTH;
+                        default: data_out = 'x;
+                    endcase
+                end
+
                 default: data_out = 'x;
             endcase
         end
@@ -392,6 +425,11 @@ module engine_command_layer (
             ENGINE_CMD_GET_SEARCH_RESULT: begin
                 active_operation <= ENGINE_CMD_GET_SEARCH_RESULT;
                 start_response(RESP_SEARCH, error_code, 1'b1, 1'b0);
+            end
+
+            ENGINE_CMD_GET_BUILD_INFO: begin
+                active_operation <= ENGINE_CMD_GET_BUILD_INFO;
+                start_response(RESP_BUILD_INFO, error_code, 1'b1, 1'b0);
             end
 
             default: begin

@@ -29,7 +29,12 @@ module tb_engine;
     int pass_count = 0;
     int fail_count = 0;
 
-    engine_command_layer dut (
+    engine_command_layer #(
+        .BUILD_ID(64'h0123_4567_89ab_cdef),
+        .CLOCK_FREQ(40_000_000),
+        .SEARCH_THREAD_COUNT(3),
+        .SEARCH_STACK_DEPTH(24)
+    ) dut (
         .clk(clk),
         .rst_n(rst_n),
         .data_in(data_in),
@@ -226,6 +231,23 @@ module tb_engine;
         for (int idx = 0; idx < 5; idx++) begin
             expect_byte(8'd0, "disabled debug statistic value");
         end
+
+        send_byte(ENGINE_CMD_GET_BUILD_INFO);
+        expect_byte(ENGINE_RESP_BUILD_INFO, "build info response type");
+        expect_byte(8'hef, "build ID byte 0");
+        expect_byte(8'hcd, "build ID byte 1");
+        expect_byte(8'hab, "build ID byte 2");
+        expect_byte(8'h89, "build ID byte 3");
+        expect_byte(8'h67, "build ID byte 4");
+        expect_byte(8'h45, "build ID byte 5");
+        expect_byte(8'h23, "build ID byte 6");
+        expect_byte(8'h01, "build ID byte 7");
+        expect_byte(8'd3, "build thread count");
+        expect_byte(8'h00, "build clock byte 0");
+        expect_byte(8'h5a, "build clock byte 1");
+        expect_byte(8'h62, "build clock byte 2");
+        expect_byte(8'h02, "build clock byte 3");
+        expect_byte(8'd24, "build search stack depth");
 
         ready_for_result = 1'b0;
         send_byte(ENGINE_CMD_GET_STATUS);

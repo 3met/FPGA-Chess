@@ -28,8 +28,8 @@ module de1_soc(input CLOCK_50,
 	parameter int unsigned LMR_A_Q8 = 192;
 	parameter int unsigned LMR_B_Q8 = 614;
 
-	// The build target generates this value from its engine_clock_mhz setting.
-	`include "engine_clock_config.svh"
+	// The build target generates these constants for the exact synthesized image.
+	`include "engine_build_config.svh"
 
 	wire rst_n;
 	assign rst_n = KEY[3];
@@ -256,6 +256,7 @@ module de1_soc(input CLOCK_50,
 
 	// --- Engine Core ---
 	engine #(
+		.BUILD_ID(FPGA_BUILD_ID),
 		.CLOCK_FREQ(ENGINE_CLOCK_FREQ),
 		.SEARCH_THREAD_COUNT(1),
 		.SEARCH_STACK_DEPTH(32),

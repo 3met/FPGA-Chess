@@ -36,6 +36,7 @@ class Command(IntEnum):
     KILL = 0x1F
     GET_SEARCH_RESULT = 0x20
     GET_DEBUG_STAT = 0x21
+    GET_BUILD_INFO = 0x22
 
 
 class ResponseType(IntEnum):
@@ -44,6 +45,7 @@ class ResponseType(IntEnum):
     SEARCH_RESULT = 0x82
     PERFT_RESULT = 0x83
     DEBUG_STAT = 0x84
+    BUILD_INFO = 0x85
     ERROR = 0xFF
 
 
@@ -174,12 +176,21 @@ class DebugStatResponse:
     value: int
 
 
+@dataclass(frozen=True)
+class BuildInfoResponse:
+    build_id: int
+    thread_count: int
+    clock_frequency_hz: int
+    search_stack_depth: int
+
+
 EngineResponse = (
     StatusResponse
     | AckResponse
     | SearchResultResponse
     | PerftResultResponse
     | DebugStatResponse
+    | BuildInfoResponse
     | ErrorResponse
 )
 
@@ -399,6 +410,10 @@ def cmd_get_debug_stat(address: int) -> bytes:
     return command(Command.GET_DEBUG_STAT, bytes([address]))
 
 
+def cmd_get_build_info() -> bytes:
+    return command(Command.GET_BUILD_INFO)
+
+
 def response_payload_length(response_type: int) -> int:
     if response_type == ResponseType.STATUS:
         return 3
@@ -410,6 +425,8 @@ def response_payload_length(response_type: int) -> int:
         return 6
     if response_type == ResponseType.DEBUG_STAT:
         return 6
+    if response_type == ResponseType.BUILD_INFO:
+        return 14
     if response_type == ResponseType.ERROR:
         return 2
     raise ProtocolError(f"Unknown response type 0x{response_type:02x}")
@@ -449,6 +466,13 @@ def decode_response(packet: bytes) -> EngineResponse:
         return DebugStatResponse(
             address=payload[0],
             value=int.from_bytes(payload[1:6], "little", signed=False),
+        )
+    if response_type == ResponseType.BUILD_INFO:
+        return BuildInfoResponse(
+            build_id=int.from_bytes(payload[0:8], "little", signed=False),
+            thread_count=payload[8],
+            clock_frequency_hz=int.from_bytes(payload[9:13], "little", signed=False),
+            search_stack_depth=payload[13],
         )
     return ErrorResponse(
         error=_enum_or_int(EngineError, payload[0]),

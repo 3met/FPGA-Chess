@@ -38,6 +38,8 @@ def command_synth_report(args: argparse.Namespace) -> int:
         ["Started", report_timestamp(build_dir, metadata)],
     ]
     if metadata:
+        if "build_id" in metadata:
+            details.append(["Build ID", str(metadata["build_id"])])
         if "seed" in metadata:
             details.append(["Seed", str(metadata["seed"])])
         details.append(["Status", str(metadata.get("status", "unknown")).upper()])

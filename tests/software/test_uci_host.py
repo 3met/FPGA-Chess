@@ -8,6 +8,7 @@ from unittest import mock
 
 from software.engine.protocol import (
     AckResponse,
+    BuildInfoResponse,
     Command,
     DebugStatResponse,
     EndReason,
@@ -16,9 +17,10 @@ from software.engine.protocol import (
     SearchResultResponse,
     StatusResponse,
     cmd_get_status,
+    cmd_get_build_info,
     cmd_new_game,
 )
-from software.engine.host import FPGAClient, FPGAUCIHost, RESET_RECOVERY_SECONDS
+from software.engine.host import FPGAClient, FPGAUCIHost, HostError, RESET_RECOVERY_SECONDS
 from software.engine.transport import SerialTimeoutError
 
 
@@ -129,6 +131,62 @@ class UCIHostSpecTests(unittest.TestCase):
 class UCIHostDiagnosticTests(unittest.TestCase):
     """Exercise diagnostics without requiring python-chess or a serial adapter."""
 
+    def test_uci_advertises_synthesized_configuration_as_fixed_options(self):
+        class Client:
+            def __init__(self):
+                self.commands = []
+
+            def request(self, command):
+                self.commands.append(command)
+                return BuildInfoResponse(0x0123456789ABCDEF, 3, 40_000_000, 24)
+
+        host = object.__new__(FPGAUCIHost)
+        host.client = Client()
+        host.build_info = None
+        host.emit = (lines := []).append
+        host.connect = lambda: host.client
+        host.logger = logging.getLogger("test_uci_build_options")
+
+        host._handle_uci()
+
+        self.assertEqual(host.client.commands, [cmd_get_build_info()])
+        self.assertEqual(
+            lines,
+            [
+                "id name FPGA Chess",
+                "id author Emet Behrendt",
+                "option name Port type string default auto",
+                "option name Baud type spin default 2000000 min 9600 max 4000000",
+                "option name Threads type spin default 3 min 3 max 3",
+                "option name Clock Frequency Hz type spin default 40000000 min 40000000 max 40000000",
+                "option name Search Stack Depth type spin default 24 min 24 max 24",
+                "uciok",
+            ],
+        )
+
+    def test_uci_completes_when_build_information_is_unavailable(self):
+        host = object.__new__(FPGAUCIHost)
+        host.emit = (lines := []).append
+        host._get_build_info = lambda: (_ for _ in ()).throw(TimeoutError("no FPGA"))
+        host.logger = logging.getLogger("test_uci_build_options_failure")
+        host.logger.disabled = True
+
+        host._handle_uci()
+
+        self.assertEqual(lines[-2:], ["info string FPGA build information unavailable: no FPGA", "uciok"])
+
+    def test_synthesized_configuration_options_accept_only_fixed_value(self):
+        host = object.__new__(FPGAUCIHost)
+        host.client = mock.Mock()
+        host.build_info = BuildInfoResponse(0x0123456789ABCDEF, 3, 40_000_000, 24)
+        host.debug = False
+
+        host._handle_setoption(["name", "Threads", "value", "3"])
+        host._handle_setoption(["name", "Clock", "Frequency", "Hz", "value", "40000000"])
+        host._handle_setoption(["name", "Search", "Stack", "Depth", "value", "24"])
+        with self.assertRaisesRegex(HostError, "threads is fixed at 3"):
+            host._handle_setoption(["name", "Threads", "value", "4"])
+
     def test_isready_withholds_readyok_for_latched_engine_error(self):
         class Client:
             def request(self, command):
@@ -137,6 +195,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
 
         host = object.__new__(FPGAUCIHost)
         host.client = Client()
+        host.build_info = None
         host._search_active = False
         host._search_lock = threading.Lock()
         host.emit = (lines := []).append
@@ -168,6 +227,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
 
         host = object.__new__(FPGAUCIHost)
         host.client = Client()
+        host.build_info = None
         host._search_active = False
         host._search_lock = threading.Lock()
         lines: list[str] = []
@@ -180,6 +240,29 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         self.assertEqual(
             lines,
             ["info string status ready=1 search_active=0 output_pending=0 error=internal operation=7"],
+        )
+
+    def test_build_diagnostic_formats_all_metadata(self):
+        class Client:
+            def request(self, command):
+                self.command = command
+                return BuildInfoResponse(0x0123456789ABCDEF, 3, 40_000_000, 24)
+
+        host = object.__new__(FPGAUCIHost)
+        host.client = Client()
+        host.build_info = None
+        host._search_active = False
+        host._search_lock = threading.Lock()
+        lines: list[str] = []
+        host.emit = lines.append
+        host.connect = lambda: host.client
+
+        host._handle_debug_command(["build"])
+
+        self.assertEqual(host.client.command, cmd_get_build_info())
+        self.assertEqual(
+            lines,
+            ["info string build id=0123456789abcdef threads=3 clock_hz=40000000 stack_depth=24"],
         )
 
     def test_stats_diagnostic_formats_rates_and_per_thread_cycles(self):

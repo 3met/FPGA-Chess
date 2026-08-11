@@ -1,12 +1,14 @@
 import unittest
 
 from software.engine.protocol import (
+    BuildInfoResponse,
     EndReason,
     DebugStatResponse,
     Move,
     SearchResultResponse,
     STARTPOS_FEN,
     cmd_make_move,
+    cmd_get_build_info,
     cmd_get_debug_stat,
     decode_response,
     encode_fen,
@@ -61,6 +63,19 @@ class ProtocolEncodingTests(unittest.TestCase):
         self.assertEqual(cmd_get_debug_stat(0x12), bytes.fromhex("2112"))
         response = decode_response(bytes.fromhex("84120504030201"))
         self.assertEqual(response, DebugStatResponse(address=0x12, value=0x0102030405))
+
+    def test_build_info_command_and_response(self):
+        self.assertEqual(cmd_get_build_info(), bytes.fromhex("22"))
+        response = decode_response(bytes.fromhex("85efcdab896745230103005a620218"))
+        self.assertEqual(
+            response,
+            BuildInfoResponse(
+                build_id=0x0123456789ABCDEF,
+                thread_count=3,
+                clock_frequency_hz=40_000_000,
+                search_stack_depth=24,
+            ),
+        )
 
 
 if __name__ == "__main__":
