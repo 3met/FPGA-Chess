@@ -20,7 +20,13 @@ from software.engine.protocol import (
     cmd_get_build_info,
     cmd_new_game,
 )
-from software.engine.host import FPGAClient, FPGAUCIHost, HostError, RESET_RECOVERY_SECONDS
+from software.engine.host import (
+    FPGAClient,
+    FPGAUCIHost,
+    HostError,
+    INITIAL_STATUS_TIMEOUT_SECONDS,
+    RESET_RECOVERY_SECONDS,
+)
 from software.engine.transport import SerialTimeoutError
 
 
@@ -315,7 +321,10 @@ class FPGAClientInitializationTests(unittest.TestCase):
 
         self.assertEqual(
             client.request.call_args_list,
-            [mock.call(cmd_get_status()), mock.call(cmd_new_game())],
+            [
+                mock.call(cmd_get_status(), timeout=INITIAL_STATUS_TIMEOUT_SECONDS),
+                mock.call(cmd_new_game()),
+            ],
         )
         client.remote_reset.assert_not_called()
 
@@ -332,7 +341,10 @@ class FPGAClientInitializationTests(unittest.TestCase):
         client.remote_reset.assert_called_once_with()
         self.assertEqual(
             client.request.call_args_list,
-            [mock.call(cmd_get_status()), mock.call(cmd_new_game())],
+            [
+                mock.call(cmd_get_status(), timeout=INITIAL_STATUS_TIMEOUT_SECONDS),
+                mock.call(cmd_new_game()),
+            ],
         )
 
     def test_initialize_reports_when_status_works_but_new_game_times_out(self):

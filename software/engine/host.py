@@ -51,6 +51,9 @@ SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
 # BREAK restarts the DE1 SDRAM path. Startup time is negligible beside search
 # time, so wait for board initialization instead of queuing across reset.
 RESET_RECOVERY_SECONDS = 1.0
+# A missing startup reply indicates stale byte-stream state, not a slow normal
+# operation. Recover promptly instead of consuming the UCI startup deadline.
+INITIAL_STATUS_TIMEOUT_SECONDS = 1.0
 # These values mirror hardware/rtl/tt/tt_defs.sv. Scores in this range encode
 # a forced mate as MATE_SCORE minus the distance in plies.
 MATE_SCORE = 32_000
@@ -107,7 +110,7 @@ class FPGAClient:
         """Synchronize with a running FPGA, using BREAK only for recovery."""
         self.transport.reset_input_buffer()
         try:
-            status = self.request(cmd_get_status())
+            status = self.request(cmd_get_status(), timeout=INITIAL_STATUS_TIMEOUT_SECONDS)
         except (ProtocolError, SerialTimeoutError):
             status = None
         if not isinstance(status, StatusResponse):

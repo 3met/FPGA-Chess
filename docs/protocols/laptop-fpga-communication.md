@@ -54,6 +54,8 @@ Ack responses for Set Board, Make Move, and New Game are emitted only after the 
 
 UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. The host must leave RX high for at least two bit times after BREAK before transmitting another byte so the receiver can observe BREAK release before the next start bit, and board-specific hosts may wait longer for memories and other reset domains to reinitialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads. BREAK clears the RX FIFO and resets the engine-side command, search-controller, SDRAM, and TX path state.
 
+At startup, the Python host gives its initial status probe one second to respond. A missing or malformed response indicates unknown byte-stream state, so the host sends BREAK and then uses the normal command timeout after board reinitialization.
+
 ## Responses
 
 Every response starts with a response-type byte followed by a fixed-size payload determined by the response type.
