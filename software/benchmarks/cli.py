@@ -137,10 +137,10 @@ def _run_repetition_checks(
     return failures
 
 
-def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbose: bool) -> int:
+def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
     """Exercise the checked-in FPGA UCI host and its connected hardware."""
     timing_failures: list[str] = []
-    with FPGAUCISession(verbose=verbose) as engine:
+    with FPGAUCISession(port=port, verbose=verbose) as engine:
         engine.initialize(startup_timeout)
         for case in SANITY_POSITIONS:
             # Isolate timing cases while fixed-depth determinism awaits a UCI
@@ -178,9 +178,9 @@ def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbos
     return 1 if timing_failures or repetition_failures else 0
 
 
-def run_perft(startup_timeout: float, search_timeout: float, verbose: bool) -> int:
+def run_perft(startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
     failures = 0
-    with FPGAUCISession(verbose=verbose) as engine:
+    with FPGAUCISession(port=port, verbose=verbose) as engine:
         engine.initialize(startup_timeout)
         for case in FAST_PERFT:
             engine.send("position fen " + case.fen)
@@ -322,7 +322,7 @@ def estimate_rating(results: Sequence[tuple[float, bool]]) -> tuple[float, float
     return rating, 1.96 / math.sqrt(information)
 
 
-def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_rating: float, startup_timeout: float, search_timeout: float, verbose: bool) -> int:
+def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_rating: float, startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
     load_started = time.monotonic()
     puzzles, malformed = load_puzzles(puzzles_path, count, seed, min_rating)
     load_seconds = time.monotonic() - load_started
@@ -330,7 +330,7 @@ def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_ra
         print(f"warning: skipped {malformed} malformed puzzle rows", file=sys.stderr)
     results: list[tuple[float, bool]] = []
     started = time.monotonic()
-    with FPGAUCISession(verbose=verbose) as engine:
+    with FPGAUCISession(port=port, verbose=verbose) as engine:
         engine.initialize(startup_timeout)
         for index, puzzle in enumerate(puzzles, 1):
             # Puzzles are independent positions: do not carry timing-sensitive
@@ -356,6 +356,7 @@ def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_ra
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--port", help="Serial port, for example COM5 or /dev/ttyUSB0. Defaults to FPGA_CHESS_PORT or USB UART auto-detection.")
     parser.add_argument("--startup-timeout", type=float, default=10.0)
     parser.add_argument("--search-timeout", type=float, default=120.0)
     parser.add_argument("--verbose", action="store_true")
@@ -389,18 +390,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.startup_timeout <= 0 or args.search_timeout <= 0:
         parser.error("timeouts must be positive")
     try:
-        if args.suite == "sanity": return run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose)
+        if args.suite == "sanity": return run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose, args.port)
         if args.suite == "perft":
             if args.list:
                 for case in FAST_PERFT:
                     print(f"{case.name}: FEN={case.fen}; depth={case.depth}; nodes={case.nodes}")
                 return 0
-            return run_perft(args.startup_timeout, args.search_timeout, args.verbose)
+            return run_perft(args.startup_timeout, args.search_timeout, args.verbose, args.port)
         if args.suite == "rate":
             if args.count <= 0 or args.movetime_ms <= 0 or args.min_rating < 0 or not math.isfinite(args.min_rating): parser.error("count and movetime-ms must be positive, and min-rating must be a finite non-negative value")
-            return run_rate(args.puzzles, args.count, args.seed, args.movetime_ms, args.min_rating, args.startup_timeout, args.search_timeout, args.verbose)
-        sanity_status = run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose)
-        perft_status = run_perft(args.startup_timeout, args.search_timeout, args.verbose)
+            return run_rate(args.puzzles, args.count, args.seed, args.movetime_ms, args.min_rating, args.startup_timeout, args.search_timeout, args.verbose, args.port)
+        sanity_status = run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose, args.port)
+        perft_status = run_perft(args.startup_timeout, args.search_timeout, args.verbose, args.port)
         return 1 if sanity_status or perft_status else 0
     except (OSError, FPGAUCIError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

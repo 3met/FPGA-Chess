@@ -27,8 +27,10 @@ class UCIResult:
 class FPGAUCISession:
     """Run this repository's FPGA UCI host and wait for protocol responses."""
 
-    def __init__(self, *, verbose: bool = False) -> None:
+    def __init__(self, *, port: str | None = None, verbose: bool = False) -> None:
         self.command = [sys.executable, "-m", "software.engine"]
+        if port is not None:
+            self.command.extend(["--port", port])
         self.verbose = verbose
         self.process: subprocess.Popen[str] | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()

@@ -17,6 +17,8 @@ from software.engine.protocol import BAUD_RATE
 
 
 AUTO_SELECT_MIN_SCORE = 20
+AUTO_DISCOVERY_TIMEOUT_SECONDS = 2.0
+AUTO_DISCOVERY_POLL_SECONDS = 0.1
 BREAK_BITS = 20
 
 
@@ -55,11 +57,39 @@ class SerialPortInfo:
     pid: int | None = None
 
 
+def _device_identity(device: str) -> str:
+    """Normalize aliases so one Linux UART does not appear as multiple candidates."""
+    return os.path.normcase(os.path.realpath(device))
+
+
+def _linux_serial_device_nodes() -> list[str]:
+    """Recover USB-UART nodes when pyserial's sysfs metadata scan misses them."""
+    if not sys.platform.startswith("linux"):
+        return []
+
+    nodes: list[str] = []
+    seen: set[str] = set()
+    for directory, pattern in ((Path("/dev/serial/by-id"), "*"), (Path("/dev"), "ttyUSB*"), (Path("/dev"), "ttyACM*")):
+        for path in sorted(directory.glob(pattern)):
+            if not path.exists():
+                continue
+            identity = _device_identity(str(path))
+            if identity not in seen:
+                nodes.append(str(path))
+                seen.add(identity)
+    return nodes
+
+
 def list_serial_ports() -> list[SerialPortInfo]:
     list_ports = _list_ports_module()
-    return [
-        SerialPortInfo(
-            device=port.device,
+    linux_nodes = _linux_serial_device_nodes()
+    preferred_devices = {_device_identity(device): device for device in linux_nodes}
+    ports: list[SerialPortInfo] = []
+    known: set[str] = set()
+    for port in list_ports.comports():
+        identity = _device_identity(port.device)
+        info = SerialPortInfo(
+            device=preferred_devices.get(identity, port.device),
             description=port.description or "",
             hwid=port.hwid or "",
             manufacturer=port.manufacturer or "",
@@ -67,8 +97,17 @@ def list_serial_ports() -> list[SerialPortInfo]:
             vid=port.vid,
             pid=port.pid,
         )
-        for port in list_ports.comports()
-    ]
+        if identity not in known:
+            ports.append(info)
+            known.add(identity)
+    for device in linux_nodes:
+        identity = _device_identity(device)
+        if identity not in known:
+            # The path proves this is a Linux USB serial endpoint even when
+            # pyserial could not obtain its descriptive sysfs properties.
+            ports.append(SerialPortInfo(device=device, description="Linux USB serial device"))
+            known.add(identity)
+    return ports
 
 
 def _port_score(port: SerialPortInfo) -> int:
@@ -102,20 +141,42 @@ def describe_serial_ports(ports: list[SerialPortInfo]) -> str:
     return ", ".join(f"{port.device} ({port.description or port.hwid or 'no description'})" for port in ports)
 
 
-def get_serial_port(interactive: bool = False, env_var: str = "FPGA_CHESS_PORT") -> str:
-    """Return a serial port, preferring an explicit environment setting or a clear USB UART match."""
+def _clear_serial_port(ports: list[SerialPortInfo]) -> str | None:
+    """Return the sole high-confidence USB-UART candidate, if one is clear."""
+    if not ports:
+        return None
+    ranked = sorted(((port, _port_score(port)) for port in ports), key=lambda item: item[1], reverse=True)
+    if ranked[0][1] >= AUTO_SELECT_MIN_SCORE and (len(ranked) == 1 or ranked[0][1] >= ranked[1][1] + 10):
+        return ranked[0][0].device
+    return None
+
+
+def get_serial_port(
+    interactive: bool = False,
+    env_var: str = "FPGA_CHESS_PORT",
+    discovery_timeout: float = AUTO_DISCOVERY_TIMEOUT_SECONDS,
+    poll_interval: float = AUTO_DISCOVERY_POLL_SECONDS,
+) -> str:
+    """Return an explicit port or wait briefly for a clear USB-UART candidate."""
 
     env_port = os.environ.get(env_var)
     if env_port:
         return env_port
 
-    ports = list_serial_ports()
-    if not ports:
-        raise SerialDependencyError("No serial ports were found.")
+    deadline = time.monotonic() + max(0.0, discovery_timeout)
+    ports: list[SerialPortInfo] = []
+    while True:
+        ports = list_serial_ports()
+        selected = _clear_serial_port(ports)
+        if selected is not None:
+            return selected
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(0.0, poll_interval), remaining))
 
-    ranked = sorted(((port, _port_score(port)) for port in ports), key=lambda item: item[1], reverse=True)
-    if ranked[0][1] >= AUTO_SELECT_MIN_SCORE and (len(ranked) == 1 or ranked[0][1] >= ranked[1][1] + 10):
-        return ranked[0][0].device
+    if not ports:
+        raise SerialDependencyError(f"No serial ports were found after {max(0.0, discovery_timeout):g} seconds.")
 
     if not interactive:
         raise SerialDependencyError(

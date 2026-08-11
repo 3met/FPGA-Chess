@@ -22,6 +22,7 @@ from software.benchmarks.cli import (
     run_rate,
     run_sanity,
 )
+from software.benchmarks.session import FPGAUCISession
 from software.engine.protocol import encode_fen
 
 
@@ -162,7 +163,7 @@ class SanitySuiteTests(unittest.TestCase):
         with patch("software.benchmarks.cli.run_sanity", return_value=0) as sanity:
             self.assertEqual(main(["sanity"]), 0)
 
-        sanity.assert_called_once_with(SANITY_DEPTH, 10.0, 120.0, False)
+        sanity.assert_called_once_with(SANITY_DEPTH, 10.0, 120.0, False, None)
 
     def test_sanity_rejects_search_outside_movetime_tolerance(self):
         engine = MagicMock()
@@ -230,6 +231,20 @@ class RepetitionSanityTests(unittest.TestCase):
 
 
 class PuzzleAndRatingTests(unittest.TestCase):
+    def test_rate_cli_forwards_an_explicit_port(self):
+        with patch("software.benchmarks.cli.run_rate", return_value=0) as rate:
+            self.assertEqual(main(["rate", "--port", "/dev/ttyUSB0"]), 0)
+
+        rate.assert_called_once_with(
+            Path("puzzles/lichess_db_puzzle.csv"), 100, 0, 100, 1000.0,
+            10.0, 120.0, False, "/dev/ttyUSB0",
+        )
+
+    def test_session_passes_an_explicit_port_to_the_uci_host(self):
+        session = FPGAUCISession(port="COM42")
+
+        self.assertEqual(session.command[-2:], ["--port", "COM42"])
+
     def test_logistic_rating_and_boundaries(self):
         rating, interval = estimate_rating([(1200, False), (1800, True), (2200, True)])
         self.assertGreater(rating, 1800)
@@ -263,9 +278,10 @@ class PuzzleAndRatingTests(unittest.TestCase):
         class Engine:
             instances: list["Engine"] = []
 
-            def __init__(self, **_kwargs):
+            def __init__(self, **kwargs):
                 self.initialize_calls = 0
                 self.new_game_calls = 0
+                self.port = kwargs.get("port")
                 Engine.instances.append(self)
 
             def __enter__(self):
@@ -284,10 +300,11 @@ class PuzzleAndRatingTests(unittest.TestCase):
                 patch("software.benchmarks.cli.FPGAUCISession", Engine), \
                 patch("software.benchmarks.cli.solve_puzzle", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_rate(Path("unused.csv"), 2, 0, 50, 1000, 1.0, 1.0, False), 0)
+            self.assertEqual(run_rate(Path("unused.csv"), 2, 0, 50, 1000, 1.0, 1.0, False, "/dev/ttyUSB0"), 0)
 
         self.assertEqual(Engine.instances[0].initialize_calls, 1)
         self.assertEqual(Engine.instances[0].new_game_calls, len(puzzles))
+        self.assertEqual(Engine.instances[0].port, "/dev/ttyUSB0")
 
 
 if __name__ == "__main__":
