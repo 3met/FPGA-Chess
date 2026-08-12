@@ -12,8 +12,10 @@ package tt_defs;
     localparam int TT_AGE_BITS = 8;
     localparam int TT_AUX_BITS = 16;
 
-    localparam EvalScore MATE_SCORE = EvalScore'(32000);
-    localparam EvalScore MATE_THRESHOLD = EvalScore'(31000);
+    // Bit 14 separates finite evaluations from mates. The 0x100 score gap
+    // represents distances through 256 plies (mate in at least 128 moves).
+    localparam EvalScore MATE_THRESHOLD = EvalScore'(16'h4000);
+    localparam EvalScore MATE_SCORE = EvalScore'(16'h4100);
 
     typedef logic [TT_DEPTH_BITS-1:0] TTDepth;
     typedef logic [TT_AGE_BITS-1:0] TTAge;

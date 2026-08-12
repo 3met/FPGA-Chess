@@ -56,8 +56,8 @@ INITIAL_STATUS_TIMEOUT_SECONDS = 1.0
 INITIALIZATION_ATTEMPTS = 3
 # These values mirror hardware/rtl/tt/tt_defs.sv. Scores in this range encode
 # a forced mate as MATE_SCORE minus the distance in plies.
-MATE_SCORE = 32_000
-MATE_THRESHOLD = 31_000
+MATE_THRESHOLD = 0x4000
+MATE_SCORE = 0x4100
 SEARCH_PHASE_NAMES = (
     "ready",
     "tt_wait",

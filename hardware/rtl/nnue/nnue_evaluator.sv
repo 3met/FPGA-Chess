@@ -18,6 +18,7 @@ module nnue_evaluator #(
     output logic eval_ready,
     input ThreadID eval_thread_id,
     input Color eval_turn,
+    input PieceCount eval_piece_count,
     output logic result_valid,
     output EvalScore result
 );
@@ -26,10 +27,14 @@ module nnue_evaluator #(
     // and applies their inverse while unwinding instead of retaining a copy per ply.
     localparam int STATE_COUNT = STATE_THREAD_COUNT;
     localparam int STATE_ADDR_BITS = (STATE_COUNT <= 1) ? 1 : $clog2(STATE_COUNT);
-    localparam int SOFT_OUTPUT_MAC_LANES = 3 * NNUE_OUTPUT_MAC_LANES / 4;
     localparam int ACCUMULATOR_WORD_BITS =
         NNUE_STATE_VALUE_COUNT * NNUE_ACCUMULATOR_BITS;
+    localparam int OUTPUT_WEIGHT_ROW_BITS =
+        NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS;
+    localparam int OUTPUT_WEIGHT_ROW_ADDR_BITS =
+        $clog2(NNUE_OUTPUT_WEIGHT_ROW_COUNT);
     typedef logic [STATE_ADDR_BITS-1:0] StateAddress;
+    typedef logic [OUTPUT_WEIGHT_ROW_ADDR_BITS-1:0] OutputWeightRowAddress;
     typedef logic signed [5:0] OutputProduct;
     typedef logic signed [6:0] PairSum;
     typedef logic signed [7:0] TripleSum;
@@ -39,7 +44,7 @@ module nnue_evaluator #(
     typedef logic signed [10:0] ThirtyTwoSum;
     typedef logic signed [11:0] SixtyFourSum;
     typedef logic signed [12:0] MacGroupSum;
-    typedef logic signed [13:0] OutputSum;
+    typedef logic signed [14:0] OutputSum;
 
     NnueUpdateRequest active_update;
     logic update_busy;
@@ -56,6 +61,7 @@ module nnue_evaluator #(
     logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_eval_memory[STATE_COUNT];
     logic [ACCUMULATOR_WORD_BITS-1:0] eval_accumulators;
     Color eval_side_to_move;
+    NnueOutputBucket eval_output_bucket;
     logic eval_busy;
     logic partial_pending;
     logic result_pending;
@@ -67,13 +73,16 @@ module nnue_evaluator #(
 
     (* ram_style = "block" *)
     logic [NNUE_ROW_BYTES * 8-1:0] feature_rom[NNUE_FEATURE_COUNT];
-    // Each row supplies one complete group of 128 packed signed-three-bit weights.
-    (* ramstyle = "MLAB", ram_style = "distributed" *)
-    logic [NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS-1:0]
-        output_weight_rows[NNUE_OUTPUT_MAC_CYCLES];
+    // Prefetch each wide weight row from block ROM while the preceding row is
+    // consumed, avoiding a large bank of combinational bucket-selection muxes.
+    (* ramstyle = "M10K", ram_style = "block" *)
+    logic [OUTPUT_WEIGHT_ROW_BITS-1:0]
+        output_weight_rows[NNUE_OUTPUT_WEIGHT_ROW_COUNT];
+    OutputWeightRowAddress output_weight_row_address;
+    logic [OUTPUT_WEIGHT_ROW_BITS-1:0] output_weight_row_q;
     // Keep byte-wide loader storage while only the signed low five bits enter
     // the datapath.
-    logic [7:0] output_bias[1];
+    logic [7:0] output_bias[NNUE_OUTPUT_BUCKET_COUNT];
     // Hex files have nibble granularity; only the signed low three bits enter
     // the datapath, avoiding loader truncation warnings without widening it.
     logic [3:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
@@ -92,26 +101,9 @@ module nnue_evaluator #(
         return StateAddress'(thread_id);
     endfunction
 
-    // Expand most signed-three-bit products into two's-complement partial
-    // products, balancing portable logic and DSP inference without primitives.
-    function automatic OutputProduct soft_output_product(
-        input logic signed [3:0] activation,
-        input logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight
-    );
-        automatic OutputProduct activation_extended = OutputProduct'(activation);
-        automatic OutputProduct product = '0;
-        if (weight[0])
-            product += activation_extended;
-        if (weight[1])
-            product += activation_extended <<< 1;
-        if (weight[2])
-            product -= activation_extended <<< 2;
-        return product;
-    endfunction
-
-    // Leave the remaining quarter as generic multiplication so each FPGA tool may
-    // use its native small-multiplier resource.
-    function automatic OutputProduct hard_output_product(
+    // Keep multiplication generic so each synthesis target may choose its own
+    // LUT, DSP, packing, and MAC implementation.
+    function automatic OutputProduct output_product(
         input logic signed [3:0] activation,
         input logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight
     );
@@ -124,6 +116,24 @@ module nnue_evaluator #(
     // Accept a new snapshot while the preceding registered partial sums drain.
     assign eval_ready = !eval_busy || (eval_busy
         && eval_cycle == NNUE_OUTPUT_MAC_CYCLES && partial_pending);
+
+    // An accepted evaluation primes row zero. Thereafter the ROM reads one row
+    // ahead so its synchronous output does not add a MAC cycle.
+    always_comb begin
+        output_weight_row_address = OutputWeightRowAddress'(
+            int'(eval_output_bucket) * NNUE_OUTPUT_MAC_CYCLES);
+        if (eval_valid && eval_ready)
+            output_weight_row_address = OutputWeightRowAddress'(
+                int'(nnue_output_bucket(eval_piece_count))
+                    * NNUE_OUTPUT_MAC_CYCLES);
+        else if (eval_busy && eval_cycle < NNUE_OUTPUT_MAC_CYCLES - 1)
+            output_weight_row_address = OutputWeightRowAddress'(
+                int'(eval_output_bucket) * NNUE_OUTPUT_MAC_CYCLES
+                    + int'(eval_cycle) + 1);
+    end
+
+    always_ff @(posedge clk)
+        output_weight_row_q <= output_weight_rows[output_weight_row_address];
 
     always_ff @(posedge clk) begin
         if (!rst_n || clear) begin
@@ -157,71 +167,70 @@ module nnue_evaluator #(
 `ifdef FPGA_CHESS_PROFILE
                 automatic longint unsigned wrapped_lanes = 0;
 `endif
-                for (int perspective = 0; perspective < 2; perspective++) begin
-                    for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
-                        automatic int source_bit_offset =
-                            (perspective * NNUE_ACCUMULATOR_COUNT + lane)
-                                * NNUE_ACCUMULATOR_BITS;
-                        automatic NnueAccumulator old_value = active_update.clear
-                            ? NnueAccumulator'($signed(accumulator_bias[lane][
-                                NNUE_ACCUMULATOR_BIAS_BITS-1:0]))
-                            : $signed(accumulator_update_memory[
-                                destination_address][
-                                source_bit_offset +: NNUE_ACCUMULATOR_BITS]);
-                        automatic logic signed [1:0] feature_weight = perspective == 0
-                            ? $signed(feature_row_white[
-                                lane * NNUE_FEATURE_WEIGHT_BITS
-                                    +: NNUE_FEATURE_WEIGHT_BITS])
-                            : $signed(feature_row_black[
-                                lane * NNUE_FEATURE_WEIGHT_BITS
-                                    +: NNUE_FEATURE_WEIGHT_BITS]);
-                        automatic logic perspective_enable = perspective == 0
-                            ? active_update.white_enable : active_update.black_enable;
-                        automatic NnueAccumulator changed =
-                            active_update.add
-                                ? old_value + NnueAccumulator'(feature_weight)
-                                : old_value - NnueAccumulator'(feature_weight);
+                // Chess feature deltas always affect both perspectives, so a
+                // coarse request enable avoids a mux on every accumulator lane.
+                if (active_update.apply) begin
+                    for (int perspective = 0; perspective < 2; perspective++) begin
+                        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
+                            automatic int source_bit_offset =
+                                (perspective * NNUE_ACCUMULATOR_COUNT + lane)
+                                    * NNUE_ACCUMULATOR_BITS;
+                            automatic NnueAccumulator old_value = active_update.clear
+                                ? NnueAccumulator'($signed(accumulator_bias[lane][
+                                    NNUE_ACCUMULATOR_BIAS_BITS-1:0]))
+                                : $signed(accumulator_update_memory[
+                                    destination_address][
+                                    source_bit_offset +: NNUE_ACCUMULATOR_BITS]);
+                            automatic logic signed [1:0] feature_weight = perspective == 0
+                                ? $signed(feature_row_white[
+                                    lane * NNUE_FEATURE_WEIGHT_BITS
+                                        +: NNUE_FEATURE_WEIGHT_BITS])
+                                : $signed(feature_row_black[
+                                    lane * NNUE_FEATURE_WEIGHT_BITS
+                                        +: NNUE_FEATURE_WEIGHT_BITS]);
+                            automatic NnueAccumulator changed =
+                                active_update.add
+                                    ? old_value + NnueAccumulator'(feature_weight)
+                                    : old_value - NnueAccumulator'(feature_weight);
 `ifdef FPGA_CHESS_PROFILE
-                        automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
-                            old_extended = {old_value[NNUE_ACCUMULATOR_BITS-1], old_value};
-                        automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
-                            weight_extended =
-                                {{(NNUE_ACCUMULATOR_BITS-1){feature_weight[1]}},
-                                    feature_weight};
-                        automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
-                            exact_changed = active_update.add
-                                ? old_extended + weight_extended
-                                : old_extended - weight_extended;
-                        if (perspective_enable
-                                && (exact_changed > 6'sd15
-                                    || exact_changed < -6'sd16))
-                            wrapped_lanes++;
+                            automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
+                                old_extended = {old_value[NNUE_ACCUMULATOR_BITS-1], old_value};
+                            automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
+                                weight_extended =
+                                    {{(NNUE_ACCUMULATOR_BITS-1){feature_weight[1]}},
+                                        feature_weight};
+                            automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
+                                exact_changed = active_update.add
+                                    ? old_extended + weight_extended
+                                    : old_extended - weight_extended;
+                            if (exact_changed > 6'sd15 || exact_changed < -6'sd16)
+                                wrapped_lanes++;
 `endif
-                        committed_state[source_bit_offset
-                                +: NNUE_ACCUMULATOR_BITS] =
-                            perspective_enable ? NnueAccumulator'(changed) : old_value;
+                            committed_state[source_bit_offset
+                                    +: NNUE_ACCUMULATOR_BITS] = changed;
+                        end
                     end
+                    accumulator_update_memory[destination_address] <= committed_state;
+                    accumulator_eval_memory[destination_address] <= committed_state;
+`ifdef FPGA_CHESS_PROFILE
+                    profile_accumulator_wrap_lanes <=
+                        profile_accumulator_wrap_lanes + wrapped_lanes;
+`endif
                 end
-                accumulator_update_memory[destination_address] <= committed_state;
-                accumulator_eval_memory[destination_address] <= committed_state;
                 if (active_update.complete) begin
                     update_done_valid <= 1'b1;
                     update_done_thread <= active_update.thread_id;
                     update_done_ply <= active_update.ply;
                 end
-`ifdef FPGA_CHESS_PROFILE
-                profile_accumulator_wrap_lanes <=
-                    profile_accumulator_wrap_lanes + wrapped_lanes;
-`endif
             end
 
             // Clip from a dedicated result register so output timing is
             // independent of the fourth MAC tree.
             if (result_pending) begin
-                if (result_sum > 24'sd30999)
-                    result <= EvalScore'(30999);
-                else if (result_sum < -24'sd30999)
-                    result <= EvalScore'(-30999);
+                if (result_sum > 24'sd16383)
+                    result <= MAX_NON_MATE_EVAL_SCORE;
+                else if (result_sum < -24'sd16383)
+                    result <= -MAX_NON_MATE_EVAL_SCORE;
                 else
                     result <= EvalScore'(result_sum);
                 result_valid <= 1'b1;
@@ -231,9 +240,17 @@ module nnue_evaluator #(
             // Keep the evaluation-memory read in one syntactic location so
             // Intel and AMD tools infer a single synchronous read port.
             if (eval_valid && eval_ready) begin
-                eval_accumulators <= accumulator_eval_memory[
-                    state_address(eval_thread_id)];
+                // A single-thread build has no other state to update while it
+                // evaluates, so reuse the update mirror and avoid a very wide,
+                // one-word block RAM. Multi-thread builds keep the independent
+                // mirror so another thread may update concurrently.
+                if (STATE_COUNT == 1)
+                    eval_accumulators <= accumulator_update_memory[0];
+                else
+                    eval_accumulators <= accumulator_eval_memory[
+                        state_address(eval_thread_id)];
                 eval_side_to_move <= eval_turn;
+                eval_output_bucket <= nnue_output_bucket(eval_piece_count);
             end
 
             if (eval_busy) begin
@@ -251,9 +268,6 @@ module nnue_evaluator #(
                 // Register sixteen partial sums to split the RAM/arithmetic path from
                 // the upper adder tree without retaining every DSP product.
                 if (eval_cycle < NNUE_OUTPUT_MAC_CYCLES) begin
-                    automatic logic [
-                        NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS-1:0]
-                        weight_row = output_weight_rows[eval_cycle];
                     for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
                         automatic int input_index =
                             int'(eval_cycle) * NNUE_OUTPUT_MAC_LANES + lane;
@@ -274,13 +288,10 @@ module nnue_evaluator #(
                                 : accumulator > NnueAccumulator'(7) ? 4'sd7
                                 : {1'b0, accumulator[2:0]};
                         automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight =
-                            $signed(weight_row[
+                            $signed(output_weight_row_q[
                                 lane * NNUE_OUTPUT_WEIGHT_BITS
                                     +: NNUE_OUTPUT_WEIGHT_BITS]);
-                        if (lane < SOFT_OUTPUT_MAC_LANES)
-                            products[lane] = soft_output_product(activation, weight);
-                        else
-                            products[lane] = hard_output_product(activation, weight);
+                        products[lane] = output_product(activation, weight);
                     end
                     // Reduce each registered eight-product chunk as 3+3+2.
                     // This exposes natural small-multiplier groups to Intel,
@@ -324,7 +335,8 @@ module nnue_evaluator #(
                         result_pending <= 1'b1;
                         if (eval_valid && eval_ready) begin
                             eval_cycle <= '0;
-                            eval_sum <= OutputSum'($signed(output_bias[0][
+                            eval_sum <= OutputSum'($signed(output_bias[
+                                nnue_output_bucket(eval_piece_count)][
                                 NNUE_OUTPUT_BIAS_BITS-1:0]));
                         end else begin
                             eval_busy <= 1'b0;
@@ -335,7 +347,8 @@ module nnue_evaluator #(
                 end
             end else if (eval_valid && eval_ready) begin
                 eval_cycle <= '0;
-                eval_sum <= OutputSum'($signed(output_bias[0][
+                eval_sum <= OutputSum'($signed(output_bias[
+                    nnue_output_bucket(eval_piece_count)][
                     NNUE_OUTPUT_BIAS_BITS-1:0]));
                 partial_pending <= 1'b0;
                 eval_busy <= 1'b1;

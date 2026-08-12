@@ -625,8 +625,7 @@ module tb_engine_profile #(
                 if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_ROOT_INIT) begin
                     nnue_root_rows = nnue_root_rows + 1;
                 end else if (dut.controller.nnue_update_req.complete
-                        && !dut.controller.nnue_update_req.white_enable
-                        && !dut.controller.nnue_update_req.black_enable) begin
+                        && !dut.controller.nnue_update_req.apply) begin
                     nnue_completion_markers = nnue_completion_markers + 1;
                 end else if (dut.controller.nnue_delta_busy
                         && dut.controller.nnue_delta_replay

@@ -115,12 +115,13 @@ class UCIHostSpecTests(unittest.TestCase):
 
     def test_eval_score_uci_representation(self):
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(128), ("cp", 100))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(30_999), ("cp", 24_218))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_000), ("mate", 500))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_999), ("mate", 1))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_998), ("mate", 1))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(31_997), ("mate", 2))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(-31_997), ("mate", -2))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x3FFF), ("cp", 12_799))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x4000), ("mate", 128))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x4100 - 100), ("mate", 50))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FF), ("mate", 1))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FE), ("mate", 1))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FD), ("mate", 2))
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(-0x40FD), ("mate", -2))
 
     def test_search_result_emits_uci_mate_score(self):
         host = self.make_host()
@@ -129,7 +130,7 @@ class UCIHostSpecTests(unittest.TestCase):
 
         host._emit_search_result(
             SearchResultResponse(
-                Move(0, 0), 31_999, nodes=42, completed_depth=3, end_reason=EndReason.DEPTH_LIMIT
+                Move(0, 0), 0x40FF, nodes=42, completed_depth=3, end_reason=EndReason.DEPTH_LIMIT
             ),
             board_snapshot=None,
         )

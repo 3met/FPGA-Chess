@@ -53,8 +53,14 @@ def _validate(config: dict[str, Any]) -> None:
     ):
         if key not in training:
             raise ConfigError(f"training.{key} is required")
-    if "nnue_output_heads" in training:
-        raise ConfigError("training.nnue_output_heads was removed; NNUE uses one output layer")
+    buckets = training.get("nnue_output_buckets", 16)
+    if not isinstance(buckets, int) or buckets < 1 or buckets > 32 or 32 % buckets:
+        raise ConfigError("training.nnue_output_buckets must be a positive divisor of 32")
+    warmup = training.get("pst_warmup_steps", 0)
+    if not isinstance(warmup, int) or warmup < 0 or warmup >= training["max_steps"]:
+        raise ConfigError("training.pst_warmup_steps must be nonnegative and below max_steps")
+    if not isinstance(training.get("initialize_material_pst_from_engine", True), bool):
+        raise ConfigError("training.initialize_material_pst_from_engine must be boolean")
     positive = (
         "batch_size", "learning_rate", "max_steps", "shuffle_buffer",
         "validation_interval_steps", "checkpoint_interval_steps",

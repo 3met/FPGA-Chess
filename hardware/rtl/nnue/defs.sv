@@ -5,7 +5,7 @@ package nnue_defs;
     localparam int NNUE_SIDE_COUNT = 2;
     localparam int NNUE_PIECE_CATEGORY_COUNT = 6;
     localparam int NNUE_FEATURE_COUNT = NNUE_SIDE_COUNT * NNUE_PIECE_CATEGORY_COUNT * 64;
-    localparam int NNUE_ACCUMULATOR_COUNT = 128;
+    localparam int NNUE_ACCUMULATOR_COUNT = 256;
     localparam int NNUE_FEATURE_WEIGHT_BITS = 2;
     localparam int NNUE_FEATURE_ROW_BITS =
         NNUE_ACCUMULATOR_COUNT * NNUE_FEATURE_WEIGHT_BITS;
@@ -18,6 +18,18 @@ package nnue_defs;
     localparam int NNUE_OUTPUT_MAC_LANES = 128;
     localparam int NNUE_OUTPUT_MAC_CYCLES =
         (NNUE_OUTPUT_INPUT_COUNT + NNUE_OUTPUT_MAC_LANES - 1) / NNUE_OUTPUT_MAC_LANES;
+    localparam int NNUE_OUTPUT_BUCKET_COUNT = 16;
+    localparam int NNUE_OUTPUT_WEIGHT_ROW_COUNT =
+        NNUE_OUTPUT_BUCKET_COUNT * NNUE_OUTPUT_MAC_CYCLES;
+    typedef logic [$clog2(NNUE_OUTPUT_BUCKET_COUNT)-1:0] NnueOutputBucket;
+
+    // Pair counts from the legal two-king minimum upward so every head receives
+    // training examples; the full 32-piece position occupies the final head.
+    function automatic NnueOutputBucket nnue_output_bucket(input PieceCount piece_count);
+        if (piece_count <= PieceCount'(2))
+            return NnueOutputBucket'(0);
+        return NnueOutputBucket'((piece_count - PieceCount'(2)) >> 1);
+    endfunction
 
     typedef logic [9:0] NnueFeatureIndex;
     // The trained distribution stays well inside signed five-bit state. Modular
@@ -45,8 +57,9 @@ package nnue_defs;
         PlyIndex ply;
         NnueFeatureIndex white_feature;
         NnueFeatureIndex black_feature;
-        logic white_enable;
-        logic black_enable;
+        // False denotes an ordered completion marker with no accumulator write.
+        // Real feature deltas always update both perspectives together.
+        logic apply;
         logic add;
         logic clear;
         // Marks the last physical request belonging to one child-state update.

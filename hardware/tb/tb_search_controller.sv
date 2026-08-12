@@ -1427,9 +1427,11 @@ module tb_search_controller;
             automatic Move baseline_move, nnue_move;
             automatic EvalScore baseline_score, nnue_score;
             automatic NodeCountType baseline_nodes, nnue_nodes;
-            for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
+            automatic int bucket = int'(nnue_output_bucket(PieceCount'(3)));
+            for (int row = bucket * NNUE_OUTPUT_MAC_CYCLES;
+                    row < (bucket + 1) * NNUE_OUTPUT_MAC_CYCLES; row++)
                 dut.nnue_evaluator.output_weight_rows[row] = 0;
-            dut.nnue_evaluator.output_bias[0] = 0;
+            dut.nnue_evaluator.output_bias[bucket] = 0;
             new_game();
             setup_kings_only();
             set_tile(WHITE_PAWN, Position'(8), "NNUE baseline white pawn a2");
@@ -1438,7 +1440,8 @@ module tb_search_controller;
             for (int row = 0; row < NNUE_FEATURE_COUNT; row++)
                 dut.nnue_evaluator.feature_rom[row] = 0;
             dut.nnue_evaluator.feature_rom[8] = {NNUE_ROW_BYTES{8'h55}};
-            for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
+            for (int row = bucket * NNUE_OUTPUT_MAC_CYCLES;
+                    row < (bucket + 1) * NNUE_OUTPUT_MAC_CYCLES; row++)
                 dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
                 dut.nnue_evaluator.accumulator_bias[lane] = 0;
@@ -1449,7 +1452,7 @@ module tb_search_controller;
                 nnue_move, nnue_score, nnue_nodes);
             // Only White's direct a2-pawn feature is nonzero, so the ordered
             // concatenation contributes one activation in every White lane.
-            check(nnue_score == baseline_score + EvalScore'(128),
+            check(nnue_score == baseline_score + EvalScore'(256),
                 $sformatf("search adds NNUE correction: baseline=%0d corrected=%0d",
                     baseline_score, nnue_score));
         end

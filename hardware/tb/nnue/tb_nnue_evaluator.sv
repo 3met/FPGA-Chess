@@ -15,7 +15,12 @@ module tb_nnue_evaluator;
     logic eval_valid, eval_ready, result_valid;
     ThreadID eval_thread_id;
     Color eval_turn;
+    PieceCount eval_piece_count;
     EvalScore result;
+    logic single_update_valid, single_update_ready, single_update_idle;
+    NnueUpdateRequest single_update_req;
+    logic single_eval_valid, single_eval_ready, single_result_valid;
+    EvalScore single_result;
     int pass_count = 0;
     int fail_count = 0;
 
@@ -24,8 +29,20 @@ module tb_nnue_evaluator;
     nnue_evaluator #(.STATE_THREAD_COUNT(9)) dut (
         .clk, .rst_n, .clear, .update_valid, .update_ready, .update_idle, .update_req,
         .update_done_valid, .update_done_thread, .update_done_ply,
-        .eval_valid, .eval_ready, .eval_thread_id, .eval_turn,
+        .eval_valid, .eval_ready, .eval_thread_id, .eval_turn, .eval_piece_count,
         .result_valid, .result
+    );
+
+    // Exercise the single-thread state path used by the DE1-SoC build.
+    nnue_evaluator #(.STATE_THREAD_COUNT(1)) single_dut (
+        .clk, .rst_n, .clear,
+        .update_valid(single_update_valid), .update_ready(single_update_ready),
+        .update_idle(single_update_idle), .update_req(single_update_req),
+        .update_done_valid(), .update_done_thread(), .update_done_ply(),
+        .eval_valid(single_eval_valid), .eval_ready(single_eval_ready),
+        .eval_thread_id(ThreadID'(0)), .eval_turn(WHITE),
+        .eval_piece_count(PieceCount'(2)),
+        .result_valid(single_result_valid), .result(single_result)
     );
 
     task automatic check(input logic condition, input string label);
@@ -56,24 +73,40 @@ module tb_nnue_evaluator;
         check(result == expected, label);
     endtask
 
-    // Exhaust the small exact arithmetic domain but report each implementation
-    // as one behavioral property rather than 64 nominal test cases.
+    task automatic test_single_thread_state_path();
+        @(negedge clk);
+        single_update_req = '0;
+        single_update_req.black_feature = 1;
+        single_update_req.apply = 1'b1;
+        single_update_req.add = 1'b1;
+        single_update_req.clear = 1'b1;
+        single_update_valid = 1'b1;
+        @(negedge clk);
+        single_update_valid = 1'b0;
+        wait (single_update_idle);
+        @(negedge clk);
+        single_eval_valid = 1'b1;
+        @(negedge clk);
+        single_eval_valid = 1'b0;
+        wait (single_result_valid);
+        check(single_result == EvalScore'(256),
+            "single-thread evaluation reuses the update-state mirror");
+    endtask
+
+    // Exhaust the small exact arithmetic domain but report it as one behavioral
+    // property rather than 64 nominal test cases.
     task automatic test_output_products();
-        automatic bit soft_exact = 1'b1;
-        automatic bit hard_exact = 1'b1;
+        automatic bit product_exact = 1'b1;
 
         for (int activation = 0; activation <= 7; activation++) begin
             for (int weight = -4; weight <= 3; weight++) begin
                 automatic logic signed [3:0] activation_bits = activation;
                 automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight_bits = weight;
-                soft_exact &= $signed(dut.soft_output_product(
-                    activation_bits, weight_bits)) == activation * weight;
-                hard_exact &= $signed(dut.hard_output_product(
+                product_exact &= $signed(dut.output_product(
                     activation_bits, weight_bits)) == activation * weight;
             end
         end
-        check(soft_exact, "soft output product is exact over its reachable domain");
-        check(hard_exact, "hard output product is exact over its reachable domain");
+        check(product_exact, "output product is exact over its reachable domain");
     endtask
 
     initial begin
@@ -83,18 +116,40 @@ module tb_nnue_evaluator;
         eval_valid = 0;
         eval_thread_id = 0;
         eval_turn = WHITE;
+        eval_piece_count = PieceCount'(2);
+        single_update_valid = 0;
+        single_update_req = '0;
+        single_eval_valid = 0;
         #1;
         dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
-        for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
+        dut.feature_rom[1] = '0;
+        for (int row = 0; row < NNUE_OUTPUT_WEIGHT_ROW_COUNT; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-        dut.output_bias[0] = 0;
+        for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++)
+            dut.output_bias[bucket] = 0;
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
             dut.accumulator_bias[lane] = 0;
+        single_dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
+        single_dut.feature_rom[1] = '0;
+        for (int row = 0; row < NNUE_OUTPUT_WEIGHT_ROW_COUNT; row++)
+            single_dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
+        for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++)
+            single_dut.output_bias[bucket] = 0;
+        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
+            single_dut.accumulator_bias[lane] = 0;
 
         repeat (2) @(negedge clk);
         rst_n = 1;
         check(NNUE_FEATURE_COUNT == 768,
             "NNUE transformer uses 2 sides x 6 pieces x 64 squares");
+        check(NNUE_ACCUMULATOR_COUNT == 256,
+            "NNUE keeps 256 accumulators per perspective");
+        check(nnue_output_bucket(PieceCount'(1)) == NnueOutputBucket'(0)
+                && nnue_output_bucket(PieceCount'(2)) == NnueOutputBucket'(0)
+                && nnue_output_bucket(PieceCount'(3)) == NnueOutputBucket'(0)
+                && nnue_output_bucket(PieceCount'(4)) == NnueOutputBucket'(1)
+                && nnue_output_bucket(PieceCount'(32)) == NnueOutputBucket'(15),
+            "piece counts map from the legal minimum through the full-board bucket");
         check(nnue_feature_index(
             Position'(8), WHITE_PAWN, WHITE) == NnueFeatureIndex'(8),
             "white pawn maps to its direct friendly feature");
@@ -110,28 +165,36 @@ module tb_nnue_evaluator;
             "accumulator memory allocates one logical word per thread");
 
         test_output_products();
+        test_single_thread_state_path();
 
         update_req.thread_id = ThreadID'(8);
         update_req.ply = PlyIndex'(2);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = ThreadID'(8);
-        evaluate(EvalScore'(128), "state memory supports thread IDs above seven");
+        evaluate(EvalScore'(256), "state memory supports thread IDs above seven");
         dut.output_weight_rows[0] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-        dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
-        evaluate(EvalScore'(128), "side to move selects the first concatenated perspective");
+        dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
+        dut.output_weight_rows[2] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
+        dut.output_weight_rows[3] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
+        evaluate(EvalScore'(256), "side to move selects the first concatenated perspective");
         eval_turn = BLACK;
-        evaluate(EvalScore'(-128), "opponent perspective moves to the second half");
+        evaluate(EvalScore'(-256), "opponent perspective moves to the second half");
         eval_turn = WHITE;
         dut.output_bias[0] = 8'h17;
-        evaluate(EvalScore'(119), "signed output bias is added once");
+        evaluate(EvalScore'(247), "signed output bias is added once");
         dut.output_bias[0] = 0;
+        for (int row = NNUE_OUTPUT_MAC_CYCLES;
+                row < 2 * NNUE_OUTPUT_MAC_CYCLES; row++)
+            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h2}};
+        eval_piece_count = PieceCount'(4);
+        evaluate(EvalScore'(512), "piece count selects an independent output bucket");
+        eval_piece_count = PieceCount'(2);
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
 
@@ -140,9 +203,8 @@ module tb_nnue_evaluator;
         update_req.thread_id = ThreadID'(8);
         update_req.ply = PlyIndex'(1);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 1;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         update_req.complete = 1;
@@ -167,22 +229,20 @@ module tb_nnue_evaluator;
         update_req.ply = PlyIndex'(0);
         eval_thread_id = ThreadID'(0);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(128), "perspective activations feed the output layer");
+        evaluate(EvalScore'(256), "perspective activations feed the output layer");
         check(eval_ready, "evaluator becomes ready after its MAC and clipping cycles");
 
         update_req = '0;
         update_req.ply = PlyIndex'(1);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 0;
         enqueue(update_req);
         wait (update_idle);
@@ -193,9 +253,8 @@ module tb_nnue_evaluator;
         update_req.thread_id = ThreadID'(1);
         update_req.ply = PlyIndex'(0);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
@@ -203,9 +262,8 @@ module tb_nnue_evaluator;
         update_req.thread_id = ThreadID'(1);
         update_req.ply = PlyIndex'(1);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 0;
         enqueue(update_req);
         wait (update_idle);
@@ -219,9 +277,8 @@ module tb_nnue_evaluator;
         update_req.thread_id = ThreadID'(3);
         update_req.ply = PlyIndex'(0);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
@@ -236,11 +293,11 @@ module tb_nnue_evaluator;
         @(negedge clk);
         eval_valid = 0;
         wait (result_valid);
-        check(result == EvalScore'(128),
+        check(result == EvalScore'(256),
             "evaluation overlaps another thread's accumulator commit");
         wait (update_idle);
         eval_thread_id = ThreadID'(4);
-        evaluate(EvalScore'(256),
+        evaluate(EvalScore'(512),
             "overlapped update is visible in its destination thread");
 
         // Consecutive requests for one thread must observe each preceding
@@ -249,9 +306,8 @@ module tb_nnue_evaluator;
         update_req.thread_id = ThreadID'(2);
         update_req.ply = PlyIndex'(1);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         @(negedge clk);
@@ -266,7 +322,7 @@ module tb_nnue_evaluator;
         wait (update_done_valid);
         wait (update_idle);
         eval_thread_id = ThreadID'(2);
-        evaluate(EvalScore'(384),
+        evaluate(EvalScore'(768),
             "full-width update pipeline commits back-to-back same-thread rows");
 
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
@@ -275,9 +331,8 @@ module tb_nnue_evaluator;
         update_req = '0;
         update_req.ply = PlyIndex'(2);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
@@ -287,7 +342,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(15),
             "five-bit accumulators retain the trained positive range");
-        evaluate(EvalScore'(1280), "concatenated perspective activations reach the output");
+        evaluate(EvalScore'(2560), "concatenated perspective activations reach the output");
         update_req.add = 0;
         repeat (12)
             enqueue(update_req);
@@ -295,7 +350,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(3),
             "modular inverse deltas exactly restore the accumulator bias");
-        evaluate(EvalScore'(768), "both biased perspectives remain in the concatenated output");
+        evaluate(EvalScore'(1536), "both biased perspectives remain in the concatenated output");
 
         // Flush an accepted evaluation and queued update together, then prove
         // that no result or update survives and a fresh rebuild still works.
@@ -304,9 +359,8 @@ module tb_nnue_evaluator;
         update_req.thread_id = ThreadID'(8);
         update_req.ply = PlyIndex'(2);
         update_req.white_feature = 0;
-        update_req.black_feature = 0;
-        update_req.white_enable = 1;
-        update_req.black_enable = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
         update_req.add = 1;
         update_valid = 1;
         eval_thread_id = ThreadID'(0);
@@ -332,7 +386,7 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = ThreadID'(8);
-        evaluate(EvalScore'(128), "evaluation restarts correctly after clear");
+        evaluate(EvalScore'(256), "evaluation restarts correctly after clear");
 
         // Exercise the signed activation product extrema; an unsigned
         // multiply produces a non-clipped value with this model.
@@ -342,7 +396,7 @@ module tb_nnue_evaluator;
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h4}};
         update_req.ply = PlyIndex'(1);
-        update_req.black_enable = 1;
+        update_req.black_feature = 0;
         update_req.add = 1;
         update_req.clear = 1;
         enqueue(update_req);
@@ -350,9 +404,9 @@ module tb_nnue_evaluator;
         repeat (11)
             enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(-7168), "signed activation products retain their full width");
+        evaluate(EvalScore'(-14336), "signed activation products retain their full width");
         dut.output_bias[0] = 8'h10;
-        evaluate(EvalScore'(-7184), "minimum MAC sum and output bias retain their full width");
+        evaluate(EvalScore'(-14352), "minimum MAC sum and output bias retain their full width");
         dut.output_bias[0] = 0;
 
         begin
@@ -376,7 +430,7 @@ module tb_nnue_evaluator;
             while (stream_results != 2) begin
                 @(negedge clk);
                 if (result_valid) begin
-                    check(result == EvalScore'(-7168),
+                    check(result == EvalScore'(-14336),
                         "pipelined evaluation preserves result ordering");
                     stream_results++;
                 end

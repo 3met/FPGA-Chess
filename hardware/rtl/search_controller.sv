@@ -60,8 +60,8 @@ module search_controller #(
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
-    localparam int SEARCH_INF_VALUE = 32001;
-    localparam int NULL_MIN_BETA_VALUE = -32000 + MAX_PLY_COUNT;
+    localparam int SEARCH_INF_VALUE = 32767;
+    localparam int NULL_MIN_BETA_VALUE = -16640 + MAX_PLY_COUNT;
     localparam int ASPIRATION_DELTA_VALUE = 64;
     localparam int TT_VALIDATE_MIN_DEPTH = 8;
     localparam int TT_VALIDATE_MAX_BYPASS_HALFMOVE = 4;
@@ -198,6 +198,7 @@ module search_controller #(
     logic active_board_in_check;
     ZobristKey active_zobrist_key;
     EvalScore active_pst_eval;
+    PieceCount active_piece_count;
     logic [6:0] new_setup_index;
 
     // Perft borrows search context zero and tracks whether each ply starts a node.
@@ -246,6 +247,7 @@ module search_controller #(
     logic search_board_in_check[0:SEARCH_THREAD_COUNT-1];
     ZobristKey search_zobrist_key[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_pst_eval[0:SEARCH_THREAD_COUNT-1];
+    PieceCount search_piece_count[0:SEARCH_THREAD_COUNT-1];
     SearchStackEntry search_stack_top[0:SEARCH_THREAD_COUNT-1];
     SearchStackEntry search_stack_parent_q[0:SEARCH_THREAD_COUNT-1];
     logic [$bits(SearchStackEntry)-1:0] search_stack_parent_bits[0:SEARCH_THREAD_COUNT-1];
@@ -311,6 +313,7 @@ module search_controller #(
     FullBoard board_update_in;
     ZobristKey board_update_zobrist_in;
     EvalScore board_update_pst_in;
+    PieceCount board_update_piece_count_in;
     Move board_update_move;
     logic [6:0] board_update_set_data;
     ThreadID board_update_thread_id;
@@ -318,6 +321,7 @@ module search_controller #(
     FullBoard board_update_out;
     ZobristKey board_update_zobrist_out;
     EvalScore board_update_pst_out;
+    PieceCount board_update_piece_count_out;
     logic board_update_mover_in_check;
     // Evaluate a completed board once, then retain its check status with the
     // board context that accepts it instead of scanning during move dispatch.
@@ -547,6 +551,7 @@ module search_controller #(
         .board_in(board_update_in),
         .zobrist_key_in(board_update_zobrist_in),
         .pst_eval_in(board_update_pst_in),
+        .piece_count_in(board_update_piece_count_in),
         .move_in(board_update_move),
         .set_data(board_update_set_data),
         .thread_id(board_update_thread_id),
@@ -554,6 +559,7 @@ module search_controller #(
         .board_out(board_update_out),
         .zobrist_key_out(board_update_zobrist_out),
         .pst_eval_out(board_update_pst_out),
+        .piece_count_out(board_update_piece_count_out),
         .mover_in_check_out(board_update_mover_in_check)
     );
 
@@ -817,6 +823,7 @@ module search_controller #(
         .eval_ready(nnue_eval_ready),
         .eval_thread_id(nnue_build_thread),
         .eval_turn(search_board[nnue_build_thread].turn),
+        .eval_piece_count(search_piece_count[nnue_build_thread]),
         .result_valid(nnue_result_valid),
         .result(nnue_result)
     );
@@ -1007,10 +1014,10 @@ module search_controller #(
         automatic logic signed [16:0] total =
             $signed({material_pst[15], material_pst})
             + $signed({correction[15], correction});
-        if (total > 17'sd30999)
-            return EvalScore'(30999);
-        if (total < -17'sd30999)
-            return EvalScore'(-30999);
+        if (total > 17'sd16383)
+            return MAX_NON_MATE_EVAL_SCORE;
+        if (total < -17'sd16383)
+            return -MAX_NON_MATE_EVAL_SCORE;
         return EvalScore'(total);
     endfunction : add_nnue_correction
 
@@ -1018,13 +1025,13 @@ module search_controller #(
     function automatic EvalScore aspiration_lower_bound(input EvalScore score);
         automatic logic signed [16:0] bound =
             $signed({score[15], score}) - $signed({ASPIRATION_DELTA[15], ASPIRATION_DELTA});
-        return (bound <= -17'sd32001) ? -SEARCH_INF : EvalScore'(bound);
+        return (bound <= -17'sd32767) ? -SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_lower_bound
 
     function automatic EvalScore aspiration_upper_bound(input EvalScore score);
         automatic logic signed [16:0] bound =
             $signed({score[15], score}) + $signed({ASPIRATION_DELTA[15], ASPIRATION_DELTA});
-        return (bound >= 17'sd32001) ? SEARCH_INF : EvalScore'(bound);
+        return (bound >= 17'sd32767) ? SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_upper_bound
 
     // Every newly entered node starts from the same empty search record.
@@ -1584,6 +1591,7 @@ module search_controller #(
         board_update_in = active_board;
         board_update_zobrist_in = active_zobrist_key;
         board_update_pst_in = active_pst_eval;
+        board_update_piece_count_in = active_piece_count;
         board_update_move = active_req.move;
         board_update_set_data = active_req.board_wr_data;
         board_update_thread_id = (state == ST_SEARCH_RUN) ? search_board_issue_thread : ThreadID'(0);
@@ -1602,6 +1610,7 @@ module search_controller #(
             board_update_in = search_board[0];
             board_update_zobrist_in = search_zobrist_key[0];
             board_update_pst_in = search_pst_eval[0];
+            board_update_piece_count_in = search_piece_count[0];
             board_update_move = move_pop_resp_move;
             board_update_ply = search_ply[0];
         end else if (state == ST_PERFT_PUSH_ISSUE || state == ST_PERFT_REVERSE_ISSUE) begin
@@ -1610,6 +1619,7 @@ module search_controller #(
             board_update_in = search_board[0];
             board_update_zobrist_in = search_zobrist_key[0];
             board_update_pst_in = search_pst_eval[0];
+            board_update_piece_count_in = search_piece_count[0];
             board_update_move = search_pending_move[0];
             board_update_ply = search_ply[0];
         end else if (search_board_issue_valid) begin
@@ -1621,6 +1631,7 @@ module search_controller #(
             board_update_in = search_board[search_board_issue_thread];
             board_update_zobrist_in = search_zobrist_key[search_board_issue_thread];
             board_update_pst_in = search_pst_eval[search_board_issue_thread];
+            board_update_piece_count_in = search_piece_count[search_board_issue_thread];
             board_update_move = move_board_bypass_valid
                 ? move_board_bypass_move : search_pending_move[search_board_issue_thread];
             board_update_ply = search_ply[search_board_issue_thread];
@@ -1761,8 +1772,7 @@ module search_controller #(
                     nnue_root_init_pos, feature_tile, WHITE);
                 nnue_update_req.black_feature = nnue_feature_index(
                     nnue_root_init_pos, feature_tile, BLACK);
-                nnue_update_req.white_enable = 1'b1;
-                nnue_update_req.black_enable = 1'b1;
+                nnue_update_req.apply = 1'b1;
                 nnue_update_req.add = 1'b1;
                 nnue_update_req.clear = nnue_root_init_first;
             end
@@ -1782,8 +1792,7 @@ module search_controller #(
                         nnue_build_pos, feature_tile, WHITE);
                     nnue_update_req.black_feature = nnue_feature_index(
                         nnue_build_pos, feature_tile, BLACK);
-                    nnue_update_req.white_enable = 1'b1;
-                    nnue_update_req.black_enable = 1'b1;
+                    nnue_update_req.apply = 1'b1;
                     nnue_update_req.add = 1'b1;
                     nnue_update_req.clear = nnue_build_first;
                 end
@@ -1817,21 +1826,18 @@ module search_controller #(
             nnue_update_valid = 1'b1;
             nnue_update_req.thread_id = delta_thread;
             nnue_update_req.ply = nnue_plan_child_ply[delta_thread];
-            nnue_update_req.white_enable = 1'b1;
-            nnue_update_req.black_enable = 1'b1;
+            nnue_update_req.apply = 1'b1;
             if (nnue_delta_draining) begin
                 // An ordered no-op completion marker removes the rebuild's
                 // dependence on global FIFO/pipeline idle.
-                nnue_update_req.white_enable = 1'b0;
-                nnue_update_req.black_enable = 1'b0;
+                nnue_update_req.apply = 1'b0;
                 nnue_update_req.complete = 1'b1;
             end else if (delta_kind == NNUE_PLAN_REBUILD) begin
                 feature_tile = search_board[delta_thread].tiles[nnue_delta_pos];
                 nnue_update_valid = feature_tile.piece_type != NULL_PIECE;
                 feature_pos = nnue_delta_pos;
                 feature_add = 1'b1;
-                nnue_update_req.white_enable = 1'b1;
-                nnue_update_req.black_enable = 1'b1;
+                nnue_update_req.apply = 1'b1;
                 nnue_update_req.clear = nnue_delta_first;
             end else if (!delta_reverse) begin
                 case (nnue_delta_step)
@@ -1865,8 +1871,7 @@ module search_controller #(
                         feature_add = 1'b1;
                     end
                 endcase
-                nnue_update_req.white_enable = 1'b1;
-                nnue_update_req.black_enable = 1'b1;
+                nnue_update_req.apply = 1'b1;
             end else begin
                 // Undo exactly the same physical rows in reverse order so a
                 // thread's single live accumulator returns to its parent.
@@ -1970,6 +1975,7 @@ module search_controller #(
             active_board_in_check <= 1'b0;
             active_zobrist_key <= ZobristKey'(0);
             active_pst_eval <= EvalScore'(0);
+            active_piece_count <= PieceCount'(0);
             repetition_epoch <= '0;
             repetition_init_start <= 1'b0;
             repetition_history_reset <= 1'b0;
@@ -2075,6 +2081,7 @@ module search_controller #(
                 search_board_in_check[tid] <= 1'b0;
                 search_zobrist_key[tid] <= ZobristKey'(0);
                 search_pst_eval[tid] <= EvalScore'(0);
+                search_piece_count[tid] <= PieceCount'(0);
                 search_ply[tid] <= PlyIndex'(0);
                 search_return_score[tid] <= EvalScore'(0);
                 search_return_valid[tid] <= 1'b0;
@@ -2325,6 +2332,7 @@ module search_controller #(
                                     search_board[0] <= active_board;
                                     search_zobrist_key[0] <= active_zobrist_key;
                                     search_pst_eval[0] <= active_pst_eval;
+                                    search_piece_count[0] <= active_piece_count;
                                     search_pending_move[0] <= NULL_MOVE;
                                     search_stack_top[0] <= empty_search_stack_entry();
                                     search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_NOISY;
@@ -2489,6 +2497,7 @@ module search_controller #(
                         active_board_in_check <= board_update_side_in_check;
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
+                        active_piece_count <= board_update_piece_count_out;
                         if (active_req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
                             if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
                                 repetition_history_reset <= 1'b1;
@@ -2535,6 +2544,7 @@ module search_controller #(
                         active_board_in_check <= board_update_side_in_check;
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
+                        active_piece_count <= board_update_piece_count_out;
                         if (new_setup_index == 7'd67) begin
                             repetition_history_reset <= 1'b1;
                             repetition_history_key <= board_update_zobrist_out;
@@ -2615,6 +2625,7 @@ module search_controller #(
                             search_board[0] <= board_update_out;
                             search_zobrist_key[0] <= board_update_zobrist_out;
                             search_pst_eval[0] <= board_update_pst_out;
+                            search_piece_count[0] <= board_update_piece_count_out;
                             search_stack_top[0] <= empty_search_stack_entry();
                             search_stack_top[0].bucket_tops <= inherited_tops;
                             search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_NOISY;
@@ -2636,6 +2647,7 @@ module search_controller #(
                         search_board[0] <= board_update_out;
                         search_zobrist_key[0] <= board_update_zobrist_out;
                         search_pst_eval[0] <= board_update_pst_out;
+                        search_piece_count[0] <= board_update_piece_count_out;
                         search_stack_top[0] <= search_stack_parent_q[0];
                         search_ply[0] <= search_ply[0] - PlyIndex'(1);
                         state <= ST_PERFT_GEN_ISSUE;
@@ -2684,6 +2696,7 @@ module search_controller #(
                         search_board_in_check[tid] <= active_board_in_check;
                         search_zobrist_key[tid] <= active_zobrist_key;
                         search_pst_eval[tid] <= active_pst_eval;
+                        search_piece_count[tid] <= active_piece_count;
                         search_ply[tid] <= PlyIndex'(0);
                         search_best_move[tid] <= NULL_MOVE;
                         search_root_best_score[tid] <= -SEARCH_INF;
@@ -2990,6 +3003,7 @@ module search_controller #(
                                 search_board_in_check[tid] <= active_board_in_check;
                                 search_zobrist_key[tid] <= active_zobrist_key;
                                 search_pst_eval[tid] <= active_pst_eval;
+                                search_piece_count[tid] <= active_piece_count;
                                 search_ply[tid] <= PlyIndex'(0);
                                 search_best_move[tid] <= NULL_MOVE;
                                 search_root_best_score[tid] <= -SEARCH_INF;
@@ -3134,6 +3148,7 @@ module search_controller #(
                                 search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
+                                search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 search_return_move[board_thread_id] <= search_stack_top[board_thread_id].move;
                                 search_return_was_scout[board_thread_id] <= search_stack_top[board_thread_id].scout_search;
                                 search_return_was_reduced[board_thread_id]
@@ -3200,6 +3215,7 @@ module search_controller #(
                                 search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
+                                search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 search_stack_top[board_thread_id].move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
@@ -3316,6 +3332,7 @@ module search_controller #(
                                 search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
+                                search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 repetition_line_write_valid <= 1'b1;
                                 repetition_line_write_thread <= board_thread_id;
                                 repetition_line_write_ply <= child_ply;

@@ -18,12 +18,25 @@ FIXED_MATERIAL_CP = {"pawn": 100.0, "king": 0.0}
 NNUE_SIDES = 2
 NNUE_PIECE_CATEGORIES = 6
 NNUE_FEATURE_COUNT = NNUE_SIDES * NNUE_PIECE_CATEGORIES * 64
-NNUE_ACCUMULATORS = 128
+NNUE_ACCUMULATORS = 256
 NNUE_OUTPUT_INPUTS = NNUE_SIDES * NNUE_ACCUMULATORS
+NNUE_OUTPUT_BUCKETS = 16
+NNUE_ACCUMULATOR_BITS = 5
 NNUE_OUTPUT_WEIGHT_BITS = 3
 NNUE_OUTPUT_BIAS_BITS = 5
 NNUE_ENGINE_UNIT_CP = 100.0 / 128.0
-NNUE_MODEL_VERSION = 9
+NNUE_MAX_ENGINE_UNITS = 0x3FFF
+NNUE_MODEL_VERSION = 11
+
+
+def nnue_output_bucket(codes: torch.Tensor, bucket_count: int = NNUE_OUTPUT_BUCKETS) -> torch.Tensor:
+    """Map the legal two-piece minimum upward into near-equal phase buckets."""
+    piece_count = codes.ne(0).sum(dim=1)
+    pieces_per_bucket = 32 // bucket_count
+    scaled = piece_count.sub(2).clamp_min(0).div(
+        pieces_per_bucket, rounding_mode="floor"
+    )
+    return scaled.clamp_max(bucket_count - 1).to(torch.long)
 
 
 def engine_parameters_cp() -> tuple[torch.Tensor, torch.Tensor]:
@@ -53,8 +66,12 @@ class EvaluationModel(nn.Module):
     def __init__(
         self,
         initial_combined_cp: torch.Tensor | None = None,
+        output_buckets: int = NNUE_OUTPUT_BUCKETS,
     ):
         super().__init__()
+        if output_buckets < 1 or output_buckets > 32 or 32 % output_buckets:
+            raise ValueError("NNUE output bucket count must divide 32")
+        self.output_buckets = output_buckets
         if initial_combined_cp is None:
             material = torch.zeros(6, dtype=torch.float32)
             material[0] = FIXED_MATERIAL_CP["pawn"]
@@ -86,13 +103,22 @@ class EvaluationModel(nn.Module):
         # an exact zero correction while avoiding dead quantized parameters.
         self.accumulator_bias = nn.Parameter(torch.ones(NNUE_ACCUMULATORS))
         initial_output = torch.tensor([1.0, -1.0]).repeat(NNUE_OUTPUT_INPUTS // 2)
-        self.output_weights = nn.Parameter(initial_output)
-        self.output_bias = nn.Parameter(torch.tensor(0.0))
+        self.output_weights = nn.Parameter(initial_output.repeat(output_buckets, 1))
+        self.output_bias = nn.Parameter(torch.zeros(output_buckets))
         pst_mask = torch.ones((6, 64), dtype=pst.dtype)
         pst_mask[0, :8] = 0
         pst_mask[0, 56:] = 0
         self.register_buffer("_pst_mask", pst_mask)
         self.project_parameters()
+
+    def nnue_parameters(self) -> tuple[nn.Parameter, ...]:
+        """Return the parameters held fixed during optional PST warmup."""
+        return (
+            self.feature_weights,
+            self.accumulator_bias,
+            self.output_weights,
+            self.output_bias,
+        )
 
     def material_cp(self) -> torch.Tensor:
         """Return all six material values, including fixed pawn and king."""
@@ -186,18 +212,22 @@ class EvaluationModel(nn.Module):
         )
         # Hardware retains the low five bits so add/remove deltas remain exact
         # inverses even in the rare event of an overflow.
-        accumulators = torch.remainder(accumulators + 16, 32) - 16
+        accumulator_modulus = 1 << NNUE_ACCUMULATOR_BITS
+        accumulators = torch.remainder(
+            accumulators + accumulator_modulus // 2, accumulator_modulus
+        ) - accumulator_modulus // 2
         activations = accumulators.clamp(0, 7)
         white_to_move = white_to_move.to(device=codes.device, dtype=torch.bool)
         first = torch.where(white_to_move[:, None], activations[:, 0], activations[:, 1])
         second = torch.where(white_to_move[:, None], activations[:, 1], activations[:, 0])
         ordered_activations = torch.cat((first, second), dim=1)
-        weights = self._int3(self.output_weights)
+        buckets = nnue_output_bucket(codes, self.output_buckets)
+        weights = self._int3(self.output_weights)[buckets]
         # Ordering by side to move makes color-flipped positions share exactly
         # the same output without constraining the two halves of the head.
-        output_bias = self._output_bias_int5(self.output_bias)
+        output_bias = self._output_bias_int5(self.output_bias)[buckets]
         engine_units = (ordered_activations * weights).sum(dim=1) + output_bias
-        return engine_units.clamp(-30999, 30999) * NNUE_ENGINE_UNIT_CP
+        return engine_units.clamp(-NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS) * NNUE_ENGINE_UNIT_CP
 
     def forward(self, codes: torch.Tensor, white_to_move: torch.Tensor) -> torch.Tensor:
         mask = codes != 0

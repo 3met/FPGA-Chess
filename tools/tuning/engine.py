@@ -17,6 +17,7 @@ from .model import (
     NNUE_FEATURE_COUNT,
     NNUE_MODEL_VERSION,
     NNUE_OUTPUT_BIAS_BITS,
+    NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
     NNUE_OUTPUT_WEIGHT_BITS,
     PIECE_ORDER,
@@ -149,11 +150,12 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
             "model_version": NNUE_MODEL_VERSION,
             "encoding": "relative-2x6x64",
             "output_units": "pawn/128",
+            "output_buckets": NNUE_OUTPUT_BUCKETS,
             "accumulator_bias": model.accumulator_bias.detach().cpu().tolist(),
             "feature_weights": model.feature_weights.detach().cpu().round()
                 .clamp(-2, 1).to(torch.int8).tolist(),
             "output_weights": model.output_weights.detach().cpu().tolist(),
-            "output_bias": float(model.output_bias.detach().cpu()),
+            "output_bias": model.output_bias.detach().cpu().tolist(),
         },
         "best_step": checkpoint.get("step"),
     }, "best checkpoint"
@@ -197,9 +199,9 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
     if nnue is None:
         return (
             ("00" * (NNUE_ACCUMULATORS // 4) + "\n") * NNUE_FEATURE_COUNT,
-            ("0" * NNUE_OUTPUT_MAC_LANES + "\n")
-                * (NNUE_OUTPUT_INPUTS // NNUE_OUTPUT_MAC_LANES),
-            "00\n",
+            ("0" * ((NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS + 3) // 4) + "\n")
+                * (NNUE_OUTPUT_INPUTS // NNUE_OUTPUT_MAC_LANES) * NNUE_OUTPUT_BUCKETS,
+            "00\n" * NNUE_OUTPUT_BUCKETS,
             "0\n" * NNUE_ACCUMULATORS,
         )
     rows = nnue["feature_weights"]
@@ -209,26 +211,41 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
         )
     if nnue.get("output_units") != "pawn/128":
         raise ValueError("NNUE output parameters must use pawn/128 hardware score units")
+    if nnue.get("output_buckets") != NNUE_OUTPUT_BUCKETS:
+        raise ValueError(f"NNUE output layer must contain {NNUE_OUTPUT_BUCKETS} buckets")
     feature_text = "\n".join(_pack_feature_row(row) for row in rows) + "\n"
     weights = nnue["output_weights"]
-    if len(weights) != NNUE_OUTPUT_INPUTS:
-        raise ValueError(f"NNUE output layer must contain {NNUE_OUTPUT_INPUTS} weights")
+    if len(weights) != NNUE_OUTPUT_BUCKETS or any(
+        len(bucket) != NNUE_OUTPUT_INPUTS for bucket in weights
+    ):
+        raise ValueError(
+            f"NNUE output layer must contain {NNUE_OUTPUT_BUCKETS}x{NNUE_OUTPUT_INPUTS} weights"
+        )
     output_lines = []
-    for offset in range(0, NNUE_OUTPUT_INPUTS, NNUE_OUTPUT_MAC_LANES):
-        output_lines.append(_pack_output_row(
-            weights[offset:offset + NNUE_OUTPUT_MAC_LANES]
-        ))
+    for bucket in weights:
+        for offset in range(0, NNUE_OUTPUT_INPUTS, NNUE_OUTPUT_MAC_LANES):
+            output_lines.append(_pack_output_row(
+                bucket[offset:offset + NNUE_OUTPUT_MAC_LANES]
+            ))
     biases = nnue["accumulator_bias"]
     if len(biases) != NNUE_ACCUMULATORS:
         raise ValueError(f"NNUE accumulator bias must contain {NNUE_ACCUMULATORS} values")
     bias_text = "\n".join(
         f"{max(-4, min(3, round_ties_to_even(value))) & 0x7:x}" for value in biases
     ) + "\n"
-    output_bias = round_ties_to_even(nnue.get("output_bias", 0.0))
+    output_bias = nnue.get("output_bias", [0.0] * NNUE_OUTPUT_BUCKETS)
+    if len(output_bias) != NNUE_OUTPUT_BUCKETS:
+        raise ValueError(f"NNUE output bias must contain {NNUE_OUTPUT_BUCKETS} values")
     output_bias_min = -(1 << (NNUE_OUTPUT_BIAS_BITS - 1))
     output_bias_max = (1 << (NNUE_OUTPUT_BIAS_BITS - 1)) - 1
-    output_bias = max(output_bias_min, min(output_bias_max, output_bias))
-    output_bias_text = f"{output_bias & ((1 << NNUE_OUTPUT_BIAS_BITS) - 1):02x}\n"
+    output_bias_values = [
+        max(output_bias_min, min(output_bias_max, round_ties_to_even(value)))
+        for value in output_bias
+    ]
+    output_bias_text = "".join(
+        f"{value & ((1 << NNUE_OUTPUT_BIAS_BITS) - 1):02x}\n"
+        for value in output_bias_values
+    )
     return feature_text, "\n".join(output_lines) + "\n", output_bias_text, bias_text
 
 

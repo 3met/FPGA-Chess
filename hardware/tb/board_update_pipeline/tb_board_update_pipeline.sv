@@ -12,6 +12,7 @@ module tb_board_update_pipeline;
     FullBoard board_in;
     ZobristKey zobrist_key_in;
     EvalScore pst_eval_in;
+    PieceCount piece_count_in;
     Move move_in;
     logic [6:0] set_data;
     ThreadID thread_id;
@@ -20,6 +21,7 @@ module tb_board_update_pipeline;
     FullBoard board_out;
     ZobristKey zobrist_key_out;
     EvalScore pst_eval_out;
+    PieceCount piece_count_out;
 
     PstScore pst_values[0:(6 * 64)-1];
     ZobristKey zobrist_values[0:ZOBRIST_ENTRY_CNT-1];
@@ -39,13 +41,16 @@ module tb_board_update_pipeline;
         .board_in(board_in),
         .zobrist_key_in(zobrist_key_in),
         .pst_eval_in(pst_eval_in),
+        .piece_count_in(piece_count_in),
         .move_in(move_in),
         .set_data(set_data),
         .thread_id(thread_id),
         .search_ply(search_ply),
         .board_out(board_out),
         .zobrist_key_out(zobrist_key_out),
-        .pst_eval_out(pst_eval_out)
+        .pst_eval_out(pst_eval_out),
+        .piece_count_out(piece_count_out),
+        .mover_in_check_out()
     );
 
     task automatic do_clock(input int cnt = 1);
@@ -119,6 +124,15 @@ module tb_board_update_pipeline;
         return EvalScore'(total);
     endfunction
 
+    function automatic PieceCount ref_piece_count(input FullBoard board);
+        automatic PieceCount count = PieceCount'(0);
+        for (int pos = 0; pos < 64; pos++) begin
+            if (board.tiles[pos].piece_type != NULL_PIECE)
+                count += PieceCount'(1);
+        end
+        return count;
+    endfunction
+
     function automatic ZobristKey ref_zobrist_tile(input Tile tile, input Position pos);
         automatic Tile normalized = norm_tile(tile);
 
@@ -184,6 +198,7 @@ module tb_board_update_pipeline;
         board_in = 'x;
         zobrist_key_in = 'x;
         pst_eval_in = 'x;
+        piece_count_in = 'x;
         move_in = NULL_MOVE;
         set_data = 'x;
         thread_id = ThreadID'(0);
@@ -215,6 +230,9 @@ module tb_board_update_pipeline;
             $sformatf("%s board mismatch expected=%s found=%s", test_name, toFen(expected_board), toFen(board_out)));
         expect_equal(pst_eval_out === expected_pst,
             $sformatf("%s PST mismatch expected=%0d found=%0d", test_name, expected_pst, pst_eval_out));
+        expect_equal(piece_count_out === ref_piece_count(expected_board),
+            $sformatf("%s piece-count mismatch expected=%0d found=%0d",
+                test_name, ref_piece_count(expected_board), piece_count_out));
         expect_equal(zobrist_key_out === expected_zobrist,
             $sformatf("%s Zobrist mismatch expected=%h found=%h", test_name, expected_zobrist, zobrist_key_out));
     endtask
@@ -408,6 +426,7 @@ module tb_board_update_pipeline;
         board_in = old_board;
         zobrist_key_in = old_zobrist;
         pst_eval_in = old_pst;
+        piece_count_in = ref_piece_count(old_board);
         move_in = move;
         set_data = data;
         thread_id = ThreadID'(0);
@@ -436,6 +455,7 @@ module tb_board_update_pipeline;
         board_in = in_board;
         zobrist_key_in = in_zobrist;
         pst_eval_in = in_pst;
+        piece_count_in = ref_piece_count(in_board);
         move_in = move;
         set_data = data;
         thread_id = request_thread_id;
@@ -801,6 +821,7 @@ module tb_board_update_pipeline;
         board_in = base_board;
         zobrist_key_in = base_zobrist;
         pst_eval_in = base_pst;
+        piece_count_in = ref_piece_count(base_board);
         move_in = move_a;
         set_data = {3'b0, WHITE_KNIGHT};
         thread_id = ThreadID'(0);
@@ -811,6 +832,7 @@ module tb_board_update_pipeline;
         board_in = base_board;
         zobrist_key_in = base_zobrist;
         pst_eval_in = base_pst;
+        piece_count_in = ref_piece_count(base_board);
         move_in = move_b;
         set_data = {3'b0, BLACK_BISHOP};
         thread_id = ThreadID'(0);

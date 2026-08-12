@@ -142,9 +142,14 @@ package general_chess_defs;
 	typedef logic signed [15:0] EvalScore;
 	// PST ROM entries are individually small; expand them before accumulating.
 	typedef logic signed [9:0] PstScore;
+	// Standard chess starts with 32 pieces; six bits include the full endpoint.
+	localparam int MAX_BOARD_PIECES = 32;
+	typedef logic [$clog2(MAX_BOARD_PIECES + 1)-1:0] PieceCount;
 
 	localparam EvalScore MAX_EVAL_SCORE = EvalScore'(2 ** ($bits(EvalScore)-1) - 1);
 	localparam EvalScore MIN_EVAL_SCORE = -MAX_EVAL_SCORE;
+	// Finite scores occupy the signed 14-bit interval below the mate flag bit.
+	localparam EvalScore MAX_NON_MATE_EVAL_SCORE = EvalScore'(16'h3fff);
 	localparam EvalScore DRAW_EVAL_SCORE = EvalScore'(0);
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 

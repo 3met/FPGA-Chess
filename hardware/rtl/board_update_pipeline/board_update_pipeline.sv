@@ -15,6 +15,7 @@ module board_update_pipeline #(
     input FullBoard board_in,
     input ZobristKey zobrist_key_in,
     input EvalScore pst_eval_in,
+    input PieceCount piece_count_in,
     input Move move_in,
     input logic [6:0] set_data,
     input ThreadID thread_id,
@@ -23,6 +24,7 @@ module board_update_pipeline #(
     output FullBoard board_out,
     output ZobristKey zobrist_key_out,
     output EvalScore pst_eval_out,
+    output PieceCount piece_count_out,
     output logic mover_in_check_out
 );
 
@@ -68,6 +70,7 @@ module board_update_pipeline #(
     FullBoard next_board_out;
     ZobristKey next_zobrist_key_out;
     EvalScore next_pst_eval_out;
+    PieceCount next_piece_count_out;
 
     MoveRecord move_record_in, move_record_out;
     MoveRecordAddr move_record_rd_addr, move_record_wr_addr;
@@ -340,6 +343,7 @@ module board_update_pipeline #(
     task automatic replace_tile(
         inout FullBoard board,
         inout EvalScore pst_eval,
+        inout PieceCount piece_count,
         input Position pos,
         input Tile new_tile,
         input EvalScore old_pst,
@@ -349,6 +353,10 @@ module board_update_pipeline #(
         automatic Tile placed_tile = new_tile;
 
         pst_eval += signed_piece_score(placed_tile, new_pst) - signed_piece_score(old_tile, old_pst);
+        if (old_tile.piece_type == NULL_PIECE && placed_tile.piece_type != NULL_PIECE)
+            piece_count += PieceCount'(1);
+        else if (old_tile.piece_type != NULL_PIECE && placed_tile.piece_type == NULL_PIECE)
+            piece_count -= PieceCount'(1);
         board.tiles[pos] = placed_tile;
         // Legal positions contain one king per color, so placing a king also
         // establishes that color's canonical cached square.
@@ -463,6 +471,7 @@ module board_update_pipeline #(
         board_out <= next_board_out;
         zobrist_key_out <= next_zobrist_key_out;
         pst_eval_out <= next_pst_eval_out;
+        piece_count_out <= next_piece_count_out;
         mover_in_check_out <= ctx_pipe[1].mover_in_check;
         zobrist_read_enable_q <= zobrist_read_plan.enable;
         zobrist_turn_toggle_q <= zobrist_turn_toggle;
@@ -478,6 +487,7 @@ module board_update_pipeline #(
         next_ctx_pipe[0].board       = board_in;
         next_ctx_pipe[0].zobrist_key = zobrist_key_in;
         next_ctx_pipe[0].pst_eval    = pst_eval_in;
+        next_ctx_pipe[0].piece_count = piece_count_in;
         next_ctx_pipe[0].move        = move_in;
         next_ctx_pipe[0].set_data    = set_data;
         next_ctx_pipe[0].thread_id   = thread_id;
@@ -759,17 +769,22 @@ module board_update_pipeline #(
                 automatic BoardFile next_ep_file = getFile(to_pos);
                 automatic HalfmoveClock next_halfmove;
 
-                replace_tile(out.board, out.pst_eval, from_pos, EMPTY_TILE, pst_start_out, EvalScore'(0));
-                replace_tile(out.board, out.pst_eval, to_pos, placed_tile, (is_ep || is_castle) ? EvalScore'(0) : pst_killed_out, pst_end_out);
+                replace_tile(out.board, out.pst_eval, out.piece_count,
+                    from_pos, EMPTY_TILE, pst_start_out, EvalScore'(0));
+                replace_tile(out.board, out.pst_eval, out.piece_count,
+                    to_pos, placed_tile, (is_ep || is_castle) ? EvalScore'(0) : pst_killed_out, pst_end_out);
 
                 if (is_ep) begin
-                    replace_tile(out.board, out.pst_eval, ep_capture_pos, EMPTY_TILE, pst_killed_out, EvalScore'(0));
+                    replace_tile(out.board, out.pst_eval, out.piece_count,
+                        ep_capture_pos, EMPTY_TILE, pst_killed_out, EvalScore'(0));
                 end
 
                 if (is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                    replace_tile(out.board, out.pst_eval, rook_from, EMPTY_TILE, pst_killed_out, EvalScore'(0));
-                    replace_tile(out.board, out.pst_eval, rook_to, rook_tile, EvalScore'(0), pst_castle_out);
+                    replace_tile(out.board, out.pst_eval, out.piece_count,
+                        rook_from, EMPTY_TILE, pst_killed_out, EvalScore'(0));
+                    replace_tile(out.board, out.pst_eval, out.piece_count,
+                        rook_to, rook_tile, EvalScore'(0), pst_castle_out);
                 end
 
                 out.move_record.from_pos = from_pos;
@@ -807,18 +822,24 @@ module board_update_pipeline #(
                 automatic Position rook_to = effects.rook_to;
 
                 if (!is_null_record(rec)) begin
-                    replace_tile(out.board, out.pst_eval, from_pos, restored_mover, EvalScore'(0), pst_start_out);
-                    replace_tile(out.board, out.pst_eval, to_pos, restored_capture, pst_end_out, is_ep ? EvalScore'(0) : pst_killed_out);
+                    replace_tile(out.board, out.pst_eval, out.piece_count,
+                        from_pos, restored_mover, EvalScore'(0), pst_start_out);
+                    replace_tile(out.board, out.pst_eval, out.piece_count,
+                        to_pos, restored_capture, pst_end_out,
+                        is_ep ? EvalScore'(0) : pst_killed_out);
 
                     if (is_ep) begin
                         automatic Tile ep_tile = Tile'({captured_color, PAWN});
-                        replace_tile(out.board, out.pst_eval, ep_capture_pos, ep_tile, EvalScore'(0), pst_killed_out);
+                        replace_tile(out.board, out.pst_eval, out.piece_count,
+                            ep_capture_pos, ep_tile, EvalScore'(0), pst_killed_out);
                     end
 
                     if (is_castle) begin
                         automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                        replace_tile(out.board, out.pst_eval, rook_to, EMPTY_TILE, pst_castle_out, EvalScore'(0));
-                        replace_tile(out.board, out.pst_eval, rook_from, rook_tile, EvalScore'(0), pst_killed_out);
+                        replace_tile(out.board, out.pst_eval, out.piece_count,
+                            rook_to, EMPTY_TILE, pst_castle_out, EvalScore'(0));
+                        replace_tile(out.board, out.pst_eval, out.piece_count,
+                            rook_from, rook_tile, EvalScore'(0), pst_killed_out);
                     end
                 end
 
@@ -849,7 +870,8 @@ module board_update_pipeline #(
                 automatic Position to_pos = in.move.to_pos;
                 automatic Tile new_tile = Tile'(in.set_data[3:0]);
 
-                replace_tile(out.board, out.pst_eval, to_pos, new_tile, pst_killed_out, pst_end_out);
+                replace_tile(out.board, out.pst_eval, out.piece_count,
+                    to_pos, new_tile, pst_killed_out, pst_end_out);
             end
 
             BOARD_SET_TURN_OP: begin
@@ -881,6 +903,7 @@ module board_update_pipeline #(
         next_board_out = out.board;
         next_zobrist_key_out = out.zobrist_key;
         next_pst_eval_out = out.pst_eval;
+        next_piece_count_out = out.piece_count;
     end
 
 endmodule : board_update_pipeline

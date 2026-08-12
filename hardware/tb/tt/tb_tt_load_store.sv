@@ -485,8 +485,8 @@ module tb_tt_load_store;
         store_and_drain(make_store_req(loss_key, TTDepth'(9), EvalScore'(-MATE_SCORE + 4), TT_BOUND_EXACT, move, TTAge'(1), PlyIndex'(4)));
         expect_lookup_hit(loss_key, PlyIndex'(6), EvalScore'(-MATE_SCORE + 6), TTDepth'(9), TT_BOUND_EXACT, move, "losing mate score restored by lookup ply");
 
-        store_and_drain(make_store_req(normal_key, TTDepth'(9), EvalScore'(1234), TT_BOUND_EXACT, move, TTAge'(1), PlyIndex'(7)));
-        expect_lookup_hit(normal_key, PlyIndex'(9), EvalScore'(1234), TTDepth'(9), TT_BOUND_EXACT, move, "non-mate score unchanged by ply");
+        store_and_drain(make_store_req(normal_key, TTDepth'(9), EvalScore'(MATE_THRESHOLD - 1), TT_BOUND_EXACT, move, TTAge'(1), PlyIndex'(7)));
+        expect_lookup_hit(normal_key, PlyIndex'(9), EvalScore'(MATE_THRESHOLD - 1), TTDepth'(9), TT_BOUND_EXACT, move, "largest finite score unchanged by ply");
     endtask
 
     task automatic test_clear_behavior();

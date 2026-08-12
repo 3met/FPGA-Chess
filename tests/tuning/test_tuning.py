@@ -32,12 +32,16 @@ from tools.tuning.cli import main as tuning_main
 from tools.tuning.model import (
     NNUE_ACCUMULATORS,
     NNUE_ENGINE_UNIT_CP,
+    NNUE_MAX_ENGINE_UNITS,
     NNUE_MODEL_VERSION,
+    NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
     PIECE_ORDER,
     EvaluationModel,
     engine_combined_cp,
+    nnue_output_bucket,
 )
+from tools.tuning.quantization import analyze_quantization, signed_bits
 from tools.tuning.reporting import atomic_json, print_report, resolve_run
 from tools.tuning.training import _initialize_model, train
 
@@ -69,6 +73,8 @@ def config_for(directory: Path, dataset: Path, validation_size=2):
         "filters": filters(),
         "training": {
             "seed": 7, "batch_size": 2, "validation_size": validation_size,
+            "nnue_output_buckets": 16, "pst_warmup_steps": 0,
+            "initialize_material_pst_from_engine": False,
             "learning_rate": 0.001, "max_steps": 2, "optimizer": "adamw",
             "scheduler": "cosine", "minimum_learning_rate": 0.0001,
             "loss": "huber", "huber_delta": 100.0, "weight_decay": 0.0,
@@ -177,6 +183,15 @@ class TuningDataTests(unittest.TestCase):
 
 
 class TuningModelAndExportTests(unittest.TestCase):
+    def test_nnue_piece_count_bucket_boundaries(self):
+        counts = (0, 1, 2, 3, 4, 5, 31, 32)
+        codes = torch.zeros((len(counts), 32), dtype=torch.int16)
+        for row, count in enumerate(counts):
+            codes[row, :count] = 1
+        self.assertEqual(
+            nnue_output_bucket(codes).tolist(), [0, 0, 0, 0, 1, 1, 14, 15]
+        )
+
     def test_nnue_initialization_is_zero_output_but_has_live_gradients(self):
         model = EvaluationModel()
         codes = torch.tensor([encode_board(chess.Board(
@@ -189,7 +204,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         self.assertGreater(model.feature_weights.grad.abs().sum().item(), 0.0)
         self.assertGreater(model.accumulator_bias.grad.abs().sum().item(), 0.0)
         self.assertGreater(model.output_weights.grad.abs().sum().item(), 0.0)
-        self.assertGreater(model.output_bias.grad.abs().item(), 0.0)
+        self.assertGreater(model.output_bias.grad.abs().sum().item(), 0.0)
 
     def test_nnue_output_uses_hardware_score_units(self):
         model = EvaluationModel()
@@ -197,11 +212,12 @@ class TuningModelAndExportTests(unittest.TestCase):
             model.feature_weights.zero_()
             model.accumulator_bias.zero_()
             model.output_weights.zero_()
-            model.output_weights[0] = 1
             model.feature_weights[8, 0] = 1
         codes = torch.tensor([
             encode_board(chess.Board("4k3/8/8/8/8/8/P7/4K3 w - -"))
         ], dtype=torch.int16)
+        with torch.no_grad():
+            model.output_weights[nnue_output_bucket(codes)[0], 0] = 1
         self.assertEqual(
             model.nnue_correction(codes, torch.tensor([True])).item(),
             NNUE_ENGINE_UNIT_CP,
@@ -218,8 +234,11 @@ class TuningModelAndExportTests(unittest.TestCase):
             rows = torch.arange(model.feature_weights.numel()).reshape_as(model.feature_weights)
             model.feature_weights.copy_((rows.remainder(3) - 1).to(torch.float32))
             model.accumulator_bias.copy_(torch.arange(NNUE_ACCUMULATORS).remainder(19) - 9)
-            model.output_weights.copy_(torch.arange(NNUE_OUTPUT_INPUTS).remainder(17) - 8)
-            model.output_bias.copy_(torch.tensor(7.0))
+            model.output_weights.copy_(
+                torch.arange(model.output_weights.numel()).reshape_as(model.output_weights)
+                    .remainder(17) - 8
+            )
+            model.output_bias.copy_(torch.arange(NNUE_OUTPUT_BUCKETS).remainder(7))
         indices, valid, _ = model.nnue_indices(codes)
         feature_weights = model._feature_int2(model.feature_weights)
         reference_accumulators = (feature_weights[indices] * valid.unsqueeze(-1)).sum(dim=2)
@@ -233,10 +252,13 @@ class TuningModelAndExportTests(unittest.TestCase):
         second = torch.where(
             white_to_move[:, None], reference_activations[:, 1], reference_activations[:, 0]
         )
+        buckets = nnue_output_bucket(codes)
         reference = (torch.cat((first, second), dim=1)
-            * model._int3(model.output_weights)).sum(dim=1)
-        reference += model._output_bias_int5(model.output_bias)
-        reference = reference.clamp(-30999, 30999) * NNUE_ENGINE_UNIT_CP
+            * model._int3(model.output_weights)[buckets]).sum(dim=1)
+        reference += model._output_bias_int5(model.output_bias)[buckets]
+        reference = reference.clamp(
+            -NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS
+        ) * NNUE_ENGINE_UNIT_CP
         self.assertTrue(torch.equal(model.nnue_correction(codes, white_to_move), reference))
 
     def test_direct_nnue_indices_and_king_delta_match_full_accumulation(self):
@@ -284,30 +306,33 @@ class TuningModelAndExportTests(unittest.TestCase):
     def test_nnue_export_packs_signed_two_bit_weights_output_and_safe_bias(self):
         parameters = {
             "nnue": {
-                "feature_weights": [([-2, -1, 0, 1] * 32)] * 768,
+                "feature_weights": [([-2, -1, 0, 1] * 64)] * 768,
                 "accumulator_bias": [200.0] + [0.0] * (NNUE_ACCUMULATORS - 1),
                 "output_units": "pawn/128",
-                "output_weights": [0.0] * NNUE_OUTPUT_INPUTS,
-                "output_bias": -3.0,
+                "output_buckets": NNUE_OUTPUT_BUCKETS,
+                "output_weights": [
+                    [0.0] * NNUE_OUTPUT_INPUTS for _ in range(NNUE_OUTPUT_BUCKETS)
+                ],
+                "output_bias": [-3.0] * NNUE_OUTPUT_BUCKETS,
             }
         }
-        parameters["nnue"]["output_weights"][0] = 1.0
-        parameters["nnue"]["output_weights"][1] = 8.0
+        parameters["nnue"]["output_weights"][0][0] = 1.0
+        parameters["nnue"]["output_weights"][0][1] = 8.0
         features, outputs, output_bias, biases = export_nnue(parameters)
         self.assertEqual(len(features.splitlines()), 768)
-        self.assertEqual(len(features.splitlines()[0]), 64)
+        self.assertEqual(len(features.splitlines()[0]), 128)
         self.assertTrue(features.splitlines()[0].endswith("4e"))
-        self.assertEqual(len(outputs.splitlines()), 2)
+        self.assertEqual(len(outputs.splitlines()), 64)
         self.assertTrue(all(len(row) == 96 for row in outputs.splitlines()))
         self.assertEqual(outputs.splitlines()[0][-2:], "19")
-        self.assertEqual(output_bias, "1d\n")
+        self.assertEqual(output_bias, "1d\n" * NNUE_OUTPUT_BUCKETS)
         self.assertEqual(biases.splitlines()[0], "3")
-        parameters["nnue"]["output_weights"][0:4] = [0.5, 1.5, 2.5, -0.5]
+        parameters["nnue"]["output_weights"][0][0:4] = [0.5, 1.5, 2.5, -0.5]
         parameters["nnue"]["accumulator_bias"][0:4] = [0.5, 1.5, 2.5, -0.5]
         _, tied_outputs, tied_output_bias, tied_biases = export_nnue(parameters)
         self.assertEqual(tied_outputs.splitlines()[0][-3:], "090")
         self.assertEqual(tied_biases.splitlines()[0:4], ["0", "2", "2", "0"])
-        self.assertEqual(tied_output_bias, "1d\n")
+        self.assertEqual(tied_output_bias, "1d\n" * NNUE_OUTPUT_BUCKETS)
         parameters["nnue"]["output_units"] = "centipawns"
         with self.assertRaises(ValueError):
             export_nnue(parameters)
@@ -318,8 +343,11 @@ class TuningModelAndExportTests(unittest.TestCase):
             rows = torch.arange(model.feature_weights.numel()).reshape_as(model.feature_weights)
             model.feature_weights.copy_((rows.remainder(3) - 1).to(torch.float32))
             model.accumulator_bias.copy_(torch.arange(NNUE_ACCUMULATORS).remainder(8) - 4)
-            model.output_weights.copy_(torch.arange(NNUE_OUTPUT_INPUTS).remainder(16) - 8)
-            model.output_bias.copy_(torch.tensor(13.0))
+            model.output_weights.copy_(
+                torch.arange(model.output_weights.numel()).reshape_as(model.output_weights)
+                    .remainder(16) - 8
+            )
+            model.output_bias.copy_(torch.arange(NNUE_OUTPUT_BUCKETS).remainder(16))
         board = chess.Board("r3k2r/pp1n1ppp/2p1pn2/3p4/3P4/2N1PN2/PP3PPP/R3K2R w KQkq -")
         swapped = board.mirror()
         codes = torch.tensor([encode_board(board), encode_board(swapped)], dtype=torch.int16)
@@ -459,6 +487,12 @@ class TuningModelAndExportTests(unittest.TestCase):
 
 
 class TuningTrainingAndReportTests(unittest.TestCase):
+    def test_signed_quantization_width(self):
+        self.assertEqual(signed_bits(-1, 0), 1)
+        self.assertEqual(signed_bits(-2, 1), 2)
+        self.assertEqual(signed_bits(-4, 3), 3)
+        self.assertEqual(signed_bits(-16, 15), 5)
+
     def test_engine_commit_refuses_interrupted_latest_without_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -508,6 +542,11 @@ class TuningTrainingAndReportTests(unittest.TestCase):
             self.assertEqual(resumed, run)
             resumed_report = json.loads((run / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(resumed_report["step"], 4)
+            with contextlib.redirect_stdout(io.StringIO()):
+                quantization = analyze_quantization(config, run, sample_positions=2)
+            self.assertEqual(quantization["sample_positions"], 2)
+            self.assertEqual(quantization["output_buckets"], NNUE_OUTPUT_BUCKETS)
+            self.assertTrue((run / "quantization.json").exists())
 
     def test_default_config_and_validation(self):
         config = load_config(None)

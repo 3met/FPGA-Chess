@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import public_config
 from .data import CacheBatchLoader, available_cpus, cache_datasets
-from .model import EvaluationModel, NNUE_MODEL_VERSION, PIECE_ORDER
+from .model import EvaluationModel, NNUE_MODEL_VERSION, PIECE_ORDER, engine_combined_cp
 from .reporting import atomic_json, create_run
 
 
@@ -214,7 +214,15 @@ def train(
             f"device={device}, vectorized_cache=true, cpu_threads={torch.get_num_threads()}."
         )
         wandb_run = _start_wandb(config, run)
-        model = EvaluationModel().to(device)
+        output_buckets = int(settings.get("nnue_output_buckets", 16))
+        warmup_steps = int(settings.get("pst_warmup_steps", 0))
+        initialize_engine_pst = bool(settings.get("initialize_material_pst_from_engine", True))
+        model = EvaluationModel(
+            engine_combined_cp() if initialize_engine_pst else None,
+            output_buckets=output_buckets,
+        ).to(device)
+        if initialize_engine_pst:
+            print("Initialized material and PST parameters from the checked-in engine tables.")
         if initialize_run is not None:
             checkpoint_path = initialize_run / "best.pt"
             if not checkpoint_path.exists():
@@ -233,6 +241,10 @@ def train(
             )
         optimizer = _optimizer(torch, model, settings, device)
         scheduler = _scheduler(torch, optimizer, settings)
+        if warmup_steps:
+            print(
+                f"PST/material-only warmup enabled for the first {warmup_steps:,} optimizer steps."
+            )
         start_step = 0
         if resume_run is not None:
             checkpoint_path = run / "latest.pt"
@@ -317,6 +329,9 @@ def train(
                         prediction = compiled(codes, white_to_move)
                         loss = _loss(torch, prediction, target, settings)
                     scaler.scale(loss).backward()
+                    if step < warmup_steps:
+                        for parameter in model.nnue_parameters():
+                            parameter.grad = None
                     clip = settings.get("gradient_clip")
                     if clip is not None:
                         scaler.unscale_(optimizer)
@@ -396,7 +411,7 @@ def train(
                         stop_early = True
                         break
             checkpoint = torch.load(run / "best.pt", map_location="cpu", weights_only=True)
-            best_model = EvaluationModel()
+            best_model = EvaluationModel(output_buckets=output_buckets)
             best_model.load_state_dict(checkpoint["model"])
             best_model.project_parameters()
             best_material = best_model.material_cp().detach().cpu()
@@ -418,11 +433,12 @@ def train(
                     "model_version": NNUE_MODEL_VERSION,
                     "encoding": "relative-2x6x64",
                     "output_units": "pawn/128",
+                    "output_buckets": output_buckets,
                     "accumulator_bias": best_model.accumulator_bias.detach().cpu().tolist(),
                     "feature_weights": best_model.feature_weights.detach().cpu().round()
                         .clamp(-2, 1).to(torch.int8).tolist(),
                     "output_weights": best_model.output_weights.detach().cpu().tolist(),
-                    "output_bias": float(best_model.output_bias.detach().cpu()),
+                    "output_bias": best_model.output_bias.detach().cpu().tolist(),
                 },
                 "best_step": best_step,
             }

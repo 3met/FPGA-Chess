@@ -11,6 +11,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Input | `board_in` | Input `FullBoard` state. |
 | Input | `zobrist_key_in` | Input Zobrist key for the board position. |
 | Input | `pst_eval_in` | Current White-relative piece-square-table evaluation. |
+| Input | `piece_count_in` | Current total number of occupied squares, from 0 through 32. |
 | Input | `move_in` | Move to apply for push/commit operations, or destination square for set-tile operations. |
 | Input | `set_data` | Tile, turn, castle perms, en passant info, or halfmove clock depending on the set operation. This signal is 7 bits wide; narrow setup values use the low bits. |
 | Input | `thread_id` | Search thread whose move-history record should be read or written. |
@@ -18,6 +19,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Output | `board_out` | Output `FullBoard` state. |
 | Output | `zobrist_key_out` | Updated Zobrist key for the board position. |
 | Output | `pst_eval_out` | Updated White-relative PST evaluation. |
+| Output | `piece_count_out` | Updated total number of occupied squares. |
 | Output | `mover_in_check_out` | For push operations, indicates that the resulting position attacks the king of the side that moved. |
 
 ## Operations
@@ -51,7 +53,7 @@ The engine sets up a board through Set Tile, Set Turn, Set Castle Perms, Set En 
 
 Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. The deterministic generator produces the ROM data and SystemVerilog reference package used by RTL; pawn entries on unreachable ranks are zero.
 
-The pipeline always maintains the cached king squares, Zobrist key, and incremental material/PST evaluation. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
+The pipeline always maintains the cached king squares, Zobrist key, incremental material/PST evaluation, and six-bit piece count. The shared tile-replacement path increments the count only for empty-to-piece changes and decrements it only for piece-to-empty changes, so ordinary captures, en passant, setup, and reversal need no board scan. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
 
 ## PST Tables
 

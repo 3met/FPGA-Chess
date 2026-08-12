@@ -146,7 +146,7 @@ The canonical internal representation is two fields:
 
 The total packed width is 284 bits.
 
-`FullBoard` does not include the fullmove number, Zobrist key, PST score, search history, or repetition history. Those values are tracked separately when needed. King squares are derived while a position is loaded and are not separate NNUE inputs or features.
+`FullBoard` does not include the fullmove number, Zobrist key, PST score, total piece count, search history, or repetition history. Those values are tracked separately when needed. King squares are derived while a position is loaded and are not separate NNUE inputs or features.
 
 ## Search, Evaluation, and Metric Types
 
@@ -165,10 +165,14 @@ The total packed width is 284 bits.
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
-| `MAX_EVAL_SCORE` | `32767` | Maximum finite evaluation. |
-| `MIN_EVAL_SCORE` | `-32767` | Minimum finite evaluation. |
+| `MAX_EVAL_SCORE` | `32767` | Positive search infinity and maximum representable non-sentinel score. |
+| `MIN_EVAL_SCORE` | `-32767` | Negative search infinity. |
 | `DRAW_EVAL_SCORE` | `0` | Drawn/equal evaluation. |
 | `UNKNOWN_EVAL_SCORE` | `x` | Unknown evaluation. |
+
+`PieceCount` is a six-bit side-state value covering 0 through the standard-chess maximum of 32. Board update maintains it incrementally and the NNUE output layer uses it for phase-head selection.
+
+`MAX_NON_MATE_EVAL_SCORE` is `0x3fff`. Values whose absolute magnitude is at least `0x4000` are reserved for mate-distance scores; `MAX_EVAL_SCORE` remains `0x7fff` for search infinity.
 
 Material values are available in two forms:
 

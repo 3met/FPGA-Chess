@@ -40,7 +40,7 @@ Repetition history is not part of the Zobrist key, so a stored score may be unsa
 
 ## Mate and Draw Scores
 
-`MATE_SCORE` is `32000` and `MATE_THRESHOLD` is `31000`. Non-mate evaluations are clamped inside `[-MATE_THRESHOLD + 1, MATE_THRESHOLD - 1]`.
+`MATE_THRESHOLD` is `0x4000`, `MATE_SCORE` is `0x4100`, and search infinity is `0x7fff`. Non-mate evaluations are clamped inside `[-0x3fff, 0x3fff]`, so bit 14 separates every finite score from the mate interval. The `0x100` gap from the threshold to `MATE_SCORE` supports mate distances through 256 plies, or mate in 128 moves.
 
 A winning mate at root-relative ply `ply` is encoded as `MATE_SCORE - ply`; a losing mate is `-MATE_SCORE + ply`. TT stores normalize mate scores relative to the stored node and restore them relative to the current root.
 
