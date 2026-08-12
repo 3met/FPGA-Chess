@@ -428,6 +428,9 @@ module tb_tt_load_store;
         store_and_drain(make_store_req(key, TTDepth'(5), EvalScore'(52), TT_BOUND_EXACT, move, TTAge'(4), PlyIndex'(0)));
         expect_lookup_hit(key, PlyIndex'(0), EvalScore'(52), TTDepth'(5), TT_BOUND_EXACT, move, "exact same-depth entry replaces bound");
 
+        store_and_drain(make_store_req(key, TTDepth'(5), EvalScore'(53), TT_BOUND_UPPER, move, TTAge'(4), PlyIndex'(0)));
+        expect_lookup_hit(key, PlyIndex'(0), EvalScore'(52), TTDepth'(5), TT_BOUND_EXACT, move, "same-depth bound preserves exact entry");
+
         clear_table();
         store_and_drain(make_store_req(key, TTDepth'(8), EvalScore'(80), TT_BOUND_EXACT, move, TTAge'(5), PlyIndex'(0)));
         store_and_drain(make_store_req(key, TTDepth'(7), EvalScore'(70), TT_BOUND_LOWER, move, TTAge'(5), PlyIndex'(0)));

@@ -248,6 +248,11 @@ module tb_tt_external_load_store;
         check(request_count == 1, "equal-depth exact result replaced upper bound");
         do_lookup(64'h4567_89ab_cdef_0123, 1'b1, ThreadID'(0),
             EvalScore'(211), PlyIndex'(0), "exact replacement lookup");
+        request_count = 0;
+        do_store(64'h4567_89ab_cdef_0123, TTDepth'(8), EvalScore'(212), TT_BOUND_LOWER);
+        check(request_count == 0, "equal-depth bound did not overwrite exact entry");
+        do_lookup(64'h4567_89ab_cdef_0123, 1'b1, ThreadID'(0),
+            EvalScore'(211), PlyIndex'(0), "exact entry survives equal-depth bound");
 
         // Stored mate distance is node-relative and restored for the lookup ply.
         do_store(64'h5678_9abc_def0_1234, TTDepth'(4),

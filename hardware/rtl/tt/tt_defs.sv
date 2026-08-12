@@ -130,15 +130,17 @@ package tt_defs;
         input TTBoundType new_bound_type
     );
         automatic logic stale_with_depth_window;
-        automatic logic exact_over_non_exact;
+        automatic logic equal_depth_allowed;
 
         stale_with_depth_window = (old_age != new_age)
             && (({1'b0, new_depth} + 7'd4) >= {1'b0, old_depth});
-        exact_over_non_exact = (new_bound_type == TT_BOUND_EXACT)
-            && (old_bound_type != TT_BOUND_EXACT)
-            && (new_depth == old_depth);
+        // At equal depth, preserve an exact result against a later bound while
+        // still allowing another exact result or bound to refresh its peer.
+        equal_depth_allowed = (new_depth == old_depth)
+            && ((old_bound_type != TT_BOUND_EXACT)
+                || (new_bound_type == TT_BOUND_EXACT));
         return !old_valid || !old_key_matches || stale_with_depth_window
-            || new_depth >= old_depth || exact_over_non_exact;
+            || new_depth > old_depth || equal_depth_allowed;
     endfunction : tt_should_replace
 
     function automatic TTEntry tt_invalid_entry();

@@ -78,8 +78,9 @@ The TT stores one logical entry at each index. A store replaces the indexed entr
 | --------- | ------ |
 | Entry is invalid or belongs to another key | The slot contains no result for this position. |
 | Entry belongs to an older generation and the new depth is at least `old_depth - 4` | Prefer fresh search information without discarding a substantially deeper result. |
-| New depth is at least the stored depth | Preserve the deepest available result. |
-| Equal-depth new result is exact and the stored result is not | Prefer an exact score over a bound. |
+| New depth exceeds the stored depth | Preserve the deepest available result. |
+| Depths are equal and the stored result is not exact | Allow bounds to refresh peers and exact scores to replace bounds. |
+| Depths are equal and both results are exact | Allow the latest exact score and move to refresh the entry. |
 
 Skipping a store is not an error. Generation comparison uses equality with the current generation; New Game advances that generation.
 
