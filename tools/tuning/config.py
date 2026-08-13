@@ -53,7 +53,7 @@ def _validate(config: dict[str, Any]) -> None:
     ):
         if key not in training:
             raise ConfigError(f"training.{key} is required")
-    buckets = training.get("nnue_output_buckets", 16)
+    buckets = training.get("nnue_output_buckets", 8)
     if not isinstance(buckets, int) or buckets < 1 or buckets > 32 or 32 % buckets:
         raise ConfigError("training.nnue_output_buckets must be a positive divisor of 32")
     warmup = training.get("pst_warmup_steps", 0)
@@ -61,6 +61,20 @@ def _validate(config: dict[str, Any]) -> None:
         raise ConfigError("training.pst_warmup_steps must be nonnegative and below max_steps")
     if not isinstance(training.get("initialize_material_pst_from_engine", True), bool):
         raise ConfigError("training.initialize_material_pst_from_engine must be boolean")
+    if "bucket_loss_weights" in training:
+        raise ConfigError("training.bucket_loss_weights is no longer supported")
+    overflow_penalty = training.get("accumulator_overflow_penalty", 0.0)
+    if not isinstance(overflow_penalty, (int, float)) or overflow_penalty < 0:
+        raise ConfigError("training.accumulator_overflow_penalty must be nonnegative")
+    microbatch_size = training.get("microbatch_size", "auto")
+    if microbatch_size != "auto" and (
+        not isinstance(microbatch_size, int)
+        or microbatch_size < 1
+        or microbatch_size > training["batch_size"]
+    ):
+        raise ConfigError(
+            "training.microbatch_size must be 'auto' or a positive integer no larger than batch_size"
+        )
     positive = (
         "batch_size", "learning_rate", "max_steps", "shuffle_buffer",
         "validation_interval_steps", "checkpoint_interval_steps",
@@ -85,16 +99,27 @@ def _validate(config: dict[str, Any]) -> None:
         raise ConfigError("dataset.progress_interval_seconds must be positive")
     if dataset["max_positions"] is not None and dataset["max_positions"] <= training["validation_size"]:
         raise ConfigError("dataset.max_positions must exceed training.validation_size")
-    if training["loss"] not in {"huber", "mse"}:
-        raise ConfigError("training.loss must be 'huber' or 'mse'")
+    if training["loss"] != "score_probability_mse":
+        raise ConfigError("training.loss must be 'score_probability_mse'")
     if training["optimizer"] not in {"adamw", "adam", "sgd"}:
         raise ConfigError("training.optimizer must be adamw, adam, or sgd")
-    if training.get("scheduler", "none") not in {"none", "cosine"}:
-        raise ConfigError("training.scheduler must be none or cosine")
-    if training.get("minimum_learning_rate", 0.0) < 0:
-        raise ConfigError("training.minimum_learning_rate must be nonnegative")
-    if training.get("minimum_learning_rate", 0.0) > training["learning_rate"]:
-        raise ConfigError("training.minimum_learning_rate cannot exceed training.learning_rate")
+    if training.get("scheduler", "none") not in {"none", "warmup_exponential"}:
+        raise ConfigError("training.scheduler must be none or warmup_exponential")
+    for name in ("score_probability_offset", "score_probability_scale"):
+        if not isinstance(training.get(name), (int, float)) or training[name] <= 0:
+            raise ConfigError(f"training.{name} must be positive")
+    warmup_fraction = training.get("warmup_fraction", 0.015)
+    if not isinstance(warmup_fraction, (int, float)) or not 0.01 <= warmup_fraction <= 0.02:
+        raise ConfigError("training.warmup_fraction must be between 0.01 and 0.02")
+    warmup_start = training.get("warmup_start_factor", 0.1)
+    if not isinstance(warmup_start, (int, float)) or not 0 < warmup_start <= 1:
+        raise ConfigError("training.warmup_start_factor must be in (0, 1]")
+    epoch_decay = training.get("exponential_decay_per_epoch", 0.992)
+    if not isinstance(epoch_decay, (int, float)) or not 0 < epoch_decay <= 1:
+        raise ConfigError("training.exponential_decay_per_epoch must be in (0, 1]")
+    weight_decay = training.get("weight_decay", 0.0)
+    if not isinstance(weight_decay, (int, float)) or weight_decay < 0:
+        raise ConfigError("training.weight_decay must be nonnegative")
     for key in (
         "remove_mates", "remove_in_check", "remove_captures", "remove_checks",
     ):

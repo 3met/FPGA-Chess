@@ -146,9 +146,11 @@ module tb_nnue_evaluator;
             "NNUE keeps 256 accumulators per perspective");
         check(nnue_output_bucket(PieceCount'(1)) == NnueOutputBucket'(0)
                 && nnue_output_bucket(PieceCount'(2)) == NnueOutputBucket'(0)
-                && nnue_output_bucket(PieceCount'(3)) == NnueOutputBucket'(0)
-                && nnue_output_bucket(PieceCount'(4)) == NnueOutputBucket'(1)
-                && nnue_output_bucket(PieceCount'(32)) == NnueOutputBucket'(15),
+                && nnue_output_bucket(PieceCount'(5)) == NnueOutputBucket'(0)
+                && nnue_output_bucket(PieceCount'(6)) == NnueOutputBucket'(1)
+                && nnue_output_bucket(PieceCount'(29)) == NnueOutputBucket'(6)
+                && nnue_output_bucket(PieceCount'(30)) == NnueOutputBucket'(7)
+                && nnue_output_bucket(PieceCount'(32)) == NnueOutputBucket'(7),
             "piece counts map from the legal minimum through the full-board bucket");
         check(nnue_feature_index(
             Position'(8), WHITE_PAWN, WHITE) == NnueFeatureIndex'(8),
@@ -192,7 +194,7 @@ module tb_nnue_evaluator;
         for (int row = NNUE_OUTPUT_MAC_CYCLES;
                 row < 2 * NNUE_OUTPUT_MAC_CYCLES; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h2}};
-        eval_piece_count = PieceCount'(4);
+        eval_piece_count = PieceCount'(6);
         evaluate(EvalScore'(512), "piece count selects an independent output bucket");
         eval_piece_count = PieceCount'(2);
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)

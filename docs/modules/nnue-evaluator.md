@@ -20,7 +20,7 @@ Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumul
 
 ## Output Layer
 
-Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Sixteen output heads use the incrementally maintained total piece count: counts 2-3 use head 0, counts 4-5 use head 1, counts 30-31 use head 14, and the full 32-piece position uses head 15. This alignment gives the legal two-king minimum a head trained by three-piece positions. A 128-lane MAC evaluates the 512 inputs in four cycles; a synchronous block-ROM prefetch supplies one 384-bit weight row ahead of the MAC, so output-head selection adds neither a cycle nor combinational selection muxes. Every signed activation-weight product uses generic multiplication so each synthesis target may choose its own LUT, DSP, packing, and MAC implementation. The result is clipped to the finite search-score range.
+Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Eight output heads use the incrementally maintained total piece count for the ranges 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. Grouping four adjacent counts gives scarce endgames more training data while retaining phase-specific output parameters. A 128-lane MAC evaluates the 512 inputs in four cycles; a synchronous block-ROM prefetch supplies one 384-bit weight row ahead of the MAC, so output-head selection adds neither a cycle nor combinational selection muxes. Every signed activation-weight product uses generic multiplication so each synthesis target may choose its own LUT, DSP, packing, and MAC implementation. The result is clipped to the finite search-score range.
 
 Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
 
@@ -43,10 +43,10 @@ The tuning and export workflow is described in [evaluation-tuning.md](../develop
 | --------- | --------------- | ------------ |
 | Feature transformer | `768 * 256 * 2` bits | 48 KiB |
 | Accumulator bias | `256 * 3` bits | 96 B |
-| Output weights | `16 * 512 * 3` bits | 3 KiB |
-| Output biases | `16 * 5` bits | 10 B |
-| Total trained parameters |  | 52,330 B (51.1 KiB) |
+| Output weights | `8 * 512 * 3` bits | 1.5 KiB |
+| Output biases | `8 * 5` bits | 5 B |
+| Total trained parameters |  | 50,789 B (49.6 KiB) |
 
 Runtime accumulator storage is separate from trained parameter memory. Each thread has two 256-lane signed-five-bit perspectives, or 320 B per logical state. Multi-thread builds keep update and evaluation mirrors to provide independent read paths; a single-thread build snapshots the update state directly and lets synthesis remove the otherwise wasteful one-word evaluation mirror.
 
-On the single-thread Cyclone V target, the transformer maps to 393,216 block-memory bits in 52 M10Ks. The 24,576-bit output-weight table maps to ten additional M10Ks because its 384-bit read width spans ten physical blocks; the accumulator and output biases remain in logic. With generic inferred multiplication, synchronous output-weight prefetch, and request-level accumulator-update gating, the complete fitted evaluator uses 3,050.5 ALMs, 5,398 logic registers, 62 M10Ks, and 80 DSP blocks.
+On the single-thread Cyclone V target, the transformer maps to 393,216 block-memory bits in 52 M10Ks. The 12,288-bit output-weight table retains its 384-bit read width; fitted resource counts must be refreshed after the next synthesis. The accumulator and output biases remain in logic.

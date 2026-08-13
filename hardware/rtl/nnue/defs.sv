@@ -18,22 +18,22 @@ package nnue_defs;
     localparam int NNUE_OUTPUT_MAC_LANES = 128;
     localparam int NNUE_OUTPUT_MAC_CYCLES =
         (NNUE_OUTPUT_INPUT_COUNT + NNUE_OUTPUT_MAC_LANES - 1) / NNUE_OUTPUT_MAC_LANES;
-    localparam int NNUE_OUTPUT_BUCKET_COUNT = 16;
+    localparam int NNUE_OUTPUT_BUCKET_COUNT = 8;
     localparam int NNUE_OUTPUT_WEIGHT_ROW_COUNT =
         NNUE_OUTPUT_BUCKET_COUNT * NNUE_OUTPUT_MAC_CYCLES;
     typedef logic [$clog2(NNUE_OUTPUT_BUCKET_COUNT)-1:0] NnueOutputBucket;
 
-    // Pair counts from the legal two-king minimum upward so every head receives
-    // training examples; the full 32-piece position occupies the final head.
+    // Group four counts from the legal two-king minimum upward so the scarce
+    // low-piece positions share heads; the final head covers 30 through 32.
     function automatic NnueOutputBucket nnue_output_bucket(input PieceCount piece_count);
         if (piece_count <= PieceCount'(2))
             return NnueOutputBucket'(0);
-        return NnueOutputBucket'((piece_count - PieceCount'(2)) >> 1);
+        return NnueOutputBucket'((piece_count - PieceCount'(2)) >> 2);
     endfunction
 
     typedef logic [9:0] NnueFeatureIndex;
-    // The trained distribution stays well inside signed five-bit state. Modular
-    // updates preserve exact inverse deltas if a rare extreme wraps.
+    // Training penalizes values outside signed five-bit state. Modular updates
+    // preserve exact inverse deltas if an extreme still wraps.
     localparam int NNUE_ACCUMULATOR_BITS = 5;
     localparam int NNUE_ACCUMULATOR_BIAS_BITS = 3;
     typedef logic signed [NNUE_ACCUMULATOR_BITS-1:0] NnueAccumulator;

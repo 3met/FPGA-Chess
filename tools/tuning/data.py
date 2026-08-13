@@ -349,12 +349,14 @@ class CacheBatchLoader:
         shuffle: bool,
         seed: int,
         shuffle_buffer: int,
+        reshuffle_each_iteration: bool = True,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
         self.shuffle_buffer = max(batch_size, shuffle_buffer)
+        self.reshuffle_each_iteration = reshuffle_each_iteration
         self.iteration = 0
 
     def __len__(self) -> int:
@@ -372,7 +374,8 @@ class CacheBatchLoader:
         records = numpy.memmap(self.dataset.path, dtype=dtype, mode="r")
         start = self.dataset.start
         stop = start + len(self.dataset)
-        rng = numpy.random.default_rng(self.seed + self.iteration)
+        iteration = self.iteration if self.reshuffle_each_iteration else 0
+        rng = numpy.random.default_rng(self.seed + iteration)
         self.iteration += 1
         if self.shuffle:
             block_starts = numpy.arange(start, stop, self.shuffle_buffer)

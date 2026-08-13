@@ -20,13 +20,12 @@ NNUE_PIECE_CATEGORIES = 6
 NNUE_FEATURE_COUNT = NNUE_SIDES * NNUE_PIECE_CATEGORIES * 64
 NNUE_ACCUMULATORS = 256
 NNUE_OUTPUT_INPUTS = NNUE_SIDES * NNUE_ACCUMULATORS
-NNUE_OUTPUT_BUCKETS = 16
+NNUE_OUTPUT_BUCKETS = 8
 NNUE_ACCUMULATOR_BITS = 5
 NNUE_OUTPUT_WEIGHT_BITS = 3
 NNUE_OUTPUT_BIAS_BITS = 5
 NNUE_ENGINE_UNIT_CP = 100.0 / 128.0
 NNUE_MAX_ENGINE_UNITS = 0x3FFF
-NNUE_MODEL_VERSION = 11
 
 
 def nnue_output_bucket(codes: torch.Tensor, bucket_count: int = NNUE_OUTPUT_BUCKETS) -> torch.Tensor:
@@ -139,7 +138,7 @@ class EvaluationModel(nn.Module):
 
     @torch.no_grad()
     def project_parameters(self) -> None:
-        """Remove PST offset ambiguity without changing reachable combined scores."""
+        """Keep identifiable PST values and latent QAT parameters in their legal ranges."""
         pst = self.terms["pst"].reshape(6, 64)
         pst[0, :8] = 0
         pst[0, 56:] = 0
@@ -149,6 +148,12 @@ class EvaluationModel(nn.Module):
             self.terms["material"][piece_index - 1].add_(center)
         king_center = (pst[5].min() + pst[5].max()) / 2.0
         pst[5].sub_(king_center)
+        # Projecting the latent values prevents straight-through gradients from
+        # stranding parameters far beyond a deployable quantization bin.
+        self.feature_weights.clamp_(-2, 1)
+        self.accumulator_bias.clamp_(-4, 3)
+        self.output_weights.clamp_(-4, 3)
+        self.output_bias.clamp_(-16, 15)
 
     @staticmethod
     def _feature_int2(values: torch.Tensor) -> torch.Tensor:
@@ -191,12 +196,12 @@ class EvaluationModel(nn.Module):
         indices = category * 64 + relative_square
         return indices, valid, mask
 
-    def nnue_correction(
+    def _nnue_correction(
         self,
         codes: torch.Tensor,
         white_to_move: torch.Tensor,
-    ) -> torch.Tensor:
-        """Evaluate the side-to-move ordered activation pair and output layer."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate the correction and a differentiable five-bit overflow penalty."""
         indices, valid, _ = self.nnue_indices(codes)
         feature_weights = self._feature_int2(self.feature_weights)
         # Embedding-bag fuses the feature gather and 32-piece reduction, avoiding
@@ -213,23 +218,50 @@ class EvaluationModel(nn.Module):
         # Hardware retains the low five bits so add/remove deltas remain exact
         # inverses even in the rare event of an overflow.
         accumulator_modulus = 1 << NNUE_ACCUMULATOR_BITS
+        # Distance to the deployable interval gives the same squared overflow
+        # penalty without materializing separate lower- and upper-bound tensors.
+        deployable = accumulators.clamp(
+            -accumulator_modulus // 2, accumulator_modulus // 2 - 1
+        )
+        overflow_penalty = (accumulators - deployable).square().mean()
         accumulators = torch.remainder(
             accumulators + accumulator_modulus // 2, accumulator_modulus
         ) - accumulator_modulus // 2
         activations = accumulators.clamp(0, 7)
         white_to_move = white_to_move.to(device=codes.device, dtype=torch.bool)
-        first = torch.where(white_to_move[:, None], activations[:, 0], activations[:, 1])
-        second = torch.where(white_to_move[:, None], activations[:, 1], activations[:, 0])
-        ordered_activations = torch.cat((first, second), dim=1)
+        perspective_order = torch.stack(
+            (~white_to_move, white_to_move), dim=1
+        ).to(torch.long)
+        ordered_activations = activations.gather(
+            1,
+            perspective_order[:, :, None].expand(-1, -1, NNUE_ACCUMULATORS),
+        ).flatten(1)
         buckets = nnue_output_bucket(codes, self.output_buckets)
         weights = self._int3(self.output_weights)[buckets]
         # Ordering by side to move makes color-flipped positions share exactly
         # the same output without constraining the two halves of the head.
         output_bias = self._output_bias_int5(self.output_bias)[buckets]
         engine_units = (ordered_activations * weights).sum(dim=1) + output_bias
-        return engine_units.clamp(-NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS) * NNUE_ENGINE_UNIT_CP
+        correction = engine_units.clamp(
+            -NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS
+        ) * NNUE_ENGINE_UNIT_CP
+        return correction, overflow_penalty
 
-    def forward(self, codes: torch.Tensor, white_to_move: torch.Tensor) -> torch.Tensor:
+    def nnue_correction(
+        self,
+        codes: torch.Tensor,
+        white_to_move: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the deployed side-to-move-relative NNUE correction."""
+        return self._nnue_correction(codes, white_to_move)[0]
+
+    def forward(
+        self,
+        codes: torch.Tensor,
+        white_to_move: torch.Tensor,
+        return_overflow_penalty: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate a position and optionally return the QAT overflow penalty."""
         mask = codes != 0
         indices = codes.abs().to(torch.long).sub(1).clamp_min(0)
         signs = codes.sign().to(self.terms["pst"].dtype)
@@ -240,4 +272,8 @@ class EvaluationModel(nn.Module):
             white_relative.new_tensor(1.0),
             white_relative.new_tensor(-1.0),
         )
-        return white_relative + stm_sign * self.nnue_correction(codes, white_to_move)
+        correction, overflow_penalty = self._nnue_correction(codes, white_to_move)
+        prediction = white_relative + stm_sign * correction
+        if return_overflow_penalty:
+            return prediction, overflow_penalty
+        return prediction

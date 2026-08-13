@@ -15,7 +15,6 @@ from .model import (
     EvaluationModel,
     NNUE_ACCUMULATORS,
     NNUE_FEATURE_COUNT,
-    NNUE_MODEL_VERSION,
     NNUE_OUTPUT_BIAS_BITS,
     NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
@@ -131,11 +130,8 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
             "combined_pst": state["terms.material_pst"].reshape(6, 64).tolist(),
             "best_step": checkpoint.get("step"),
         }, "legacy best checkpoint"
-    if checkpoint.get("nnue_model_version") != NNUE_MODEL_VERSION:
-        raise ValueError(
-            "checkpoint does not match the current NNUE model and cannot be exported"
-        )
-    model = EvaluationModel()
+    output_buckets = int(state["output_weights"].shape[0])
+    model = EvaluationModel(output_buckets=output_buckets)
     model.load_state_dict(state)
     model.project_parameters()
     material = model.material_cp().detach().cpu()
@@ -147,10 +143,9 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
         "pst": {piece: pst[index].tolist() for index, piece in enumerate(PIECE_ORDER)},
         "combined_pst": model.combined_cp().detach().cpu().tolist(),
         "nnue": {
-            "model_version": NNUE_MODEL_VERSION,
             "encoding": "relative-2x6x64",
             "output_units": "pawn/128",
-            "output_buckets": NNUE_OUTPUT_BUCKETS,
+            "output_buckets": output_buckets,
             "accumulator_bias": model.accumulator_bias.detach().cpu().tolist(),
             "feature_weights": model.feature_weights.detach().cpu().round()
                 .clamp(-2, 1).to(torch.int8).tolist(),

@@ -12,6 +12,7 @@ import torch
 from tools.tuning.config import ConfigError, load_config
 from tools.tuning.data import (
     BufferedShuffleSampler,
+    CacheBatchLoader,
     build_cache,
     cache_datasets,
     encode_board,
@@ -33,7 +34,6 @@ from tools.tuning.model import (
     NNUE_ACCUMULATORS,
     NNUE_ENGINE_UNIT_CP,
     NNUE_MAX_ENGINE_UNITS,
-    NNUE_MODEL_VERSION,
     NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
     PIECE_ORDER,
@@ -43,7 +43,14 @@ from tools.tuning.model import (
 )
 from tools.tuning.quantization import analyze_quantization, signed_bits
 from tools.tuning.reporting import atomic_json, print_report, resolve_run
-from tools.tuning.training import _initialize_model, train
+from tools.tuning.training import (
+    _initialize_model,
+    _loss,
+    _microbatches,
+    _scheduler,
+    _score_probability,
+    train,
+)
 
 
 def filters(**overrides):
@@ -72,12 +79,19 @@ def config_for(directory: Path, dataset: Path, validation_size=2):
         },
         "filters": filters(),
         "training": {
-            "seed": 7, "batch_size": 2, "validation_size": validation_size,
-            "nnue_output_buckets": 16, "pst_warmup_steps": 0,
+            "seed": 7, "batch_size": 2, "microbatch_size": 1,
+            "validation_size": validation_size,
+            "nnue_output_buckets": 8,
+            "accumulator_overflow_penalty": 0.0001,
+            "pst_warmup_steps": 0,
             "initialize_material_pst_from_engine": False,
             "learning_rate": 0.001, "max_steps": 2, "optimizer": "adamw",
-            "scheduler": "cosine", "minimum_learning_rate": 0.0001,
-            "loss": "huber", "huber_delta": 100.0, "weight_decay": 0.0,
+            "scheduler": "warmup_exponential", "warmup_fraction": 0.01,
+            "warmup_start_factor": 0.1, "exponential_decay_per_epoch": 0.992,
+            "loss": "score_probability_mse",
+            "score_probability_offset": 270.0,
+            "score_probability_scale": 380.0,
+            "weight_decay": 0.00001,
             "gradient_clip": 1000.0, "device": "cpu", "cpu_threads": 1,
             "shuffle_buffer": 3, "compile": False, "amp": False,
             "validation_interval_steps": 1, "checkpoint_interval_steps": 1,
@@ -181,16 +195,77 @@ class TuningDataTests(unittest.TestCase):
         self.assertEqual(first_order, second_order)
         self.assertEqual(sorted(first_order), list(range(20)))
 
+    def test_fixed_shuffle_randomizes_validation_reproducibly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "positions.jsonl"
+            source.write_text(
+                "".join(json.dumps(record(cp=value)) + "\n" for value in range(8)),
+                encoding="utf-8",
+            )
+            config = config_for(root, source, validation_size=4)
+            cache = build_cache(config, print_fn=lambda _: None)
+            _train, validation, _metadata = cache_datasets(cache)
+            loader = CacheBatchLoader(
+                validation,
+                batch_size=2,
+                shuffle=True,
+                seed=11,
+                shuffle_buffer=2,
+                reshuffle_each_iteration=False,
+            )
+            first = torch.cat([target for _codes, _stm, target in loader]).tolist()
+            second = torch.cat([target for _codes, _stm, target in loader]).tolist()
+            sequential = torch.cat([
+                target for _codes, _stm, target in CacheBatchLoader(
+                    validation,
+                    batch_size=2,
+                    shuffle=False,
+                    seed=11,
+                    shuffle_buffer=2,
+                )
+            ]).tolist()
+            validation.close()
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, sequential)
+
 
 class TuningModelAndExportTests(unittest.TestCase):
     def test_nnue_piece_count_bucket_boundaries(self):
-        counts = (0, 1, 2, 3, 4, 5, 31, 32)
+        counts = (2, 5, 6, 9, 10, 13, 14, 17, 18, 21, 22, 25, 26, 29, 30, 32)
         codes = torch.zeros((len(counts), 32), dtype=torch.int16)
         for row, count in enumerate(counts):
             codes[row, :count] = 1
         self.assertEqual(
-            nnue_output_bucket(codes).tolist(), [0, 0, 0, 0, 1, 1, 14, 15]
+            nnue_output_bucket(codes).tolist(),
+            [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7],
         )
+
+    def test_qat_projection_keeps_latent_parameters_deployable(self):
+        model = EvaluationModel()
+        with torch.no_grad():
+            model.feature_weights.fill_(100.0)
+            model.accumulator_bias.fill_(-100.0)
+            model.output_weights.fill_(100.0)
+            model.output_bias.fill_(-100.0)
+            model.project_parameters()
+        self.assertEqual(model.feature_weights.unique().tolist(), [1.0])
+        self.assertEqual(model.accumulator_bias.unique().tolist(), [-4.0])
+        self.assertEqual(model.output_weights.unique().tolist(), [3.0])
+        self.assertEqual(model.output_bias.unique().tolist(), [-16.0])
+
+    def test_training_forward_penalizes_five_bit_accumulator_overflow(self):
+        model = EvaluationModel()
+        codes = torch.tensor([encode_board(chess.Board())], dtype=torch.int16)
+        white_to_move = torch.tensor([True])
+        with torch.no_grad():
+            model.feature_weights.fill_(-2.0)
+            model.accumulator_bias.fill_(-4.0)
+        prediction, penalty = model(codes, white_to_move, True)
+        self.assertEqual(prediction.shape, torch.Size([1]))
+        self.assertGreater(penalty.item(), 0.0)
+        penalty.backward()
+        self.assertGreater(model.feature_weights.grad.abs().sum().item(), 0.0)
 
     def test_nnue_initialization_is_zero_output_but_has_live_gradients(self):
         model = EvaluationModel()
@@ -322,7 +397,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         self.assertEqual(len(features.splitlines()), 768)
         self.assertEqual(len(features.splitlines()[0]), 128)
         self.assertTrue(features.splitlines()[0].endswith("4e"))
-        self.assertEqual(len(outputs.splitlines()), 64)
+        self.assertEqual(len(outputs.splitlines()), 4 * NNUE_OUTPUT_BUCKETS)
         self.assertTrue(all(len(row) == 96 for row in outputs.splitlines()))
         self.assertEqual(outputs.splitlines()[0][-2:], "19")
         self.assertEqual(output_bias, "1d\n" * NNUE_OUTPUT_BUCKETS)
@@ -358,14 +433,12 @@ class TuningModelAndExportTests(unittest.TestCase):
         stm_relative = torch.where(white_to_move, white_relative, -white_relative)
         self.assertEqual(stm_relative[0].item(), stm_relative[1].item())
 
-    def test_old_nnue_checkpoint_is_rejected(self):
+    def test_incompatible_nnue_checkpoint_shape_is_rejected(self):
         model = EvaluationModel()
         old_state = dict(model.state_dict())
-        with self.assertRaises(ValueError):
-            _initialize_model(model, {
-                "nnue_model_version": NNUE_MODEL_VERSION - 1,
-                "model": old_state,
-            })
+        old_state["output_weights"] = old_state["output_weights"][:1]
+        with self.assertRaises(RuntimeError):
+            _initialize_model(model, {"model": old_state})
 
     def test_model_matches_manual_current_engine_evaluation(self):
         weights = engine_combined_cp()
@@ -434,16 +507,9 @@ class TuningModelAndExportTests(unittest.TestCase):
             run = Path(directory)
             model = EvaluationModel()
             torch.save({"model": model.state_dict(), "step": 11}, run / "best.pt")
-            with self.assertRaisesRegex(ValueError, "does not match"):
-                load_run_parameters(run)
-            torch.save({
-                "nnue_model_version": NNUE_MODEL_VERSION,
-                "model": model.state_dict(),
-                "step": 12,
-            }, run / "best.pt")
             parameters, source = load_run_parameters(run)
             self.assertEqual(source, "best checkpoint")
-            self.assertEqual(parameters["best_step"], 12)
+            self.assertEqual(parameters["best_step"], 11)
             self.assertEqual(parameters["material"]["pawn"], 100.0)
 
     def test_dry_run_does_not_change_engine_files(self):
@@ -487,6 +553,55 @@ class TuningModelAndExportTests(unittest.TestCase):
 
 
 class TuningTrainingAndReportTests(unittest.TestCase):
+    def test_score_probability_transform_and_loss_are_symmetric(self):
+        values = torch.tensor([-1000.0, -270.0, 0.0, 270.0, 1000.0])
+        transformed = _score_probability(values, 270.0, 380.0)
+        self.assertAlmostEqual(transformed[2].item(), 0.5, places=7)
+        self.assertTrue(torch.allclose(transformed + transformed.flip(0), torch.ones(5)))
+        settings = {
+            "score_probability_offset": 270.0,
+            "score_probability_scale": 380.0,
+        }
+        self.assertEqual(_loss(torch, values, values, settings).item(), 0.0)
+        self.assertGreater(
+            _loss(torch, torch.zeros(1), torch.full((1,), 500.0), settings).item(),
+            0.0,
+        )
+
+    def test_learning_rate_warms_up_then_decays_per_epoch(self):
+        parameter = torch.nn.Parameter(torch.zeros(()))
+        optimizer = torch.optim.AdamW([parameter], lr=0.01)
+        settings = {
+            "scheduler": "warmup_exponential",
+            "max_steps": 100,
+            "warmup_fraction": 0.02,
+            "warmup_start_factor": 0.1,
+            "exponential_decay_per_epoch": 0.992,
+        }
+        scheduler = _scheduler(torch, optimizer, settings, steps_per_epoch=10)
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.001)
+        for _ in range(2):
+            optimizer.step()
+            scheduler.step()
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.01)
+        for _ in range(10):
+            optimizer.step()
+            scheduler.step()
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.01 * 0.992, places=9)
+
+    def test_auto_microbatching_uses_cpu_cache_sized_chunks(self):
+        codes = torch.zeros((5000, 32), dtype=torch.int16)
+        white_to_move = torch.zeros(5000, dtype=torch.bool)
+        target = torch.zeros(5000)
+        chunks = list(_microbatches(
+            codes, white_to_move, target,
+            {"batch_size": 5000, "microbatch_size": "auto"},
+        ))
+        self.assertEqual(
+            [len(chunk_target) for _, _, chunk_target in chunks],
+            [2048, 2048, 904],
+        )
+
     def test_signed_quantization_width(self):
         self.assertEqual(signed_bits(-1, 0), 1)
         self.assertEqual(signed_bits(-2, 1), 2)
@@ -551,6 +666,13 @@ class TuningTrainingAndReportTests(unittest.TestCase):
     def test_default_config_and_validation(self):
         config = load_config(None)
         self.assertTrue(Path(config["dataset"]["path"]).is_absolute())
+        self.assertTrue(config["filters"]["remove_captures"])
+        self.assertTrue(config["filters"]["remove_in_check"])
+        self.assertEqual(config["training"]["nnue_output_buckets"], 8)
+        self.assertEqual(config["training"]["learning_rate"], 0.01)
+        self.assertEqual(config["training"]["exponential_decay_per_epoch"], 0.992)
+        self.assertLessEqual(config["training"]["warmup_fraction"], 0.02)
+        self.assertGreaterEqual(config["training"]["warmup_fraction"], 0.01)
         bad = json.loads(Path("tools/tuning/default_config.json").read_text(encoding="utf-8"))
         bad["training"]["batch_size"] = 0
         with tempfile.TemporaryDirectory() as directory:
@@ -559,7 +681,22 @@ class TuningTrainingAndReportTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(path)
         bad["training"]["batch_size"] = 1
+        bad["training"]["microbatch_size"] = 1
         bad["training"]["early_stopping_patience"] = 0
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps(bad), encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                load_config(path)
+        bad["training"]["early_stopping_patience"] = 1
+        bad["training"]["bucket_loss_weights"] = [1.0] * NNUE_OUTPUT_BUCKETS
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps(bad), encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                load_config(path)
+        del bad["training"]["bucket_loss_weights"]
+        bad["training"]["microbatch_size"] = 2
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.json"
             path.write_text(json.dumps(bad), encoding="utf-8")
