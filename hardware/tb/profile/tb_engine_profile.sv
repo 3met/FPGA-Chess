@@ -42,7 +42,7 @@ module tb_engine_profile #(
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
     localparam int TT_STATE_COUNT = 12;
     localparam int TT_STATE_IDLE = 0;
-    localparam int SDRAM_STATE_COUNT = 34;
+    localparam int SDRAM_STATE_COUNT = 37;
 
     logic engine_clk = 1'b0;
     logic memory_clk = 1'b0;

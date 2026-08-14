@@ -39,6 +39,7 @@ module tb_sdr_sdram_controller;
     int read_delay;
     int read_drive_count;
     int precharge_count;
+    int single_precharge_count;
     int refresh_count;
     int mode_count;
     int write_count;
@@ -55,7 +56,7 @@ module tb_sdr_sdram_controller;
     assign dram_dq = dq_drive_enable ? dq_drive_data : 16'hzzzz;
 
     sdr_sdram_controller #(
-        .CLOCK_FREQ(1_000_000),
+        .CLOCK_FREQ(10_000_000),
         .ENTRY_COUNT(2)
     ) dut (
         .clk,
@@ -95,7 +96,10 @@ module tb_sdr_sdram_controller;
     always @(posedge clk) begin
         if (!dram_cs_n && dram_cke) begin
             case ({dram_ras_n, dram_cas_n, dram_we_n})
-                3'b010: precharge_count++;
+                3'b010: begin
+                    precharge_count++;
+                    if (!dram_addr[10]) single_precharge_count++;
+                end
                 3'b001: refresh_count++;
                 3'b000: begin
                     mode_count++;
@@ -163,6 +167,7 @@ module tb_sdr_sdram_controller;
         write_last = 1'b0;
         read_ready = 1'b1;
         precharge_count = 0;
+        single_precharge_count = 0;
         refresh_count = 0;
         mode_count = 0;
         write_count = 0;
@@ -210,6 +215,22 @@ module tb_sdr_sdram_controller;
         while (!done_valid) @(negedge clk);
     endtask : wait_for_completion
 
+    // Hold a command valid while the controller finishes an earlier request.
+    task automatic queue_request(
+        input logic is_write,
+        input TTWordAddress address,
+        input logic [3:0] length
+    );
+        @(negedge clk);
+        req_write = is_write;
+        req_address = address;
+        req_length = length;
+        req_valid = 1'b1;
+        while (!req_ready) @(negedge clk);
+        @(negedge clk);
+        req_valid = 1'b0;
+    endtask : queue_request
+
     task automatic test_initialization();
         while (!ready) @(negedge clk);
         check(!error, "initialization completed without error");
@@ -222,6 +243,8 @@ module tb_sdr_sdram_controller;
     endtask : test_initialization
 
     task automatic test_buffered_write();
+        automatic int single_precharge_base = single_precharge_count;
+
         physical_write_words = 0;
         issue_request(1'b1, TTWordAddress'(20), 4'd2);
         send_write_word(16'h1234, 1'b0, 3);
@@ -233,6 +256,9 @@ module tb_sdr_sdram_controller;
         check(physical_write_data[0] == 16'h1234
                 && physical_write_data[1] == 16'h5678,
             "gapped input retained consecutive physical write data");
+        while (!req_ready) @(negedge clk);
+        check(single_precharge_count == single_precharge_base + 1,
+            "idle terminal write closed its bank during the command gap");
     endtask : test_buffered_write
 
     task automatic test_read_backpressure();
@@ -254,6 +280,21 @@ module tb_sdr_sdram_controller;
             "second read word completed burst");
         wait_for_completion();
     endtask : test_read_backpressure
+
+    task automatic test_queued_request_preserves_row();
+        automatic int single_precharge_base = single_precharge_count;
+
+        issue_request(1'b1, TTWordAddress'(40), 4'd2);
+        send_write_word(16'h1111, 1'b0);
+        send_write_word(16'h2222, 1'b1);
+        fork
+            queue_request(1'b0, TTWordAddress'(60), 4'd2);
+            wait_for_completion();
+        join
+        check(single_precharge_count == single_precharge_base,
+            "queued traffic suppressed opportunistic post-write close");
+        wait_for_completion();
+    endtask : test_queued_request_preserves_row
 
     task automatic test_row_crossing_write();
         automatic int crossing_write_base = write_count;
@@ -281,6 +322,7 @@ module tb_sdr_sdram_controller;
         test_initialization();
         test_buffered_write();
         test_read_backpressure();
+        test_queued_request_preserves_row();
         test_row_crossing_write();
         repeat (20) @(posedge clk);
         check(refresh_count >= 3, "distributed refresh continued after initialization");

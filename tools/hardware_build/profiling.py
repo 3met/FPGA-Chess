@@ -116,7 +116,8 @@ SDRAM_STATES = [
     "precharge", "precharge_wait", "activate", "activate_wait", "read_command",
     "read_wait", "read_data", "read_serve", "write_collect", "write_command", "write_data",
     "burst_terminate", "complete", "refresh_precharge", "refresh_precharge_wait",
-    "refresh", "refresh_wait",
+    "refresh", "refresh_wait", "write_close_wait", "write_close",
+    "write_close_precharge_wait",
 ]
 
 

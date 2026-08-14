@@ -33,6 +33,9 @@ module sdr_sdram_controller #(
     // Start refresh service early enough that precharge/command latency still
     // keeps successive AUTO REFRESH commands within the 7.8125 us requirement.
     localparam int REFRESH_CYCLES = cycles_ns(7_200);
+    // A short post-write grace period covers tRAS/tDPL and lets a command
+    // already crossing the CDC bridge preserve the row before it is closed.
+    localparam int WRITE_CLOSE_DELAY = cycles_ns(100);
     localparam int WAIT_COUNT_BITS = $clog2(POWERUP_CYCLES + 1);
     localparam int REFRESH_COUNT_BITS = $clog2(REFRESH_CYCLES + 1);
     localparam int BURST_COUNT_BITS = $clog2(WORDS_PER_ENTRY + 1);
@@ -45,7 +48,8 @@ module sdr_sdram_controller #(
         S_IDLE, S_PRE, S_PRE_WAIT, S_ACT, S_ACT_WAIT, S_READ_CMD, S_READ_WAIT,
         S_READ_DATA, S_READ_SERVE, S_WRITE_COLLECT, S_WRITE_CMD, S_WRITE_DATA,
         S_BURST_TERM, S_COMPLETE,
-        S_REFRESH_PRE, S_REFRESH_PRE_WAIT, S_REFRESH, S_REFRESH_WAIT
+        S_REFRESH_PRE, S_REFRESH_PRE_WAIT, S_REFRESH, S_REFRESH_WAIT,
+        S_WRITE_CLOSE_WAIT, S_WRITE_CLOSE, S_WRITE_CLOSE_PRE_WAIT
     } State;
     State state;
     // Power-up dominates the wait-counter range; right-sized counters avoid
@@ -63,6 +67,8 @@ module sdr_sdram_controller #(
     logic [3:0] transaction_length;
     logic [12:0] open_row[0:3];
     logic open_valid[0:3];
+    logic [1:0] completed_write_bank;
+    logic [12:0] completed_write_row;
     logic [15:0] dq_out;
     logic dq_oe;
     logic [12:0] dram_addr_next;
@@ -128,6 +134,16 @@ module sdr_sdram_controller #(
                 dq_out_next = write_buffer[write_emit_count];
             end
             S_CLEAR_TERM, S_BURST_TERM: begin dram_we_n_next = 1'b0; end
+            S_WRITE_CLOSE: begin
+                if (refresh_count != 0 && !req_valid
+                        && open_valid[completed_write_bank]
+                        && open_row[completed_write_bank] == completed_write_row) begin
+                    dram_ba_next = completed_write_bank;
+                    dram_ras_n_next = 1'b0;
+                    dram_we_n_next = 1'b0;
+                    dram_addr_next[10] = 1'b0;
+                end
+            end
             default: begin end
         endcase
     end
@@ -141,6 +157,7 @@ module sdr_sdram_controller #(
             state <= S_POWERUP; ready <= 1'b0; error <= 1'b0;
             wait_count <= WAIT_COUNT_BITS'(POWERUP_CYCLES); refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
             clear_word <= 25'(WORDS_PER_ENTRY - 1); address <= '0; remaining <= '0; segment_remaining <= '0;
+            completed_write_bank <= '0; completed_write_row <= '0;
             write_collect_count <= '0; write_emit_count <= '0;
             read_capture_count <= '0; read_emit_count <= '0; transaction_length <= '0;
             invalidate_rows();
@@ -256,6 +273,9 @@ module sdr_sdram_controller #(
                 S_BURST_TERM: begin
                     if (remaining == 0) begin
                         if (transaction_write) begin
+                            // Address has advanced past the final emitted word.
+                            completed_write_bank <= bank_of(address - 25'd1);
+                            completed_write_row <= row_of(address - 25'd1);
                             state <= S_COMPLETE;
                         end else begin
                             read_emit_count <= '0;
@@ -270,7 +290,17 @@ module sdr_sdram_controller #(
                         else state <= S_ACT;
                     end
                 end
-                S_COMPLETE: if (done_valid && done_ready) state <= S_IDLE;
+                S_COMPLETE: if (done_valid && done_ready) begin
+                    if (transaction_write && transaction_length != 0
+                            && transaction_length <= WORDS_PER_ENTRY
+                            && open_valid[completed_write_bank]
+                            && open_row[completed_write_bank] == completed_write_row) begin
+                        wait_count <= WAIT_COUNT_BITS'(WRITE_CLOSE_DELAY - 1);
+                        state <= S_WRITE_CLOSE_WAIT;
+                    end else begin
+                        state <= S_IDLE;
+                    end
+                end
                 S_REFRESH_PRE: begin invalidate_rows(); wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_REFRESH_PRE_WAIT; end
                 S_REFRESH_PRE_WAIT: if (wait_count == 0) state <= S_REFRESH; else wait_count <= wait_count - 1'b1;
                 S_REFRESH: begin wait_count <= WAIT_COUNT_BITS'(TRFC - 1); state <= S_REFRESH_WAIT; end
@@ -278,6 +308,37 @@ module sdr_sdram_controller #(
                     refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
                     state <= ready ? S_IDLE : S_CLEAR_CHECK;
                 end else wait_count <= wait_count - 1'b1;
+                // Close only during a real command gap. A queued request keeps
+                // the row available, including same-entry follow-up traffic.
+                S_WRITE_CLOSE_WAIT: begin
+                    if (refresh_count == 0) begin
+                        state <= S_REFRESH_PRE;
+                    end else if (req_valid || !open_valid[completed_write_bank]
+                            || open_row[completed_write_bank] != completed_write_row) begin
+                        state <= S_IDLE;
+                    end else if (wait_count == 0) begin
+                        state <= S_WRITE_CLOSE;
+                    end else begin
+                        wait_count <= wait_count - 1'b1;
+                    end
+                end
+                S_WRITE_CLOSE: begin
+                    if (refresh_count == 0) begin
+                        state <= S_REFRESH_PRE;
+                    end else if (req_valid || !open_valid[completed_write_bank]
+                            || open_row[completed_write_bank] != completed_write_row) begin
+                        state <= S_IDLE;
+                    end else begin
+                        open_valid[completed_write_bank] <= 1'b0;
+                        wait_count <= WAIT_COUNT_BITS'(TRP - 1);
+                        state <= S_WRITE_CLOSE_PRE_WAIT;
+                    end
+                end
+                S_WRITE_CLOSE_PRE_WAIT: if (wait_count == 0) begin
+                    state <= (refresh_count == 0) ? S_REFRESH_PRE : S_IDLE;
+                end else begin
+                    wait_count <= wait_count - 1'b1;
+                end
                 default: state <= S_POWERUP;
             endcase
         end
