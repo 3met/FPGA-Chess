@@ -6,7 +6,7 @@ The TT memory subsystem implements the logical lookup and best-effort store cont
 
 The on-chip backend stores one logical entry per indexed RAM word. It is suitable for simulation, portable synthesis, and targets without external memory.
 
-The external backend stores compact entries through a vendor-neutral 16-bit burst protocol. It contains a direct-mapped on-chip cache indexed independently from the external table. Cache tags identify the complete external entry index, and a key match is still required before a lookup is reported as a hit.
+The external backend stores compact entries through a vendor-neutral 16-bit burst protocol. Its entry count and burst length derive from the configured compact-tag width. It contains a direct-mapped on-chip cache indexed independently from the external table. Cache tags identify the complete external entry index, and a key match is still required before a lookup is reported as a hit.
 
 Both backends preserve the same lookup result, mate-score normalization, generation handling, and replacement semantics.
 
@@ -40,6 +40,8 @@ Lookups take priority over queued stores. One lookup probe or miss may be buffer
 On a cache miss, the frontend reads the existing external entry before responding to a lookup or deciding whether a store may replace it. A replacement write is held separately after the store read, allowing a waiting lookup miss to use external memory before the low-priority write. Accepted replacements update the cache and external memory. The cache is therefore a write-through performance layer, not an independent source of TT state.
 
 Each direct-mapped cache line stores entry data, the complete external-index tag, and validity. Lookup and store probes are arbitrated through the cache without changing the logical TT semantics.
+
+With the current 32-bit compact tag, each of the 1,024 cache lines contains 1 valid bit, a 23-bit external-entry index, and 75 entry-data bits, for 99 effective bits per line. The DE1-SoC Quartus build maps this 1,024 x 99 cache to 10 M10Ks.
 
 ## Clearing
 

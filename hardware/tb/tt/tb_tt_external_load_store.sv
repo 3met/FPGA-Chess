@@ -22,7 +22,9 @@ module tb_tt_external_load_store;
     int lookup_cache_access_count, lookup_cache_hit_count, store_cache_access_count;
     TTAge old_generation;
 
-    tt_external_load_store #(.CACHE_INDEX_BITS(2), .ENTRY_COUNT(16), .STORE_FIFO_DEPTH(2)) dut (
+    tt_external_load_store #(
+        .CACHE_INDEX_BITS(2), .TAG_BITS(32), .ENTRY_COUNT(16), .STORE_FIFO_DEPTH(2)
+    ) dut (
         .clk, .rst_n, .memory_ready(1'b1), .memory_error(1'b0), .clear, .clear_busy(),
         .lookup_req_valid, .lookup_req_ready, .lookup_req, .lookup_resp_valid, .lookup_resp,
         .cache_access, .cache_hit, .cache_access_is_store,
@@ -230,7 +232,7 @@ module tb_tt_external_load_store;
         clear = 1; @(posedge clk); clear = 0; repeat (2) @(posedge clk);
         do_lookup(64'h0123_4567_89ab_cdef, 1'b0, ThreadID'(0),
             EvalScore'(123), PlyIndex'(0), "post-clear lookup");
-        check(mem_req_address < 96 && mem_req_length == 6, "bounded aligned burst mapping");
+        check(mem_req_address < 80 && mem_req_length == 5, "bounded aligned burst mapping");
 
         // An old-generation result survives a much shallower publication. This
         // must match the inferred-RAM backend's shared depth/age policy.

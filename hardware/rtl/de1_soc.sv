@@ -25,8 +25,12 @@ module de1_soc(input CLOCK_50,
 	parameter UART_CLOCK_FREQ = 100_000_000;
 	parameter BAUD_RATE = 2_000_000;
 	parameter ENABLE_SEARCH_STATS = 1'b0;
+	parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS;
 	parameter int unsigned LMR_A_Q8 = 192;
 	parameter int unsigned LMR_B_Q8 = 614;
+	localparam int TT_COMPACT_BITS = TT_TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
+	localparam int TT_ENTRY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
+	localparam int TT_ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS;
 
 	// The build target generates these constants for the exact synthesized image.
 	`include "engine_build_config.svh"
@@ -177,6 +181,7 @@ module de1_soc(input CLOCK_50,
 		.CLOCK_FREQ(ENGINE_CLOCK_FREQ),
 		.SEARCH_THREAD_COUNT(1),
 		.SEARCH_STACK_DEPTH(32),
+		.TT_TAG_BITS(TT_TAG_BITS),
 		.LMR_A_Q8(LMR_A_Q8),
 		.LMR_B_Q8(LMR_B_Q8),
 		.EXTERNAL_TT(1'b1),
@@ -218,7 +223,11 @@ module de1_soc(input CLOCK_50,
 		.backend_read_data(backend_read_data), .backend_read_last(backend_read_last),
 		.backend_done_valid(backend_done_valid), .backend_done_ready(backend_done_ready), .backend_done_error(backend_done_error));
 
-	sdr_sdram_controller #(.CLOCK_FREQ(100_000_000)) tt_sdram (
+	sdr_sdram_controller #(
+		.CLOCK_FREQ(100_000_000),
+		.ENTRY_COUNT(TT_ENTRY_COUNT),
+		.WORDS_PER_ENTRY(TT_ENTRY_WORDS)
+	) tt_sdram (
 		.clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(memory_rst_n),
 		.ready(tt_memory_ready_backend), .error(tt_memory_error_backend),
 		.req_valid(backend_req_valid), .req_ready(backend_req_ready), .req_write(backend_req_write),

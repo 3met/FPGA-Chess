@@ -415,7 +415,8 @@ module tb_search_controller;
         first_store_count = tt_store_count;
         check(first_lookup_count > 0, {label, " first search issued TT lookups"});
         check(first_store_count > 0, {label, " first search issued TT stores"});
-        check(first_nodes > NodeCountType'(20), {label, " first search visited tree"});
+        check(first_nodes >= NodeCountType'(20),
+            {label, " first search visited every legal root child"});
 
         tt_lookup_count = 0;
         tt_store_count = 0;
@@ -433,7 +434,8 @@ module tb_search_controller;
         input EvalScore score,
         input TTDepth depth
     );
-        automatic int index = int'(dut.active_zobrist_key[3:0]);
+        automatic int index = int'(
+            dut.internal_tt_gen.tt_load_store.tt_index(dut.active_zobrist_key));
         dut.internal_tt_gen.tt_load_store.entry_memory.mem[index] = tt_make_entry(
             dut.active_zobrist_key,
             best_move,
@@ -1637,7 +1639,9 @@ module tb_search_controller;
                 end
                 if (lmr_depth_check_pending[idx]) begin
                     check(8'(dut.search_pending_child_depth[idx]) == lmr_expected_child_depth[idx],
-                        "LMR registers the expected reduced child depth before board completion");
+                        $sformatf("LMR registers reduced child depth expected=%0d actual=%0d",
+                            lmr_expected_child_depth[idx],
+                            8'(dut.search_pending_child_depth[idx])));
                     lmr_depth_check_pending[idx] = 1'b0;
                 end
                 if (lmr_recovery_check_pending[idx]) begin

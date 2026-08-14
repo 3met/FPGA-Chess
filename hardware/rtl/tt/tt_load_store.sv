@@ -5,6 +5,7 @@ import tt_defs::*;
 
 module tt_load_store #(
     parameter int TT_INDEX_BITS = 10,
+    parameter int TAG_BITS = TT_DEFAULT_TAG_BITS,
     parameter int STORE_FIFO_DEPTH = 256,
     parameter bit USE_FULL_KEY = 1'b0
 ) (
@@ -29,9 +30,22 @@ module tt_load_store #(
 );
 
     localparam int TT_ENTRY_COUNT = 1 << TT_INDEX_BITS;
-    localparam int STORAGE_ENTRY_BITS = USE_FULL_KEY ? $bits(TTFullEntry) : $bits(TTEntry);
+    localparam int SELECTOR_BITS = $bits(ZobristKey) - TAG_BITS;
+    localparam int HASH_ENTROPY_BITS = SELECTOR_BITS < TT_HASH_BITS
+        ? SELECTOR_BITS : TT_HASH_BITS;
+    localparam int COMPACT_ENTRY_BITS = TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
 
     typedef logic [TT_INDEX_BITS-1:0] TTIndex;
+    typedef logic [TAG_BITS-1:0] EntryTag;
+    typedef struct packed {
+        TTAge age;
+        TTBoundType bound_type;
+        TTDepth depth;
+        EvalScore score;
+        TTMoveBits best_move_bits;
+        EntryTag tag;
+    } CompactEntry;
+    localparam int STORAGE_ENTRY_BITS = USE_FULL_KEY ? $bits(TTFullEntry) : $bits(CompactEntry);
     typedef logic [STORAGE_ENTRY_BITS-1:0] TTStorageEntry;
     typedef logic [$clog2(STORE_FIFO_DEPTH + 1)-1:0] StoreFifoCount;
 
@@ -79,6 +93,12 @@ module tt_load_store #(
 `ifndef SYNTHESIS
     initial begin
         if (STORE_FIFO_DEPTH < 2) $error("tt_load_store STORE_FIFO_DEPTH must be at least two");
+        if (TAG_BITS < 1 || TAG_BITS >= $bits(ZobristKey))
+            $error("tt_load_store TAG_BITS must be between 1 and 63");
+        if (TT_INDEX_BITS > HASH_ENTROPY_BITS)
+            $error("tt_load_store has more TT index bits than untagged hash entropy");
+        else if (TT_INDEX_BITS + 8 > HASH_ENTROPY_BITS)
+            $warning("tt_load_store TT entry count is large relative to untagged hash entropy");
     end
 `endif
 
@@ -97,8 +117,19 @@ module tt_load_store #(
     assign store_pop = !lookup_accept && store_state == STORE_IDLE && store_fifo_valid;
 
     function automatic TTIndex tt_index(input ZobristKey zobrist_key);
-        return TTIndex'(zobrist_key[TT_INDEX_BITS-1:0]);
+        automatic logic [TT_HASH_BITS-1:0] hash = tt_index_hash(zobrist_key, TAG_BITS);
+        automatic TTIndex folded = '0;
+
+        // Fold every hash bit into the power-of-two RAM address so no
+        // untagged Zobrist bit is silently discarded by a narrow table.
+        for (int bit_index = 0; bit_index < TT_HASH_BITS; bit_index++)
+            folded[bit_index % TT_INDEX_BITS] ^= hash[bit_index];
+        return folded;
     endfunction : tt_index
+
+    function automatic EntryTag entry_tag(input ZobristKey zobrist_key);
+        return EntryTag'(zobrist_key);
+    endfunction : entry_tag
 
     function automatic TTStorePayload store_payload(input TTStoreRequest req);
         automatic TTStorePayload payload;
@@ -118,7 +149,11 @@ module tt_load_store #(
             return TTStorageEntry'(tt_invalid_full_entry());
         end
 
-        return TTStorageEntry'(tt_invalid_entry());
+        begin
+            automatic CompactEntry compact_entry = '0;
+            compact_entry.bound_type = TT_BOUND_INVALID;
+            return TTStorageEntry'(compact_entry);
+        end
     endfunction : invalid_storage_entry
 
     function automatic TTStorageEntry make_storage_entry(input TTStorePayload req);
@@ -134,14 +169,17 @@ module tt_load_store #(
             ));
         end
 
-        return TTStorageEntry'(tt_make_entry(
-            req.zobrist_key,
-            req.best_move,
-            tt_normalize_mate_score(req.score, req.ply),
-            req.depth,
-            req.bound_type,
-            req.age
-        ));
+        begin
+            automatic CompactEntry compact_entry;
+
+            compact_entry.tag = entry_tag(req.zobrist_key);
+            compact_entry.best_move_bits = tt_encode_move(req.best_move);
+            compact_entry.score = tt_normalize_mate_score(req.score, req.ply);
+            compact_entry.depth = req.depth;
+            compact_entry.bound_type = req.bound_type;
+            compact_entry.age = req.age;
+            return TTStorageEntry'(compact_entry);
+        end
     endfunction : make_storage_entry
 
     function automatic TTBoundType storage_bound_type(input TTStorageEntry entry);
@@ -153,9 +191,9 @@ module tt_load_store #(
         end
 
         begin
-            automatic TTEntry compact_entry;
+            automatic CompactEntry compact_entry;
 
-            compact_entry = TTEntry'(entry);
+            compact_entry = CompactEntry'(entry);
             return compact_entry.bound_type;
         end
     endfunction : storage_bound_type
@@ -169,9 +207,9 @@ module tt_load_store #(
         end
 
         begin
-            automatic TTEntry compact_entry;
+            automatic CompactEntry compact_entry;
 
-            compact_entry = TTEntry'(entry);
+            compact_entry = CompactEntry'(entry);
             return compact_entry.depth;
         end
     endfunction : storage_depth
@@ -185,9 +223,9 @@ module tt_load_store #(
         end
 
         begin
-            automatic TTEntry compact_entry;
+            automatic CompactEntry compact_entry;
 
-            compact_entry = TTEntry'(entry);
+            compact_entry = CompactEntry'(entry);
             return compact_entry.age;
         end
     endfunction : storage_age
@@ -201,9 +239,9 @@ module tt_load_store #(
         end
 
         begin
-            automatic TTEntry compact_entry;
+            automatic CompactEntry compact_entry;
 
-            compact_entry = TTEntry'(entry);
+            compact_entry = CompactEntry'(entry);
             return compact_entry.score;
         end
     endfunction : storage_score
@@ -217,9 +255,9 @@ module tt_load_store #(
         end
 
         begin
-            automatic TTEntry compact_entry;
+            automatic CompactEntry compact_entry;
 
-            compact_entry = TTEntry'(entry);
+            compact_entry = CompactEntry'(entry);
             return tt_decode_move(compact_entry.best_move_bits);
         end
     endfunction : storage_best_move
@@ -233,10 +271,10 @@ module tt_load_store #(
         end
 
         begin
-            automatic TTEntry compact_entry;
+            automatic CompactEntry compact_entry;
 
-            compact_entry = TTEntry'(entry);
-            return compact_entry.verify_key == tt_verify_key(zobrist_key);
+            compact_entry = CompactEntry'(entry);
+            return compact_entry.tag == entry_tag(zobrist_key);
         end
     endfunction : storage_key_matches
 

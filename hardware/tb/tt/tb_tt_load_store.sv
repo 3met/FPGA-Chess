@@ -41,6 +41,7 @@ module tb_tt_load_store;
 
     tt_load_store #(
         .TT_INDEX_BITS(TEST_TT_INDEX_BITS),
+        .TAG_BITS(32),
         .STORE_FIFO_DEPTH(TEST_STORE_FIFO_DEPTH)
     ) dut (
         .clk(clk),
@@ -57,8 +58,25 @@ module tb_tt_load_store;
         .store_req(store_req)
     );
 
+    // Keep a non-default instance in the bench so tag-width parameterization
+    // is elaborated and its key partition can be checked directly.
     tt_load_store #(
         .TT_INDEX_BITS(TEST_TT_INDEX_BITS),
+        .TAG_BITS(24),
+        .STORE_FIFO_DEPTH(2)
+    ) alternate_tag_dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(1'b0),
+        .lookup_req_valid(1'b0),
+        .lookup_req(TTLookupRequest'('0)),
+        .store_req_valid(1'b0),
+        .store_req(TTStoreRequest'('0))
+    );
+
+    tt_load_store #(
+        .TT_INDEX_BITS(TEST_TT_INDEX_BITS),
+        .TAG_BITS(32),
         .STORE_FIFO_DEPTH(TEST_STORE_FIFO_DEPTH),
         .USE_FULL_KEY(1'b1)
     ) full_key_dut (
@@ -92,8 +110,8 @@ module tb_tt_load_store;
         return move;
     endfunction
 
-    function automatic ZobristKey make_key(input TTVerifyKey verify_key, input logic [15:0] suffix);
-        return {verify_key, suffix};
+    function automatic ZobristKey make_key(input logic [47:0] selector_and_tag, input logic [15:0] suffix);
+        return {selector_and_tag[31:0], selector_and_tag[47:32], suffix};
     endfunction
 
     function automatic TTStoreRequest make_store_req(
@@ -344,7 +362,8 @@ module tb_tt_load_store;
 
         expect_equal($bits(TTEntry) == TT_ENTRY_BITS, "TTEntry has declared compact width");
         expect_equal($bits(TTFullEntry) == TT_FULL_ENTRY_BITS, "TTFullEntry has declared full-key width");
-        expect_equal(entry.verify_key == 48'h1234_5678_9abc, "entry stores high 48 key bits");
+        expect_equal(TT_AGE_BITS == 5, "TT generation field is five bits");
+        expect_equal(entry.tag == 32'h1234_0003, "entry stores low 32 key bits as its tag");
         expect_equal($bits(entry.best_move_bits) == $bits(Move), "entry stores only move bits");
         expect_equal(tt_decode_move(entry.best_move_bits) === move, "entry move round trips");
         expect_equal(entry.score === EvalScore'(-123), "entry stores score field");
@@ -360,6 +379,26 @@ module tb_tt_load_store;
         expect_equal(full_entry.aux == TTAux'(16'h55aa), "full entry stores aux field");
     endtask
 
+    task automatic test_tag_and_index_partition();
+        automatic ZobristKey base_key = 64'h0123_4567_0000_0000;
+        automatic logic [TEST_TT_INDEX_BITS-1:0] base_index = dut.tt_index(base_key);
+        automatic logic [TEST_TT_INDEX_BITS-1:0] alternate_base_index =
+            alternate_tag_dut.tt_index(base_key);
+
+        expect_equal(dut.tt_index(base_key | 64'h0000_0000_ffff_ffff) == base_index,
+            "low tag bits do not affect the TT index");
+        for (int bit_index = 32; bit_index < 64; bit_index++) begin
+            expect_equal(dut.tt_index(ZobristKey'(1) << bit_index) != dut.tt_index('0),
+                $sformatf("selector bit %0d affects the TT index hash", bit_index));
+        end
+        expect_equal(alternate_tag_dut.tt_index(base_key | 64'h0000_0000_00ff_ffff)
+                == alternate_base_index,
+            "non-default low 24 tag bits do not affect the TT index");
+        expect_equal(alternate_tag_dut.tt_index(base_key ^ 64'h0000_0000_0100_0000)
+                != alternate_base_index,
+            "first selector bit above a non-default tag affects the TT index");
+    endtask
+
     task automatic test_empty_miss();
         clear_table();
         expect_lookup_miss(make_key(48'h1111_2222_3333, 16'h0001), "empty table");
@@ -371,7 +410,7 @@ module tb_tt_load_store;
 
         clear_table();
         for (int idx = 0; idx < 3; idx++) begin
-            automatic ZobristKey key = make_key(48'h0100_0000_0000 + TTVerifyKey'(idx), KeySuffix'(idx + 1));
+            automatic ZobristKey key = make_key(48'h0100_0000_0000 + 48'(idx), KeySuffix'(idx + 1));
             automatic EvalScore score = EvalScore'(100 + idx);
             automatic TTDepth depth = TTDepth'(6 + idx);
 
@@ -391,16 +430,16 @@ module tb_tt_load_store;
         expect_lookup_miss(make_key(48'h0100_0000_1000, 16'h0004), "invalid bound store");
     endtask
 
-    task automatic test_verify_key_mismatch();
+    task automatic test_tag_mismatch();
         automatic Move move = make_move(Position'('d2), Position'('d10), PROMO_KNIGHT);
         automatic ZobristKey key_a = make_key(48'haaaa_0000_0001, 16'h0007);
         automatic ZobristKey key_b = make_key(48'hbbbb_0000_0001, 16'h0007);
 
         clear_table();
         store_and_drain(make_store_req(key_a, TTDepth'(8), EvalScore'(80), TT_BOUND_EXACT, move, TTAge'(1), PlyIndex'(0)));
-        expect_lookup_miss(key_b, "different verify key same index");
+        expect_lookup_miss(key_b, "different tag same index");
         store_and_drain(make_store_req(key_b, TTDepth'(1), EvalScore'(20), TT_BOUND_LOWER, move, TTAge'(1), PlyIndex'(0)));
-        expect_lookup_miss(key_a, "old verify key replaced");
+        expect_lookup_miss(key_a, "old tag replaced");
         expect_lookup_hit(key_b, PlyIndex'(0), EvalScore'(20), TTDepth'(1), TT_BOUND_LOWER, move, "new verify key replaced old slot");
     endtask
 
@@ -453,9 +492,9 @@ module tb_tt_load_store;
 
         clear_table();
         for (int idx = 0; idx < TEST_STORE_FIFO_DEPTH; idx++) begin
-            automatic ZobristKey fifo_key = make_key(48'heeee_0000_0000 + TTVerifyKey'(idx), KeySuffix'(idx));
+            automatic ZobristKey fifo_key = make_key(48'heeee_0000_0000 + 48'(idx), KeySuffix'(idx));
             expect_equal(store_req_ready, $sformatf("store FIFO ready before entry %0d", idx));
-            lookup_req = make_lookup_req(make_key(48'heeee_1111_0000 + TTVerifyKey'(idx), KeySuffix'(idx)), PlyIndex'(0));
+            lookup_req = make_lookup_req(make_key(48'heeee_1111_0000 + 48'(idx), KeySuffix'(idx)), PlyIndex'(0));
             lookup_req_valid = 1'b1;
             store_req = make_store_req(fifo_key, TTDepth'(idx + 1), EvalScore'(idx + 1), TT_BOUND_EXACT, move, TTAge'(1), PlyIndex'(0));
             store_req_valid = 1'b1;
@@ -526,9 +565,10 @@ module tb_tt_load_store;
         $display("=== TT load/store testbench ===");
         reset_dut();
         test_codec_layout();
+        test_tag_and_index_partition();
         test_empty_miss();
         test_store_hit_and_bounds();
-        test_verify_key_mismatch();
+        test_tag_mismatch();
         test_replacement_policy();
         test_arbitration_and_backpressure();
         test_mate_scores();

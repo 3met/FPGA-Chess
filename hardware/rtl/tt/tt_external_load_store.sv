@@ -5,7 +5,9 @@ import tt_defs::*;
 
 module tt_external_load_store #(
     parameter int CACHE_INDEX_BITS = 10,
-    parameter int ENTRY_COUNT = TT_EXTERNAL_ENTRY_COUNT,
+    parameter int TAG_BITS = TT_DEFAULT_TAG_BITS,
+    parameter int ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT
+        / ((TAG_BITS + TT_ENTRY_PAYLOAD_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS),
     parameter int STORE_FIFO_DEPTH = 256
 ) (
     input logic clk,
@@ -45,13 +47,31 @@ module tt_external_load_store #(
 
     localparam int CACHE_COUNT = 1 << CACHE_INDEX_BITS;
     localparam int ENTRY_INDEX_BITS = $clog2(ENTRY_COUNT);
+    localparam int SELECTOR_BITS = $bits(ZobristKey) - TAG_BITS;
+    localparam int HASH_ENTROPY_BITS = SELECTOR_BITS < TT_HASH_BITS
+        ? SELECTOR_BITS : TT_HASH_BITS;
+    localparam int COMPACT_ENTRY_BITS = TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
+    localparam int PHYSICAL_ENTRY_BITS =
+        ((COMPACT_ENTRY_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS) * TT_WORD_BITS;
+    localparam int WORDS_PER_ENTRY = PHYSICAL_ENTRY_BITS / TT_WORD_BITS;
+    localparam int WORD_COUNT_BITS = $clog2(WORDS_PER_ENTRY);
     typedef logic [ENTRY_INDEX_BITS-1:0] EntryIndex;
     typedef logic [CACHE_INDEX_BITS-1:0] CacheIndex;
+    typedef logic [TAG_BITS-1:0] EntryTag;
+    typedef logic [PHYSICAL_ENTRY_BITS-1:0] PhysicalEntry;
+    typedef struct packed {
+        TTAge age;
+        TTBoundType bound_type;
+        TTDepth depth;
+        EvalScore score;
+        TTMoveBits best_move_bits;
+        EntryTag tag;
+    } CompactEntry;
     typedef logic [$clog2(STORE_FIFO_DEPTH + 1)-1:0] StoreFifoCount;
     typedef struct packed {
         logic valid;
         EntryIndex tag;
-        TTPhysicalEntry data;
+        PhysicalEntry data;
     } CacheLine;
 
     typedef enum logic [3:0] {
@@ -64,9 +84,9 @@ module tt_external_load_store #(
     logic operation_store;
     TTLookupRequest active_lookup;
     TTStoreRequest active_store;
-    TTPhysicalEntry transfer_entry;
-    TTPhysicalEntry write_entry;
-    logic [2:0] word_count;
+    PhysicalEntry transfer_entry;
+    PhysicalEntry write_entry;
+    logic [WORD_COUNT_BITS-1:0] word_count;
     EntryIndex active_index;
     EntryIndex clear_index;
     CacheIndex cache_clear_index;
@@ -88,7 +108,7 @@ module tt_external_load_store #(
     EntryIndex lookup_miss_index;
     logic store_write_pending;
     EntryIndex store_write_index;
-    TTPhysicalEntry store_write_data;
+    PhysicalEntry store_write_data;
     logic backend_lookup_response;
     logic cache_read_enable;
     CacheIndex cache_read_index;
@@ -96,6 +116,14 @@ module tt_external_load_store #(
 `ifndef SYNTHESIS
     initial begin
         if (STORE_FIFO_DEPTH < 2) $error("tt_external_load_store STORE_FIFO_DEPTH must be at least two");
+        if (TAG_BITS < 1 || TAG_BITS >= $bits(ZobristKey))
+            $error("tt_external_load_store TAG_BITS must be between 1 and 63");
+        if (ENTRY_INDEX_BITS > HASH_ENTROPY_BITS)
+            $error("tt_external_load_store has more TT entries than untagged hash entropy can address");
+        else if (ENTRY_INDEX_BITS + 8 > HASH_ENTROPY_BITS)
+            $warning("tt_external_load_store TT entry count is large relative to untagged hash entropy");
+        if (WORDS_PER_ENTRY > 15)
+            $error("tt_external_load_store entry does not fit the four-bit burst length");
     end
 `endif
 
@@ -105,24 +133,37 @@ module tt_external_load_store #(
     CacheLine cache_read_line;
 
     function automatic EntryIndex entry_index(input ZobristKey key);
-        logic [54:0] product;
-        product = key[47:16] * ENTRY_COUNT;
-        return EntryIndex'(product[54:32]);
+        logic [TT_HASH_BITS + ENTRY_INDEX_BITS-1:0] product;
+        product = tt_index_hash(key, TAG_BITS) * ENTRY_COUNT;
+        return EntryIndex'(product >> TT_HASH_BITS);
     endfunction
 
     function automatic TTWordAddress word_address(input EntryIndex index);
-        return TTWordAddress'((index << 2) + (index << 1));
+        return TTWordAddress'(index * WORDS_PER_ENTRY);
     endfunction
 
-    function automatic logic entry_hit(input TTEntry entry, input ZobristKey key);
+    function automatic EntryTag entry_tag(input ZobristKey key);
+        return EntryTag'(key);
+    endfunction
+
+    function automatic CompactEntry unpack_entry(input PhysicalEntry physical);
+        return CompactEntry'(physical[COMPACT_ENTRY_BITS-1:0]);
+    endfunction
+
+    function automatic TTAge physical_age(input PhysicalEntry physical);
+        automatic CompactEntry entry = unpack_entry(physical);
+        return entry.age;
+    endfunction
+
+    function automatic logic entry_hit(input CompactEntry entry, input ZobristKey key);
         return entry.bound_type != TT_BOUND_INVALID && entry.age == generation
-            && entry.verify_key == tt_verify_key(key);
+            && entry.tag == entry_tag(key);
     endfunction
 
-    function automatic logic should_replace(input TTEntry old_entry, input TTStoreRequest req);
+    function automatic logic should_replace(input CompactEntry old_entry, input TTStoreRequest req);
         return tt_should_replace(
             old_entry.bound_type != TT_BOUND_INVALID,
-            old_entry.verify_key == tt_verify_key(req.zobrist_key),
+            old_entry.tag == entry_tag(req.zobrist_key),
             old_entry.age,
             old_entry.depth,
             old_entry.bound_type,
@@ -132,17 +173,25 @@ module tt_external_load_store #(
         );
     endfunction
 
-    function automatic TTPhysicalEntry make_store_entry(input TTStoreRequest req);
-        TTEntry entry;
-        entry = tt_make_entry(req.zobrist_key, req.best_move, tt_normalize_mate_score(req.score, req.ply),
-            req.depth, req.bound_type, generation);
-        return tt_pack_entry(entry);
+    function automatic PhysicalEntry make_store_entry(input TTStoreRequest req);
+        CompactEntry entry;
+        PhysicalEntry physical;
+
+        entry.tag = entry_tag(req.zobrist_key);
+        entry.best_move_bits = tt_encode_move(req.best_move);
+        entry.score = tt_normalize_mate_score(req.score, req.ply);
+        entry.depth = req.depth;
+        entry.bound_type = req.bound_type;
+        entry.age = generation;
+        physical = '0;
+        physical[COMPACT_ENTRY_BITS-1:0] = entry;
+        return physical;
     endfunction
 
-    task automatic drive_lookup_response(input TTLookupRequest req, input TTPhysicalEntry physical);
-        TTEntry entry;
+    task automatic drive_lookup_response(input TTLookupRequest req, input PhysicalEntry physical);
+        CompactEntry entry;
         logic hit;
-        entry = tt_unpack_entry(physical);
+        entry = unpack_entry(physical);
         hit = entry_hit(entry, req.zobrist_key);
         lookup_resp.thread_id <= req.thread_id;
         lookup_resp.hit <= hit;
@@ -180,11 +229,14 @@ module tt_external_load_store #(
         mem_req_valid = state == S_READ_REQ || state == S_WRITE_REQ || state == S_CLEAR_REQ;
         mem_req_write = state != S_READ_REQ;
         mem_req_address = (state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE)
-            ? word_address(clear_index) + TTWordAddress'(5) : word_address(active_index);
-        mem_req_length = (state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE) ? 4'd1 : 4'd6;
+            ? word_address(clear_index) + TTWordAddress'(WORDS_PER_ENTRY - 1) : word_address(active_index);
+        mem_req_length = (state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE)
+            ? 4'd1 : 4'(WORDS_PER_ENTRY);
         mem_write_valid = state == S_WRITE_DATA || state == S_CLEAR_DATA;
-        mem_write_data = (state == S_CLEAR_DATA) ? 16'h0000 : write_entry[word_count*16 +: 16];
-        mem_write_last = state == S_CLEAR_DATA || word_count == 3'd5;
+        mem_write_data = (state == S_CLEAR_DATA) ? 16'h0000
+            : write_entry[word_count*TT_WORD_BITS +: TT_WORD_BITS];
+        mem_write_last = state == S_CLEAR_DATA
+            || word_count == WORD_COUNT_BITS'(WORDS_PER_ENTRY - 1);
         mem_read_ready = state == S_READ_DATA;
         // Every backend request, including reads, has a completion token. Do
         // not allow the backend to remain blocked after delivering read data.
@@ -204,7 +256,7 @@ module tt_external_load_store #(
             cache_hit <= 1'b0;
             cache_access_is_store <= 1'b0;
             lookup_resp <= TTLookupResponse'('0);
-            word_count <= 3'd0;
+            word_count <= '0;
             clear_index <= '0;
             cache_clear_index <= '0;
             lookup_probe_valid <= 1'b0;
@@ -232,11 +284,11 @@ module tt_external_load_store #(
             if (lookup_probe_valid && !backend_lookup_response) begin
                 cache_access <= 1'b1;
                 cache_hit <= cache_read_line.valid
-                    && cache_read_line.data[95:88] == generation
+                    && physical_age(cache_read_line.data) == generation
                     && cache_read_line.tag == lookup_probe_index;
                 cache_access_is_store <= 1'b0;
                 if (cache_read_line.valid
-                        && cache_read_line.data[95:88] == generation
+                        && physical_age(cache_read_line.data) == generation
                         && cache_read_line.tag == lookup_probe_index) begin
                     drive_lookup_response(lookup_probe_req, cache_read_line.data);
                 end else begin
@@ -262,13 +314,13 @@ module tt_external_load_store #(
                 S_CACHE_READ: begin
                     cache_access <= 1'b1;
                     cache_hit <= cache_read_line.valid
-                        && cache_read_line.data[95:88] == generation
+                        && physical_age(cache_read_line.data) == generation
                         && cache_read_line.tag == active_index;
                     cache_access_is_store <= 1'b1;
                     if (cache_read_line.valid
-                            && cache_read_line.data[95:88] == generation
+                            && physical_age(cache_read_line.data) == generation
                             && cache_read_line.tag == active_index) begin
-                        if (should_replace(tt_unpack_entry(cache_read_line.data), active_store)) begin
+                        if (should_replace(unpack_entry(cache_read_line.data), active_store)) begin
                             store_write_index <= active_index;
                             store_write_data <= make_store_entry(active_store);
                             store_write_pending <= 1'b1;
@@ -311,15 +363,16 @@ module tt_external_load_store #(
                         state <= S_CACHE_READ;
                     end
                 end
-                S_READ_REQ: if (mem_req_valid && mem_req_ready) begin word_count <= 3'd0; transfer_entry <= '0; state <= S_READ_DATA; end
+                S_READ_REQ: if (mem_req_valid && mem_req_ready) begin word_count <= '0; transfer_entry <= '0; state <= S_READ_DATA; end
                 S_READ_DATA: if (mem_read_valid) begin
-                    TTPhysicalEntry assembled;
+                    PhysicalEntry assembled;
                     assembled = transfer_entry;
-                    assembled[word_count*16 +: 16] = mem_read_data;
+                    assembled[word_count*TT_WORD_BITS +: TT_WORD_BITS] = mem_read_data;
                     transfer_entry <= assembled;
-                    if (mem_read_last || word_count == 3'd5) begin
+                    if (mem_read_last
+                            || word_count == WORD_COUNT_BITS'(WORDS_PER_ENTRY - 1)) begin
                         state <= S_READ_DONE;
-                    end else word_count <= word_count + 3'd1;
+                    end else word_count <= word_count + WORD_COUNT_BITS'(1);
                 end
                 S_READ_DONE: if (mem_done_valid) begin
                     if (mem_done_error) begin
@@ -335,7 +388,7 @@ module tt_external_load_store #(
                         if (!operation_store) begin
                             drive_lookup_response(active_lookup, transfer_entry);
                             state <= S_IDLE;
-                        end else if (should_replace(tt_unpack_entry(transfer_entry), active_store)) begin
+                        end else if (should_replace(unpack_entry(transfer_entry), active_store)) begin
                             store_write_index <= active_index;
                             store_write_data <= make_store_entry(active_store);
                             store_write_pending <= 1'b1;
@@ -345,10 +398,10 @@ module tt_external_load_store #(
                         end
                     end
                 end
-                S_WRITE_REQ: if (mem_req_valid && mem_req_ready) begin word_count <= 3'd0; state <= S_WRITE_DATA; end
+                S_WRITE_REQ: if (mem_req_valid && mem_req_ready) begin word_count <= '0; state <= S_WRITE_DATA; end
                 S_WRITE_DATA: if (mem_write_valid && mem_write_ready) begin
-                    if (word_count == 3'd5) state <= S_WRITE_DONE;
-                    else word_count <= word_count + 3'd1;
+                    if (word_count == WORD_COUNT_BITS'(WORDS_PER_ENTRY - 1)) state <= S_WRITE_DONE;
+                    else word_count <= word_count + WORD_COUNT_BITS'(1);
                 end
                 S_WRITE_DONE: if (mem_done_valid) begin
                     CacheIndex cidx;

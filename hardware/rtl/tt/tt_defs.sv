@@ -4,12 +4,14 @@ package tt_defs;
 
     import general_chess_defs::*;
 
-    localparam int TT_COMPACT_ENTRY_BITS = 94;
-    localparam int TT_FULL_ENTRY_BITS = 126;
+    localparam int TT_DEFAULT_TAG_BITS = 32;
+    localparam int TT_HASH_BITS = 32;
+    localparam int TT_ENTRY_PAYLOAD_BITS = 43;
+    localparam int TT_COMPACT_ENTRY_BITS = TT_DEFAULT_TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
+    localparam int TT_FULL_ENTRY_BITS = 123;
     localparam int TT_ENTRY_BITS = TT_COMPACT_ENTRY_BITS;
-    localparam int TT_VERIFY_BITS = 48;
     localparam int TT_DEPTH_BITS = 6;
-    localparam int TT_AGE_BITS = 8;
+    localparam int TT_AGE_BITS = 5;
     localparam int TT_AUX_BITS = 16;
 
     // Bit 14 separates finite evaluations from mates. The 0x100 score gap
@@ -20,7 +22,7 @@ package tt_defs;
     typedef logic [TT_DEPTH_BITS-1:0] TTDepth;
     typedef logic [TT_AGE_BITS-1:0] TTAge;
     typedef logic [TT_AUX_BITS-1:0] TTAux;
-    typedef logic [TT_VERIFY_BITS-1:0] TTVerifyKey;
+    typedef logic [TT_DEFAULT_TAG_BITS-1:0] TTTag;
     // Store only the defined move bits; TT records have no unused move padding.
     typedef logic [$bits(Move)-1:0] TTMoveBits;
 
@@ -60,11 +62,13 @@ package tt_defs;
         PlyIndex ply;
     } TTStoreRequest;
 
-    localparam int TT_PHYSICAL_ENTRY_BITS = 96;
     localparam int TT_WORD_BITS = 16;
-    localparam int TT_WORDS_PER_ENTRY = 6;
+    localparam int TT_PHYSICAL_ENTRY_BITS =
+        ((TT_COMPACT_ENTRY_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS) * TT_WORD_BITS;
+    localparam int TT_WORDS_PER_ENTRY = TT_PHYSICAL_ENTRY_BITS / TT_WORD_BITS;
     localparam int TT_EXTERNAL_WORD_ADDR_BITS = 25;
-    localparam int TT_EXTERNAL_ENTRY_COUNT = 5_592_405;
+    localparam int TT_EXTERNAL_WORD_COUNT = 1 << TT_EXTERNAL_WORD_ADDR_BITS;
+    localparam int TT_EXTERNAL_ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT / TT_WORDS_PER_ENTRY;
 
     typedef logic [TT_PHYSICAL_ENTRY_BITS-1:0] TTPhysicalEntry;
     typedef logic [TT_EXTERNAL_WORD_ADDR_BITS-1:0] TTWordAddress;
@@ -75,7 +79,7 @@ package tt_defs;
         TTDepth depth;
         EvalScore score;
         TTMoveBits best_move_bits;
-        TTVerifyKey verify_key;
+        TTTag tag;
     } TTEntry;
 
     typedef struct packed {
@@ -88,9 +92,32 @@ package tt_defs;
         ZobristKey zobrist_key;
     } TTFullEntry;
 
-    function automatic TTVerifyKey tt_verify_key(input ZobristKey zobrist_key);
-        return zobrist_key[$bits(ZobristKey)-1 -: TT_VERIFY_BITS];
-    endfunction : tt_verify_key
+    function automatic TTTag tt_tag(input ZobristKey zobrist_key);
+        return TTTag'(zobrist_key);
+    endfunction : tt_tag
+
+    // Zobrist keys are already uniformly distributed, so an XOR fold followed
+    // by an invertible xorshift avalanche provides a strong index hash without
+    // consuming a multiplier. Callers range-reduce this value when needed.
+    function automatic logic [TT_HASH_BITS-1:0] tt_index_hash(
+        input ZobristKey zobrist_key,
+        input int unsigned tag_bits
+    );
+        logic [TT_HASH_BITS-1:0] folded;
+        logic [TT_HASH_BITS-1:0] mixed;
+
+        folded = '0;
+        for (int bit_index = 0; bit_index < $bits(ZobristKey); bit_index++) begin
+            if (bit_index >= tag_bits)
+                folded[(bit_index - tag_bits) % TT_HASH_BITS] ^=
+                    zobrist_key[bit_index];
+        end
+        mixed = folded;
+        mixed ^= mixed << 13;
+        mixed ^= mixed >> 17;
+        mixed ^= mixed << 5;
+        return mixed;
+    endfunction : tt_index_hash
 
     function automatic TTMoveBits tt_encode_move(input Move move);
         return TTMoveBits'(move);
@@ -146,7 +173,7 @@ package tt_defs;
     function automatic TTEntry tt_invalid_entry();
         automatic TTEntry entry;
 
-        entry.verify_key = TTVerifyKey'(0);
+        entry.tag = TTTag'(0);
         entry.best_move_bits = TTMoveBits'(0);
         entry.score = DRAW_EVAL_SCORE;
         entry.depth = TTDepth'(0);
@@ -165,7 +192,7 @@ package tt_defs;
     );
         automatic TTEntry entry;
 
-        entry.verify_key = tt_verify_key(zobrist_key);
+        entry.tag = tt_tag(zobrist_key);
         entry.best_move_bits = tt_encode_move(best_move);
         entry.score = score;
         entry.depth = depth;
@@ -178,24 +205,14 @@ package tt_defs;
         automatic TTPhysicalEntry physical;
 
         physical = '0;
-        physical[47:0] = entry.verify_key;
-        physical[61:48] = entry.best_move_bits;
-        physical[79:64] = entry.score;
-        physical[85:80] = entry.depth;
-        physical[87:86] = entry.bound_type;
-        physical[95:88] = entry.age;
+        physical[TT_COMPACT_ENTRY_BITS-1:0] = entry;
         return physical;
     endfunction : tt_pack_entry
 
     function automatic TTEntry tt_unpack_entry(input TTPhysicalEntry physical);
         automatic TTEntry entry;
 
-        entry.verify_key = physical[47:0];
-        entry.best_move_bits = physical[61:48];
-        entry.score = EvalScore'(physical[79:64]);
-        entry.depth = TTDepth'(physical[85:80]);
-        entry.bound_type = TTBoundType'(physical[87:86]);
-        entry.age = TTAge'(physical[95:88]);
+        entry = TTEntry'(physical[TT_COMPACT_ENTRY_BITS-1:0]);
         return entry;
     endfunction : tt_unpack_entry
 

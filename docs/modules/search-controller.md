@@ -78,6 +78,6 @@ Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. S
 
 ## Configuration and Instrumentation
 
-Thread count, stack depth, repetition capacity, LMR policy, clock frequency, TT backend, and optional statistics are synthesis parameters. Capacity types define the largest encodable thread and ply identifiers; a target may instantiate fewer contexts.
+Thread count, stack depth, repetition capacity, LMR policy, clock frequency, TT backend, TT tag width, and optional statistics are synthesis parameters. Capacity types define the largest encodable thread and ply identifiers; a target may instantiate fewer contexts.
 
 Optional statistics report pipeline activity, search phases, TT/cache behavior, move-generation work, and overflow state without affecting search semantics.

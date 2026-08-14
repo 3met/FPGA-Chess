@@ -258,9 +258,9 @@ module tb_sdr_sdram_controller;
     task automatic test_row_crossing_write();
         automatic int crossing_write_base = write_count;
 
-        issue_request(1'b1, TTWordAddress'(1022), 4'd6);
-        for (int word = 0; word < 6; word++) begin
-            send_write_word(16'(16'h8000 + word), word == 5);
+        issue_request(1'b1, TTWordAddress'(1022), 4'd5);
+        for (int word = 0; word < 5; word++) begin
+            send_write_word(16'(16'h8000 + word), word == 4);
         end
         wait_for_completion();
         check(write_count == crossing_write_base + 2,

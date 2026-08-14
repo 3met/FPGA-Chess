@@ -69,7 +69,7 @@ module tt_memory_cdc_bridge #(
         .wr_clk(req_clk), .wr_rst_n(req_rst_n), .wr_en(write_valid && write_ready),
         .wr_data({write_last, write_data}), .full(write_full),
         .rd_clk(mem_clk), .rd_rst_n(mem_rst_n), .rd_en(write_pop), .rd_data(write_fifo_data), .empty(write_empty));
-    // A read FIFO must hold an entire six-word SDRAM burst because SDR SDRAM
+    // A read FIFO must hold the maximum compact-entry burst because SDR SDRAM
     // cannot pause a burst once it has started.
     async_fifo #(.DATA_WIDTH(WORD_PACKET_BITS), .DEPTH(READ_FIFO_DEPTH)) read_fifo (
         .wr_clk(mem_clk), .wr_rst_n(mem_rst_n), .wr_en(backend_read_valid && backend_read_ready),

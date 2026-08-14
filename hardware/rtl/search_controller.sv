@@ -11,6 +11,7 @@ import tt_defs::*;
 module search_controller #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int TT_INDEX_BITS = 10,
+    parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
     parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
@@ -639,7 +640,9 @@ module search_controller #(
 
     generate
         if (EXTERNAL_TT) begin : external_tt_gen
-            tt_external_load_store tt_load_store (
+            tt_external_load_store #(
+                .TAG_BITS(TT_TAG_BITS)
+            ) tt_load_store (
                 .clk(clk), .rst_n(rst_n), .memory_ready(tt_memory_ready), .memory_error(tt_memory_error),
                 .clear(tt_clear), .clear_busy(tt_clear_busy),
                 .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
@@ -661,7 +664,8 @@ module search_controller #(
             );
         end else begin : internal_tt_gen
             tt_load_store #(
-                .TT_INDEX_BITS(TT_INDEX_BITS)
+                .TT_INDEX_BITS(TT_INDEX_BITS),
+                .TAG_BITS(TT_TAG_BITS)
             ) tt_load_store (
                 .clk(clk), .rst_n(rst_n), .clear(tt_clear), .clear_busy(tt_clear_busy),
                 .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),

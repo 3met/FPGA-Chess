@@ -4,7 +4,7 @@ The SDR SDRAM controller adapts the vendor-neutral 16-bit burst protocol in [tt-
 
 ## Configuration
 
-The controller is parameterized by clock frequency, accessible entry count, and CAS latency. JEDEC timing intervals are converted to conservative integer clock counts from the configured frequency.
+The controller is parameterized by clock frequency, accessible entry count, TT words per entry, and CAS latency. JEDEC timing intervals are converted to conservative integer clock counts from the configured frequency.
 
 The physical interface uses a 16-bit data bus, four banks, 13 row-address bits, and the standard SDR SDRAM command and byte-mask signals. A board wrapper supplies the memory clocking and pin assignments.
 
@@ -18,7 +18,7 @@ Initialization and refresh timing are properties of the memory device and contro
 
 ## Transactions
 
-The controller accepts one transaction at a time. Addresses and lengths are expressed in 16-bit words. A transaction contains between one and six words, matching the maximum compact TT entry transfer.
+The controller accepts one transaction at a time. Addresses and lengths are expressed in 16-bit words. A transaction contains between one word and the configured compact TT entry width; the default 32-bit tag uses five words.
 
 For writes, the controller buffers the complete transaction before issuing the SDRAM WRITE command because the physical burst cannot be stalled. For reads, it captures the complete physical burst before exposing words on the backpressured read-data channel.
 

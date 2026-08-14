@@ -43,22 +43,22 @@ Mate scores are normalized when stored so they are relative to the stored node r
 
 ## Logical Entry Formats
 
-The live Zobrist key remains 64 bits. A storage profile may omit index bits from the stored verification key because those bits already select the entry.
+The live Zobrist key remains 64 bits. `TT_TAG_BITS` selects the low key bits stored as the compact entry tag. Every remaining high key bit participates in a shared XOR-fold and xorshift index hash; power-of-two tables fold that hash into their address width, while non-power-of-two tables use multiply-high range reduction. Configurations with fewer index-hash entropy bits than address bits are invalid, and configurations with less than eight bits of entropy margin emit a simulation warning.
 
-The compact logical entry is 94 bits:
+The default compact logical entry is 75 bits:
 
 | Width | Field |
 | ----- | ----- |
-| 48 | High-hash verification key. |
+| 32 | Low Zobrist-key tag. |
 | 14 | Encoded best move. |
 | 16 | Side-to-move score. |
 | 6 | Search depth. |
 | 2 | Bound type. |
-| 8 | Age/generation. |
+| 5 | Age/generation. |
 
-The external 16-bit backend pads the compact entry to 96 physical bits. Other backends may choose alignment appropriate to their native memory width without changing the logical fields.
+The external 16-bit backend pads the default compact entry to 80 physical bits, transferring five words and fitting 6,710,886 entries in the 64 MiB memory. Changing `TT_TAG_BITS` changes the compact width, aligned physical width, burst length, and external entry count together. Other backends may choose alignment appropriate to their native memory width without changing the logical fields.
 
-A 126-bit full-key profile stores the complete 64-bit key, best move, score, depth, bound, age, and 16 auxiliary bits. It is used when full-key verification or native memory alignment warrants the additional storage.
+A 123-bit full-key profile stores the complete 64-bit key, best move, score, depth, bound, age, and 16 auxiliary bits. It is used when full-key verification or native memory alignment warrants the additional storage.
 
 ## Hit Verification
 
@@ -66,9 +66,9 @@ An entry hits only when:
 
 - its bound type is not invalid,
 - its generation is current,
-- and its stored full or compact verification key matches the request.
+- and its stored full key or compact low-bit tag matches the request.
 
-Compact verification can admit a false hit if two distinct keys share both the table index and stored verification bits. The full-key profile eliminates that possibility.
+Compact verification can admit a false hit if two distinct keys share both the hashed table index and stored tag. The full-key profile eliminates that possibility.
 
 ## Replacement
 
@@ -86,4 +86,4 @@ Skipping a store is not an error. Generation comparison uses equality with the c
 
 ## Clearing
 
-New Game makes older entries unavailable by advancing the generation and clears queued stores. On-chip storage may invalidate entries sequentially. External storage performs a physical validity sweep only when required at reset or generation wrap. Requests remain unavailable while an invalidation pass is active.
+New Game makes older entries unavailable by advancing the five-bit generation and clears queued stores. On-chip storage may invalidate entries sequentially. External storage performs a physical validity sweep only when required at reset or when New Game arrives at generation 31, then restarts at generation 1. Requests remain unavailable while an invalidation pass is active.

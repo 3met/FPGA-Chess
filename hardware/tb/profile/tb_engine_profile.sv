@@ -12,8 +12,12 @@ module tb_engine_profile #(
     parameter int ENGINE_CLOCK_FREQ = 50_000_000,
     parameter int ENGINE_HALF_PERIOD_NS = 10,
     parameter int SEARCH_THREAD_COUNT = 1,
-    parameter int SEARCH_STACK_DEPTH = 24
+    parameter int SEARCH_STACK_DEPTH = 24,
+    parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS
 );
+    localparam int TT_COMPACT_BITS = TT_TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
+    localparam int TT_ENTRY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
+    localparam int TT_ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS;
     localparam int MEMORY_HALF_PERIOD_NS = 5;
     localparam int MEMORY_PIN_LEAD_NS = 3;
     // The DE1 pin clock leads the controller by 3 ns. Sampling 5 ns after the
@@ -37,6 +41,7 @@ module tb_engine_profile #(
     localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1)
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
     localparam int TT_STATE_COUNT = 12;
+    localparam int TT_STATE_IDLE = 0;
     localparam int SDRAM_STATE_COUNT = 34;
 
     logic engine_clk = 1'b0;
@@ -96,6 +101,7 @@ module tb_engine_profile #(
         .CLOCK_FREQ(ENGINE_CLOCK_FREQ),
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
+        .TT_TAG_BITS(TT_TAG_BITS),
         .EXTERNAL_TT(1'b1),
         .ENABLE_SEARCH_STATS(1'b1)
     ) dut (
@@ -131,7 +137,8 @@ module tb_engine_profile #(
 
     sdr_sdram_controller #(
         .CLOCK_FREQ(100_000_000),
-        .ENTRY_COUNT(TT_EXTERNAL_ENTRY_COUNT),
+        .ENTRY_COUNT(TT_ENTRY_COUNT),
+        .WORDS_PER_ENTRY(TT_ENTRY_WORDS),
         .CAS_LATENCY(2),
         .SKIP_INITIAL_CLEAR(1'b1)
     ) memory_controller (
@@ -350,8 +357,8 @@ module tb_engine_profile #(
                     > tt_store_fifo_high_water)
                 tt_store_fifo_high_water =
                     dut.controller.external_tt_gen.tt_load_store.store_fifo_count;
-            if (dut.controller.external_tt_gen.tt_load_store.state
-                        == dut.controller.external_tt_gen.tt_load_store.S_IDLE
+            if (int'(dut.controller.external_tt_gen.tt_load_store.state)
+                        == TT_STATE_IDLE
                     && dut.controller.external_tt_gen.tt_load_store.lookup_miss_valid
                     && dut.controller.external_tt_gen.tt_load_store.store_write_pending)
                 tt_store_write_preemptions = tt_store_write_preemptions + 1;
@@ -686,8 +693,8 @@ module tb_engine_profile #(
                     depth_cache_probes[iteration_depth] <= depth_cache_probes[iteration_depth] + 1;
                     if (dut.controller.tt_cache_hit) tt_cache_lookup_hits <= tt_cache_lookup_hits + 1;
                     if (dut.controller.tt_cache_hit
-                            && dut.controller.external_tt_gen.tt_load_store.state
-                                != dut.controller.external_tt_gen.tt_load_store.S_IDLE)
+                            && int'(dut.controller.external_tt_gen.tt_load_store.state)
+                                != TT_STATE_IDLE)
                         tt_cache_bypass_hits <= tt_cache_bypass_hits + 1;
                     if (dut.controller.tt_cache_hit)
                         depth_cache_hits[iteration_depth] <= depth_cache_hits[iteration_depth] + 1;
