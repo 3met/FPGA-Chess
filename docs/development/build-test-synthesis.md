@@ -27,7 +27,8 @@ Generated projects, simulator libraries, logs, and reports are written under `wo
 | `python -m tools.hardware_build compile --set portable-rtl` | Compile one RTL source set with ModelSim/Questa. |
 | `python -m tools.hardware_build test` | Run SystemVerilog tests. Use repeated `--name` options to select tests. |
 | `python -m tools.hardware_build check` | Run generated-data checks, core Python suites, and all RTL tests. |
-| `python -m tools.hardware_build profile` | Run the engine profiler described in [engine-profiling.md](engine-profiling.md). |
+| `python -m tools.hardware_build profile` | Profile the standard named position suite and print aggregate results. |
+| `python -m tools.hardware_build profile_position --fen "..."` | Profile one position and print its detailed results; see [engine-profiling.md](engine-profiling.md). |
 | `python -m tools.hardware_build synth --target <target>` | Synthesize a configured target. |
 | `python -m tools.hardware_build flash --target quartus-de1-soc` | Program a volatile Quartus image through JTAG. |
 | `python -m tools.hardware_build synth-report` | Summarize the latest or selected synthesis result. |

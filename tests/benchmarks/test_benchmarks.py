@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from software.benchmarks.positions import PERFT_POSITIONS, REPETITION_CASES, SANITY_POSITIONS
+from software.benchmarks.positions import (
+    PERFT_POSITIONS,
+    PROFILE_POSITIONS,
+    REPETITION_CASES,
+    SANITY_POSITIONS,
+)
 from software.benchmarks.cli import (
     SANITY_DEPTH,
     SANITY_MOVETIME_MS,
@@ -40,6 +45,15 @@ class BenchmarkPositionTests(unittest.TestCase):
         self.assertEqual(len({case.name for case in SANITY_POSITIONS}), len(SANITY_POSITIONS))
         self.assertEqual(len({case.fen for case in SANITY_POSITIONS}), len(SANITY_POSITIONS))
         for case in SANITY_POSITIONS:
+            self.assertTrue(case.name)
+            self.assertEqual(len(case.fen.split()), 6)
+            self.assertEqual(len(encode_fen(case.fen)), 36)
+
+    def test_profile_positions_are_complete_and_unique(self):
+        self.assertEqual(len(PROFILE_POSITIONS), 48)
+        self.assertEqual(len({case.name for case in PROFILE_POSITIONS}), len(PROFILE_POSITIONS))
+        self.assertEqual(len({case.fen for case in PROFILE_POSITIONS}), len(PROFILE_POSITIONS))
+        for case in PROFILE_POSITIONS:
             self.assertTrue(case.name)
             self.assertEqual(len(case.fen.split()), 6)
             self.assertEqual(len(encode_fen(case.fen)), 36)

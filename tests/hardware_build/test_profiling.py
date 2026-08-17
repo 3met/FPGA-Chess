@@ -10,9 +10,12 @@ from tools.hardware_build.profiling import (
     MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
     THREAD_PHASES,
+    _profile_job_count,
     _validate_profile_args,
     build_profile_report,
+    build_profile_suite_report,
     format_profile_report,
+    format_profile_suite_report,
     parse_metric_records,
     percent,
     rate,
@@ -207,7 +210,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Simulated FPGA search time: 100.00 ms", text)
         self.assertIn("20.00 search cycles/wall s", text)
         self.assertNotIn("wall s/search cycle", text)
-        self.assertIn("peak queued=", text)
+        self.assertIn("Peak queued", text)
         self.assertIn("Per-depth breakdown", text)
         self.assertIn("max ply  status", text)
         self.assertIn("Deepest search ply reached (including qsearch): 3", text)
@@ -216,9 +219,11 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Pipeline request accepted", text)
         self.assertNotIn("Move request blocked", text)
         self.assertIn("10 (100.0%)", text)
+        self.assertNotRegex(text, r"\(\s+\d+\.\d+%")
         self.assertNotIn("runnable breakdown", text)
-        self.assertIn("Beta cutoffs by searched move rank", text)
-        self.assertIn("Legal candidates by searched rank", text)
+        self.assertIn("Searched move ranks", text)
+        self.assertIn("Legal candidates", text)
+        self.assertIn("Cutoff share", text)
         self.assertIn("Move generator busy; a generation request was waiting", text)
         self.assertIn("2 candidate pushes: 1 legal, 1 illegal; 0 reversals", text)
         self.assertIn("NNUE evaluator: 1 evaluations", text)
@@ -247,7 +252,7 @@ class ReportTests(unittest.TestCase):
             ]
         )
         self.assertIn("Main-search move pushes", text)
-        self.assertLess(text.index("good_noisy_high"), text.index("bad_noisy_low"))
+        self.assertLess(text.index("Good noisy high"), text.index("Bad noisy low"))
 
     def test_phase_total_mismatch_fails(self):
         metrics = sample_metrics()
@@ -459,6 +464,7 @@ class ProfileArgumentTests(unittest.TestCase):
 
     def test_default_and_explicit_limits(self):
         self.assertEqual(_validate_profile_args(self.namespace()), ("time", 50))
+        self.assertEqual(_validate_profile_args(self.namespace(timeout=None)), ("time", 50))
         self.assertEqual(_validate_profile_args(self.namespace(nodes=100)), ("nodes", 100))
         self.assertEqual(_validate_profile_args(self.namespace(time_ms=5)), ("time", 5))
 
@@ -469,6 +475,88 @@ class ProfileArgumentTests(unittest.TestCase):
             _validate_profile_args(self.namespace(depth=32))
         with self.assertRaises(BuildError):
             _validate_profile_args(self.namespace(simulator_threads=0))
+
+
+class ProfileSuiteTests(unittest.TestCase):
+    def make_report(self, fen: str, nodes: int, wall_seconds: float) -> dict:
+        metrics = sample_metrics()
+        result_values = {
+            "best_move.from": 0,
+            "best_move.to": 8,
+            "best_move.promotion": 0,
+            "score": 2,
+            "nodes": nodes,
+            "completed_depth": 1,
+            "deepest_search_ply": 3,
+            "end_reason": 1,
+            "error": 0,
+        }
+        return build_profile_report(
+            {
+                "fen": fen,
+                "search_limit": {"kind": "time", "value": 50},
+                "threads": 1,
+                "engine_clock_hz": 100,
+                "simulator": "verilator",
+                "simulator_threads": 1,
+            },
+            metrics,
+            result_values,
+            wall_seconds,
+        )
+
+    def test_suite_uses_weighted_aggregate_rates(self):
+        report = build_profile_suite_report([
+            ("first", self.make_report("first fen", 5, 0.5)),
+            ("second", self.make_report("second fen", 10, 1.5)),
+        ])
+        self.assertEqual(report["position_count"], 2)
+        self.assertEqual(report["timing"]["nodes"], 15)
+        self.assertEqual(report["timing"]["search_cycles"], 20)
+        self.assertAlmostEqual(report["timing"]["cycles_per_node"], 20 / 15)
+        self.assertEqual(report["transposition_table"]["lookups"], 4)
+        self.assertEqual(report["transposition_table"]["hits"], 2)
+        aggregate = report["aggregate_profile"]
+        self.assertEqual(aggregate["timing"]["setup_cycles"], 4)
+        self.assertEqual(aggregate["components"]["board_update"]["issues"], 4)
+        self.assertEqual(aggregate["transposition_table"]["store_fifo_high_water"], 1)
+        self.assertEqual(
+            aggregate["components"]["move_generator"]["operations"]
+            ["direct_validation"]["maximum_cycles"],
+            2,
+        )
+        self.assertEqual(aggregate["depth_breakdown"][0]["positions_completed"], 2)
+        self.assertEqual(aggregate["depth_breakdown"][1]["positions_completed"], 0)
+        text = format_profile_suite_report(report)
+        self.assertIn("FPGA Chess Engine Runtime Profile Suite", text)
+        self.assertIn("Positions: 2", text)
+        self.assertIn("Simulator: verilator", text)
+        self.assertNotIn("execution thread per process", text)
+        self.assertNotIn("Completed depth:", text)
+        self.assertNotIn("first fen", text)
+        self.assertNotIn("second fen", text)
+        self.assertIn("Per-thread lifecycle", text)
+        self.assertIn("Per-depth breakdown", text)
+        self.assertIn("positions", text)
+        self.assertIn("Component activity", text)
+        self.assertIn("Move generator operations", text)
+        self.assertIn("Type       Destinations   With >=1 source", text)
+        self.assertIn("Transposition table and SDRAM", text)
+        self.assertIn("Suite simulation performance", text)
+        self.assertNotRegex(text, r"\(\s+\d+\.\d+%")
+
+    def test_suite_parallelism_is_bounded_and_validated(self):
+        args = argparse.Namespace(jobs=3, simulator_threads=1)
+        self.assertEqual(_profile_job_count(args, "verilator"), 3)
+        args.jobs = 1000
+        self.assertEqual(_profile_job_count(args, "verilator"), 48)
+        args.jobs = 0
+        with self.assertRaises(BuildError):
+            _profile_job_count(args, "verilator")
+
+    def test_modelsim_defaults_to_one_suite_job(self):
+        args = argparse.Namespace(jobs=None, simulator_threads=1)
+        self.assertEqual(_profile_job_count(args, "modelsim"), 1)
 
 
 if __name__ == "__main__":

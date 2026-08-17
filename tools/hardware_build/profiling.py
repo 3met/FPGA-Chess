@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import math
 import os
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
+from software.benchmarks.positions import PROFILE_POSITIONS
 from software.engine.protocol import (
     NODE_COUNT_MAX,
     TIME_MAX_MS,
@@ -20,7 +23,16 @@ from software.engine.protocol import (
     move_to_uci,
 )
 
-from .common import BUILD_ROOT, REPO_ROOT, BuildError, print_failure_excerpt, rel, require_tool, run_command
+from .common import (
+    BUILD_ROOT,
+    REPO_ROOT,
+    BuildError,
+    host_parallel_processors,
+    print_failure_excerpt,
+    rel,
+    require_tool,
+    run_command,
+)
 from .manifest import expand_source_set, load_manifest
 from .simulation import has_sim_errors
 
@@ -438,11 +450,11 @@ def build_profile_report(
     ):
         raise BuildError("NNUE completion or per-cycle counters exceed their measurement window")
     nnue["root_initialization_cycles"] = controller_states["search_root_init"]
-    nnue["update_request_utilization_percent"] = percent(
+    nnue["update_request_rate_percent"] = percent(
         nnue["update_requests"], search_cycles
     )
     for values in components.values():
-        values["issue_utilization_percent"] = percent(
+        values["issue_rate_percent"] = percent(
             values.get(
                 "issues",
                 values.get(
@@ -582,52 +594,60 @@ def _format_number(value: float | int | None, suffix: str = "") -> str:
 
 
 def _format_percent(value: float | None) -> str:
-    """Format percentages compactly with a fixed-width numeric field."""
+    """Format a percentage without prose-only alignment padding."""
     if value is None or not math.isfinite(value):
         return "n/a"
-    return f"{value:4.1f}%"
+    return f"{value:.1f}%"
 
 
-def format_profile_report(report: dict) -> str:
+def format_profile_report(
+    report: dict,
+    *,
+    include_header: bool = True,
+    include_simulator_performance: bool = True,
+) -> str:
     """Format a compact but detailed terminal report."""
     timing = report["timing"]
     result = report["result"]
     tt = report["transposition_table"]
     cache = tt["cache"]
-    lines = [
-        "FPGA Chess Engine Runtime Profile",
-        "=" * 34,
-        f"Position: {report['configuration']['fen']}",
-        (
-            f"Simulator: {report['configuration'].get('simulator', 'unspecified')} "
-            f"({report['configuration'].get('simulator_threads', 1)} execution thread"
-            f"{'' if report['configuration'].get('simulator_threads', 1) == 1 else 's'})"
-        ),
-        (
-            f"Result: {result['best_move']}  score={result['score']}  "
-            f"depth={result['completed_depth']}  nodes={result['nodes']:,}"
-        ),
-        (
-            f"Deepest search ply reached (including qsearch): {result['deepest_search_ply']} "
-            f"(+{result['qsearch_extension_beyond_completed_depth']} beyond completed depth)"
-        ),
-        (
-            f"Search: {timing['search_cycles']:,} cycles, "
-            f"{_format_number(timing['cycles_per_node'])} cycles/node, "
-            f"{_format_number(timing['nodes_per_simulated_second'])} nodes/s"
-        ),
-        (
-            f"Simulated FPGA search time: "
-            f"{_format_number(timing['simulated_search_seconds'] * 1_000)} ms"
-        ),
-        (
-            f"Outside measured search: command/position setup={timing['setup_cycles']:,} cycles, "
-            f"result serialization={timing['output_cycles']:,} cycles, "
-            f"background TT-store completion={timing['post_search_drain_cycles']:,} cycles"
-        ),
-        "",
-        "Per-thread lifecycle (cycles and % of search)",
-    ]
+    lines = []
+    if include_header:
+        title = "FPGA Chess Engine Runtime Profile"
+        lines += [
+            title,
+            "=" * len(title),
+            f"Position: {report['configuration']['fen']}",
+            (
+                f"Simulator: {report['configuration'].get('simulator', 'unspecified')} "
+                f"({report['configuration'].get('simulator_threads', 1)} execution thread"
+                f"{'' if report['configuration'].get('simulator_threads', 1) == 1 else 's'})"
+            ),
+            (
+                f"Result: {result['best_move']}  score={result['score']}  "
+                f"depth={result['completed_depth']}  nodes={result['nodes']:,}"
+            ),
+            (
+                f"Deepest search ply reached (including qsearch): {result['deepest_search_ply']} "
+                f"(+{result['qsearch_extension_beyond_completed_depth']} beyond completed depth)"
+            ),
+            (
+                f"Search: {timing['search_cycles']:,} cycles, "
+                f"{_format_number(timing['cycles_per_node'])} cycles/node, "
+                f"{_format_number(timing['nodes_per_simulated_second'])} nodes/s"
+            ),
+            (
+                f"Simulated FPGA search time: "
+                f"{_format_number(timing['simulated_search_seconds'] * 1_000)} ms"
+            ),
+            (
+                f"Outside measured search: command/position setup={timing['setup_cycles']:,} cycles, "
+                f"result serialization={timing['output_cycles']:,} cycles, "
+                f"background TT-store completion={timing['post_search_drain_cycles']:,} cycles"
+            ),
+            "",
+        ]
+    lines.append("Per-thread lifecycle (cycles and % of search)")
     lifecycle_metrics = [
         (THREAD_PHASE_LABELS["idle"], "phase", "idle"),
         (READY_BREAKDOWN_LABELS["nnue_init"], "ready", "nnue_init"),
@@ -665,8 +685,14 @@ def format_profile_report(report: dict) -> str:
         for metric in lifecycle_metrics
         if any(lifecycle_value(thread, metric[1], metric[2]) for thread in report["threads"])
     ]
-    label_width = max(20, max(len(label) for label, _, _ in lifecycle_metrics) + 2)
-    cell_width = 20
+    label_width = max(
+        20,
+        max((len(label) for label, _, _ in lifecycle_metrics), default=18) + 2,
+    )
+    lifecycle_count_width = 11
+    lifecycle_percent_width = 8
+    lifecycle_suffix_width = 1 + lifecycle_percent_width
+    cell_width = lifecycle_count_width + lifecycle_suffix_width
     for start in range(0, len(report["threads"]), 4):
         thread_group = report["threads"][start : start + 4]
         if start:
@@ -679,39 +705,73 @@ def format_profile_report(report: dict) -> str:
             f"  {'-' * (label_width - 2):<{label_width}}"
             + "".join(f"{'-' * (cell_width - 2):>{cell_width}}" for _ in thread_group)
         )
-        lines.append(
+        lines.append((
             f"  {'Nodes':<{label_width}}"
-            + "".join(f"{thread['nodes']:>{cell_width},}" for thread in thread_group)
-        )
+            + "".join(
+                f"{thread['nodes']:>{lifecycle_count_width},}"
+                f"{'':>{lifecycle_suffix_width}}"
+                for thread in thread_group
+            )
+        ).rstrip())
         for label, source, key in lifecycle_metrics:
             cells = []
             for thread in thread_group:
                 value = lifecycle_value(thread, source, key)
-                cells.append(
-                    "-"
-                    if value == 0
-                    else f"{value:,} ({_format_percent(percent(value, timing['search_cycles']))})"
+                if value == 0:
+                    cells.append(
+                        f"{'-':>{lifecycle_count_width}}{'':>{lifecycle_suffix_width}}"
+                    )
+                    continue
+                percentage_text = (
+                    f"({_format_percent(percent(value, timing['search_cycles']))})"
                 )
-            lines.append(
+                percentage_cell = (
+                    f" {percentage_text}"
+                    if len(percentage_text) >= lifecycle_percent_width
+                    else f"{percentage_text:>{lifecycle_percent_width}} "
+                )
+                cells.append(
+                    f"{value:>{lifecycle_count_width},}{percentage_cell}"
+                )
+            lines.append((
                 f"  {label:<{label_width}}"
-                + "".join(f"{cell:>{cell_width}}" for cell in cells)
-            )
+                + "".join(cells)
+            ).rstrip())
 
-    lines += ["", "Per-depth breakdown"]
+    aggregate_depths = bool(
+        report["depth_breakdown"]
+        and "positions_completed" in report["depth_breakdown"][0]
+    )
+    lines += [
+        "",
+        "Per-depth breakdown",
+    ]
+    depth_suffix_header = (
+        f"  {'positions':>9}"
+        if aggregate_depths
+        else "  status"
+    )
     lines.append(
-        "  Depth       cycles    nodes  cycles/node  node growth  TT hit rate  cache hit  max ply  status"
+        f"  {'Depth':>5}  {'cycles':>11}  {'nodes':>10}  {'cycles/node':>11}  "
+        f"{'node growth':>11}  {'TT hit rate':>11}  {'cache hit':>9}  "
+        f"{'max ply':>7}{depth_suffix_header}"
     )
     for depth in report["depth_breakdown"]:
+        depth_suffix = (
+            f"  {depth['positions_completed']:>9,}"
+            if aggregate_depths
+            else f"  {depth['status']}"
+        )
         lines.append(
-            f"  {depth['depth']:>5}  {depth['cycles']:>11,}  {depth['nodes']:>7,}  "
+            f"  {depth['depth']:>5}  {depth['cycles']:>11,}  {depth['nodes']:>10,}  "
             f"{_format_number(depth['cycles_per_node']):>11}  "
             f"{_format_number(depth['node_growth_vs_previous_depth']):>11}  "
             f"{_format_percent(depth['tt_hit_rate_percent']):>11}  "
             f"{_format_percent(depth['cache_hit_rate_percent']):>9}  "
-            f"{depth['maximum_ply']:>7}  {depth['status']}"
+            f"{depth['maximum_ply']:>7}{depth_suffix}"
         )
 
-    lines += ["", "Component utilization"]
+    lines += ["", "Component activity"]
     for name, values in report["components"].items():
         if name == "move_generator":
             continue
@@ -726,7 +786,7 @@ def format_profile_report(report: dict) -> str:
             forward_count = count - values["reverses"]
             lines.append(
                 f"  board update: {count:,} issues, "
-                f"{_format_percent(values['issue_utilization_percent'])} issue utilization "
+                f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles "
                 f"({forward_count:,} candidate pushes: "
                 f"{values['legal_candidates']:,} legal, "
                 f"{values['illegal_candidates']:,} illegal; "
@@ -736,11 +796,11 @@ def format_profile_report(report: dict) -> str:
         if name == "nnue_evaluator":
             lines.append(
                 f"  NNUE evaluator: {count:,} evaluations, "
-                f"{_format_percent(values['issue_utilization_percent'])} issue utilization"
+                f"started in {_format_percent(values['issue_rate_percent'])} of search cycles"
             )
             lines.append(
                 f"    updates: {values['update_requests']:,} accepted "
-                f"({_format_percent(values['update_request_utilization_percent'])} request utilization); "
+                f"({_format_percent(values['update_request_rate_percent'])} of search cycles); "
                 f"root initialization={values['root_initialization_cycles']:,} cycles; "
                 f"rows: {values['root_initialization_rows']:,} root, "
                 f"{values['delta_feature_requests']:,} delta rows, "
@@ -759,14 +819,14 @@ def format_profile_report(report: dict) -> str:
         if name == "repetition_checker":
             lines.append(
                 f"  repetition checker: {count:,} issues, "
-                f"{_format_percent(values['issue_utilization_percent'])} issue utilization; "
+                f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles; "
                 f"child requests in flight={values['inflight_child_thread_cycles']:,} "
                 "thread-cycles"
             )
             continue
         lines.append(
             f"  {name.replace('_', ' ')}: {count:,} issues, "
-            f"{_format_percent(values['issue_utilization_percent'])} issue utilization"
+            f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles"
         )
 
     move_generator = report["components"]["move_generator"]
@@ -787,25 +847,27 @@ def format_profile_report(report: dict) -> str:
     lines += [
         "",
         "Move generation work",
-        (
-            "  Type       Destinations  With >=1 source  Candidates  "
-            "Gen cycles  Cycles/candidate  Cycles/destination"
-        ),
+        f"  {'Type':<8}  {'Destinations':>13}  {'With >=1 source':>16}  "
+        f"{'Candidates':>12}  {'Gen cycles':>12}  "
+        f"{'Cycles/candidate':>16}  {'Cycles/destination':>18}",
     ]
     for kind in ("noisy", "quiet"):
         generation = move_generator["generation"][kind]
         lines.append(
-            f"  {kind.capitalize():<10}"
-            f"{generation['destinations_examined']:>12,}"
-            f"{generation['destinations_with_at_least_one_source']:>17,}"
-            f"{generation['candidates_emitted']:>12,}"
-            f"{generation['generation_cycles']:>12,}"
-            f"{_format_number(generation['cycles_per_candidate']):>18}"
-            f"{_format_number(generation['cycles_per_destination']):>20}"
+            f"  {kind.capitalize():<8}  "
+            f"{generation['destinations_examined']:>13,}  "
+            f"{generation['destinations_with_at_least_one_source']:>16,}  "
+            f"{generation['candidates_emitted']:>12,}  "
+            f"{generation['generation_cycles']:>12,}  "
+            f"{_format_number(generation['cycles_per_candidate']):>16}  "
+            f"{_format_number(generation['cycles_per_destination']):>18}"
         )
 
     lines += ["", "Stalls"]
-    for name, value in report["stalls"].items():
+    stall_names = [name for name in STALL_LABELS if name in report["stalls"]]
+    stall_names += sorted(name for name in report["stalls"] if name not in STALL_LABELS)
+    for name in stall_names:
+        value = report["stalls"][name]
         denominator = (
             timing["search_cycles"] + timing["post_search_drain_cycles"]
             if name.startswith("cdc_")
@@ -816,7 +878,12 @@ def format_profile_report(report: dict) -> str:
             f"({_format_percent(percent(value, denominator))})"
         )
 
-    lines += ["", "Move ordering"]
+    lines += [
+        "",
+        "Move ordering",
+        "  Bucket                  Writes        Pops  Beta cutoffs  Cutoff rate  Peak queued",
+        "  ------------------  ----------  ----------  ------------  -----------  -----------",
+    ]
     # Hardware bucket indices run from worst to best; reports read more
     # naturally in the opposite direction.
     for bucket in reversed(MOVE_BUCKETS):
@@ -825,27 +892,34 @@ def format_profile_report(report: dict) -> str:
         cutoffs = report["move_ordering"]["bucket_cutoffs"][bucket]
         high = report["move_ordering"]["bucket_high_water"][bucket]
         lines.append(
-            f"  {bucket}: writes={writes:,}, pops={pops:,}, beta cutoffs={cutoffs:,} "
-            f"({_format_percent(percent(cutoffs, pops))} of pops), peak queued={high:,}"
+            f"  {bucket.replace('_', ' ').capitalize():<18}"
+            f"{writes:>12,}{pops:>12,}{cutoffs:>14,}"
+            f"{_format_percent(percent(cutoffs, pops)):>13}{high:>13,}"
         )
-    ordinal_text = ", ".join(
-        f"{bucket}={count:,}"
-        for bucket, count in report["move_ordering"]["legal_move_ordinal"].items()
-    )
-    lines.append(f"  Legal candidates by searched rank: {ordinal_text}")
     cutoff_total = sum(report["move_ordering"]["cutoff_ordinal"].values())
-    cutoff_text = ", ".join(
-        f"{bucket}={count:,} ({_format_percent(percent(count, cutoff_total))})"
-        for bucket, count in report["move_ordering"]["cutoff_ordinal"].items()
-    )
-    lines.append(f"  Beta cutoffs by searched move rank: {cutoff_text}")
+    lines += [
+        "",
+        "  Searched move ranks",
+        "  Rank    Legal candidates  Beta cutoffs  Cutoff share",
+        "  ------  ----------------  ------------  ------------",
+    ]
+    for bucket in ORDINAL_BUCKETS:
+        legal = report["move_ordering"]["legal_move_ordinal"][bucket]
+        cutoffs = report["move_ordering"]["cutoff_ordinal"][bucket]
+        lines.append(
+            f"  {bucket:<6}{legal:>18,}{cutoffs:>14,}"
+            f"{_format_percent(percent(cutoffs, cutoff_total)):>14}"
+        )
     lines.append(
-        f"  Direct or otherwise unbucketed beta cutoffs: "
+        f"  Direct/unbucketed beta cutoffs: "
         f"{report['move_ordering']['direct_move_cutoffs']:,}"
     )
 
     lines += ["", "Search algorithm"]
-    for name, value in report["algorithm"].items():
+    algorithm_names = [name for name in ALGORITHM_LABELS if name in report["algorithm"]]
+    algorithm_names += sorted(name for name in report["algorithm"] if name not in ALGORITHM_LABELS)
+    for name in algorithm_names:
+        value = report["algorithm"][name]
         lines.append(f"  {ALGORITHM_LABELS.get(name, name.replace('_', ' ').capitalize())}: {value:,}")
 
     lines += [
@@ -877,16 +951,19 @@ def format_profile_report(report: dict) -> str:
             f"({_format_percent(report['sdram']['row_hit_rate_percent'])} hit), "
             f"payload={_format_number(report['sdram']['effective_bytes_per_simulated_second'] / (1024 * 1024))} MiB/s"
         ),
-        "",
-        (
-            f"Simulator performance: {_format_number(timing['simulator_wall_seconds'])} s wall time, "
-            f"{_format_number(timing['search_cycles_per_wall_second'])} search cycles/wall s"
-        ),
-        (
-            f"Simulation slowdown versus the configured FPGA clock: "
-            f"{_format_number(timing['wall_to_simulated_time_ratio'])}x"
-        ),
     ]
+    if include_simulator_performance:
+        lines += [
+            "",
+            (
+                f"Simulator performance: {_format_number(timing['simulator_wall_seconds'])} s wall time, "
+                f"{_format_number(timing['search_cycles_per_wall_second'])} search cycles/wall s"
+            ),
+            (
+                f"Simulation slowdown versus the configured FPGA clock: "
+                f"{_format_number(timing['wall_to_simulated_time_ratio'])}x"
+            ),
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -1009,7 +1086,7 @@ def _validate_profile_args(args: argparse.Namespace) -> tuple[str, int]:
         raise BuildError("--stack-depth must be between 1 and 64")
     if args.engine_clock_hz < 1:
         raise BuildError("--engine-clock-hz must be positive")
-    if args.timeout < 1:
+    if args.timeout is not None and args.timeout < 1:
         raise BuildError("--timeout must be at least 1 second")
     if not 1 <= args.simulator_threads <= 32:
         raise BuildError("--simulator-threads must be between 1 and 32")
@@ -1028,29 +1105,36 @@ def _validate_profile_args(args: argparse.Namespace) -> tuple[str, int]:
     return "time", 50
 
 
-def command_profile(args: argparse.Namespace) -> int:
-    search_kind, search_limit = _validate_profile_args(args)
-    try:
-        board_payload = encode_fen(args.fen)
-    except ProtocolError as exc:
-        raise BuildError(f"Invalid FEN: {exc}") from exc
-
+def _prepare_profile_simulator(args: argparse.Namespace) -> tuple[dict, str, Path | None, Path | None]:
+    """Compile the selected backend once for one position or a complete suite."""
     manifest = load_manifest()
     sources = expand_source_set(manifest, "engine-profile")
     simulator = args.simulator
     if simulator == "auto":
         simulator = "verilator" if shutil.which("verilator") else "modelsim"
-    library = None
-    executable = None
     if simulator == "verilator":
-        executable = _compile_verilator(sources, args)
-    else:
-        library = _compile_profile(manifest, sources, args.force_rebuild)
-    if args.output:
-        run_dir = Path(args.output).expanduser().resolve()
-    else:
-        timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-        run_dir = BUILD_ROOT / "profile" / timestamp
+        return manifest, simulator, None, _compile_verilator(sources, args)
+    return manifest, simulator, _compile_profile(manifest, sources, args.force_rebuild), None
+
+
+def _run_profile_position(
+    args: argparse.Namespace,
+    fen: str,
+    run_dir: Path,
+    search_kind: str,
+    search_limit: int,
+    manifest: dict,
+    simulator: str,
+    library: Path | None,
+    executable: Path | None,
+    position_name: str | None = None,
+) -> dict:
+    """Run one already-prepared simulation and persist its detailed artifacts."""
+    try:
+        board_payload = encode_fen(fen)
+    except ProtocolError as exc:
+        raise BuildError(f"Invalid FEN: {exc}") from exc
+
     run_dir.mkdir(parents=True, exist_ok=True)
     board_path = run_dir / "board.hex"
     metrics_path = run_dir / "metrics.tsv"
@@ -1070,10 +1154,12 @@ def command_profile(args: argparse.Namespace) -> int:
     if args.event_trace:
         plusargs.append(f"+EVENTS_FILE={run_dir / 'events.jsonl'}")
     if simulator == "verilator":
+        assert executable is not None
         if args.waveform:
             plusargs.append(f"+WAVE_FILE={run_dir / 'wave.fst'}")
         cmd = [str(executable), *plusargs]
     else:
+        assert library is not None
         vsim = require_tool("vsim")
         run_do = (
             "log -r /*; run -all; quit -f"
@@ -1116,7 +1202,7 @@ def command_profile(args: argparse.Namespace) -> int:
 
     metrics, result_values = parse_metric_records(metrics_path.read_text(encoding="utf-8"))
     configuration = {
-        "fen": args.fen,
+        "fen": fen,
         "search_limit": {"kind": search_kind, "value": search_limit},
         "threads": args.threads,
         "stack_depth": args.stack_depth,
@@ -1131,12 +1217,275 @@ def command_profile(args: argparse.Namespace) -> int:
         "simulator": simulator,
         "simulator_threads": args.simulator_threads if simulator == "verilator" else 1,
     }
+    if position_name is not None:
+        configuration["position_name"] = position_name
     report = build_profile_report(configuration, metrics, result_values, elapsed)
     text_report = format_profile_report(report)
     (run_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (run_dir / "report.txt").write_text(text_report, encoding="utf-8")
     if simulator == "modelsim" and not args.waveform:
         transient_wave.unlink(missing_ok=True)
+    return report
+
+
+def _aggregate_profile_reports(reports: list[dict], configuration: dict) -> dict:
+    """Build one detailed profile from suite counters using each counter's aggregation semantics."""
+    metric_names = sorted(set().union(*(report["raw_metrics"] for report in reports)))
+
+    def is_maximum_metric(name: str) -> bool:
+        return (
+            name.endswith(".max_cycles")
+            or name.endswith(".max_ply")
+            or "high_water" in name
+        )
+
+    metrics = {
+        name: (
+            max(report["raw_metrics"].get(name, 0) for report in reports)
+            if is_maximum_metric(name)
+            else sum(report["raw_metrics"].get(name, 0) for report in reports)
+        )
+        for name in metric_names
+    }
+    completed_depths = [report["result"]["completed_depth"] for report in reports]
+    result_values = {
+        "best_move.from": 0,
+        "best_move.to": 0,
+        "best_move.promotion": 0,
+        "score": 0,
+        "nodes": sum(report["result"]["nodes"] for report in reports),
+        "completed_depth": min(completed_depths),
+        "deepest_search_ply": max(report["result"]["deepest_search_ply"] for report in reports),
+        "end_reason": 0,
+        "error": int(any(report["result"]["error"] for report in reports)),
+    }
+    aggregate_configuration = dict(configuration)
+    aggregate_configuration["fen"] = f"aggregate of {len(reports)} named positions"
+    aggregate = build_profile_report(
+        aggregate_configuration,
+        metrics,
+        result_values,
+        sum(report["timing"]["simulator_wall_seconds"] for report in reports),
+    )
+    for depth in aggregate["depth_breakdown"]:
+        depth_number = depth["depth"]
+        depth["positions_completed"] = sum(
+            report["result"]["completed_depth"] >= depth_number
+            for report in reports
+        )
+    return aggregate
+
+
+def build_profile_suite_report(
+    named_reports: list[tuple[str, dict]],
+    suite_wall_seconds: float | None = None,
+    jobs: int = 1,
+) -> dict:
+    """Aggregate additive counters and weighted rates across named positions."""
+    if not named_reports:
+        raise BuildError("The profiling position suite is empty")
+    reports = [report for _, report in named_reports]
+    total_nodes = sum(report["result"]["nodes"] for report in reports)
+    total_cycles = sum(report["timing"]["search_cycles"] for report in reports)
+    total_simulated_seconds = sum(report["timing"]["simulated_search_seconds"] for report in reports)
+    total_wall_seconds = sum(report["timing"]["simulator_wall_seconds"] for report in reports)
+    if suite_wall_seconds is None:
+        suite_wall_seconds = total_wall_seconds
+    tt_lookups = sum(report["transposition_table"]["lookups"] for report in reports)
+    tt_hits = sum(report["transposition_table"]["hits"] for report in reports)
+    cache_probes = sum(report["transposition_table"]["cache"]["lookup_probes"] for report in reports)
+    cache_hits = sum(report["transposition_table"]["cache"]["lookup_hits"] for report in reports)
+    row_hits = sum(report["sdram"]["row_hits"] for report in reports)
+    row_misses = sum(report["sdram"]["row_misses"] for report in reports)
+    row_conflicts = sum(report["sdram"]["row_conflicts"] for report in reports)
+    common_configuration = dict(reports[0]["configuration"])
+    common_configuration.pop("fen", None)
+    common_configuration.pop("position_name", None)
+    aggregate_profile = _aggregate_profile_reports(reports, common_configuration)
+    return {
+        "configuration": common_configuration,
+        "position_count": len(reports),
+        "jobs": jobs,
+        "aggregate_profile": aggregate_profile,
+        "positions": [
+            {
+                "name": name,
+                "fen": report["configuration"]["fen"],
+                "result": report["result"],
+                "timing": report["timing"],
+            }
+            for name, report in named_reports
+        ],
+        "timing": {
+            "search_cycles": total_cycles,
+            "nodes": total_nodes,
+            "simulated_search_seconds": total_simulated_seconds,
+            "simulator_wall_seconds": total_wall_seconds,
+            "suite_wall_seconds": suite_wall_seconds,
+            "cycles_per_node": rate(total_cycles, total_nodes),
+            "nodes_per_simulated_second": rate(total_nodes, total_simulated_seconds),
+            "search_cycles_per_wall_second": rate(total_cycles, total_wall_seconds),
+            "wall_to_simulated_time_ratio": rate(total_wall_seconds, total_simulated_seconds),
+            "suite_search_cycles_per_wall_second": rate(total_cycles, suite_wall_seconds),
+            "suite_wall_to_simulated_time_ratio": rate(suite_wall_seconds, total_simulated_seconds),
+        },
+        "transposition_table": {
+            "lookups": tt_lookups,
+            "hits": tt_hits,
+            "hit_rate_percent": percent(tt_hits, tt_lookups),
+            "cache_lookup_probes": cache_probes,
+            "cache_lookup_hits": cache_hits,
+            "cache_hit_rate_percent": percent(cache_hits, cache_probes),
+        },
+        "sdram": {
+            "row_hits": row_hits,
+            "row_misses": row_misses,
+            "row_conflicts": row_conflicts,
+            "row_hit_rate_percent": percent(row_hits, row_hits + row_misses + row_conflicts),
+        },
+    }
+
+
+def format_profile_suite_report(report: dict) -> str:
+    """Format a detailed aggregate report without dumping individual positions."""
+    timing = report["timing"]
+    aggregate = report["aggregate_profile"]
+    aggregate_timing = aggregate["timing"]
+    configuration = report["configuration"]
+    limit = configuration["search_limit"]
+    limit_text = {
+        "depth": f"depth {limit['value']}",
+        "nodes": f"{limit['value']:,} node{'' if limit['value'] == 1 else 's'}",
+        "time": f"{limit['value']:,} ms",
+    }[limit["kind"]]
+    title = "FPGA Chess Engine Runtime Profile Suite"
+    lines = [
+        title,
+        "=" * len(title),
+        (
+            f"Positions: {report['position_count']}; search threads: {configuration['threads']}; "
+            f"search limit: {limit_text}"
+        ),
+        f"Simulator: {configuration['simulator']}",
+        (
+            f"Aggregate search: {timing['search_cycles']:,} cycles, {timing['nodes']:,} nodes, "
+            f"{_format_number(timing['cycles_per_node'])} cycles/node"
+        ),
+        (
+            f"Simulated FPGA search time: "
+            f"{_format_number(timing['simulated_search_seconds'] * 1_000)} ms; "
+            f"throughput: {_format_number(timing['nodes_per_simulated_second'])} nodes/s"
+        ),
+        (
+            f"Outside measured search: command/position setup={aggregate_timing['setup_cycles']:,} cycles, "
+            f"result serialization={aggregate_timing['output_cycles']:,} cycles, "
+            f"background TT-store completion={aggregate_timing['post_search_drain_cycles']:,} cycles"
+        ),
+        "",
+        format_profile_report(
+            aggregate,
+            include_header=False,
+            include_simulator_performance=False,
+        ).rstrip(),
+        "",
+        "Suite simulation performance",
+        (
+            f"  Elapsed wall time: {_format_number(timing['suite_wall_seconds'])} s"
+        ),
+        (
+            f"  Aggregate simulation throughput: "
+            f"{_format_number(timing['suite_search_cycles_per_wall_second'])} "
+            "search cycles/wall s"
+        ),
+        (
+            f"  Wall time / aggregate simulated search time: "
+            f"{_format_number(timing['suite_wall_to_simulated_time_ratio'])}x"
+        ),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _profile_output_dir(args: argparse.Namespace) -> Path:
+    """Resolve an explicit output directory or allocate a timestamped one."""
+    if args.output:
+        return Path(args.output).expanduser().resolve()
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    return BUILD_ROOT / "profile" / timestamp
+
+
+def command_profile_position(args: argparse.Namespace) -> int:
+    """Run the detailed profiler for one explicitly supplied FEN."""
+    search_kind, search_limit = _validate_profile_args(args)
+    try:
+        encode_fen(args.fen)
+    except ProtocolError as exc:
+        raise BuildError(f"Invalid FEN: {exc}") from exc
+    manifest, simulator, library, executable = _prepare_profile_simulator(args)
+    run_dir = _profile_output_dir(args)
+    report = _run_profile_position(
+        args, args.fen, run_dir, search_kind, search_limit,
+        manifest, simulator, library, executable,
+    )
+    text_report = format_profile_report(report)
     print(text_report, end="")
+    print()
+    print(f"Artifacts: {rel(run_dir) if run_dir.is_relative_to(REPO_ROOT) else run_dir}")
+    return 0
+
+
+def _profile_job_count(args: argparse.Namespace, simulator: str) -> int:
+    """Choose process-level suite parallelism without oversubscribing Verilator workers."""
+    if args.jobs is not None:
+        if args.jobs < 1:
+            raise BuildError("--jobs must be positive")
+        return min(args.jobs, len(PROFILE_POSITIONS))
+    if simulator != "verilator":
+        return 1
+    return min(
+        len(PROFILE_POSITIONS),
+        max(1, host_parallel_processors() // args.simulator_threads),
+    )
+
+
+def command_profile(args: argparse.Namespace) -> int:
+    """Profile the standard named position suite and print only its summary."""
+    search_kind, search_limit = _validate_profile_args(args)
+    if args.jobs is not None and args.jobs < 1:
+        raise BuildError("--jobs must be positive")
+    manifest, simulator, library, executable = _prepare_profile_simulator(args)
+    jobs = _profile_job_count(args, simulator)
+    run_dir = _profile_output_dir(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    suite_start = time.monotonic()
+
+    def run_case(case) -> dict:
+        """Run one suite case in its own simulator process and artifact directory."""
+        return _run_profile_position(
+            args, case.fen, run_dir / "positions" / case.name,
+            search_kind, search_limit, manifest, simulator, library, executable,
+            position_name=case.name,
+        )
+
+    reports: list[dict | None] = [None] * len(PROFILE_POSITIONS)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        future_indices = {
+            executor.submit(run_case, case): index
+            for index, case in enumerate(PROFILE_POSITIONS)
+        }
+        for future in concurrent.futures.as_completed(future_indices):
+            reports[future_indices[future]] = future.result()
+    suite_wall_seconds = time.monotonic() - suite_start
+    named_reports = [
+        (case.name, report)
+        for case, report in zip(PROFILE_POSITIONS, reports)
+        if report is not None
+    ]
+    suite_report = build_profile_suite_report(named_reports, suite_wall_seconds, jobs)
+    text_report = format_profile_suite_report(suite_report)
+    (run_dir / "report.json").write_text(json.dumps(suite_report, indent=2) + "\n", encoding="utf-8")
+    (run_dir / "report.txt").write_text(text_report, encoding="utf-8")
+    print(text_report, end="")
+    print()
+    print(f"Per-position reports: {rel(run_dir / 'positions') if run_dir.is_relative_to(REPO_ROOT) else run_dir / 'positions'}")
     print(f"Artifacts: {rel(run_dir) if run_dir.is_relative_to(REPO_ROOT) else run_dir}")
     return 0
