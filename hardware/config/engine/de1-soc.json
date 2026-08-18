@@ -1,0 +1,14 @@
+{
+  "search_config": "hardware/config/search/default.json",
+  "engine": {
+    "threads": 1,
+    "stack_depth": 32,
+    "clock_frequency_hz": 50000000
+  },
+  "transposition_table": {
+    "tag_bits": 32
+  },
+  "instrumentation": {
+    "search_statistics": false
+  }
+}

@@ -20,7 +20,7 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status of the selected TT memory backend. |
 | Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral TT memory command, write-data, read-data, and completion channels. |
 
-Parameters configure the build ID, controller clock frequency, thread count, stack depth, LMR policy, TT backend, and optional search statistics. Board wrappers must supply the exact clock frequency and generated build identifier for the image; clock and metadata generation remain outside the portable core.
+Parameters configure the build ID, controller clock frequency, thread count, stack depth, search policy, move-history policy, TT backend and policy, and optional search statistics. FPGA engine profiles and their referenced search profiles are resolved into constants passed by the board wrapper; clock, configuration-digest, and metadata generation remain outside the portable core.
 
 ## Commands
 

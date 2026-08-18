@@ -55,11 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
         limits.add_argument("--depth", type=int, help="Fixed search depth")
         limits.add_argument("--nodes", type=int, help="Node-limited search")
         limits.add_argument("--time-ms", type=int, help="Fixed simulated search time; defaults to 50 ms")
-        profile_command.add_argument("--threads", type=int, default=1, help="Search threads; defaults to the DE1 value 1")
-        profile_command.add_argument("--stack-depth", type=int, default=32, help="Stack plies; defaults to 32")
         profile_command.add_argument(
-            "--engine-clock-hz", type=int, default=50_000_000,
-            help="Engine clock frequency; defaults to the DE1 value 50000000",
+            "--engine-config", default="hardware/config/engine/de1-soc.json",
+            help="Layered FPGA engine profile; defaults to the DE1-SoC profile",
+        )
+        profile_command.add_argument("--threads", type=int, help="Override the engine profile's search threads")
+        profile_command.add_argument("--stack-depth", type=int, help="Override the engine profile's stack plies")
+        profile_command.add_argument(
+            "--engine-clock-hz", type=int,
+            help="Override the engine profile's clock frequency",
         )
         profile_command.add_argument(
             "--timeout", type=float,

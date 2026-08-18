@@ -6,11 +6,12 @@ package tt_defs;
 
     localparam int TT_DEFAULT_TAG_BITS = 32;
     localparam int TT_HASH_BITS = 32;
-    localparam int TT_ENTRY_PAYLOAD_BITS = 43;
+    localparam int TT_DEPTH_BITS = (MAX_PLY_COUNT <= 1) ? 1 : $clog2(MAX_PLY_COUNT);
+    localparam int TT_ENTRY_PAYLOAD_BITS = $bits(Move) + $bits(EvalScore)
+        + TT_DEPTH_BITS + 2 + 5;
     localparam int TT_COMPACT_ENTRY_BITS = TT_DEFAULT_TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
-    localparam int TT_FULL_ENTRY_BITS = 123;
+    localparam int TT_FULL_ENTRY_BITS = $bits(ZobristKey) + TT_ENTRY_PAYLOAD_BITS + 16;
     localparam int TT_ENTRY_BITS = TT_COMPACT_ENTRY_BITS;
-    localparam int TT_DEPTH_BITS = 6;
     localparam int TT_AGE_BITS = 5;
     localparam int TT_AUX_BITS = 16;
 
@@ -154,13 +155,14 @@ package tt_defs;
         input TTBoundType old_bound_type,
         input TTAge new_age,
         input TTDepth new_depth,
-        input TTBoundType new_bound_type
+        input TTBoundType new_bound_type,
+        input int unsigned stale_depth_tolerance
     );
         automatic logic stale_with_depth_window;
         automatic logic equal_depth_allowed;
 
         stale_with_depth_window = (old_age != new_age)
-            && (({1'b0, new_depth} + 7'd4) >= {1'b0, old_depth});
+            && ((int'(new_depth) + stale_depth_tolerance) >= int'(old_depth));
         // At equal depth, preserve an exact result against a later bound while
         // still allowing another exact result or bound to refresh its peer.
         equal_depth_allowed = (new_depth == old_depth)

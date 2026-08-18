@@ -33,8 +33,15 @@ class EngineBuildConfigTests(unittest.TestCase):
 
             self.assertEqual(project, build_dir / "fpga_chess")
             self.assertTrue((build_dir / "engine_build_config.svh").is_file())
+            self.assertTrue((build_dir / "resolved_engine_config.json").is_file())
+            generated_config = (build_dir / "engine_build_config.svh").read_text(encoding="utf-8")
+            self.assertIn("ENGINE_SEARCH_THREAD_COUNT = 1", generated_config)
+            self.assertIn("ENGINE_SEARCH_STACK_DEPTH = 32", generated_config)
+            self.assertIn("ENGINE_ASPIRATION_HALF_WINDOW = 64", generated_config)
             qsf = project.with_suffix(".qsf").read_text(encoding="utf-8")
             self.assertIn("engine_build_config.svh", qsf)
+            self.assertIn('FPGA_CHESS_THREAD_CAPACITY=1', qsf)
+            self.assertIn('FPGA_CHESS_SEARCH_STACK_CAPACITY=32', qsf)
 
 
 if __name__ == "__main__":

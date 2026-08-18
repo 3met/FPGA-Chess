@@ -8,7 +8,8 @@ module tt_external_load_store #(
     parameter int TAG_BITS = TT_DEFAULT_TAG_BITS,
     parameter int ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT
         / ((TAG_BITS + TT_ENTRY_PAYLOAD_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS),
-    parameter int STORE_FIFO_DEPTH = 256
+    parameter int STORE_FIFO_DEPTH = 256,
+    parameter int unsigned STALE_DEPTH_TOLERANCE = 4
 ) (
     input logic clk,
     input logic rst_n,
@@ -169,7 +170,8 @@ module tt_external_load_store #(
             old_entry.bound_type,
             generation,
             req.depth,
-            req.bound_type
+            req.bound_type,
+            STALE_DEPTH_TOLERANCE
         );
     endfunction
 

@@ -11,6 +11,7 @@ from tools.hardware_build.profiling import (
     ORDINAL_BUCKETS,
     THREAD_PHASES,
     _profile_job_count,
+    _resolve_profile_config,
     _validate_profile_args,
     build_profile_report,
     build_profile_suite_report,
@@ -469,12 +470,21 @@ class ProfileArgumentTests(unittest.TestCase):
         self.assertEqual(_validate_profile_args(self.namespace(time_ms=5)), ("time", 5))
 
     def test_invalid_configuration_fails(self):
+        self.assertEqual(_validate_profile_args(self.namespace(threads=17)), ("time", 50))
         with self.assertRaises(BuildError):
-            _validate_profile_args(self.namespace(threads=17))
+            _validate_profile_args(self.namespace(threads=0))
         with self.assertRaises(BuildError):
             _validate_profile_args(self.namespace(depth=32))
         with self.assertRaises(BuildError):
             _validate_profile_args(self.namespace(simulator_threads=0))
+
+    def test_structural_overrides_update_resolved_profile(self):
+        args = self.namespace(threads=17, stack_depth=65, engine_clock_hz=60_000_000)
+        args.engine_config = "hardware/config/engine/de1-soc.json"
+        config = _resolve_profile_config(args)
+        self.assertEqual(config["threads"], 17)
+        self.assertEqual(config["stack_depth"], 65)
+        self.assertEqual(config["clock_frequency_hz"], 60_000_000)
 
 
 class ProfileSuiteTests(unittest.TestCase):

@@ -26,6 +26,7 @@ from .common import (
     write_synth_metadata,
 )
 from .generated_data import command_gen_data
+from .engine_config import engine_clock_mhz_for_target, engine_config_for_target
 from .manifest import ensure_existing, expand_source_set, load_manifest, repo_path
 
 
@@ -114,15 +115,58 @@ def new_build_id() -> int:
     return build_id
 
 
-def write_engine_build_config(build_dir: Path, engine_clock_mhz: float, build_id: int) -> Path:
+def write_engine_build_config(
+    build_dir: Path,
+    engine_clock_mhz: float,
+    build_id: int,
+    engine_config: dict | None = None,
+) -> Path:
     """Generate constant engine metadata for the exact synthesized image."""
     config = build_dir / "engine_build_config.svh"
-    config.write_text(
+    lines = [
         "// Generated for this synthesis invocation; do not edit.\n"
         f"localparam logic [63:0] FPGA_BUILD_ID = 64'h{build_id:016x};\n"
-        f"localparam int ENGINE_CLOCK_FREQ = {engine_clock_values(engine_clock_mhz)[1]:_};\n",
-        encoding="utf-8",
-    )
+        f"localparam int ENGINE_CLOCK_FREQ = {engine_clock_values(engine_clock_mhz)[1]:_};\n"
+    ]
+    if engine_config is not None:
+        search = engine_config["search"]
+        thresholds = search["quiet_bucket_thresholds"]
+        increment = search["increment_fraction"]
+        remaining = search["remaining_time_fraction"]
+        values = {
+            "ENGINE_SEARCH_THREAD_COUNT": engine_config["threads"],
+            "ENGINE_SEARCH_STACK_DEPTH": engine_config["stack_depth"],
+            "ENGINE_TT_TAG_BITS": engine_config["tt_tag_bits"],
+            "ENGINE_ENABLE_SEARCH_STATS": int(engine_config["search_statistics"]),
+            "ENGINE_ASPIRATION_HALF_WINDOW": search["aspiration_half_window"],
+            "ENGINE_LMR_A_Q8": search["lmr_a_q8"],
+            "ENGINE_LMR_B_Q8": search["lmr_b_q8"],
+            "ENGINE_LMR_MINIMUM_DEPTH": search["lmr_minimum_depth"],
+            "ENGINE_LMR_MINIMUM_MOVE_NUMBER": search["lmr_minimum_move_number"],
+            "ENGINE_NULL_MINIMUM_DEPTH": search["null_minimum_depth"],
+            "ENGINE_NULL_DEEP_DEPTH_THRESHOLD": search["null_deep_depth_threshold"],
+            "ENGINE_NULL_SHALLOW_REDUCTION": search["null_shallow_reduction"],
+            "ENGINE_NULL_DEEP_REDUCTION": search["null_deep_reduction"],
+            "ENGINE_MOVE_OVERHEAD_MS": search["move_overhead_ms"],
+            "ENGINE_MINIMUM_SEARCH_MS": search["minimum_search_ms"],
+            "ENGINE_INCREMENT_NUMERATOR": increment[0],
+            "ENGINE_INCREMENT_DENOMINATOR": increment[1],
+            "ENGINE_REMAINING_TIME_NUMERATOR": remaining[0],
+            "ENGINE_REMAINING_TIME_DENOMINATOR": remaining[1],
+            "ENGINE_HISTORY_REWARD_PER_DEPTH": search["history_reward_per_depth"],
+            "ENGINE_HISTORY_MAXIMUM_REWARD": search["history_maximum_reward"],
+            "ENGINE_HISTORY_MALUS_DIVISOR": search["history_malus_divisor"],
+            "ENGINE_QUIET_THRESHOLD_1": thresholds[0],
+            "ENGINE_QUIET_THRESHOLD_2": thresholds[1],
+            "ENGINE_QUIET_THRESHOLD_3": thresholds[2],
+            "ENGINE_CASTLING_HISTORY_BONUS": search["castling_history_bonus"],
+            "ENGINE_TT_VALIDATE_MINIMUM_DEPTH": search["tt_history_validation_minimum_depth"],
+            "ENGINE_TT_VALIDATE_BYPASS_HALFMOVES": search["tt_history_validation_bypass_halfmoves"],
+            "ENGINE_TT_STALE_DEPTH_TOLERANCE": search["tt_stale_entry_depth_tolerance"],
+        }
+        lines.append(f"localparam logic [255:0] ENGINE_CONFIG_DIGEST = 256'h{engine_config['digest']};\n")
+        lines.extend(f"localparam int {name} = {value};\n" for name, value in values.items())
+    config.write_text("".join(lines), encoding="utf-8")
     return config
 
 
@@ -149,8 +193,14 @@ def write_quartus_project(
     qsf = project.with_suffix(".qsf")
     sources = expand_source_set(manifest, target["source_set"])
     generated_build_config = None
-    if "engine_clock_mhz" in target:
-        generated_build_config = write_engine_build_config(build_dir, target["engine_clock_mhz"], build_id)
+    engine_clock_mhz = engine_clock_mhz_for_target(target)
+    if engine_clock_mhz is not None:
+        generated_build_config = write_engine_build_config(
+            build_dir,
+            engine_clock_mhz,
+            build_id,
+            engine_config_for_target(target),
+        )
     generated_outputs = [
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
@@ -179,6 +229,15 @@ def write_quartus_project(
         f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(build_dir)}"',
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
+    resolved_engine_config = engine_config_for_target(target)
+    if resolved_engine_config is not None:
+        (build_dir / "resolved_engine_config.json").write_text(
+            json.dumps(resolved_engine_config, indent=2) + "\n", encoding="utf-8"
+        )
+        lines.extend([
+            f"set_global_assignment -name VERILOG_MACRO \"FPGA_CHESS_THREAD_CAPACITY={resolved_engine_config['threads']}\"",
+            f"set_global_assignment -name VERILOG_MACRO \"FPGA_CHESS_SEARCH_STACK_CAPACITY={resolved_engine_config['stack_depth']}\"",
+        ])
     if "seed" in target:
         lines.append(f"set_global_assignment -name SEED {target['seed']}")
     for message_id in target.get("message_disable", []):
@@ -196,7 +255,7 @@ def write_quartus_project(
     if "clock_generator" in target:
         qip_files.append(
             materialize_intel_pll(
-                repo_path(target["clock_generator"]["template"]), build_dir, target["engine_clock_mhz"]
+                repo_path(target["clock_generator"]["template"]), build_dir, engine_clock_mhz
             )
         )
     for qip in qip_files:
@@ -239,6 +298,9 @@ def synth_quartus(
     build_id = new_build_id()
     project = write_quartus_project(manifest, target, build_dir, parallel_processors, build_id)
     metadata = begin_synth_metadata(build_dir, target_name, target)
+    resolved_engine_config = engine_config_for_target(target)
+    if resolved_engine_config is not None:
+        metadata["engine_profile"] = resolved_engine_config
     metadata["build_id"] = f"{build_id:016x}"
     metadata["parallel_processors"] = parallel_processors
     write_synth_metadata(build_dir, metadata)

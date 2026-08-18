@@ -6,6 +6,13 @@
 
 // A Package for general chess/engine definitions
 package general_chess_defs;
+	// Build tools may size packed identifiers to the selected FPGA profile.
+	`ifndef FPGA_CHESS_SEARCH_STACK_CAPACITY
+		`define FPGA_CHESS_SEARCH_STACK_CAPACITY 64
+	`endif
+	`ifndef FPGA_CHESS_THREAD_CAPACITY
+		`define FPGA_CHESS_THREAD_CAPACITY 16
+	`endif
 
 	// -- Data Type for Colors --
 	typedef enum logic {
@@ -129,10 +136,10 @@ package general_chess_defs;
 
 
 	// Maximum supported search depth. Target builds may allocate a smaller stack.
-	localparam MAX_PLY_COUNT = 64;
+	localparam int MAX_PLY_COUNT = `FPGA_CHESS_SEARCH_STACK_CAPACITY;
 
 	// Data type to index search plies
-	typedef logic [$clog2(MAX_PLY_COUNT)-1:0] PlyIndex;
+	typedef logic [((MAX_PLY_COUNT <= 1) ? 1 : $clog2(MAX_PLY_COUNT))-1:0] PlyIndex;
 
 	// Data type for a Zobrist position key
 	typedef logic [63:0] ZobristKey;
@@ -205,9 +212,9 @@ package general_chess_defs;
 
 	// -- Evaluation Related Definitions --
 
-	localparam THREAD_COUNT = 16;
+	localparam int THREAD_COUNT = `FPGA_CHESS_THREAD_CAPACITY;
 
-	localparam THREAD_ID_BITS = $clog2(THREAD_COUNT);
+	localparam int THREAD_ID_BITS = (THREAD_COUNT <= 1) ? 1 : $clog2(THREAD_COUNT);
 
 	typedef logic [THREAD_ID_BITS-1:0] ThreadID;
 

@@ -7,6 +7,7 @@ module tt_load_store #(
     parameter int TT_INDEX_BITS = 10,
     parameter int TAG_BITS = TT_DEFAULT_TAG_BITS,
     parameter int STORE_FIFO_DEPTH = 256,
+    parameter int unsigned STALE_DEPTH_TOLERANCE = 4,
     parameter bit USE_FULL_KEY = 1'b0
 ) (
     input logic clk,
@@ -302,7 +303,8 @@ module tt_load_store #(
             storage_bound_type(old_entry),
             req.age,
             req.depth,
-            req.bound_type
+            req.bound_type,
+            STALE_DEPTH_TOLERANCE
         );
     endfunction : should_replace
 

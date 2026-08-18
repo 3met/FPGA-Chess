@@ -17,6 +17,13 @@ module move_generator_pipeline #(
     parameter MoveGenCommand GENERATION_COMMAND = MOVE_GEN_GENERATE_NOISY,
     parameter MoveBucketMask OWNED_BUCKETS =
         GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK,
+    parameter int HISTORY_REWARD_PER_DEPTH = 4,
+    parameter int HISTORY_MAXIMUM_REWARD = 63,
+    parameter int HISTORY_MALUS_DIVISOR = 2,
+    parameter int QUIET_THRESHOLD_1 = 16,
+    parameter int QUIET_THRESHOLD_2 = 64,
+    parameter int QUIET_THRESHOLD_3 = 128,
+    parameter int CASTLING_HISTORY_BONUS = 16,
     parameter bit ASSERT_ON_OVERFLOW = 1'b1,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -64,7 +71,7 @@ module move_generator_pipeline #(
     input Color history_update_color,
     input Position history_update_from,
     input Position history_update_to,
-    input logic [5:0] history_update_depth,
+    input PlyIndex history_update_depth,
     input logic [11:0] history_update_failed0,
     input logic [11:0] history_update_failed1,
     input logic [11:0] history_update_failed2,
@@ -139,6 +146,12 @@ module move_generator_pipeline #(
     initial begin
         if (THREAD_COUNT < 1 || THREAD_COUNT > general_chess_defs::THREAD_COUNT)
             $fatal(1, "move_generator THREAD_COUNT exceeds ThreadID capacity");
+        if (HISTORY_REWARD_PER_DEPTH < 1 || HISTORY_MAXIMUM_REWARD < 1
+                || HISTORY_MAXIMUM_REWARD > 127 || HISTORY_MALUS_DIVISOR < 1)
+            $fatal(1, "history update parameters do not fit their arithmetic");
+        if (!(QUIET_THRESHOLD_1 < QUIET_THRESHOLD_2
+                && QUIET_THRESHOLD_2 < QUIET_THRESHOLD_3))
+            $fatal(1, "quiet history thresholds must be strictly increasing");
         if (GENERATION_COMMAND != MOVE_GEN_GENERATE_NOISY
                 && GENERATION_COMMAND != MOVE_GEN_GENERATE_QUIET)
             $fatal(1, "move-generator pipeline must be noisy or quiet");
@@ -227,7 +240,7 @@ module move_generator_pipeline #(
     HistoryUpdateState history_update_state;
     Color update_color;
     logic [11:0] update_address;
-    logic [5:0] update_depth;
+    PlyIndex update_depth;
     logic [11:0] update_failed0;
     logic [11:0] update_failed1;
     logic [11:0] update_failed2;
@@ -680,9 +693,9 @@ module move_generator_pipeline #(
     endfunction
 
     function automatic MoveBucketIndex quiet_bucket(input logic signed [10:0] score);
-        if (score >= 11'sd128) return QUIET_HIGHEST_BUCKET;
-        if (score >= 11'sd64) return QUIET_HIGH_BUCKET;
-        if (score >= 11'sd16) return QUIET_MEDIUM_BUCKET;
+        if (score >= QUIET_THRESHOLD_3) return QUIET_HIGHEST_BUCKET;
+        if (score >= QUIET_THRESHOLD_2) return QUIET_HIGH_BUCKET;
+        if (score >= QUIET_THRESHOLD_1) return QUIET_MEDIUM_BUCKET;
         return QUIET_LOW_BUCKET;
     endfunction
 
@@ -986,7 +999,7 @@ module move_generator_pipeline #(
         end else if (candidate_valid) begin
             automatic logic signed [10:0] score;
             score = $signed(history_q[job_board.turn]);
-            if (candidate_is_castle) score += 11'sd16;
+            if (candidate_is_castle) score += CASTLING_HISTORY_BONUS;
             bucket_wr_select = quiet_bucket(score);
             bucket_wr_top = job_tops[bucket_wr_select];
             if (job_tops[bucket_wr_select] < bucket_capacity(bucket_wr_select))
@@ -1022,8 +1035,10 @@ module move_generator_pipeline #(
             automatic logic signed [7:0] signed_bonus;
             automatic logic signed [16:0] gravity_product;
             automatic logic signed [10:0] updated_history;
-            reward_magnitude = (update_depth >= 6'd16) ? 7'd63 : {update_depth[4:0], 2'b00};
-            magnitude = update_is_malus ? (reward_magnitude >> 1) : reward_magnitude;
+            reward_magnitude = (int'(update_depth) * HISTORY_REWARD_PER_DEPTH >= HISTORY_MAXIMUM_REWARD)
+                ? 7'(HISTORY_MAXIMUM_REWARD) : 7'(int'(update_depth) * HISTORY_REWARD_PER_DEPTH);
+            magnitude = update_is_malus
+                ? (reward_magnitude / HISTORY_MALUS_DIVISOR) : reward_magnitude;
             signed_bonus = update_is_malus
                 ? -$signed({1'b0, magnitude}) : $signed({1'b0, magnitude});
             // Gravity makes established history progressively harder to change:
@@ -1484,6 +1499,13 @@ module move_generator #(
     parameter int BUCKET_5_CAPACITY = 512,
     parameter int BUCKET_6_CAPACITY = 512,
     parameter int BUCKET_7_CAPACITY = 512,
+    parameter int HISTORY_REWARD_PER_DEPTH = 4,
+    parameter int HISTORY_MAXIMUM_REWARD = 63,
+    parameter int HISTORY_MALUS_DIVISOR = 2,
+    parameter int QUIET_THRESHOLD_1 = 16,
+    parameter int QUIET_THRESHOLD_2 = 64,
+    parameter int QUIET_THRESHOLD_3 = 128,
+    parameter int CASTLING_HISTORY_BONUS = 16,
     parameter bit ASSERT_ON_OVERFLOW = 1'b1,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -1542,7 +1564,7 @@ module move_generator #(
     input Color history_update_color,
     input Position history_update_from,
     input Position history_update_to,
-    input logic [5:0] history_update_depth,
+    input PlyIndex history_update_depth,
     input logic [11:0] history_update_failed0,
     input logic [11:0] history_update_failed1,
     input logic [11:0] history_update_failed2,
@@ -1653,6 +1675,11 @@ module move_generator #(
         .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
         .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
         .GENERATION_COMMAND(MOVE_GEN_GENERATE_NOISY), .OWNED_BUCKETS(NOISY_BUCKET_MASK),
+        .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
+        .HISTORY_MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
+        .HISTORY_MALUS_DIVISOR(HISTORY_MALUS_DIVISOR),
+        .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1), .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
+        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3), .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
         .ASSERT_ON_OVERFLOW(ASSERT_ON_OVERFLOW), .ENABLE_STATS(ENABLE_STATS)
     ) noisy_pipeline (
         .clk, .rst_n, .clear, .flush, .init_busy(noisy_init_busy),
@@ -1695,6 +1722,11 @@ module move_generator #(
         .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
         .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
         .GENERATION_COMMAND(MOVE_GEN_GENERATE_QUIET), .OWNED_BUCKETS(QUIET_BUCKET_MASK),
+        .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
+        .HISTORY_MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
+        .HISTORY_MALUS_DIVISOR(HISTORY_MALUS_DIVISOR),
+        .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1), .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
+        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3), .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
         .ASSERT_ON_OVERFLOW(ASSERT_ON_OVERFLOW), .ENABLE_STATS(ENABLE_STATS)
     ) quiet_pipeline (
         .clk, .rst_n, .clear, .flush, .init_busy(quiet_init_busy),

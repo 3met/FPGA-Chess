@@ -17,6 +17,29 @@ module search_controller #(
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int unsigned LMR_A_Q8 = 192,
     parameter int unsigned LMR_B_Q8 = 614,
+    parameter int ASPIRATION_HALF_WINDOW = 64,
+    parameter int LMR_MINIMUM_DEPTH = 3,
+    parameter int LMR_MINIMUM_MOVE_NUMBER = 3,
+    parameter int NULL_MINIMUM_DEPTH = 3,
+    parameter int NULL_DEEP_DEPTH_THRESHOLD = 7,
+    parameter int NULL_SHALLOW_REDUCTION = 2,
+    parameter int NULL_DEEP_REDUCTION = 3,
+    parameter int MOVE_OVERHEAD_MS = 20,
+    parameter int MINIMUM_SEARCH_MS = 10,
+    parameter int INCREMENT_NUMERATOR = 3,
+    parameter int INCREMENT_DENOMINATOR = 4,
+    parameter int REMAINING_TIME_NUMERATOR = 1,
+    parameter int REMAINING_TIME_DENOMINATOR = 32,
+    parameter int HISTORY_REWARD_PER_DEPTH = 4,
+    parameter int HISTORY_MAXIMUM_REWARD = 63,
+    parameter int HISTORY_MALUS_DIVISOR = 2,
+    parameter int QUIET_THRESHOLD_1 = 16,
+    parameter int QUIET_THRESHOLD_2 = 64,
+    parameter int QUIET_THRESHOLD_3 = 128,
+    parameter int CASTLING_HISTORY_BONUS = 16,
+    parameter int TT_VALIDATE_MINIMUM_DEPTH = 8,
+    parameter int TT_VALIDATE_BYPASS_HALFMOVES = 4,
+    parameter int TT_STALE_DEPTH_TOLERANCE = 4,
     parameter bit EXTERNAL_TT = 1'b0,
     parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
@@ -63,12 +86,9 @@ module search_controller #(
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_INF_VALUE = 32767;
     localparam int NULL_MIN_BETA_VALUE = -16640 + MAX_PLY_COUNT;
-    localparam int ASPIRATION_DELTA_VALUE = 64;
-    localparam int TT_VALIDATE_MIN_DEPTH = 8;
-    localparam int TT_VALIDATE_MAX_BYPASS_HALFMOVE = 4;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam EvalScore NULL_MIN_BETA = EvalScore'(NULL_MIN_BETA_VALUE);
-    localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_DELTA_VALUE);
+    localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_HALF_WINDOW);
     localparam int LMR_LN2_Q8 = 177;
     localparam int LMR_MAX_REMAINING_DEPTH = SEARCH_STACK_DEPTH - 1;
     // Only floor-log2 buckets reachable by a legal configured search depth exist.
@@ -81,6 +101,17 @@ module search_controller #(
             $fatal(1, "SEARCH_THREAD_COUNT must fit the global ThreadID width");
         if (SEARCH_STACK_DEPTH < 1 || SEARCH_STACK_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "SEARCH_STACK_DEPTH must fit the global PlyIndex width");
+        if (ASPIRATION_HALF_WINDOW < 1)
+            $fatal(1, "ASPIRATION_HALF_WINDOW must be positive");
+        if (LMR_MINIMUM_DEPTH < 1 || LMR_MINIMUM_MOVE_NUMBER < 1)
+            $fatal(1, "LMR eligibility values must be positive");
+        if (NULL_MINIMUM_DEPTH < 1 || NULL_DEEP_DEPTH_THRESHOLD < NULL_MINIMUM_DEPTH)
+            $fatal(1, "null-move depth thresholds are inconsistent");
+        if (NULL_SHALLOW_REDUCTION >= NULL_MINIMUM_DEPTH
+                || NULL_DEEP_REDUCTION >= NULL_DEEP_DEPTH_THRESHOLD)
+            $fatal(1, "null-move reductions must leave a nonnegative child depth");
+        if (INCREMENT_DENOMINATOR < 1 || REMAINING_TIME_DENOMINATOR < 1)
+            $fatal(1, "time-management denominators must be positive");
     end
 `endif
 
@@ -375,7 +406,7 @@ module search_controller #(
     Color move_history_update_color;
     Position move_history_update_from;
     Position move_history_update_to;
-    logic [5:0] move_history_update_depth;
+    PlyIndex move_history_update_depth;
     logic [11:0] move_history_update_failed0;
     logic [11:0] move_history_update_failed1;
     logic [11:0] move_history_update_failed2;
@@ -397,7 +428,7 @@ module search_controller #(
     Color history_update_pending_color[0:SEARCH_THREAD_COUNT-1];
     Position history_update_pending_from[0:SEARCH_THREAD_COUNT-1];
     Position history_update_pending_to[0:SEARCH_THREAD_COUNT-1];
-    logic [5:0] history_update_pending_depth[0:SEARCH_THREAD_COUNT-1];
+    PlyIndex history_update_pending_depth[0:SEARCH_THREAD_COUNT-1];
     logic [11:0] history_update_pending_failed0[0:SEARCH_THREAD_COUNT-1];
     logic [11:0] history_update_pending_failed1[0:SEARCH_THREAD_COUNT-1];
     logic [11:0] history_update_pending_failed2[0:SEARCH_THREAD_COUNT-1];
@@ -586,6 +617,13 @@ module search_controller #(
 
     move_generator #(
         .THREAD_COUNT(SEARCH_THREAD_COUNT),
+        .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
+        .HISTORY_MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
+        .HISTORY_MALUS_DIVISOR(HISTORY_MALUS_DIVISOR),
+        .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1),
+        .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
+        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3),
+        .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
         .ENABLE_STATS(ENABLE_SEARCH_STATS)
     ) move_generator (
         .clk(clk),
@@ -641,7 +679,8 @@ module search_controller #(
     generate
         if (EXTERNAL_TT) begin : external_tt_gen
             tt_external_load_store #(
-                .TAG_BITS(TT_TAG_BITS)
+                .TAG_BITS(TT_TAG_BITS),
+                .STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE)
             ) tt_load_store (
                 .clk(clk), .rst_n(rst_n), .memory_ready(tt_memory_ready), .memory_error(tt_memory_error),
                 .clear(tt_clear), .clear_busy(tt_clear_busy),
@@ -665,7 +704,8 @@ module search_controller #(
         end else begin : internal_tt_gen
             tt_load_store #(
                 .TT_INDEX_BITS(TT_INDEX_BITS),
-                .TAG_BITS(TT_TAG_BITS)
+                .TAG_BITS(TT_TAG_BITS),
+                .STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE)
             ) tt_load_store (
                 .clk(clk), .rst_n(rst_n), .clear(tt_clear), .clear_busy(tt_clear_busy),
                 .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
@@ -992,17 +1032,20 @@ module search_controller #(
 
         stm_time = (active_board.turn == WHITE) ? request.wtime : request.btime;
         stm_inc = (active_board.turn == WHITE) ? request.winc : request.binc;
-        usable = (stm_time > TimeType'(20)) ? (stm_time - TimeType'(20)) : TimeType'(0);
+        usable = (stm_time > TimeType'(MOVE_OVERHEAD_MS))
+            ? (stm_time - TimeType'(MOVE_OVERHEAD_MS)) : TimeType'(0);
         // Spend the documented target share of both the increment and remaining
         // clock so increment games do not consistently finish with excess time.
-        increment_scaled = {2'b00, stm_inc} * 2'd3;
-        budget_sum = (increment_scaled >> 2) + {1'b0, (usable >> 5)};
+        increment_scaled = ({2'b00, stm_inc} * INCREMENT_NUMERATOR) / INCREMENT_DENOMINATOR;
+        budget_sum = increment_scaled
+            + (({2'b00, usable} * REMAINING_TIME_NUMERATOR) / REMAINING_TIME_DENOMINATOR);
         budget = budget_sum[TIME_BITS:0];
         if (budget > {1'b0, usable}) begin
             return usable;
         end
-        if (budget != '0 && budget < TimeType'(10)) begin
-            return (usable < TimeType'(10)) ? usable : TimeType'(10);
+        if (budget != '0 && budget < TimeType'(MINIMUM_SEARCH_MS)) begin
+            return (usable < TimeType'(MINIMUM_SEARCH_MS))
+                ? usable : TimeType'(MINIMUM_SEARCH_MS);
         end
         return TimeType'(budget);
     endfunction : clock_budget
@@ -1225,8 +1268,8 @@ module search_controller #(
         input logic [7:0] legal_move_count,
         input logic is_research
     );
-        return ply != PlyIndex'(0) && remaining_depth >= SearchDepth'(3)
-            && legal_move_count >= 8'd2 && !is_research;
+        return ply != PlyIndex'(0) && remaining_depth >= SearchDepth'(LMR_MINIMUM_DEPTH)
+            && legal_move_count >= 8'(LMR_MINIMUM_MOVE_NUMBER - 1) && !is_research;
     endfunction : lmr_eligible
 
     function automatic logic search_needs_research(
@@ -1335,9 +1378,9 @@ module search_controller #(
     // Two/three-ply adaptive reduction uses only a depth comparator and mux.
     function automatic SearchDepth null_child_depth(input ThreadID thread);
         automatic SearchDepth depth = search_stack_top[thread].remaining_depth;
-        automatic SearchDepth reduction = depth < SearchDepth'(7)
-            ? SearchDepth'(2) : SearchDepth'(3);
-        return depth < SearchDepth'(3)
+        automatic SearchDepth reduction = depth < SearchDepth'(NULL_DEEP_DEPTH_THRESHOLD)
+            ? SearchDepth'(NULL_SHALLOW_REDUCTION) : SearchDepth'(NULL_DEEP_REDUCTION);
+        return depth < SearchDepth'(NULL_MINIMUM_DEPTH)
             ? SearchDepth'(0)
             : depth - SearchDepth'(1) - reduction;
     endfunction : null_child_depth
@@ -1353,7 +1396,7 @@ module search_controller #(
         return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
             && search_thread_phase[thread_index] == SEARCH_PHASE_READY
             && search_ply[thread_index] != PlyIndex'(0)
-            && search_stack_top[thread_index].remaining_depth >= SearchDepth'(3)
+            && search_stack_top[thread_index].remaining_depth >= SearchDepth'(NULL_MINIMUM_DEPTH)
             && search_stack_top[thread_index].tt_checked
             && !search_board_in_check[thread_index]
             && !search_stack_top[thread_index].null_attempted
@@ -1469,9 +1512,9 @@ module search_controller #(
     // moves have accumulated; forced validation extends the depth check only.
     function automatic logic tt_history_validation_required(input ThreadID thread);
         return search_board[thread].halfmove_clock
-                > HalfmoveClock'(TT_VALIDATE_MAX_BYPASS_HALFMOVE)
+                > HalfmoveClock'(TT_VALIDATE_BYPASS_HALFMOVES)
             && (search_tt_validation_forced[thread]
-                || search_remaining_depth(thread) >= TTDepth'(TT_VALIDATE_MIN_DEPTH));
+                || search_remaining_depth(thread) >= TTDepth'(TT_VALIDATE_MINIMUM_DEPTH));
     endfunction : tt_history_validation_required
 
     function automatic TTBoundType tt_bound_for_score(
@@ -1666,7 +1709,7 @@ module search_controller #(
         move_history_update_color = WHITE;
         move_history_update_from = Position'(0);
         move_history_update_to = Position'(0);
-        move_history_update_depth = 6'd0;
+        move_history_update_depth = PlyIndex'(0);
         move_history_update_failed0 = 12'd0;
         move_history_update_failed1 = 12'd0;
         move_history_update_failed2 = 12'd0;
@@ -2108,7 +2151,7 @@ module search_controller #(
                 history_update_pending_color[tid] <= WHITE;
                 history_update_pending_from[tid] <= Position'(0);
                 history_update_pending_to[tid] <= Position'(0);
-                history_update_pending_depth[tid] <= 6'd0;
+                history_update_pending_depth[tid] <= PlyIndex'(0);
                 history_update_pending_failed0[tid] <= 12'd0;
                 history_update_pending_failed1[tid] <= 12'd0;
                 history_update_pending_failed2[tid] <= 12'd0;
@@ -3756,7 +3799,7 @@ module search_controller #(
                                         history_update_pending_to[return_thread_id]
                                             <= search_return_move[return_thread_id].to_pos;
                                         history_update_pending_depth[return_thread_id]
-                                            <= 6'(search_stack_top[return_thread_id].remaining_depth);
+                                            <= PlyIndex'(search_stack_top[return_thread_id].remaining_depth);
                                         history_update_pending_failed0[return_thread_id]
                                             <= search_stack_top[return_thread_id].failed_quiet0;
                                         history_update_pending_failed1[return_thread_id]

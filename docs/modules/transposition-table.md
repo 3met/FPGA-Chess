@@ -52,7 +52,7 @@ The default compact logical entry is 75 bits:
 | 32 | Low Zobrist-key tag. |
 | 14 | Encoded best move. |
 | 16 | Side-to-move score. |
-| 6 | Search depth. |
+| `ceil(log2(search stack depth))` | Search depth; six bits in the DE1-SoC profile. |
 | 2 | Bound type. |
 | 5 | Age/generation. |
 

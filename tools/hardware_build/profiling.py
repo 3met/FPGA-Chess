@@ -33,6 +33,7 @@ from .common import (
     require_tool,
     run_command,
 )
+from .engine_config import engine_config_digest, load_engine_config
 from .manifest import expand_source_set, load_manifest
 from .simulation import has_sim_errors
 
@@ -977,6 +978,59 @@ def _profile_fingerprint(sources: list[Path], extra: str = "") -> str:
     return digest.hexdigest()
 
 
+def _profile_parameter_args(config: dict, prefix: str) -> list[str]:
+    """Translate a resolved search profile into simulator top-level parameters."""
+    search = config["search"]
+    thresholds = search["quiet_bucket_thresholds"]
+    increment = search["increment_fraction"]
+    remaining = search["remaining_time_fraction"]
+    values = {
+        "TT_TAG_BITS": config["tt_tag_bits"],
+        "ASPIRATION_HALF_WINDOW": search["aspiration_half_window"],
+        "LMR_A_Q8": search["lmr_a_q8"],
+        "LMR_B_Q8": search["lmr_b_q8"],
+        "LMR_MINIMUM_DEPTH": search["lmr_minimum_depth"],
+        "LMR_MINIMUM_MOVE_NUMBER": search["lmr_minimum_move_number"],
+        "NULL_MINIMUM_DEPTH": search["null_minimum_depth"],
+        "NULL_DEEP_DEPTH_THRESHOLD": search["null_deep_depth_threshold"],
+        "NULL_SHALLOW_REDUCTION": search["null_shallow_reduction"],
+        "NULL_DEEP_REDUCTION": search["null_deep_reduction"],
+        "MOVE_OVERHEAD_MS": search["move_overhead_ms"],
+        "MINIMUM_SEARCH_MS": search["minimum_search_ms"],
+        "INCREMENT_NUMERATOR": increment[0],
+        "INCREMENT_DENOMINATOR": increment[1],
+        "REMAINING_TIME_NUMERATOR": remaining[0],
+        "REMAINING_TIME_DENOMINATOR": remaining[1],
+        "HISTORY_REWARD_PER_DEPTH": search["history_reward_per_depth"],
+        "HISTORY_MAXIMUM_REWARD": search["history_maximum_reward"],
+        "HISTORY_MALUS_DIVISOR": search["history_malus_divisor"],
+        "QUIET_THRESHOLD_1": thresholds[0],
+        "QUIET_THRESHOLD_2": thresholds[1],
+        "QUIET_THRESHOLD_3": thresholds[2],
+        "CASTLING_HISTORY_BONUS": search["castling_history_bonus"],
+        "TT_VALIDATE_MINIMUM_DEPTH": search["tt_history_validation_minimum_depth"],
+        "TT_VALIDATE_BYPASS_HALFMOVES": search["tt_history_validation_bypass_halfmoves"],
+        "TT_STALE_DEPTH_TOLERANCE": search["tt_stale_entry_depth_tolerance"],
+    }
+    return [f"{prefix}{name}={value}" for name, value in values.items()]
+
+
+def _resolve_profile_config(args: argparse.Namespace) -> dict:
+    """Apply structural CLI overrides to the selected FPGA engine profile."""
+    config = load_engine_config(args.engine_config)
+    if args.threads is None:
+        args.threads = config["threads"]
+    if args.stack_depth is None:
+        args.stack_depth = config["stack_depth"]
+    if args.engine_clock_hz is None:
+        args.engine_clock_hz = config["clock_frequency_hz"]
+    config["threads"] = args.threads
+    config["stack_depth"] = args.stack_depth
+    config["clock_frequency_hz"] = args.engine_clock_hz
+    config["digest"] = engine_config_digest(config)
+    return config
+
+
 def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     """Build and cache a native timed profiler executable."""
     verilator = require_tool("verilator")
@@ -987,7 +1041,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         f"threads={args.threads};stack={args.stack_depth};clock={args.engine_clock_hz};"
         f"half={half_period_ns};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
         f"verilator={verilator_path}:{verilator_stat.st_size}:{verilator_stat.st_mtime_ns};"
-        "native_opt=o3-lto-v1"
+        f"config={args.resolved_engine_config['digest']};native_opt=o3-lto-v1"
     )
     fingerprint = _profile_fingerprint(sources, build_key)
     build_dir = BUILD_ROOT / "profile" / "compile" / "verilator" / fingerprint[:16]
@@ -1023,6 +1077,8 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         "-j",
         "0",
         "-DFPGA_CHESS_PROFILE",
+        f"-DFPGA_CHESS_THREAD_CAPACITY={args.threads}",
+        f"-DFPGA_CHESS_SEARCH_STACK_CAPACITY={args.stack_depth}",
         "-Wno-fatal",
         *[f"-Wno-{warning}" for warning in warnings],
         "-Mdir",
@@ -1033,6 +1089,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         f"-GENGINE_HALF_PERIOD_NS={half_period_ns}",
         f"-GSEARCH_THREAD_COUNT={args.threads}",
         f"-GSEARCH_STACK_DEPTH={args.stack_depth}",
+        *_profile_parameter_args(args.resolved_engine_config, "-G"),
     ]
     if args.waveform:
         cmd.append("--trace-fst")
@@ -1045,12 +1102,13 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     return executable
 
 
-def _compile_profile(manifest: dict, sources: list[Path], force: bool) -> Path:
-    library_dir = BUILD_ROOT / "profile" / "compile"
+def _compile_profile(manifest: dict, sources: list[Path], args: argparse.Namespace) -> Path:
+    capacity_key = f"threads={args.threads};stack={args.stack_depth};config={args.resolved_engine_config['digest']}"
+    fingerprint = _profile_fingerprint(sources, capacity_key)
+    library_dir = BUILD_ROOT / "profile" / "compile" / "modelsim" / fingerprint[:16]
     work_dir = library_dir / "modelsim_work"
     fingerprint_path = library_dir / "fingerprint.txt"
-    fingerprint = _profile_fingerprint(sources)
-    if not force and work_dir.exists() and fingerprint_path.exists():
+    if not args.force_rebuild and work_dir.exists() and fingerprint_path.exists():
         if fingerprint_path.read_text(encoding="utf-8").strip() == fingerprint:
             return work_dir
     library_dir.mkdir(parents=True, exist_ok=True)
@@ -1067,6 +1125,8 @@ def _compile_profile(manifest: dict, sources: list[Path], force: bool) -> Path:
         vlog,
         *manifest["simulator"]["modelsim"].get("vlog_args", ["-sv"]),
         "+define+FPGA_CHESS_PROFILE",
+        f"+define+FPGA_CHESS_THREAD_CAPACITY={args.threads}",
+        f"+define+FPGA_CHESS_SEARCH_STACK_CAPACITY={args.stack_depth}",
         "-work",
         str(work_dir),
         *[str(path) for path in sources],
@@ -1080,10 +1140,10 @@ def _compile_profile(manifest: dict, sources: list[Path], force: bool) -> Path:
 
 
 def _validate_profile_args(args: argparse.Namespace) -> tuple[str, int]:
-    if not 1 <= args.threads <= 16:
-        raise BuildError("--threads must be between 1 and 16")
-    if not 1 <= args.stack_depth <= 64:
-        raise BuildError("--stack-depth must be between 1 and 64")
+    if args.threads < 1:
+        raise BuildError("--threads must be positive")
+    if args.stack_depth < 1:
+        raise BuildError("--stack-depth must be positive")
     if args.engine_clock_hz < 1:
         raise BuildError("--engine-clock-hz must be positive")
     if args.timeout is not None and args.timeout < 1:
@@ -1114,7 +1174,7 @@ def _prepare_profile_simulator(args: argparse.Namespace) -> tuple[dict, str, Pat
         simulator = "verilator" if shutil.which("verilator") else "modelsim"
     if simulator == "verilator":
         return manifest, simulator, None, _compile_verilator(sources, args)
-    return manifest, simulator, _compile_profile(manifest, sources, args.force_rebuild), None
+    return manifest, simulator, _compile_profile(manifest, sources, args), None
 
 
 def _run_profile_position(
@@ -1175,6 +1235,7 @@ def _run_profile_position(
             f"-gENGINE_HALF_PERIOD_NS={half_period_ns}",
             f"-gSEARCH_THREAD_COUNT={args.threads}",
             f"-gSEARCH_STACK_DEPTH={args.stack_depth}",
+            *_profile_parameter_args(args.resolved_engine_config, "-g"),
             *plusargs,
         ]
         if not args.waveform:
@@ -1201,16 +1262,20 @@ def _run_profile_position(
         raise BuildError(f"Engine profile failed; see {transcript_label}")
 
     metrics, result_values = parse_metric_records(metrics_path.read_text(encoding="utf-8"))
+    tt_depth_bits = max(1, (args.stack_depth - 1).bit_length())
+    tt_payload_bits = 14 + 16 + tt_depth_bits + 2 + 5
+    tt_entry_words = (args.resolved_engine_config["tt_tag_bits"] + tt_payload_bits + 15) // 16
     configuration = {
         "fen": fen,
         "search_limit": {"kind": search_kind, "value": search_limit},
         "threads": args.threads,
         "stack_depth": args.stack_depth,
         "engine_clock_hz": args.engine_clock_hz,
+        "engine_profile": args.resolved_engine_config,
         "memory_clock_hz": 100_000_000,
-        "tt_tag_bits": 32,
-        "tt_entry_words": 5,
-        "tt_entries": 6_710_886,
+        "tt_tag_bits": args.resolved_engine_config["tt_tag_bits"],
+        "tt_entry_words": tt_entry_words,
+        "tt_entries": (1 << 25) // tt_entry_words,
         "tt_cache_lines": 1024,
         "tt_initial_state": "cold",
         "memory_path": "external-cache-cdc-sdr-sdram",
@@ -1415,6 +1480,7 @@ def _profile_output_dir(args: argparse.Namespace) -> Path:
 
 def command_profile_position(args: argparse.Namespace) -> int:
     """Run the detailed profiler for one explicitly supplied FEN."""
+    args.resolved_engine_config = _resolve_profile_config(args)
     search_kind, search_limit = _validate_profile_args(args)
     try:
         encode_fen(args.fen)
@@ -1449,6 +1515,7 @@ def _profile_job_count(args: argparse.Namespace, simulator: str) -> int:
 
 def command_profile(args: argparse.Namespace) -> int:
     """Profile the standard named position suite and print only its summary."""
+    args.resolved_engine_config = _resolve_profile_config(args)
     search_kind, search_limit = _validate_profile_args(args)
     if args.jobs is not None and args.jobs < 1:
         raise BuildError("--jobs must be positive")

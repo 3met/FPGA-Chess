@@ -16,6 +16,12 @@ Build metadata lives in `hardware/build/manifest.json`.
 
 Generated projects, simulator libraries, logs, and reports are written under `work/build/`.
 
+## Engine Configuration
+
+Reusable chess-search policies live under `hardware/config/search/`. Per-FPGA engine profiles live under `hardware/config/engine/`, reference one search policy, and select structural settings such as thread count, stack depth, engine clock, TT tag width, and optional instrumentation. A synthesis target selects its engine profile with `engine_config`; vendor, device, source, constraint, and fitter settings remain in the build manifest.
+
+The build validates and resolves both layers, records their SHA-256 digest, and generates `engine_build_config.svh` inside the target build directory. Packed thread, ply, and TT-depth widths derive from the resolved structural settings rather than imposing the portable defaults as configuration limits. A new FPGA normally needs a new engine profile and synthesis target, while multiple FPGA profiles may share the same search policy.
+
 ## Commands
 
 | Command | Purpose |
@@ -38,7 +44,7 @@ Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`
 
 Synthesis verifies generated data before invoking the vendor flow. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Every run records portable status and timing metadata in `synthesis.json` beside the vendor reports, allowing `synth-report` to summarize completed, failed, and interrupted runs.
 
-The DE1-SoC target runs the engine at 50 MHz with timing-driven, speed-optimized synthesis and generates its Quartus project, configured PLL IP, build ID, and engine clock metadata under `work/build/quartus-de1-soc/`. Its manifest clock setting is the single source of truth for both PLL configuration and `engine.CLOCK_FREQ`. The portable RTL and TT memory protocol remain independent of the board-specific clocks, pins, and external-memory wrapper.
+The DE1-SoC engine profile runs the engine at 50 MHz with one search thread, a 32-ply stack, and the default search policy. Synthesis generates its Quartus project, configured PLL IP, build ID, resolved engine constants, and configuration digest under `work/build/quartus-de1-soc/`. The profile clock is the single source of truth for both PLL configuration and `engine.CLOCK_FREQ`. The portable RTL and TT memory protocol remain independent of the board-specific clocks, pins, and external-memory wrapper.
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 

@@ -1,0 +1,35 @@
+{
+  "aspiration": {
+    "half_window": 64
+  },
+  "lmr": {
+    "base": 0.75,
+    "divisor": 2.3984375,
+    "minimum_depth": 3,
+    "minimum_move_number": 3
+  },
+  "null_move": {
+    "minimum_depth": 3,
+    "deep_depth_threshold": 7,
+    "shallow_reduction": 2,
+    "deep_reduction": 3
+  },
+  "time_management": {
+    "move_overhead_ms": 20,
+    "minimum_search_ms": 10,
+    "increment_fraction": [3, 4],
+    "remaining_time_fraction": [1, 32]
+  },
+  "history": {
+    "reward_per_depth": 4,
+    "maximum_reward": 63,
+    "malus_divisor": 2,
+    "quiet_bucket_thresholds": [16, 64, 128],
+    "castling_bonus": 16
+  },
+  "transposition_table": {
+    "history_validation_minimum_depth": 8,
+    "history_validation_bypass_halfmoves": 4,
+    "stale_entry_depth_tolerance": 4
+  }
+}

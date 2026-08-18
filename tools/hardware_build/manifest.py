@@ -87,6 +87,13 @@ def validate_manifest(manifest: object) -> None:
             or target["engine_clock_mhz"] <= 0
         ):
             raise BuildError(f"Synthesis target '{name}' engine_clock_mhz must be a positive finite number")
+        if "engine_config" in target:
+            if not isinstance(target["engine_config"], str) or not target["engine_config"]:
+                raise BuildError(f"Synthesis target '{name}' engine_config must be a nonempty path")
+            ensure_existing([repo_path(target["engine_config"])])
+            # Import locally to keep manifest graph helpers independent of profile loading.
+            from .engine_config import load_engine_config
+            load_engine_config(target["engine_config"])
         if "seed" in target and (not isinstance(target["seed"], int) or target["seed"] < 1):
             raise BuildError(f"Synthesis target '{name}' seed must be a positive integer")
         if target["tool"] == "quartus":
@@ -103,8 +110,10 @@ def validate_manifest(manifest: object) -> None:
                 require_fields(clock_generator, f"Synthesis target '{name}' clock_generator", {"kind", "template"})
                 if clock_generator["kind"] != "intel-pll":
                     raise BuildError(f"Synthesis target '{name}' uses unsupported clock generator '{clock_generator['kind']}'")
-                if "engine_clock_mhz" not in target:
-                    raise BuildError(f"Synthesis target '{name}' clock_generator requires engine_clock_mhz")
+                if "engine_clock_mhz" not in target and "engine_config" not in target:
+                    raise BuildError(
+                        f"Synthesis target '{name}' clock_generator requires engine_clock_mhz or engine_config"
+                    )
                 ensure_existing([repo_path(clock_generator["template"])])
             message_disable = target.get("message_disable", [])
             if not isinstance(message_disable, list) or not all(

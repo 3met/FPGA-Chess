@@ -1855,9 +1855,9 @@ module tb_search_controller;
                         && dut.search_tt_response[validation_tid].depth
                             >= dut.search_remaining_depth(validation_tid)
                         && dut.search_remaining_depth(validation_tid)
-                            >= dut.TT_VALIDATE_MIN_DEPTH
+                            >= dut.TT_VALIDATE_MINIMUM_DEPTH
                         && dut.search_board[validation_tid].halfmove_clock
-                            > HalfmoveClock'(dut.TT_VALIDATE_MAX_BYPASS_HALFMOVE)
+                            > HalfmoveClock'(dut.TT_VALIDATE_BYPASS_HALFMOVES)
                         && dut.search_tt_response[validation_tid].score <= DRAW_EVAL_SCORE
                         && !dut.search_tt_validation_passed[validation_tid]) begin
                     tt_validation_nonpositive_reject_count += 1;

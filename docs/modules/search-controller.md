@@ -78,6 +78,6 @@ Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. S
 
 ## Configuration and Instrumentation
 
-Thread count, stack depth, repetition capacity, LMR policy, clock frequency, TT backend, TT tag width, and optional statistics are synthesis parameters. Capacity types define the largest encodable thread and ply identifiers; a target may instantiate fewer contexts.
+Thread count, stack depth, repetition capacity, aspiration policy, LMR policy, null-move policy, time allocation, move-history policy, clock frequency, TT backend, TT policy, TT tag width, and optional statistics are synthesis parameters. Per-FPGA engine profiles select structural values and reference reusable search-policy profiles. Build-generated packed identifier widths follow the selected thread count and stack depth.
 
 Optional statistics report pipeline activity, search phases, TT/cache behavior, move-generation work, and overflow state without affecting search semantics.
