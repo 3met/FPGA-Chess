@@ -473,84 +473,98 @@ module move_generator_pipeline #(
         return 1'b0;
     endfunction
 
-    function automatic FullBoard castle_transit_board(
-        input FullBoard board,
-        input Move move
-    );
-        automatic FullBoard result = board;
-        automatic Position transit = getFile(move.to_pos) > getFile(move.from_pos)
-            ? move.from_pos + Position'(1) : move.from_pos - Position'(1);
-        result.tiles[move.from_pos] = EMPTY_TILE;
-        result.tiles[transit] = Tile'({board.turn, KING});
-        result.king_positions[board.turn] = transit;
-        return result;
+    // Standard chess has only four castling paths. Keeping their squares
+    // constant lets synthesis remove the dynamic board-index muxes from the
+    // direct-validation path without adding a pipeline stage.
+    function automatic logic white_kingside_castle_pseudo_legal(input FullBoard board);
+        automatic FullBoard transit_board = board;
+        automatic FullBoard final_board = board;
+        if (board.turn != WHITE || !board.castle_perms.white_kingside
+                || board.tiles[4] != WHITE_KING || board.tiles[7] != WHITE_ROOK
+                || board.tiles[5].piece_type != NULL_PIECE
+                || board.tiles[6].piece_type != NULL_PIECE) return 1'b0;
+        transit_board.tiles[4] = EMPTY_TILE;
+        transit_board.tiles[5] = WHITE_KING;
+        final_board.tiles[4] = EMPTY_TILE;
+        final_board.tiles[7] = EMPTY_TILE;
+        final_board.tiles[6] = WHITE_KING;
+        final_board.tiles[5] = WHITE_ROOK;
+        return !square_attacked(board, Position'(4), BLACK)
+            && !square_attacked(transit_board, Position'(5), BLACK)
+            && !square_attacked(final_board, Position'(6), BLACK);
     endfunction
 
-    function automatic FullBoard castle_final_board(
-        input FullBoard board,
-        input Move move
-    );
-        automatic FullBoard result = board;
-        automatic Position rook_from;
-        automatic Position rook_to;
-        case (move.to_pos)
-            Position'(2): begin rook_from = Position'(0); rook_to = Position'(3); end
-            Position'(6): begin rook_from = Position'(7); rook_to = Position'(5); end
-            Position'(58): begin rook_from = Position'(56); rook_to = Position'(59); end
-            default: begin rook_from = Position'(63); rook_to = Position'(61); end
-        endcase
-        result.tiles[move.from_pos] = EMPTY_TILE;
-        result.tiles[rook_from] = EMPTY_TILE;
-        result.tiles[move.to_pos] = Tile'({board.turn, KING});
-        result.tiles[rook_to] = Tile'({board.turn, ROOK});
-        result.king_positions[board.turn] = move.to_pos;
-        return result;
+    function automatic logic white_queenside_castle_pseudo_legal(input FullBoard board);
+        automatic FullBoard transit_board = board;
+        automatic FullBoard final_board = board;
+        if (board.turn != WHITE || !board.castle_perms.white_queenside
+                || board.tiles[4] != WHITE_KING || board.tiles[0] != WHITE_ROOK
+                || board.tiles[1].piece_type != NULL_PIECE
+                || board.tiles[2].piece_type != NULL_PIECE
+                || board.tiles[3].piece_type != NULL_PIECE) return 1'b0;
+        transit_board.tiles[4] = EMPTY_TILE;
+        transit_board.tiles[3] = WHITE_KING;
+        final_board.tiles[4] = EMPTY_TILE;
+        final_board.tiles[0] = EMPTY_TILE;
+        final_board.tiles[2] = WHITE_KING;
+        final_board.tiles[3] = WHITE_ROOK;
+        return !square_attacked(board, Position'(4), BLACK)
+            && !square_attacked(transit_board, Position'(3), BLACK)
+            && !square_attacked(final_board, Position'(2), BLACK);
+    endfunction
+
+    function automatic logic black_kingside_castle_pseudo_legal(input FullBoard board);
+        automatic FullBoard transit_board = board;
+        automatic FullBoard final_board = board;
+        if (board.turn != BLACK || !board.castle_perms.black_kingside
+                || board.tiles[60] != BLACK_KING || board.tiles[63] != BLACK_ROOK
+                || board.tiles[61].piece_type != NULL_PIECE
+                || board.tiles[62].piece_type != NULL_PIECE) return 1'b0;
+        transit_board.tiles[60] = EMPTY_TILE;
+        transit_board.tiles[61] = BLACK_KING;
+        final_board.tiles[60] = EMPTY_TILE;
+        final_board.tiles[63] = EMPTY_TILE;
+        final_board.tiles[62] = BLACK_KING;
+        final_board.tiles[61] = BLACK_ROOK;
+        return !square_attacked(board, Position'(60), WHITE)
+            && !square_attacked(transit_board, Position'(61), WHITE)
+            && !square_attacked(final_board, Position'(62), WHITE);
+    endfunction
+
+    function automatic logic black_queenside_castle_pseudo_legal(input FullBoard board);
+        automatic FullBoard transit_board = board;
+        automatic FullBoard final_board = board;
+        if (board.turn != BLACK || !board.castle_perms.black_queenside
+                || board.tiles[60] != BLACK_KING || board.tiles[56] != BLACK_ROOK
+                || board.tiles[57].piece_type != NULL_PIECE
+                || board.tiles[58].piece_type != NULL_PIECE
+                || board.tiles[59].piece_type != NULL_PIECE) return 1'b0;
+        transit_board.tiles[60] = EMPTY_TILE;
+        transit_board.tiles[59] = BLACK_KING;
+        final_board.tiles[60] = EMPTY_TILE;
+        final_board.tiles[56] = EMPTY_TILE;
+        final_board.tiles[58] = BLACK_KING;
+        final_board.tiles[59] = BLACK_ROOK;
+        return !square_attacked(board, Position'(60), WHITE)
+            && !square_attacked(transit_board, Position'(59), WHITE)
+            && !square_attacked(final_board, Position'(58), WHITE);
     endfunction
 
     function automatic logic castle_pseudo_legal(input FullBoard board, input Move move);
-        automatic logic occupancy_ok;
-        automatic logic permission_ok;
-        automatic Position rook_pos;
-        automatic Position transit;
-        automatic FullBoard transit_board;
-        automatic FullBoard final_board;
-        occupancy_ok = 1'b0;
-        permission_ok = 1'b0;
-        rook_pos = Position'(0);
-        if (board.turn == WHITE && move.from_pos == Position'(4) && move.to_pos == Position'(6)) begin
-            permission_ok = board.castle_perms.white_kingside;
-            rook_pos = Position'(7);
-            occupancy_ok = board.tiles[5].piece_type == NULL_PIECE && board.tiles[6].piece_type == NULL_PIECE;
-        end else if (board.turn == WHITE && move.from_pos == Position'(4) && move.to_pos == Position'(2)) begin
-            permission_ok = board.castle_perms.white_queenside;
-            rook_pos = Position'(0);
-            occupancy_ok = board.tiles[1].piece_type == NULL_PIECE
-                && board.tiles[2].piece_type == NULL_PIECE && board.tiles[3].piece_type == NULL_PIECE;
-        end else if (board.turn == BLACK && move.from_pos == Position'(60) && move.to_pos == Position'(62)) begin
-            permission_ok = board.castle_perms.black_kingside;
-            rook_pos = Position'(63);
-            occupancy_ok = board.tiles[61].piece_type == NULL_PIECE && board.tiles[62].piece_type == NULL_PIECE;
-        end else if (board.turn == BLACK && move.from_pos == Position'(60) && move.to_pos == Position'(58)) begin
-            permission_ok = board.castle_perms.black_queenside;
-            rook_pos = Position'(56);
-            occupancy_ok = board.tiles[57].piece_type == NULL_PIECE
-                && board.tiles[58].piece_type == NULL_PIECE && board.tiles[59].piece_type == NULL_PIECE;
-        end else begin
-            return 1'b0;
-        end
-        if (!permission_ok || !occupancy_ok
-                || board.tiles[rook_pos] != Tile'({board.turn, ROOK})) return 1'b0;
-        transit = getFile(move.to_pos) > getFile(move.from_pos)
-            ? move.from_pos + Position'(1) : move.from_pos - Position'(1);
-        transit_board = castle_transit_board(board, move);
-        final_board = castle_final_board(board, move);
-        return !square_attacked(board, move.from_pos, Color'(~board.turn))
-            && !square_attacked(transit_board, transit, Color'(~board.turn))
-            && !square_attacked(final_board, move.to_pos, Color'(~board.turn));
+        case ({move.from_pos, move.to_pos})
+            {Position'(4), Position'(6)}: return white_kingside_castle_pseudo_legal(board);
+            {Position'(4), Position'(2)}: return white_queenside_castle_pseudo_legal(board);
+            {Position'(60), Position'(62)}: return black_kingside_castle_pseudo_legal(board);
+            {Position'(60), Position'(58)}: return black_queenside_castle_pseudo_legal(board);
+            default: return 1'b0;
+        endcase
     endfunction
 
     // Direct moves use the same pseudo-legality contract as generated candidates.
-    function automatic logic move_pseudo_legal(input FullBoard board, input Move move);
+    function automatic logic move_pseudo_legal(
+        input FullBoard board,
+        input Move move
+    );
         automatic Tile source = board.tiles[move.from_pos];
         automatic Tile destination = board.tiles[move.to_pos];
         automatic BoardRank from_rank = getRank(move.from_pos);

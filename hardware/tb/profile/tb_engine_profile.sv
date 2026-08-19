@@ -9,8 +9,8 @@ import tt_defs::*;
 // Engine-only runtime profiler. This is measurement infrastructure, not a
 // chess-correctness testbench.
 module tb_engine_profile #(
-    parameter int ENGINE_CLOCK_FREQ = 50_000_000,
-    parameter int ENGINE_HALF_PERIOD_NS = 10,
+    parameter int ENGINE_CLOCK_FREQ = 65_000_000,
+    parameter int ENGINE_HALF_PERIOD_PS = 7692,
     parameter int SEARCH_THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = 24,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
@@ -44,9 +44,9 @@ module tb_engine_profile #(
     localparam int TT_ENTRY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
     localparam int TT_ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS;
     localparam int MEMORY_HALF_PERIOD_NS = 5;
-    localparam int MEMORY_PIN_LEAD_NS = 3;
-    // The DE1 pin clock leads the controller by 3 ns. Sampling 5 ns after the
-    // controller edge places reads 8 ns into the SDRAM's 10 ns data cycle.
+    localparam realtime MEMORY_PIN_LEAD_NS = 2.5;
+    // The DE1 pin clock leads the controller by 2.5 ns. Sampling 5 ns after the
+    // controller edge places reads 7.5 ns into the SDRAM's 10 ns data cycle.
     localparam int MEMORY_READ_LAG_NS = 5;
     localparam int ENGINE_STATE_COUNT = 8;
     localparam int CONTROLLER_STATE_COUNT = 22;
@@ -75,7 +75,7 @@ module tb_engine_profile #(
     logic memory_read_clk = 1'b0;
     logic system_rst_n = 1'b0;
     logic engine_rst_n;
-    always #(ENGINE_HALF_PERIOD_NS) engine_clk = ~engine_clk;
+    always #(ENGINE_HALF_PERIOD_PS * 1ps) engine_clk = ~engine_clk;
     always #(MEMORY_HALF_PERIOD_NS) memory_clk = ~memory_clk;
     initial begin
         #(MEMORY_HALF_PERIOD_NS - MEMORY_PIN_LEAD_NS);

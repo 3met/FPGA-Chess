@@ -16,8 +16,8 @@ if {[get_collection_size $engine_clock] > 0} {
 }
 
 # The DE1 SDRAM samples commands and write data on the phase-shifted memory
-# clock. The pin clock leads the controller by 3 ns, while the read register
-# captures 8 ns after the SDRAM edge. These values cover the SDRAM setup/hold
+# clock. The pin clock leads the controller by 2.5 ns, while the read register
+# captures 7.5 ns after the SDRAM edge. These values cover the SDRAM setup/hold
 # requirements and retain board-routing margin.
 set sdram_clock_source [get_pins {pll_1|pll_ip_inst|altera_pll_i|outclk_wire[2]~CLKENA0|outclk}]
 if {[get_collection_size $sdram_clock_source] > 0} {

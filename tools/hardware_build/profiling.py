@@ -1036,10 +1036,10 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     verilator = require_tool("verilator")
     verilator_path = Path(verilator).resolve()
     verilator_stat = verilator_path.stat()
-    half_period_ns = max(1, round(500_000_000 / args.engine_clock_hz))
+    half_period_ps = max(1, round(500_000_000_000 / args.engine_clock_hz))
     build_key = (
         f"threads={args.threads};stack={args.stack_depth};clock={args.engine_clock_hz};"
-        f"half={half_period_ns};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
+        f"half_ps={half_period_ps};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
         f"verilator={verilator_path}:{verilator_stat.st_size}:{verilator_stat.st_mtime_ns};"
         f"config={args.resolved_engine_config['digest']};native_opt=o3-lto-v1"
     )
@@ -1086,7 +1086,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         "-o",
         executable.name,
         f"-GENGINE_CLOCK_FREQ={args.engine_clock_hz}",
-        f"-GENGINE_HALF_PERIOD_NS={half_period_ns}",
+        f"-GENGINE_HALF_PERIOD_PS={half_period_ps}",
         f"-GSEARCH_THREAD_COUNT={args.threads}",
         f"-GSEARCH_STACK_DEPTH={args.stack_depth}",
         *_profile_parameter_args(args.resolved_engine_config, "-G"),
@@ -1203,7 +1203,7 @@ def _run_profile_position(
     transient_wave = run_dir / ("wave.wlf" if args.waveform else "transient.wlf")
     board_path.write_text("".join(f"{value:02x}\n" for value in board_payload), encoding="ascii")
 
-    half_period_ns = max(1, round(500_000_000 / args.engine_clock_hz))
+    half_period_ps = max(1, round(500_000_000_000 / args.engine_clock_hz))
     kind_number = {"depth": 0, "nodes": 1, "time": 2}[search_kind]
     plusargs = [
         f"+BOARD_FILE={board_path}",
@@ -1232,7 +1232,7 @@ def _run_profile_position(
             "-lib",
             str(library),
             f"-gENGINE_CLOCK_FREQ={args.engine_clock_hz}",
-            f"-gENGINE_HALF_PERIOD_NS={half_period_ns}",
+            f"-gENGINE_HALF_PERIOD_PS={half_period_ps}",
             f"-gSEARCH_THREAD_COUNT={args.threads}",
             f"-gSEARCH_STACK_DEPTH={args.stack_depth}",
             *_profile_parameter_args(args.resolved_engine_config, "-g"),

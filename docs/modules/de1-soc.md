@@ -10,7 +10,7 @@ The controller's simulator-only initialization shortcut must not be enabled in h
 
 ## Clocking and Reset
 
-`CLOCK_50` is the board reference clock. The synthesis flow configures board-specific Intel PLL IP from the target's engine-clock setting and generates matching `ENGINE_CLOCK_FREQ` and `FPGA_BUILD_ID` constants. The PLL also supplies the SDRAM and UART clock domains and the phase relationships required by SDRAM I/O timing.
+`CLOCK_50` is the board reference clock. The synthesis flow configures board-specific Intel PLL IP from the target's engine-clock setting and generates matching `ENGINE_CLOCK_FREQ` and `FPGA_BUILD_ID` constants. The PLL also supplies the SDRAM and UART clock domains and the phase relationships required by SDRAM I/O timing. The 100 MHz SDRAM pin clock leads the controller clock by 2.5 ns, a phase supported by the PLL divider settings used for the 65 MHz engine clock.
 
 A startup controller holds the design in reset until the PLL is stable and retries if lock is lost. It reuses one maximal-length LFSR period for reset hold, lock timeout, and lock verification, trading irrelevant startup latency for a shift/XOR path instead of arithmetic counters. Each clock domain releases reset through a two-flop local synchronizer. UART BREAK holds the engine, memory path, and transmitter in reset until BREAK release so the board can recover remotely without a physical reset. A UART framing error or RX overflow fails closed until the next BREAK.
 

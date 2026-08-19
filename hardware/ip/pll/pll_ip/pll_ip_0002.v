@@ -29,7 +29,7 @@ module  pll_ip_0002(
 		.phase_shift1("0 ps"),
 		.duty_cycle1(50),
 		.output_clock_frequency2("100.000000 MHz"),
-		.phase_shift2("-3000 ps"),
+		.phase_shift2("-2500 ps"),
 		.duty_cycle2(50),
 		.output_clock_frequency3("100.000000 MHz"),
 		.phase_shift3("5000 ps"),

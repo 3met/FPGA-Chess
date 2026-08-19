@@ -453,7 +453,7 @@ class ProfileArgumentTests(unittest.TestCase):
         values = {
             "threads": 1,
             "stack_depth": 32,
-            "engine_clock_hz": 50_000_000,
+            "engine_clock_hz": 65_000_000,
             "timeout": 10,
             "simulator_threads": 1,
             "depth": None,

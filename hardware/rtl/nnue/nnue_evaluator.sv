@@ -60,12 +60,11 @@ module nnue_evaluator #(
     (* ramstyle = "no_rw_check", ram_style = "block" *)
     logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_eval_memory[STATE_COUNT];
     logic [ACCUMULATOR_WORD_BITS-1:0] eval_accumulators;
-    Color eval_side_to_move;
     NnueOutputBucket eval_output_bucket;
     logic eval_busy;
     logic partial_pending;
     logic result_pending;
-    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES + 1)-1:0] eval_cycle;
+    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] eval_cycle;
     logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] partial_cycle;
     OctetSum partial_q[16];
     OutputSum eval_sum;
@@ -114,8 +113,8 @@ module nnue_evaluator #(
     assign update_ready = 1'b1;
     assign update_idle = !update_busy;
     // Accept a new snapshot while the preceding registered partial sums drain.
-    assign eval_ready = !eval_busy || (eval_busy
-        && eval_cycle == NNUE_OUTPUT_MAC_CYCLES && partial_pending);
+    assign eval_ready = !eval_busy || (eval_busy && partial_pending
+        && partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1);
 
     // An accepted evaluation primes row zero. Thereafter the ROM reads one row
     // ahead so its synchronous output does not add a MAC cycle.
@@ -237,22 +236,6 @@ module nnue_evaluator #(
                 result_pending <= 1'b0;
             end
 
-            // Keep the evaluation-memory read in one syntactic location so
-            // Intel and AMD tools infer a single synchronous read port.
-            if (eval_valid && eval_ready) begin
-                // A single-thread build has no other state to update while it
-                // evaluates, so reuse the update mirror and avoid a very wide,
-                // one-word block RAM. Multi-thread builds keep the independent
-                // mirror so another thread may update concurrently.
-                if (STATE_COUNT == 1)
-                    eval_accumulators <= accumulator_update_memory[0];
-                else
-                    eval_accumulators <= accumulator_eval_memory[
-                        state_address(eval_thread_id)];
-                eval_side_to_move <= eval_turn;
-                eval_output_bucket <= nnue_output_bucket(eval_piece_count);
-            end
-
             if (eval_busy) begin
                 automatic OutputProduct products[NNUE_OUTPUT_MAC_LANES];
                 automatic TripleSum triple_sums_a[16], triple_sums_b[16];
@@ -263,59 +246,50 @@ module nnue_evaluator #(
                 automatic SixtyFourSum sums_2[2];
                 automatic MacGroupSum lane_sum;
                 automatic OutputSum cycle_sum;
-                partial_pending <= 1'b0;
-
                 // Register sixteen partial sums to split the RAM/arithmetic path from
                 // the upper adder tree without retaining every DSP product.
-                if (eval_cycle < NNUE_OUTPUT_MAC_CYCLES) begin
-                    for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
-                        automatic int input_index =
-                            int'(eval_cycle) * NNUE_OUTPUT_MAC_LANES + lane;
-                        automatic int accumulator_lane =
-                            input_index % NNUE_ACCUMULATOR_COUNT;
-                        automatic Color activation_perspective =
-                            input_index < NNUE_ACCUMULATOR_COUNT
-                                ? eval_side_to_move : Color'(~eval_side_to_move);
-                        automatic int state_index =
-                            int'(activation_perspective) * NNUE_ACCUMULATOR_COUNT
-                                + accumulator_lane;
-                        automatic NnueAccumulator accumulator =
-                            $signed(eval_accumulators[
-                                state_index * NNUE_ACCUMULATOR_BITS
-                                    +: NNUE_ACCUMULATOR_BITS]);
-                        automatic logic signed [3:0] activation =
-                            accumulator < 0 ? 4'sd0
-                                : accumulator > NnueAccumulator'(7) ? 4'sd7
-                                : {1'b0, accumulator[2:0]};
-                        automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight =
-                            $signed(output_weight_row_q[
-                                lane * NNUE_OUTPUT_WEIGHT_BITS
-                                    +: NNUE_OUTPUT_WEIGHT_BITS]);
-                        products[lane] = output_product(activation, weight);
-                    end
-                    // Reduce each registered eight-product chunk as 3+3+2.
-                    // This exposes natural small-multiplier groups to Intel,
-                    // AMD, and other tools without instantiating vendor DSP IP.
-                    for (int lane = 0; lane < 16; lane++) begin
-                        automatic int base = 8 * lane;
-                        triple_sums_a[lane] = TripleSum'(products[base])
-                            + TripleSum'(products[base + 1])
-                            + TripleSum'(products[base + 2]);
-                        triple_sums_b[lane] = TripleSum'(products[base + 3])
-                            + TripleSum'(products[base + 4])
-                            + TripleSum'(products[base + 5]);
-                        pair_sums[lane] = PairSum'(products[base + 6])
-                            + PairSum'(products[base + 7]);
-                        sextet_sums[lane] = SextetSum'(triple_sums_a[lane])
-                            + SextetSum'(triple_sums_b[lane]);
-                        partial_q[lane] <= OctetSum'(sextet_sums[lane])
-                            + OctetSum'(pair_sums[lane]);
-                    end
-                    partial_cycle <= eval_cycle[
-                        $clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0];
-                    partial_pending <= 1'b1;
-                    eval_cycle <= eval_cycle + 1'b1;
+                // The drain cycle overwrites these registers with unused data;
+                // unconditional writes avoid a high-fanout terminal-count enable.
+                for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
+                    automatic NnueAccumulator accumulator =
+                        $signed(eval_accumulators[
+                            lane * NNUE_ACCUMULATOR_BITS
+                                +: NNUE_ACCUMULATOR_BITS]);
+                    automatic logic signed [3:0] activation =
+                        accumulator < 0 ? 4'sd0
+                            : accumulator > NnueAccumulator'(7) ? 4'sd7
+                            : {1'b0, accumulator[2:0]};
+                    automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight =
+                        $signed(output_weight_row_q[
+                            lane * NNUE_OUTPUT_WEIGHT_BITS
+                                +: NNUE_OUTPUT_WEIGHT_BITS]);
+                    products[lane] = output_product(activation, weight);
                 end
+                // Reduce each registered eight-product chunk as 3+3+2.
+                // This exposes natural small-multiplier groups to Intel,
+                // AMD, and other tools without instantiating vendor DSP IP.
+                for (int lane = 0; lane < 16; lane++) begin
+                    automatic int base = 8 * lane;
+                    triple_sums_a[lane] = TripleSum'(products[base])
+                        + TripleSum'(products[base + 1])
+                        + TripleSum'(products[base + 2]);
+                    triple_sums_b[lane] = TripleSum'(products[base + 3])
+                        + TripleSum'(products[base + 4])
+                        + TripleSum'(products[base + 5]);
+                    pair_sums[lane] = PairSum'(products[base + 6])
+                        + PairSum'(products[base + 7]);
+                    sextet_sums[lane] = SextetSum'(triple_sums_a[lane])
+                        + SextetSum'(triple_sums_b[lane]);
+                    partial_q[lane] <= OctetSum'(sextet_sums[lane])
+                        + OctetSum'(pair_sums[lane]);
+                end
+                partial_cycle <= eval_cycle;
+                partial_pending <= 1'b1;
+                eval_cycle <= eval_cycle + 1'b1;
+                // Advance the ordered snapshot so every MAC lane reads a fixed
+                // bit slice instead of a cycle-selected four-row mux.
+                eval_accumulators <= eval_accumulators
+                    >> (NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS);
 
                 if (partial_pending) begin
                     for (int lane = 0; lane < 8; lane++)
@@ -338,8 +312,10 @@ module nnue_evaluator #(
                             eval_sum <= OutputSum'($signed(output_bias[
                                 nnue_output_bucket(eval_piece_count)][
                                 NNUE_OUTPUT_BIAS_BITS-1:0]));
+                            partial_pending <= 1'b0;
                         end else begin
                             eval_busy <= 1'b0;
+                            partial_pending <= 1'b0;
                         end
                     end else begin
                         eval_sum <= cycle_sum;
@@ -352,6 +328,32 @@ module nnue_evaluator #(
                     NNUE_OUTPUT_BIAS_BITS-1:0]));
                 partial_pending <= 1'b0;
                 eval_busy <= 1'b1;
+            end
+
+            // Keep the evaluation-memory read in one syntactic location so
+            // Intel and AMD tools infer a single synchronous read port. Order
+            // the two perspectives once, then shift one MAC row per cycle.
+            if (eval_valid && eval_ready) begin
+                automatic logic [ACCUMULATOR_WORD_BITS-1:0] selected_state;
+
+                // A single-thread build has no other state to update while it
+                // evaluates, so reuse the update mirror and avoid a very wide,
+                // one-word block RAM. Multi-thread builds keep the independent
+                // mirror so another thread may update concurrently.
+                if (STATE_COUNT == 1)
+                    selected_state = accumulator_update_memory[0];
+                else
+                    selected_state = accumulator_eval_memory[
+                        state_address(eval_thread_id)];
+                if (eval_turn == WHITE)
+                    eval_accumulators <= selected_state;
+                else
+                    eval_accumulators <= {
+                        selected_state[0 +: ACCUMULATOR_WORD_BITS / 2],
+                        selected_state[ACCUMULATOR_WORD_BITS / 2
+                            +: ACCUMULATOR_WORD_BITS / 2]
+                    };
+                eval_output_bucket <= nnue_output_bucket(eval_piece_count);
             end
         end
     end

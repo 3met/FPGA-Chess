@@ -37,7 +37,7 @@ class EngineConfigTests(unittest.TestCase):
         config = load_engine_config("hardware/config/engine/de1-soc.json")
         self.assertEqual(config["threads"], 1)
         self.assertEqual(config["stack_depth"], 32)
-        self.assertEqual(config["clock_frequency_hz"], 50_000_000)
+        self.assertEqual(config["clock_frequency_hz"], 65_000_000)
         self.assertEqual(config["search"]["aspiration_half_window"], 64)
         self.assertEqual(config["search"]["lmr_a_q8"], 192)
         self.assertEqual(config["search"]["lmr_b_q8"], 614)
