@@ -9,8 +9,8 @@ import tt_defs::*;
 // Engine-only runtime profiler. This is measurement infrastructure, not a
 // chess-correctness testbench.
 module tb_engine_profile #(
-    parameter int ENGINE_CLOCK_FREQ = 65_000_000,
-    parameter int ENGINE_HALF_PERIOD_PS = 7692,
+    parameter int ENGINE_CLOCK_FREQ = 75_000_000,
+    parameter int ENGINE_HALF_PERIOD_PS = 6667,
     parameter int SEARCH_THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = 24,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,

@@ -103,6 +103,11 @@ module board_update_pipeline #(
     ZobristAddr zobrist_old_ep_address, zobrist_new_ep_address;
     ZobristKey zobrist_old_ep_data, zobrist_new_ep_data;
     MoveEffects move_effects, move_effects_q;
+    logic [63:0] check_empty_mask_d, check_empty_mask_q;
+    logic [63:0] check_mover_mask_d, check_mover_mask_q;
+    logic [63:0] check_rook_mask_d, check_rook_mask_q;
+    Tile check_mover_tile_d, check_mover_tile_q;
+    Color check_mover_color_d, check_mover_color_q;
 
     localparam ZobristKey ZOBRIST_TURN_VALUE =
         zobrist_value(ZobristAddr'(ZOBRIST_TURN_BLACK_ADDR));
@@ -245,20 +250,19 @@ module board_update_pipeline #(
             || (piece == BISHOP && isDirDiag(dir));
     endfunction : is_line_attacker
 
-    function automatic Tile pushed_tile(input FullBoard board, input MoveEffects effects, input Position pos);
+    // Overlay the predecoded push masks on the registered source board. The
+    // move-position decoders remain before stage 0 instead of repeating in
+    // every pawn, knight, and ray tile lookup.
+    function automatic Tile checked_tile(input FullBoard board, input Position pos);
         automatic Tile tile = board.tiles[pos];
-
-        if (pos == effects.from_pos) tile = EMPTY_TILE;
-        if (pos == effects.to_pos) tile = effects.placed_tile;
-        if (effects.is_ep && pos == effects.ep_capture_pos) tile = EMPTY_TILE;
-        if (effects.is_castle && pos == effects.rook_from) tile = EMPTY_TILE;
-        if (effects.is_castle && pos == effects.rook_to) tile = Tile'({board.turn, ROOK});
+        if (check_empty_mask_q[pos]) tile = EMPTY_TILE;
+        if (check_mover_mask_q[pos]) tile = check_mover_tile_q;
+        if (check_rook_mask_q[pos]) tile = Tile'({check_mover_color_q, ROOK});
         return tile;
-    endfunction : pushed_tile
+    endfunction : checked_tile
 
-    function automatic logic pushed_square_attacked(
+    function automatic logic board_square_attacked(
         input FullBoard board,
-        input MoveEffects effects,
         input Position square,
         input Color attacker_color
     );
@@ -267,20 +271,20 @@ module board_update_pipeline #(
 
         if (attacker_color == WHITE) begin
             if (isShiftOnBoard(square, SOUTH_WEST, 3'd1)
-                    && pushed_tile(board, effects, shiftPos(square, SOUTH_WEST, 3'd1)) == WHITE_PAWN) return 1'b1;
+                    && checked_tile(board, shiftPos(square, SOUTH_WEST, 3'd1)) == WHITE_PAWN) return 1'b1;
             if (isShiftOnBoard(square, SOUTH_EAST, 3'd1)
-                    && pushed_tile(board, effects, shiftPos(square, SOUTH_EAST, 3'd1)) == WHITE_PAWN) return 1'b1;
+                    && checked_tile(board, shiftPos(square, SOUTH_EAST, 3'd1)) == WHITE_PAWN) return 1'b1;
         end else begin
             if (isShiftOnBoard(square, NORTH_WEST, 3'd1)
-                    && pushed_tile(board, effects, shiftPos(square, NORTH_WEST, 3'd1)) == BLACK_PAWN) return 1'b1;
+                    && checked_tile(board, shiftPos(square, NORTH_WEST, 3'd1)) == BLACK_PAWN) return 1'b1;
             if (isShiftOnBoard(square, NORTH_EAST, 3'd1)
-                    && pushed_tile(board, effects, shiftPos(square, NORTH_EAST, 3'd1)) == BLACK_PAWN) return 1'b1;
+                    && checked_tile(board, shiftPos(square, NORTH_EAST, 3'd1)) == BLACK_PAWN) return 1'b1;
         end
 
         for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
             if (isKnightShiftOnBoard(square, KnightDirection'(knight_dir))) begin
                 test_pos = shiftKnightPos(square, KnightDirection'(knight_dir));
-                if (pushed_tile(board, effects, test_pos) == Tile'({attacker_color, KNIGHT})) return 1'b1;
+                if (checked_tile(board, test_pos) == Tile'({attacker_color, KNIGHT})) return 1'b1;
             end
         end
 
@@ -289,7 +293,7 @@ module board_update_pipeline #(
             for (int distance = 1; distance < 8; distance++) begin
                 if (isShiftOnBoard(square, dir, distance[2:0])) begin
                     test_pos = shiftPos(square, dir, distance[2:0]);
-                    test_tile = pushed_tile(board, effects, test_pos);
+                    test_tile = checked_tile(board, test_pos);
                     if (test_tile.piece_type != NULL_PIECE) begin
                         if (test_tile.piece_color == attacker_color) begin
                             if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
@@ -302,21 +306,7 @@ module board_update_pipeline #(
         end
 
         return 1'b0;
-    endfunction : pushed_square_attacked
-
-    function automatic logic pushed_mover_in_check(
-        input FullBoard board,
-        input MoveEffects effects,
-        input Position king_square
-    );
-        automatic Color mover_color = board.turn;
-        return pushed_square_attacked(
-            board,
-            effects,
-            king_square,
-            Color'(~mover_color)
-        );
-    endfunction : pushed_mover_in_check
+    endfunction : board_square_attacked
 
     function automatic Position pushed_king_square(input FullBoard board, input Move move);
         if (board.tiles[move.from_pos].piece_type == KING) begin
@@ -342,19 +332,13 @@ module board_update_pipeline #(
 
     task automatic replace_tile(
         inout FullBoard board,
-        inout EvalScore pst_eval,
         inout PieceCount piece_count,
         input Position pos,
         input Tile old_tile,
-        input Tile new_tile,
-        input EvalScore old_pst,
-        input EvalScore new_pst
+        input Tile new_tile
     );
         automatic Tile placed_tile = new_tile;
 
-        // The caller has already decoded the old tile while planning the table
-        // reads; reusing it avoids a variable-square board mux in the PST path.
-        pst_eval += signed_piece_score(placed_tile, new_pst) - signed_piece_score(old_tile, old_pst);
         if (old_tile.piece_type == NULL_PIECE && placed_tile.piece_type != NULL_PIECE)
             piece_count += PieceCount'(1);
         else if (old_tile.piece_type != NULL_PIECE && placed_tile.piece_type == NULL_PIECE)
@@ -482,6 +466,11 @@ module board_update_pipeline #(
         zobrist_new_ep_enable_q <= zobrist_new_ep_enable;
         pst_read_enable_q <= pst_read_plan.enable;
         move_effects_q <= move_effects;
+        check_empty_mask_q <= check_empty_mask_d;
+        check_mover_mask_q <= check_mover_mask_d;
+        check_rook_mask_q <= check_rook_mask_d;
+        check_mover_tile_q <= check_mover_tile_d;
+        check_mover_color_q <= check_mover_color_d;
     end
 
     always_comb begin
@@ -503,6 +492,50 @@ module board_update_pipeline #(
 
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
+
+        check_empty_mask_d = 64'd0;
+        check_mover_mask_d = 64'd0;
+        check_rook_mask_d = 64'd0;
+        check_mover_tile_d = EMPTY_TILE;
+        check_mover_color_d = WHITE;
+        if (board_op == BOARD_PUSH_MOVE_OP) begin
+            automatic Tile start_tile = board_in.tiles[move_in.from_pos];
+            automatic Tile end_tile = board_in.tiles[move_in.to_pos];
+            automatic Color moved_color = start_tile.piece_color;
+            automatic logic is_promo = start_tile.piece_type == PAWN
+                && (getRank(move_in.to_pos) == BoardRank'('d0)
+                    || getRank(move_in.to_pos) == BoardRank'('d7));
+            automatic logic is_castle = start_tile.piece_type == KING
+                && getFile(move_in.from_pos) == BoardFile'('d4)
+                && (getFile(move_in.to_pos) == BoardFile'('d2)
+                    || getFile(move_in.to_pos) == BoardFile'('d6));
+            automatic logic is_ep = start_tile.piece_type == PAWN
+                && board_in.has_ep
+                && board_in.ep_file == getFile(move_in.to_pos)
+                && end_tile.piece_type == NULL_PIECE
+                && ((moved_color == WHITE
+                        && getRank(move_in.to_pos) == BoardRank'('d5))
+                    || (moved_color == BLACK
+                        && getRank(move_in.to_pos) == BoardRank'('d2)));
+            automatic Position ep_capture_pos = getPosition(
+                getRank(move_in.from_pos), getFile(move_in.to_pos));
+            automatic Position rook_from = castle_rook_from(move_in.to_pos);
+            automatic Position rook_to = castle_rook_to(move_in.to_pos);
+
+            check_empty_mask_d[move_in.from_pos] = 1'b1;
+            check_mover_mask_d[move_in.to_pos] = 1'b1;
+            check_mover_tile_d = Tile'({
+                moved_color,
+                is_promo ? promo_to_piece(move_in.promo_piece) : start_tile.piece_type
+            });
+            check_mover_color_d = moved_color;
+            if (is_ep)
+                check_empty_mask_d[ep_capture_pos] = 1'b1;
+            if (is_castle) begin
+                check_empty_mask_d[rook_from] = 1'b1;
+                check_rook_mask_d[rook_to] = 1'b1;
+            end
+        end
     end
 
     always_comb begin
@@ -510,7 +543,8 @@ module board_update_pipeline #(
         // King safety is evaluated in parallel with the synchronous table
         // reads and carried to the stage-2 board result without adding a cycle.
         next_ctx_pipe[1].mover_in_check = (ctx_pipe[0].board_op == BOARD_PUSH_MOVE_OP)
-            ? pushed_mover_in_check(ctx_pipe[0].board, move_effects, ctx_pipe[0].mover_king_square)
+            ? board_square_attacked(ctx_pipe[0].board, ctx_pipe[0].mover_king_square,
+                Color'(~ctx_pipe[0].board.turn))
             : 1'b0;
     end
 
@@ -770,24 +804,43 @@ module board_update_pipeline #(
                 automatic logic next_has_ep;
                 automatic BoardFile next_ep_file = getFile(to_pos);
                 automatic HalfmoveClock next_halfmove;
+                automatic EvalScore mover_delta =
+                    signed_piece_score(placed_tile, pst_end_out)
+                    - signed_piece_score(start_tile, pst_start_out);
+                automatic EvalScore capture_delta = (is_ep || is_castle)
+                    ? EvalScore'(0) : -signed_piece_score(end_tile, pst_killed_out);
+                automatic Tile auxiliary_tile = is_ep
+                    ? Tile'({Color'(~moved_color), PAWN})
+                    : Tile'({moved_color, ROOK});
+                automatic EvalScore auxiliary_remove_delta = (is_ep || is_castle)
+                    ? -signed_piece_score(auxiliary_tile, pst_killed_out)
+                    : EvalScore'(0);
+                automatic EvalScore rook_place_delta = is_castle
+                    ? signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out)
+                    : EvalScore'(0);
 
-                replace_tile(out.board, out.pst_eval, out.piece_count,
-                    from_pos, start_tile, EMPTY_TILE, pst_start_out, EvalScore'(0));
-                replace_tile(out.board, out.pst_eval, out.piece_count,
-                    to_pos, end_tile, placed_tile, (is_ep || is_castle) ? EvalScore'(0) : pst_killed_out, pst_end_out);
+                // Balance the independent tile-score deltas so a synchronous
+                // PST ROM output crosses two adders rather than a serial task chain.
+                out.pst_eval = in.pst_eval
+                    + EvalScore'(mover_delta + capture_delta)
+                    + EvalScore'(auxiliary_remove_delta + rook_place_delta);
+
+                replace_tile(out.board, out.piece_count,
+                    from_pos, start_tile, EMPTY_TILE);
+                replace_tile(out.board, out.piece_count,
+                    to_pos, end_tile, placed_tile);
 
                 if (is_ep) begin
-                    replace_tile(out.board, out.pst_eval, out.piece_count,
-                        ep_capture_pos, Tile'({Color'(~moved_color), PAWN}), EMPTY_TILE,
-                        pst_killed_out, EvalScore'(0));
+                    replace_tile(out.board, out.piece_count,
+                        ep_capture_pos, Tile'({Color'(~moved_color), PAWN}), EMPTY_TILE);
                 end
 
                 if (is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                    replace_tile(out.board, out.pst_eval, out.piece_count,
-                        rook_from, rook_tile, EMPTY_TILE, pst_killed_out, EvalScore'(0));
-                    replace_tile(out.board, out.pst_eval, out.piece_count,
-                        rook_to, EMPTY_TILE, rook_tile, EvalScore'(0), pst_castle_out);
+                    replace_tile(out.board, out.piece_count,
+                        rook_from, rook_tile, EMPTY_TILE);
+                    replace_tile(out.board, out.piece_count,
+                        rook_to, EMPTY_TILE, rook_tile);
                 end
 
                 out.move_record.from_pos = from_pos;
@@ -823,26 +876,41 @@ module board_update_pipeline #(
                 automatic Position ep_capture_pos = effects.ep_capture_pos;
                 automatic Position rook_from = effects.rook_from;
                 automatic Position rook_to = effects.rook_to;
+                automatic EvalScore mover_delta =
+                    signed_piece_score(restored_mover, pst_start_out);
+                automatic EvalScore capture_delta =
+                    signed_piece_score(restored_capture,
+                        is_ep ? EvalScore'(0) : pst_killed_out)
+                    - signed_piece_score(effects.end_tile, pst_end_out);
+                automatic EvalScore ep_restore_delta = is_ep
+                    ? signed_piece_score(Tile'({captured_color, PAWN}), pst_killed_out)
+                    : EvalScore'(0);
+                automatic EvalScore castle_rook_delta = is_castle
+                    ? signed_piece_score(Tile'({moved_color, ROOK}), pst_killed_out)
+                        - signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out)
+                    : EvalScore'(0);
 
                 if (!is_null_record(rec)) begin
-                    replace_tile(out.board, out.pst_eval, out.piece_count,
-                        from_pos, EMPTY_TILE, restored_mover, EvalScore'(0), pst_start_out);
-                    replace_tile(out.board, out.pst_eval, out.piece_count,
-                        to_pos, effects.end_tile, restored_capture, pst_end_out,
-                        is_ep ? EvalScore'(0) : pst_killed_out);
+                    out.pst_eval = in.pst_eval
+                        + EvalScore'(mover_delta + capture_delta)
+                        + EvalScore'(ep_restore_delta + castle_rook_delta);
+                    replace_tile(out.board, out.piece_count,
+                        from_pos, EMPTY_TILE, restored_mover);
+                    replace_tile(out.board, out.piece_count,
+                        to_pos, effects.end_tile, restored_capture);
 
                     if (is_ep) begin
                         automatic Tile ep_tile = Tile'({captured_color, PAWN});
-                        replace_tile(out.board, out.pst_eval, out.piece_count,
-                            ep_capture_pos, EMPTY_TILE, ep_tile, EvalScore'(0), pst_killed_out);
+                        replace_tile(out.board, out.piece_count,
+                            ep_capture_pos, EMPTY_TILE, ep_tile);
                     end
 
                     if (is_castle) begin
                         automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                        replace_tile(out.board, out.pst_eval, out.piece_count,
-                            rook_to, rook_tile, EMPTY_TILE, pst_castle_out, EvalScore'(0));
-                        replace_tile(out.board, out.pst_eval, out.piece_count,
-                            rook_from, EMPTY_TILE, rook_tile, EvalScore'(0), pst_killed_out);
+                        replace_tile(out.board, out.piece_count,
+                            rook_to, rook_tile, EMPTY_TILE);
+                        replace_tile(out.board, out.piece_count,
+                            rook_from, EMPTY_TILE, rook_tile);
                     end
                 end
 
@@ -873,8 +941,11 @@ module board_update_pipeline #(
                 automatic Position to_pos = in.move.to_pos;
                 automatic Tile new_tile = Tile'(in.set_data[3:0]);
 
-                replace_tile(out.board, out.pst_eval, out.piece_count,
-                    to_pos, in.board.tiles[to_pos], new_tile, pst_killed_out, pst_end_out);
+                out.pst_eval = in.pst_eval
+                    + signed_piece_score(new_tile, pst_end_out)
+                    - signed_piece_score(in.board.tiles[to_pos], pst_killed_out);
+                replace_tile(out.board, out.piece_count,
+                    to_pos, in.board.tiles[to_pos], new_tile);
             end
 
             BOARD_SET_TURN_OP: begin

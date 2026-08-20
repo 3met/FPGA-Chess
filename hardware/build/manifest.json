@@ -230,10 +230,11 @@
         "kind": "intel-pll",
         "template": "hardware/ip/pll"
       },
-      "seed": 8,
+      "seed": 6,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",
+      "fit_timing_optimization": true,
       "message_disable": [10008, 10264, 12021, 12022, 12128, 12130, 12133, 12134, 144001, 169065, 169070, 286033, 292013, 334003, 334004],
       "sdc": "hardware/constraints/engine.sdc",
       "qsf_template": "hardware/constraints/DE1_SoC.qsf",

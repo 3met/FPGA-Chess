@@ -31,7 +31,7 @@ module tb_engine;
 
     engine_command_layer #(
         .BUILD_ID(64'h0123_4567_89ab_cdef),
-        .CLOCK_FREQ(65_000_000),
+        .CLOCK_FREQ(75_000_000),
         .SEARCH_THREAD_COUNT(3),
         .SEARCH_STACK_DEPTH(24)
     ) dut (
@@ -246,10 +246,10 @@ module tb_engine;
         expect_byte(8'h23, "build ID byte 6");
         expect_byte(8'h01, "build ID byte 7");
         expect_byte(8'd3, "build thread count");
-        expect_byte(8'h40, "build clock byte 0");
-        expect_byte(8'hd2, "build clock byte 1");
-        expect_byte(8'hdf, "build clock byte 2");
-        expect_byte(8'h03, "build clock byte 3");
+        expect_byte(8'hc0, "build clock byte 0");
+        expect_byte(8'h68, "build clock byte 1");
+        expect_byte(8'h78, "build clock byte 2");
+        expect_byte(8'h04, "build clock byte 3");
         expect_byte(8'd24, "build search stack depth");
 
         ready_for_result = 1'b0;

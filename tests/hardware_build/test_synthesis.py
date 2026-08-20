@@ -42,6 +42,9 @@ class EngineBuildConfigTests(unittest.TestCase):
             self.assertIn("engine_build_config.svh", qsf)
             self.assertIn('FPGA_CHESS_THREAD_CAPACITY=1', qsf)
             self.assertIn('FPGA_CHESS_SEARCH_STACK_CAPACITY=32', qsf)
+            self.assertIn("PHYSICAL_SYNTHESIS_COMBO_LOGIC ON", qsf)
+            self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON", qsf)
+            self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF", qsf)
 
 
 if __name__ == "__main__":

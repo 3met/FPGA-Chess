@@ -240,6 +240,18 @@ def write_quartus_project(
         ])
     if "seed" in target:
         lines.append(f"set_global_assignment -name SEED {target['seed']}")
+    if target.get("fit_timing_optimization", False):
+        # Use Quartus's placement-aware optimizations without register
+        # retiming, preserving every RTL pipeline and state-machine boundary.
+        lines.extend([
+            "set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON",
+            "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON",
+            "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF",
+            "set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT NORMAL",
+            "set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM",
+            "set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON",
+            "set_global_assignment -name ENABLE_BENEFICIAL_SKEW_OPTIMIZATION ON",
+        ])
     for message_id in target.get("message_disable", []):
         lines.append(f"set_global_assignment -name MESSAGE_DISABLE {message_id}")
     assigned_sources = set(sources)

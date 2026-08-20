@@ -3,7 +3,7 @@
   "engine": {
     "threads": 1,
     "stack_depth": 32,
-    "clock_frequency_hz": 65000000
+    "clock_frequency_hz": 75000000
   },
   "transposition_table": {
     "tag_bits": 32

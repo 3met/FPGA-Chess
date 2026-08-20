@@ -194,6 +194,7 @@ module move_generator_pipeline #(
     logic candidate_is_promotion;
     logic candidate_is_castle;
     logic candidate_is_knight;
+    logic candidate_see_good;
     Direction candidate_lane;
     logic [1:0] candidate_promo_counter;
     logic candidate_valid;
@@ -382,17 +383,29 @@ module move_generator_pipeline #(
         input Direction dir
     );
         automatic RayRecord result;
+        automatic Tile candidates[7];
+        automatic logic [6:0] occupied;
         result = NULL_RAY;
-        for (int distance = 1; distance < 8; distance++) begin
-            if (3'(distance) <= ray_max_distance(destination, dir)
-                    && result.tile.piece_type == NULL_PIECE) begin
-                automatic Position pos = shiftPos(destination, dir, 3'(distance));
-                if (board.tiles[pos].piece_type != NULL_PIECE) begin
-                    result.tile = board.tiles[pos];
-                    result.distance = 3'(distance - 1);
-                end
-            end
+        for (int index = 0; index < 7; index++) begin
+            automatic logic on_ray = 3'(index + 1)
+                <= ray_max_distance(destination, dir);
+            automatic Position pos = shiftPos(destination, dir, 3'(index + 1));
+            candidates[index] = board.tiles[pos];
+            occupied[index] = on_ray
+                && candidates[index].piece_type != NULL_PIECE;
         end
+        // A priority mux avoids carrying the selected tile through seven
+        // dependent conditional assignments on long rays.
+        casez (occupied)
+            7'b??????1: begin result.tile = candidates[0]; result.distance = 3'd0; end
+            7'b?????10: begin result.tile = candidates[1]; result.distance = 3'd1; end
+            7'b????100: begin result.tile = candidates[2]; result.distance = 3'd2; end
+            7'b???1000: begin result.tile = candidates[3]; result.distance = 3'd3; end
+            7'b??10000: begin result.tile = candidates[4]; result.distance = 3'd4; end
+            7'b?100000: begin result.tile = candidates[5]; result.distance = 3'd5; end
+            7'b1000000: begin result.tile = candidates[6]; result.distance = 3'd6; end
+            default: begin end
+        endcase
         return result;
     endfunction
 
@@ -649,15 +662,21 @@ module move_generator_pipeline #(
     endfunction
 
     // Shared bounded SEE: victim, least visible recapturer, and one defender reply.
-    function automatic logic candidate_see_nonnegative();
-        automatic PieceType victim = candidate_is_ep ? PAWN : candidate_victim.piece_type;
+    function automatic logic see_nonnegative(
+        input Tile attacker,
+        input Tile victim_tile,
+        input logic is_ep,
+        input logic is_knight,
+        input Direction lane
+    );
+        automatic PieceType victim = is_ep ? PAWN : victim_tile.piece_type;
         automatic logic [4:0] enemy_classes = '0;
         automatic logic friendly_defender = 1'b0;
         automatic logic [3:0] recapturer_value;
-        if (exchange_value(candidate_attacker.piece_type) <= exchange_value(victim)) return 1'b1;
+        if (exchange_value(attacker.piece_type) <= exchange_value(victim)) return 1'b1;
         for (int dir = 0; dir < 8; dir++) begin
             automatic Tile tile = context_ray[dir].tile;
-            if (!(candidate_is_knight == 1'b0 && candidate_lane == Direction'(dir))
+            if (!(is_knight == 1'b0 && lane == Direction'(dir))
                     && tile.piece_type != NULL_PIECE
                     && ray_piece_attacks(tile, Direction'(dir), context_ray[dir].distance)) begin
                 if (tile.piece_color == job_board.turn) friendly_defender = 1'b1;
@@ -675,7 +694,7 @@ module move_generator_pipeline #(
         end
         for (int dir = 0; dir < 8; dir++) begin
             automatic Tile tile = context_knight[dir];
-            if (!(candidate_is_knight && candidate_lane == Direction'(dir))
+            if (!(is_knight && lane == Direction'(dir))
                     && tile.piece_type == KNIGHT) begin
                 if (tile.piece_color == job_board.turn) friendly_defender = 1'b1;
                 else enemy_classes[1] = 1'b1;
@@ -689,7 +708,7 @@ module move_generator_pipeline #(
         else if (enemy_classes[3]) recapturer_value = 4'd9;
         else recapturer_value = 4'd15;
         return 5'(exchange_value(victim)) + 5'(recapturer_value)
-            >= 5'(exchange_value(candidate_attacker.piece_type));
+            >= 5'(exchange_value(attacker.piece_type));
     endfunction
 
     function automatic MoveBucketIndex noisy_bucket();
@@ -698,7 +717,7 @@ module move_generator_pipeline #(
             return candidate_move.promo_piece == PROMO_QUEEN
                 ? GOOD_NOISY_HIGH_BUCKET : GOOD_NOISY_LOW_BUCKET;
         end
-        if (candidate_see_nonnegative()) begin
+        if (candidate_see_good) begin
             return victim == ROOK || victim == QUEEN || victim == KING
                 ? GOOD_NOISY_HIGH_BUCKET : GOOD_NOISY_LOW_BUCKET;
         end
@@ -1367,6 +1386,13 @@ module move_generator_pipeline #(
                                 candidate_is_promotion <= source_is_promotion;
                                 candidate_is_castle <= 1'b0;
                                 candidate_is_knight <= source_is_knight;
+                                candidate_see_good <= see_nonnegative(
+                                    source_attacker,
+                                    source_victim,
+                                    source_is_ep,
+                                    source_is_knight,
+                                    source_lane
+                                );
                                 candidate_lane <= source_lane;
                                 candidate_promo_counter <= source_is_promotion ? 2'd3 : 2'd0;
                                 if (source_is_promotion)
@@ -1430,6 +1456,7 @@ module move_generator_pipeline #(
                             candidate_is_promotion <= 1'b0;
                             candidate_is_castle <= 1'b1;
                             candidate_is_knight <= 1'b0;
+                            candidate_see_good <= 1'b1;
                             candidate_lane <= Direction'(0);
                             if (ENABLE_STATS) stat_candidate_count <= stat_candidate_count + 40'd1;
                             if (castle_candidate_suppressed) begin

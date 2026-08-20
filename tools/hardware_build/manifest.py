@@ -103,6 +103,8 @@ def validate_manifest(manifest: object) -> None:
                 raise BuildError(f"Synthesis target '{name}' uses unsupported Quartus map_optimization")
             if target.get("fit_effort") not in {None, "standard", "fast", "auto"}:
                 raise BuildError(f"Synthesis target '{name}' uses unsupported Quartus fit_effort")
+            if not isinstance(target.get("fit_timing_optimization", False), bool):
+                raise BuildError(f"Synthesis target '{name}' fit_timing_optimization must be boolean")
             clock_generator = target.get("clock_generator")
             if clock_generator is not None:
                 if not isinstance(clock_generator, dict):

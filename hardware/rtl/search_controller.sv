@@ -1627,12 +1627,12 @@ module search_controller #(
         search_eval_issue_thread = search_eval_issue_valid
             ? search_select_thread(search_eval_mask, search_dispatch.eval)
             : ThreadID'(0);
-        search_tt_lookup_issue_thread = search_tt_lookup_issue_valid
-            ? search_select_thread(search_tt_lookup_mask, search_dispatch.tt_lookup)
-            : ThreadID'(0);
-        search_tt_store_issue_thread = search_tt_store_issue_valid
-            ? search_select_thread(search_store_mask, search_dispatch.tt_store)
-            : ThreadID'(0);
+        // Request payloads are sampled only when their valid signal is set, so
+        // keep validity out of these wide thread-selected data paths.
+        search_tt_lookup_issue_thread = search_select_thread(
+            search_tt_lookup_mask, search_dispatch.tt_lookup);
+        search_tt_store_issue_thread = search_select_thread(
+            search_store_mask, search_dispatch.tt_store);
 
         board_update_op = BOARD_IDLE_OP;
         board_update_in = active_board;
@@ -1688,14 +1688,17 @@ module search_controller #(
         move_cmd = MOVE_GEN_GENERATE_NOISY;
         move_cmd_thread = ThreadID'(0);
         move_cmd_ply = PlyIndex'(0);
-        move_cmd_board = active_board;
+        // The command is sampled only with move_cmd_valid. Default directly
+        // to the selected search board so readiness logic does not control a
+        // wide active-board/search-board data mux on the command path.
+        move_cmd_board = search_board[search_move_issue_thread];
         move_cmd_suppress_valid = 1'b0;
         move_cmd_suppress_move = NULL_MOVE;
         move_cmd_tops = MoveBucketTops'(0);
         move_quiet_cmd_valid = 1'b0;
         move_quiet_cmd_thread = ThreadID'(0);
         move_quiet_cmd_ply = PlyIndex'(0);
-        move_quiet_cmd_board = active_board;
+        move_quiet_cmd_board = search_board[search_quiet_issue_thread];
         move_quiet_cmd_suppress_valid = 1'b0;
         move_quiet_cmd_suppress_move = NULL_MOVE;
         move_quiet_cmd_tops = MoveBucketTops'(0);

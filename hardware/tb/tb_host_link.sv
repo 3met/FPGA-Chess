@@ -5,7 +5,7 @@ import engine_defs::*;
 module tb_host_link;
 
     localparam int UART_CLOCK_FREQ = 100_000_000;
-    localparam int ENGINE_CLOCK_FREQ = 65_000_000;
+    localparam int ENGINE_CLOCK_FREQ = 75_000_000;
     localparam int BAUD_RATE = 2_000_000;
     localparam real UART_CLK_NS = 1_000_000_000.0 / UART_CLOCK_FREQ;
     localparam real ENGINE_CLK_NS = 1_000_000_000.0 / ENGINE_CLOCK_FREQ;

@@ -37,8 +37,7 @@ module nnue_evaluator #(
     typedef logic [OUTPUT_WEIGHT_ROW_ADDR_BITS-1:0] OutputWeightRowAddress;
     typedef logic signed [5:0] OutputProduct;
     typedef logic signed [6:0] PairSum;
-    typedef logic signed [7:0] TripleSum;
-    typedef logic signed [8:0] SextetSum;
+    typedef logic signed [7:0] QuadSum;
     typedef logic signed [8:0] OctetSum;
     typedef logic signed [9:0] SixteenSum;
     typedef logic signed [10:0] ThirtyTwoSum;
@@ -66,7 +65,7 @@ module nnue_evaluator #(
     logic result_pending;
     logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] eval_cycle;
     logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] partial_cycle;
-    OctetSum partial_q[16];
+    QuadSum partial_q[32];
     OutputSum eval_sum;
     OutputSum result_sum;
 
@@ -238,16 +237,15 @@ module nnue_evaluator #(
 
             if (eval_busy) begin
                 automatic OutputProduct products[NNUE_OUTPUT_MAC_LANES];
-                automatic TripleSum triple_sums_a[16], triple_sums_b[16];
-                automatic PairSum pair_sums[16];
-                automatic SextetSum sextet_sums[16];
-                automatic SixteenSum sums_8[8];
-                automatic ThirtyTwoSum sums_4[4];
-                automatic SixtyFourSum sums_2[2];
+                automatic PairSum pair_sums_a[32], pair_sums_b[32];
+                automatic OctetSum octet_sums[16];
+                automatic SixteenSum sixteen_sums[8];
+                automatic ThirtyTwoSum thirty_two_sums[4];
+                automatic SixtyFourSum sixty_four_sums[2];
                 automatic MacGroupSum lane_sum;
                 automatic OutputSum cycle_sum;
-                // Register sixteen partial sums to split the RAM/arithmetic path from
-                // the upper adder tree without retaining every DSP product.
+                // Register 32 four-product sums to keep the block-ROM/DSP path
+                // short without adding a MAC cycle or retaining every product.
                 // The drain cycle overwrites these registers with unused data;
                 // unconditional writes avoid a high-fanout terminal-count enable.
                 for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
@@ -265,23 +263,14 @@ module nnue_evaluator #(
                                 +: NNUE_OUTPUT_WEIGHT_BITS]);
                     products[lane] = output_product(activation, weight);
                 end
-                // Reduce each registered eight-product chunk as 3+3+2.
-                // This exposes natural small-multiplier groups to Intel,
-                // AMD, and other tools without instantiating vendor DSP IP.
-                for (int lane = 0; lane < 16; lane++) begin
-                    automatic int base = 8 * lane;
-                    triple_sums_a[lane] = TripleSum'(products[base])
-                        + TripleSum'(products[base + 1])
-                        + TripleSum'(products[base + 2]);
-                    triple_sums_b[lane] = TripleSum'(products[base + 3])
-                        + TripleSum'(products[base + 4])
-                        + TripleSum'(products[base + 5]);
-                    pair_sums[lane] = PairSum'(products[base + 6])
-                        + PairSum'(products[base + 7]);
-                    sextet_sums[lane] = SextetSum'(triple_sums_a[lane])
-                        + SextetSum'(triple_sums_b[lane]);
-                    partial_q[lane] <= OctetSum'(sextet_sums[lane])
-                        + OctetSum'(pair_sums[lane]);
+                for (int lane = 0; lane < 32; lane++) begin
+                    automatic int base = 4 * lane;
+                    pair_sums_a[lane] = PairSum'(products[base])
+                        + PairSum'(products[base + 1]);
+                    pair_sums_b[lane] = PairSum'(products[base + 2])
+                        + PairSum'(products[base + 3]);
+                    partial_q[lane] <= QuadSum'(pair_sums_a[lane])
+                        + QuadSum'(pair_sums_b[lane]);
                 end
                 partial_cycle <= eval_cycle;
                 partial_pending <= 1'b1;
@@ -292,17 +281,20 @@ module nnue_evaluator #(
                     >> (NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS);
 
                 if (partial_pending) begin
+                    for (int lane = 0; lane < 16; lane++)
+                        octet_sums[lane] = OctetSum'(partial_q[2 * lane])
+                            + OctetSum'(partial_q[2 * lane + 1]);
                     for (int lane = 0; lane < 8; lane++)
-                        sums_8[lane] = SixteenSum'(partial_q[2 * lane])
-                            + SixteenSum'(partial_q[2 * lane + 1]);
+                        sixteen_sums[lane] = SixteenSum'(octet_sums[2 * lane])
+                            + SixteenSum'(octet_sums[2 * lane + 1]);
                     for (int lane = 0; lane < 4; lane++)
-                        sums_4[lane] = ThirtyTwoSum'(sums_8[2 * lane])
-                            + ThirtyTwoSum'(sums_8[2 * lane + 1]);
+                        thirty_two_sums[lane] = ThirtyTwoSum'(sixteen_sums[2 * lane])
+                            + ThirtyTwoSum'(sixteen_sums[2 * lane + 1]);
                     for (int lane = 0; lane < 2; lane++)
-                        sums_2[lane] = SixtyFourSum'(sums_4[2 * lane])
-                            + SixtyFourSum'(sums_4[2 * lane + 1]);
-                    lane_sum = MacGroupSum'(sums_2[0])
-                        + MacGroupSum'(sums_2[1]);
+                        sixty_four_sums[lane] = SixtyFourSum'(thirty_two_sums[2 * lane])
+                            + SixtyFourSum'(thirty_two_sums[2 * lane + 1]);
+                    lane_sum = MacGroupSum'(sixty_four_sums[0])
+                        + MacGroupSum'(sixty_four_sums[1]);
                     cycle_sum = eval_sum + OutputSum'(lane_sum);
                     if (partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1) begin
                         result_sum <= cycle_sum;
