@@ -8,8 +8,8 @@ All time values use the 24-bit millisecond `TimeType`; representable durations m
 
 | Name                | Default | Description                                                                           |
 | ------------------- | ------- | ------------------------------------------------------------------------------------- |
-| `MOVE_OVERHEAD_MS`  | `20`    | Time reserved for host/FPGA latency and command turnaround.                           |
-| `MINIMUM_SEARCH_MS` | `10`    | Minimum nonzero search budget when any usable time remains.                           |
+| `MOVE_OVERHEAD_MS`  | `5`     | Time reserved for host/FPGA latency and command turnaround.                           |
+| `MINIMUM_SEARCH_MS` | `5`     | Minimum nonzero search budget when any usable time remains.                           |
 | `INCREMENT_NUMERATOR` / `INCREMENT_DENOMINATOR` | `3 / 4` | Fraction of the increment added to the budget. |
 | `REMAINING_TIME_NUMERATOR` / `REMAINING_TIME_DENOMINATOR` | `1 / 32` | Fraction of usable remaining time added to the budget. |
 

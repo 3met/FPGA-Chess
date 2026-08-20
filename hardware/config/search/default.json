@@ -15,8 +15,8 @@
     "deep_reduction": 3
   },
   "time_management": {
-    "move_overhead_ms": 20,
-    "minimum_search_ms": 10,
+    "move_overhead_ms": 5,
+    "minimum_search_ms": 5,
     "increment_fraction": [3, 4],
     "remaining_time_fraction": [1, 32]
   },
