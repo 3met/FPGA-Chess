@@ -38,6 +38,9 @@ from .manifest import expand_source_set, load_manifest
 from .simulation import has_sim_errors
 
 
+VERILATOR_PROFILE_CACHE_LIMIT = 10
+
+
 ENGINE_STATES = [
     "idle", "receive_payload", "process_payload", "direct_board",
     "issue_request", "wait_result", "issue_kill", "output",
@@ -1031,6 +1034,20 @@ def _resolve_profile_config(args: argparse.Namespace) -> dict:
     return config
 
 
+def _prune_verilator_profile_cache(cache_root: Path, active_dir: Path) -> None:
+    """Retain only the most recently used completed Verilator profiler builds."""
+    completed = []
+    for build_dir in cache_root.iterdir():
+        fingerprint = build_dir / "fingerprint.txt"
+        executable = build_dir / ("profile_sim.exe" if os.name == "nt" else "profile_sim")
+        if build_dir.is_dir() and fingerprint.is_file() and executable.is_file():
+            completed.append((fingerprint.stat().st_mtime_ns, build_dir))
+    completed.sort(reverse=True)
+    for _, build_dir in completed[VERILATOR_PROFILE_CACHE_LIMIT:]:
+        if build_dir != active_dir:
+            shutil.rmtree(build_dir)
+
+
 def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     """Build and cache a native timed profiler executable."""
     verilator = require_tool("verilator")
@@ -1053,6 +1070,8 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         and fingerprint_path.exists()
         and fingerprint_path.read_text(encoding="utf-8").strip() == fingerprint
     ):
+        fingerprint_path.touch()
+        _prune_verilator_profile_cache(build_dir.parent, build_dir)
         return executable
 
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -1099,6 +1118,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         print_failure_excerpt(output)
         raise BuildError(f"Verilator profile build failed; see {rel(build_dir / 'compile.log')}")
     fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
+    _prune_verilator_profile_cache(build_dir.parent, build_dir)
     return executable
 
 

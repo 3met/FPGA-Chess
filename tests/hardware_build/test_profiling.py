@@ -1,5 +1,8 @@
 import argparse
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
 from tools.hardware_build.common import BuildError
 from tools.hardware_build.profiling import (
@@ -10,6 +13,7 @@ from tools.hardware_build.profiling import (
     MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
     THREAD_PHASES,
+    _prune_verilator_profile_cache,
     _profile_job_count,
     _resolve_profile_config,
     _validate_profile_args,
@@ -21,6 +25,16 @@ from tools.hardware_build.profiling import (
     percent,
     rate,
 )
+
+
+def make_completed_verilator_build(cache: Path, name: str, timestamp: int) -> Path:
+    build = cache / name
+    build.mkdir()
+    fingerprint = build / "fingerprint.txt"
+    fingerprint.write_text(name, encoding="utf-8")
+    (build / ("profile_sim.exe" if os.name == "nt" else "profile_sim")).touch()
+    os.utime(fingerprint, ns=(timestamp, timestamp))
+    return build
 
 
 def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
@@ -567,6 +581,24 @@ class ProfileSuiteTests(unittest.TestCase):
     def test_modelsim_defaults_to_one_suite_job(self):
         args = argparse.Namespace(jobs=None, simulator_threads=1)
         self.assertEqual(_profile_job_count(args, "modelsim"), 1)
+
+    def test_verilator_profile_cache_keeps_ten_most_recent_completed_builds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary)
+            builds = [
+                make_completed_verilator_build(cache, f"build-{index}", index + 1)
+                for index in range(12)
+            ]
+            incomplete = cache / "incomplete"
+            incomplete.mkdir()
+            (incomplete / "fingerprint.txt").write_text("incomplete", encoding="utf-8")
+
+            _prune_verilator_profile_cache(cache, builds[-1])
+
+            self.assertFalse(builds[0].exists())
+            self.assertFalse(builds[1].exists())
+            self.assertTrue(all(build.exists() for build in builds[2:]))
+            self.assertTrue(incomplete.exists())
 
 
 if __name__ == "__main__":
