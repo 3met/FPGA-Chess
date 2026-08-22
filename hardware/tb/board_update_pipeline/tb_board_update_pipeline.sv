@@ -22,6 +22,7 @@ module tb_board_update_pipeline;
     ZobristKey zobrist_key_out;
     EvalScore pst_eval_out;
     PieceCount piece_count_out;
+    logic mover_in_check_out;
 
     PstScore pst_values[0:(6 * 64)-1];
     ZobristKey zobrist_values[0:ZOBRIST_ENTRY_CNT-1];
@@ -50,7 +51,7 @@ module tb_board_update_pipeline;
         .zobrist_key_out(zobrist_key_out),
         .pst_eval_out(pst_eval_out),
         .piece_count_out(piece_count_out),
-        .mover_in_check_out()
+        .mover_in_check_out(mover_in_check_out)
     );
 
     task automatic do_clock(input int cnt = 1);
@@ -847,6 +848,59 @@ module tb_board_update_pipeline;
         expect_state(expected_b, "back-to-back request B");
     endtask
 
+    // Consecutive pushes must use each request's own post-move overlay when
+    // checking whether the mover exposed its king.
+    task automatic test_back_to_back_king_safety();
+        automatic FullBoard board_a;
+        automatic FullBoard board_b;
+        automatic Move move_a = NULL_MOVE;
+        automatic Move move_b = NULL_MOVE;
+
+        init_empty_board(board_a);
+        board_a.tiles[Position'(4)] = WHITE_KING;
+        board_a.tiles[Position'(12)] = WHITE_ROOK;
+        board_a.tiles[Position'(56)] = BLACK_KING;
+        board_a.tiles[Position'(60)] = BLACK_ROOK;
+        board_a.king_positions[WHITE] = Position'(4);
+        board_a.king_positions[BLACK] = Position'(56);
+        move_a.from_pos = Position'(12);
+        move_a.to_pos = Position'(13);
+
+        init_empty_board(board_b);
+        board_b.tiles[Position'(4)] = WHITE_KING;
+        board_b.tiles[Position'(1)] = WHITE_KNIGHT;
+        board_b.tiles[Position'(56)] = BLACK_KING;
+        board_b.king_positions[WHITE] = Position'(4);
+        board_b.king_positions[BLACK] = Position'(56);
+        move_b.from_pos = Position'(1);
+        move_b.to_pos = Position'(18);
+
+        board_in = board_a;
+        zobrist_key_in = ref_zobrist_full(board_a);
+        pst_eval_in = ref_eval(board_a);
+        piece_count_in = ref_piece_count(board_a);
+        move_in = move_a;
+        set_data = 7'd0;
+        thread_id = ThreadID'(0);
+        search_ply = PlyIndex'(0);
+        board_op = BOARD_PUSH_MOVE_OP;
+        do_clock(1);
+
+        board_in = board_b;
+        zobrist_key_in = ref_zobrist_full(board_b);
+        pst_eval_in = ref_eval(board_b);
+        piece_count_in = ref_piece_count(board_b);
+        move_in = move_b;
+        board_op = BOARD_PUSH_MOVE_OP;
+        do_clock(1);
+
+        drive_idle();
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 2);
+        expect_equal(mover_in_check_out, "back-to-back request A exposes its king");
+        do_clock(1);
+        expect_equal(!mover_in_check_out, "back-to-back request B keeps its king safe");
+    endtask
+
     initial begin
         $readmemh("hardware/data/pst_values/pst_values.hex", pst_values);
         $readmemh(ZOBRIST_MEM_INIT_FILE, zobrist_values);
@@ -858,6 +912,7 @@ module tb_board_update_pipeline;
 
         $display("=== Board update pipeline testbench ===");
         test_back_to_back_independent_requests();
+        test_back_to_back_king_safety();
         test_main_move_sequence();
         test_null_move();
         test_castles();

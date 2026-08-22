@@ -103,11 +103,12 @@ module board_update_pipeline #(
     ZobristAddr zobrist_old_ep_address, zobrist_new_ep_address;
     ZobristKey zobrist_old_ep_data, zobrist_new_ep_data;
     MoveEffects move_effects, move_effects_q;
-    logic [63:0] check_empty_mask_d, check_empty_mask_q;
-    logic [63:0] check_mover_mask_d, check_mover_mask_q;
-    logic [63:0] check_rook_mask_d, check_rook_mask_q;
-    Tile check_mover_tile_d, check_mover_tile_q;
-    Color check_mover_color_d, check_mover_color_q;
+    MoveEffects check_move_effects_d, check_move_effects_q;
+    logic [63:0] check_empty_mask;
+    logic [63:0] check_mover_mask;
+    logic [63:0] check_rook_mask;
+    Tile check_mover_tile;
+    Color check_mover_color;
 
     localparam ZobristKey ZOBRIST_TURN_VALUE =
         zobrist_value(ZobristAddr'(ZOBRIST_TURN_BLACK_ADDR));
@@ -250,14 +251,13 @@ module board_update_pipeline #(
             || (piece == BISHOP && isDirDiag(dir));
     endfunction : is_line_attacker
 
-    // Overlay the predecoded push masks on the registered source board. The
-    // move-position decoders remain before stage 0 instead of repeating in
-    // every pawn, knight, and ray tile lookup.
+    // Overlay push masks decoded once from registered move effects instead of
+    // repeating position comparisons in every pawn, knight, and ray lookup.
     function automatic Tile checked_tile(input FullBoard board, input Position pos);
         automatic Tile tile = board.tiles[pos];
-        if (check_empty_mask_q[pos]) tile = EMPTY_TILE;
-        if (check_mover_mask_q[pos]) tile = check_mover_tile_q;
-        if (check_rook_mask_q[pos]) tile = Tile'({check_mover_color_q, ROOK});
+        if (check_empty_mask[pos]) tile = EMPTY_TILE;
+        if (check_mover_mask[pos]) tile = check_mover_tile;
+        if (check_rook_mask[pos]) tile = Tile'({check_mover_color, ROOK});
         return tile;
     endfunction : checked_tile
 
@@ -314,6 +314,43 @@ module board_update_pipeline #(
         end
         return kingPosition(board, board.turn);
     endfunction : pushed_king_square
+
+    // Decode the compact post-push effects shared by board mutation and the
+    // stage-1 king-safety overlay.
+    function automatic MoveEffects decode_push_effects(input FullBoard board, input Move move);
+        automatic MoveEffects effects = MoveEffects'('0);
+        automatic Color moved_color;
+
+        effects.from_pos = move.from_pos;
+        effects.to_pos = move.to_pos;
+        effects.start_tile = board.tiles[effects.from_pos];
+        effects.end_tile = board.tiles[effects.to_pos];
+        moved_color = effects.start_tile.piece_color;
+        effects.is_promo = effects.start_tile.piece_type == PAWN
+            && (getRank(effects.to_pos) == BoardRank'('d0)
+                || getRank(effects.to_pos) == BoardRank'('d7));
+        effects.is_castle = effects.start_tile.piece_type == KING
+            && getFile(effects.from_pos) == BoardFile'('d4)
+            && (getFile(effects.to_pos) == BoardFile'('d2)
+                || getFile(effects.to_pos) == BoardFile'('d6));
+        effects.is_ep = effects.start_tile.piece_type == PAWN
+            && board.has_ep
+            && board.ep_file == getFile(effects.to_pos)
+            && effects.end_tile.piece_type == NULL_PIECE
+            && ((moved_color == WHITE && getRank(effects.to_pos) == BoardRank'('d5))
+                || (moved_color == BLACK && getRank(effects.to_pos) == BoardRank'('d2)));
+        effects.placed_tile = Tile'({
+            moved_color,
+            effects.is_promo
+                ? promo_to_piece(move.promo_piece)
+                : effects.start_tile.piece_type
+        });
+        effects.ep_capture_pos = getPosition(
+            getRank(effects.from_pos), getFile(effects.to_pos));
+        effects.rook_from = castle_rook_from(effects.to_pos);
+        effects.rook_to = castle_rook_to(effects.to_pos);
+        return effects;
+    endfunction : decode_push_effects
 
     task automatic plan_side_delta(
         input FullBoard old_board,
@@ -376,36 +413,7 @@ module board_update_pipeline #(
 
         case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
-                automatic Color moved_color;
-
-                effects.start_tile = in.board.tiles[effects.from_pos];
-                effects.end_tile = in.board.tiles[effects.to_pos];
-                moved_color = effects.start_tile.piece_color;
-                effects.is_promo = effects.start_tile.piece_type == PAWN
-                    && (getRank(effects.to_pos) == BoardRank'('d0)
-                        || getRank(effects.to_pos) == BoardRank'('d7));
-                effects.is_castle = effects.start_tile.piece_type == KING
-                    && getFile(effects.from_pos) == BoardFile'('d4)
-                    && (getFile(effects.to_pos) == BoardFile'('d2)
-                        || getFile(effects.to_pos) == BoardFile'('d6));
-                effects.is_ep = effects.start_tile.piece_type == PAWN
-                    && in.board.has_ep
-                    && in.board.ep_file == getFile(effects.to_pos)
-                    && effects.end_tile.piece_type == NULL_PIECE
-                    && ((moved_color == WHITE && getRank(effects.to_pos) == BoardRank'('d5))
-                        || (moved_color == BLACK && getRank(effects.to_pos) == BoardRank'('d2)));
-                effects.placed_tile = Tile'({
-                    moved_color,
-                    effects.is_promo
-                        ? promo_to_piece(in.move.promo_piece)
-                        : effects.start_tile.piece_type
-                });
-                effects.ep_capture_pos = getPosition(
-                    getRank(effects.from_pos),
-                    getFile(effects.to_pos)
-                );
-                effects.rook_from = castle_rook_from(effects.to_pos);
-                effects.rook_to = castle_rook_to(effects.to_pos);
+                effects = decode_push_effects(in.board, in.move);
             end
 
             BOARD_REVERSE_MOVE_OP: begin
@@ -466,11 +474,7 @@ module board_update_pipeline #(
         zobrist_new_ep_enable_q <= zobrist_new_ep_enable;
         pst_read_enable_q <= pst_read_plan.enable;
         move_effects_q <= move_effects;
-        check_empty_mask_q <= check_empty_mask_d;
-        check_mover_mask_q <= check_mover_mask_d;
-        check_rook_mask_q <= check_rook_mask_d;
-        check_mover_tile_q <= check_mover_tile_d;
-        check_mover_color_q <= check_mover_color_d;
+        check_move_effects_q <= check_move_effects_d;
     end
 
     always_comb begin
@@ -485,61 +489,37 @@ module board_update_pipeline #(
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
         // Select the tracked post-move king square before the attack scan.
-        next_ctx_pipe[0].mover_king_square = (board_op == BOARD_PUSH_MOVE_OP)
-            ? pushed_king_square(board_in, move_in)
-            : Position'(0);
+        // The value is consumed only for a registered push operation. Decode
+        // it unconditionally so operation arbitration does not gate its data.
+        next_ctx_pipe[0].mover_king_square = pushed_king_square(board_in, move_in);
         next_ctx_pipe[0].mover_in_check = 1'b0;
+        check_move_effects_d = MoveEffects'('0);
+        if (board_op == BOARD_PUSH_MOVE_OP)
+            check_move_effects_d = decode_push_effects(board_in, move_in);
 
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
 
-        check_empty_mask_d = 64'd0;
-        check_mover_mask_d = 64'd0;
-        check_rook_mask_d = 64'd0;
-        check_mover_tile_d = EMPTY_TILE;
-        check_mover_color_d = WHITE;
-        if (board_op == BOARD_PUSH_MOVE_OP) begin
-            automatic Tile start_tile = board_in.tiles[move_in.from_pos];
-            automatic Tile end_tile = board_in.tiles[move_in.to_pos];
-            automatic Color moved_color = start_tile.piece_color;
-            automatic logic is_promo = start_tile.piece_type == PAWN
-                && (getRank(move_in.to_pos) == BoardRank'('d0)
-                    || getRank(move_in.to_pos) == BoardRank'('d7));
-            automatic logic is_castle = start_tile.piece_type == KING
-                && getFile(move_in.from_pos) == BoardFile'('d4)
-                && (getFile(move_in.to_pos) == BoardFile'('d2)
-                    || getFile(move_in.to_pos) == BoardFile'('d6));
-            automatic logic is_ep = start_tile.piece_type == PAWN
-                && board_in.has_ep
-                && board_in.ep_file == getFile(move_in.to_pos)
-                && end_tile.piece_type == NULL_PIECE
-                && ((moved_color == WHITE
-                        && getRank(move_in.to_pos) == BoardRank'('d5))
-                    || (moved_color == BLACK
-                        && getRank(move_in.to_pos) == BoardRank'('d2)));
-            automatic Position ep_capture_pos = getPosition(
-                getRank(move_in.from_pos), getFile(move_in.to_pos));
-            automatic Position rook_from = castle_rook_from(move_in.to_pos);
-            automatic Position rook_to = castle_rook_to(move_in.to_pos);
-
-            check_empty_mask_d[move_in.from_pos] = 1'b1;
-            check_mover_mask_d[move_in.to_pos] = 1'b1;
-            check_mover_tile_d = Tile'({
-                moved_color,
-                is_promo ? promo_to_piece(move_in.promo_piece) : start_tile.piece_type
-            });
-            check_mover_color_d = moved_color;
-            if (is_ep)
-                check_empty_mask_d[ep_capture_pos] = 1'b1;
-            if (is_castle) begin
-                check_empty_mask_d[rook_from] = 1'b1;
-                check_rook_mask_d[rook_to] = 1'b1;
-            end
-        end
     end
 
     always_comb begin
         next_ctx_pipe[1] = ctx_pipe[0];
+        // Decode the post-move overlay from registered effects so thread
+        // arbitration terminates at compact stage-0 registers rather than at
+        // each bit of three one-hot masks.
+        check_empty_mask = 64'd0;
+        check_mover_mask = 64'd0;
+        check_rook_mask = 64'd0;
+        check_mover_tile = check_move_effects_q.placed_tile;
+        check_mover_color = check_move_effects_q.start_tile.piece_color;
+        check_empty_mask[check_move_effects_q.from_pos] = 1'b1;
+        check_mover_mask[check_move_effects_q.to_pos] = 1'b1;
+        if (check_move_effects_q.is_ep)
+            check_empty_mask[check_move_effects_q.ep_capture_pos] = 1'b1;
+        if (check_move_effects_q.is_castle) begin
+            check_empty_mask[check_move_effects_q.rook_from] = 1'b1;
+            check_rook_mask[check_move_effects_q.rook_to] = 1'b1;
+        end
         // King safety is evaluated in parallel with the synchronous table
         // reads and carried to the stage-2 board result without adding a cycle.
         next_ctx_pipe[1].mover_in_check = (ctx_pipe[0].board_op == BOARD_PUSH_MOVE_OP)

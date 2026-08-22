@@ -314,6 +314,7 @@ module search_controller #(
     SearchThreadMask search_return_mask;
     SearchThreadMask search_tt_response_mask;
     SearchThreadMask search_null_mask;
+    logic search_null_candidate[0:SEARCH_THREAD_COUNT-1];
     SearchThreadStatus search_thread_status[0:SEARCH_THREAD_COUNT-1];
     SearchThreadPhase search_thread_phase[0:SEARCH_THREAD_COUNT-1];
     ThreadCount search_active_thread_count;
@@ -510,6 +511,8 @@ module search_controller #(
     logic search_null_issue_valid;
     logic search_board_issue_is_null;
     ThreadID search_board_issue_thread;
+    ThreadID search_board_work_thread;
+    ThreadID search_null_issue_thread;
     ThreadID search_move_issue_thread;
     ThreadID search_quiet_issue_thread;
     ThreadID search_eval_issue_thread;
@@ -1385,26 +1388,34 @@ module search_controller #(
             : depth - SearchDepth'(1) - reduction;
     endfunction : null_child_depth
 
-    // Restrict the first implementation to non-root scout nodes. The
-    // halfmove bound prevents the synthetic ply from creating a false draw.
+    // Cache the position/depth portion when launching the TT lookup. Alpha can
+    // change when the TT response is consumed, so the window tests must remain
+    // live in search_thread_null_ready.
+    function automatic logic search_thread_null_candidate(input int thread_index);
+        automatic SearchDepth depth = search_stack_top[thread_index].remaining_depth;
+        automatic SearchDepth reduction = depth < SearchDepth'(NULL_DEEP_DEPTH_THRESHOLD)
+            ? SearchDepth'(NULL_SHALLOW_REDUCTION) : SearchDepth'(NULL_DEEP_REDUCTION);
+        automatic logic [7:0] halfmove_depth_sum;
+        // halfmove + null_child_depth + 1 < 100 is equivalent to this
+        // single-adder form because null_child_depth = depth - 1 - reduction.
+        halfmove_depth_sum = {1'b0, search_board[thread_index].halfmove_clock}
+            + 8'(depth);
+        return search_ply[thread_index] != PlyIndex'(0)
+            && search_stack_top[thread_index].remaining_depth >= SearchDepth'(NULL_MINIMUM_DEPTH)
+            && !search_board_in_check[thread_index]
+            && !search_stack_top[thread_index].entered_by_null
+            && halfmove_depth_sum < 8'(100 + int'(reduction));
+    endfunction : search_thread_null_candidate
+
     function automatic logic search_thread_null_ready(input int thread_index);
-        automatic ThreadID thread = ThreadID'(thread_index);
-        automatic SearchDepth child_depth = null_child_depth(thread);
-        automatic logic [7:0] halfmove_horizon;
-        halfmove_horizon = {1'b0, search_board[thread_index].halfmove_clock}
-            + 8'(child_depth) + 8'd1;
         return search_thread_status[thread_index] == SEARCH_THREAD_ACTIVE
             && search_thread_phase[thread_index] == SEARCH_PHASE_READY
-            && search_ply[thread_index] != PlyIndex'(0)
-            && search_stack_top[thread_index].remaining_depth >= SearchDepth'(NULL_MINIMUM_DEPTH)
             && search_stack_top[thread_index].tt_checked
-            && !search_board_in_check[thread_index]
             && !search_stack_top[thread_index].null_attempted
-            && !search_stack_top[thread_index].entered_by_null
+            && search_null_candidate[thread_index]
             && search_stack_top[thread_index].beta
                 == search_stack_top[thread_index].alpha + EvalScore'(1)
-            && search_stack_top[thread_index].beta > NULL_MIN_BETA
-            && halfmove_horizon < 8'd100;
+            && search_stack_top[thread_index].beta > NULL_MIN_BETA;
     endfunction : search_thread_null_ready
 
     function automatic logic search_thread_tt_lookup_ready(input int thread_index);
@@ -1610,20 +1621,26 @@ module search_controller #(
             && |search_tt_lookup_mask;
         search_tt_store_issue_valid = (state == ST_SEARCH_RUN)
             && |search_store_mask;
-        search_board_issue_thread = search_board_issue_valid
-            ? move_board_bypass_valid
-                ? move_board_bypass_thread
-                : |search_board_mask
-                ? search_select_thread(search_board_mask, search_dispatch.board)
-                : search_select_thread(search_null_mask, search_dispatch.board)
-            : ThreadID'(0);
-        search_board_issue_is_null = search_null_issue_valid;
-        search_move_issue_thread = search_move_issue_valid
-            ? search_select_thread(search_move_mask, search_dispatch.move)
-            : ThreadID'(0);
-        search_quiet_issue_thread = search_quiet_issue_valid
-            ? search_select_thread(search_quiet_mask, search_dispatch.quiet)
-            : ThreadID'(0);
+        // Keep null eligibility out of the normal move payload mux. A null
+        // board operation ignores move_in, but allowing its thread choice to
+        // select that payload creates an unnecessary depth-to-board path.
+        search_board_work_thread = search_select_thread(
+            search_board_mask, search_dispatch.board);
+        search_null_issue_thread = search_select_thread(
+            search_null_mask, search_dispatch.board);
+        search_board_issue_thread = move_board_bypass_valid
+            ? move_board_bypass_thread
+            : |search_board_mask
+            ? search_board_work_thread : search_null_issue_thread;
+        // Derive the operation kind from the selected source so this remains
+        // correct if the null-request valid qualification is later refactored.
+        search_board_issue_is_null = !move_board_bypass_valid
+            && !(|search_board_mask)
+            && search_null_issue_valid;
+        search_move_issue_thread = search_select_thread(
+            search_move_mask, search_dispatch.move);
+        search_quiet_issue_thread = search_select_thread(
+            search_quiet_mask, search_dispatch.quiet);
         search_eval_issue_thread = search_eval_issue_valid
             ? search_select_thread(search_eval_mask, search_dispatch.eval)
             : ThreadID'(0);
@@ -1680,7 +1697,9 @@ module search_controller #(
             board_update_pst_in = search_pst_eval[search_board_issue_thread];
             board_update_piece_count_in = search_piece_count[search_board_issue_thread];
             board_update_move = move_board_bypass_valid
-                ? move_board_bypass_move : search_pending_move[search_board_issue_thread];
+                ? move_board_bypass_move
+                : |search_board_mask
+                ? search_pending_move[search_board_work_thread] : NULL_MOVE;
             board_update_ply = search_ply[search_board_issue_thread];
         end
 
@@ -1703,11 +1722,22 @@ module search_controller #(
         move_quiet_cmd_suppress_move = NULL_MOVE;
         move_quiet_cmd_tops = MoveBucketTops'(0);
         move_pop_valid = 1'b0;
-        move_pop_thread = ThreadID'(0);
-        move_pop_ply = PlyIndex'(0);
+        // Preselect the complete pop address payload. It is ignored until
+        // valid, and keeping readiness out of it shortens every bucket-RAM
+        // read-address path.
+        move_pop_thread = search_move_issue_thread;
+        move_pop_ply = search_ply[search_move_issue_thread];
         move_pop_eligible = MoveBucketMask'(0);
-        move_pop_current_tops = MoveBucketTops'(0);
-        move_pop_lower_tops = MoveBucketTops'(0);
+        move_pop_current_tops = search_stack_top[search_move_issue_thread].bucket_tops;
+        move_pop_lower_tops = search_ply[search_move_issue_thread] == PlyIndex'(0)
+            ? MoveBucketTops'(0)
+            : search_stack_parent_q[search_move_issue_thread].bucket_tops;
+        case (search_stack_top[search_move_issue_thread].move_order_state)
+            MOVE_ORDER_GOOD_NOISY: move_pop_eligible = GOOD_NOISY_BUCKET_MASK;
+            MOVE_ORDER_QUIET: move_pop_eligible = QUIET_BUCKET_MASK;
+            MOVE_ORDER_BAD_NOISY: move_pop_eligible = BAD_NOISY_BUCKET_MASK;
+            default: begin end
+        endcase
         move_history_update_valid = 1'b0;
         move_history_update_color = WHITE;
         move_history_update_from = Position'(0);
@@ -1772,18 +1802,8 @@ module search_controller #(
             move_cmd_tops = search_stack_top[search_move_issue_thread].bucket_tops;
             move_cmd_suppress_valid = search_stack_top[search_move_issue_thread].direct_attempted;
             move_cmd_suppress_move = search_stack_top[search_move_issue_thread].tt_move;
-            move_pop_thread = search_move_issue_thread;
-            move_pop_ply = search_ply[search_move_issue_thread];
-            move_pop_current_tops = search_stack_top[search_move_issue_thread].bucket_tops;
-            move_pop_lower_tops = search_ply[search_move_issue_thread] == PlyIndex'(0)
-                ? MoveBucketTops'(0) : search_stack_parent_q[search_move_issue_thread].bucket_tops;
             if (move_state_uses_pop(order_state)) begin
                 move_pop_valid = 1'b1;
-                case (order_state)
-                    MOVE_ORDER_GOOD_NOISY: move_pop_eligible = GOOD_NOISY_BUCKET_MASK;
-                    MOVE_ORDER_QUIET: move_pop_eligible = QUIET_BUCKET_MASK;
-                    default: move_pop_eligible = BAD_NOISY_BUCKET_MASK;
-                endcase
             end else begin
                 move_cmd_valid = 1'b1;
                 if (order_state == MOVE_ORDER_DIRECT && !is_null_move(order_move)) begin
@@ -2119,6 +2139,7 @@ module search_controller #(
                 search_tt_lookup_inflight[tid] <= 1'b0;
                 search_tt_store_inflight[tid] <= 1'b0;
                 search_tt_response_pending[tid] <= 1'b0;
+                search_null_candidate[tid] <= 1'b0;
                 search_repetition_pending[tid] <= 1'b0;
                 search_repetition_done[tid] <= 1'b0;
                 search_repetition_draw[tid] <= 1'b0;
@@ -3935,6 +3956,8 @@ module search_controller #(
 
                         if (search_tt_lookup_issue_valid && tt_lookup_req_ready) begin
                             search_thread_id <= search_tt_lookup_issue_thread;
+                            search_null_candidate[search_tt_lookup_issue_thread]
+                                <= search_thread_null_candidate(search_tt_lookup_issue_thread);
                             search_stack_top[search_tt_lookup_issue_thread].tt_checked <= 1'b1;
                             search_thread_phase[search_tt_lookup_issue_thread] <= SEARCH_PHASE_TT_WAIT;
                             search_tt_lookup_inflight[search_tt_lookup_issue_thread] <= 1'b1;

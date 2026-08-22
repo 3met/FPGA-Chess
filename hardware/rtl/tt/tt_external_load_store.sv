@@ -95,6 +95,8 @@ module tt_external_load_store #(
     logic clear_prev;
     logic clear_pending;
     EntryIndex cache_request_index;
+    EntryIndex lookup_request_index;
+    EntryIndex store_request_index;
     StoreFifoCount store_fifo_count;
     TTStoreRequest store_fifo_data;
     logic store_fifo_valid;
@@ -205,11 +207,12 @@ module tt_external_load_store #(
     endtask
 
     always_comb begin
-        // Lookup acceptance and store dequeue are mutually exclusive, so one
-        // range-reduction multiplier serves both cache-port request sources.
-        cache_request_index = entry_index(
-            lookup_req_valid ? lookup_req.zobrist_key : store_fifo_data.zobrist_key
-        );
+        // Reduce both hashes before arbitration so lookup validity controls
+        // only a compact index mux rather than feeding the range multiplier.
+        lookup_request_index = entry_index(lookup_req.zobrist_key);
+        store_request_index = entry_index(store_fifo_data.zobrist_key);
+        cache_request_index = lookup_req_valid
+            ? lookup_request_index : store_request_index;
         // One buffered probe is sufficient to serve cache hits while an
         // unrelated SDRAM transaction is active. Cache-fill/write cycles are
         // excluded so inferred single-port RAM read-during-write behavior is

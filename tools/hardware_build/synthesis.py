@@ -241,13 +241,13 @@ def write_quartus_project(
     if "seed" in target:
         lines.append(f"set_global_assignment -name SEED {target['seed']}")
     if target.get("fit_timing_optimization", False):
-        # Use Quartus's placement-aware optimizations without register
-        # retiming, preserving every RTL pipeline and state-machine boundary.
+        # Physical retiming redistributes existing registers for placement
+        # while preserving the RTL's cycle-level behavior.
         lines.extend([
             "set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON",
             "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON",
-            "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF",
-            "set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT NORMAL",
+            "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON",
+            "set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA",
             "set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM",
             "set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON",
             "set_global_assignment -name ENABLE_BENEFICIAL_SKEW_OPTIMIZATION ON",

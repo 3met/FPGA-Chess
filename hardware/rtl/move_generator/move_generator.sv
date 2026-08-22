@@ -823,8 +823,6 @@ module move_generator_pipeline #(
                 == (destination_tile.piece_type != NULL_PIECE));
     endfunction
 
-    always_comb source_select_index = first_source(source_mask);
-
     // Build ray and knight context from a registered destination so the fixed
     // priority encoder and board scan occupy separate timing stages.
     always_comb begin
@@ -1158,6 +1156,7 @@ module move_generator_pipeline #(
             history_update_state <= HISTORY_UPDATE_IDLE;
             pop_pending <= 1'b0;
             candidate_valid <= 1'b0;
+            source_select_index <= 4'd0;
             cmd_resp_valid <= 1'b0;
             cmd_resp_thread <= ThreadID'(0);
             cmd_resp_ply <= PlyIndex'(0);
@@ -1296,6 +1295,10 @@ module move_generator_pipeline #(
                 end
                 case (state)
                     GEN_IDLE: begin
+                        // Payload is irrelevant until a command is accepted.
+                        // Preload it while idle so command validity controls
+                        // only the state transition, not a 64-bit data mux.
+                        destination_mask <= generation_destination_mask(cmd_board);
                         if (cmd_valid && cmd_ready) begin
                             job_thread <= cmd_thread;
                             job_ply <= cmd_ply;
@@ -1308,7 +1311,6 @@ module move_generator_pipeline #(
                                     && cmd == MOVE_GEN_VALIDATE_DIRECT) begin
                                 state <= GEN_DIRECT;
                             end else begin
-                                destination_mask <= generation_destination_mask(cmd_board);
                                 state <= GEN_SELECT_DEST;
                             end
                         end
@@ -1377,6 +1379,7 @@ module move_generator_pipeline #(
                             automatic logic [15:0] remaining_mask =
                                 source_mask & ~(16'b1 << source_select_index);
                             source_mask <= remaining_mask;
+                            source_select_index <= first_source(remaining_mask);
                             if (source_valid) begin
                                 candidate_move <= source_move;
                                 candidate_attacker <= source_attacker;
@@ -1432,6 +1435,7 @@ module move_generator_pipeline #(
                         end
                         if (selected_source_mask != 16'd0) begin
                             source_mask <= selected_source_mask;
+                            source_select_index <= first_source(selected_source_mask);
                             state <= GEN_EXPAND_SOURCE;
                         end else begin
                             state <= GEN_SELECT_DEST;
