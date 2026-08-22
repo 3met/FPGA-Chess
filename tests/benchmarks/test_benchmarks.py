@@ -18,6 +18,7 @@ from software.benchmarks.cli import (
     SANITY_MOVETIME_TOLERANCE_MS,
     SANITY_REPETITION_DEPTH,
     Puzzle,
+    _is_legal_repetition_move,
     _repetition_position,
     _run_repetition_checks,
     _uci_score,
@@ -89,7 +90,7 @@ class BenchmarkPositionTests(unittest.TestCase):
             with self.subTest(case=case.name):
                 self.assertEqual(len(encode_fen(case.base_fen)), 36)
                 prime = chess.Board(case.base_fen)
-                for move in case.return_moves:
+                for move in case.moves_to_candidate_root:
                     prime.push_uci(move)
                 primed_child = prime.copy()
                 for move in case.draw_line:
@@ -107,6 +108,8 @@ class BenchmarkPositionTests(unittest.TestCase):
                 for move in case.draw_line:
                     drawing_child.push_uci(move)
                 self.assertTrue(drawing_child.is_repetition(3))
+                self.assertEqual(case.cycle_moves, case.moves_to_candidate_root + case.draw_line)
+                self.assertEqual(case.final_child_moves, case.final_moves + case.draw_line)
 
                 material = sum(
                     (1 if piece.color == final.turn else -1) * piece_values[piece.piece_type]
@@ -199,48 +202,83 @@ class SanitySuiteTests(unittest.TestCase):
         self.assertIn("movetime 15/16 passed", output.getvalue())
 
 
+@unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for repetition validation")
 class RepetitionSanityTests(unittest.TestCase):
-    def test_repetition_checks_prime_and_reload_every_case(self):
-        engine = MagicMock()
+    @staticmethod
+    def _legal_move(case, moves, excluded=()):
+        import chess
+
+        board = chess.Board(case.base_fen)
+        for move in moves:
+            board.push_uci(move)
+        return next(move.uci() for move in board.legal_moves if move.uci() not in excluded)
+
+    def _passing_results(self):
         results = []
         for case in REPETITION_CASES:
+            twofold_move = self._legal_move(case, case.cycle_moves)
+            primed_move = self._legal_move(case, case.moves_to_candidate_root)
+            final_move = case.draw_move
+            if not case.should_choose_draw:
+                final_move = self._legal_move(case, case.final_moves, (case.draw_move,))
             results.extend([
-                (100, case.draw_move, 0.0, "cp 20"),
-                (100, case.draw_move if case.should_choose_draw else "b1b2", 0.0, "cp 0"),
+                (100, twofold_move, 0.0, "cp 20"),
+                (0, "0000", 0.0, "cp 0"),
+                (100, primed_move, 0.0, "cp 20"),
+                (100, final_move, 0.0, "cp 0"),
             ])
+        return results
 
-        with patch("software.benchmarks.cli._search_position", side_effect=results) as search:
+    def test_repetition_checks_detection_and_policy_separately(self):
+        engine = MagicMock()
+
+        with patch("software.benchmarks.cli._search_position", side_effect=self._passing_results()) as search:
             failures = _run_repetition_checks(engine, SANITY_REPETITION_DEPTH, 10.0, 120.0)
 
         self.assertEqual(failures, [])
-        self.assertEqual(engine.new_game.call_count, len(REPETITION_CASES))
-        self.assertEqual(search.call_count, 2 * len(REPETITION_CASES))
+        self.assertEqual(engine.new_game.call_count, 2 * len(REPETITION_CASES))
+        self.assertEqual(search.call_count, 4 * len(REPETITION_CASES))
         for index, case in enumerate(REPETITION_CASES):
-            prime_call, final_call = search.call_args_list[index * 2:index * 2 + 2]
-            self.assertEqual(prime_call.args[1], _repetition_position(case, case.return_moves))
+            twofold_call, threefold_call, prime_call, final_call = search.call_args_list[index * 4:index * 4 + 4]
+            self.assertEqual(twofold_call.args[1], _repetition_position(case, case.cycle_moves))
+            self.assertEqual(threefold_call.args[1], _repetition_position(case, case.final_child_moves))
+            self.assertEqual(prime_call.args[1], _repetition_position(case, case.moves_to_candidate_root))
             self.assertEqual(final_call.args[1], _repetition_position(case, case.final_moves))
-            self.assertEqual(prime_call.args[2:], (f"go depth {SANITY_REPETITION_DEPTH}", 120.0))
-            self.assertEqual(final_call.args[2:], (f"go depth {SANITY_REPETITION_DEPTH}", 120.0))
+            for call in (twofold_call, threefold_call, prime_call, final_call):
+                self.assertEqual(call.args[2:], (f"go depth {SANITY_REPETITION_DEPTH}", 120.0))
 
-    def test_repetition_checks_report_the_wrong_policy(self):
-        engine = MagicMock()
-        results = []
-        for index, case in enumerate(REPETITION_CASES):
-            final_move = case.draw_move if case.should_choose_draw else "b1b2"
-            if index == 0:
-                final_move = case.draw_move
-            results.extend([(100, case.draw_move, 0.0, "cp -120"), (100, final_move, 0.0, "cp 0")])
+    def test_repetition_move_legality_uses_the_historical_position(self):
+        case = REPETITION_CASES[0]
+        move = self._legal_move(case, case.final_moves)
 
-        with patch("software.benchmarks.cli._search_position", side_effect=results):
-            failures = _run_repetition_checks(engine, SANITY_REPETITION_DEPTH, 10.0, 120.0)
+        self.assertTrue(_is_legal_repetition_move(case, case.final_moves, move))
+        self.assertFalse(_is_legal_repetition_move(case, case.final_moves, "0000"))
+        self.assertFalse(_is_legal_repetition_move(case, case.final_moves, "e2e5"))
+
+    def test_repetition_checks_report_an_illegal_bestmove(self):
+        case = REPETITION_CASES[0]
+        results = self._passing_results()[:4]
+        results[-1] = (100, "e2e5", 0.0, "cp 0")
+
+        with patch("software.benchmarks.cli.REPETITION_CASES", (case,)), \
+                patch("software.benchmarks.cli._search_position", side_effect=results):
+            failures = _run_repetition_checks(MagicMock(), SANITY_REPETITION_DEPTH, 10.0, 120.0)
 
         self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0][0], REPETITION_CASES[0])
-        self.assertIn(
-            f"prime={REPETITION_CASES[0].draw_move} score=cp -120 nodes=100, "
-            f"final={REPETITION_CASES[0].draw_move} score=cp 0 nodes=100",
-            failures[0][1],
-        )
+        self.assertIn("final search returned illegal move e2e5", failures[0][1])
+
+    def test_repetition_checks_report_the_wrong_policy(self):
+        case = REPETITION_CASES[0]
+        results = self._passing_results()[:4]
+        results[-1] = (100, case.draw_move, 0.0, "cp 0")
+
+        with patch("software.benchmarks.cli.REPETITION_CASES", (case,)), \
+                patch("software.benchmarks.cli._search_position", side_effect=results):
+            failures = _run_repetition_checks(MagicMock(), SANITY_REPETITION_DEPTH, 10.0, 120.0)
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], case)
+        self.assertIn(f"final={case.draw_move} score=cp 0 nodes=100", failures[0][1])
         self.assertIn("expected to avoid drawing move", failures[0][1])
 
 

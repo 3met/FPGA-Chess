@@ -29,7 +29,7 @@ class RepetitionCase:
 
     name: str
     base_fen: str
-    return_moves: tuple[str, ...]
+    moves_to_candidate_root: tuple[str, ...]
     draw_move: str
     should_choose_draw: bool
     draw_replies: tuple[str, ...] = ()
@@ -40,9 +40,19 @@ class RepetitionCase:
         return (self.draw_move,) + self.draw_replies
 
     @property
+    def cycle_moves(self) -> tuple[str, ...]:
+        """Return one complete cycle from the base position back to itself."""
+        return self.moves_to_candidate_root + self.draw_line
+
+    @property
     def final_moves(self) -> tuple[str, ...]:
         """Build history with two prior occurrences of the candidate child position."""
-        return self.return_moves + self.draw_line + self.return_moves
+        return self.cycle_moves + self.moves_to_candidate_root
+
+    @property
+    def final_child_moves(self) -> tuple[str, ...]:
+        """Complete the draw line for the third occurrence of the base position."""
+        return self.final_moves + self.draw_line
 
 
 STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"

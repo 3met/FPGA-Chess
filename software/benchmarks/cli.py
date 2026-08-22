@@ -92,19 +92,62 @@ def _repetition_position(case: RepetitionCase, moves: Sequence[str]) -> str:
     return f"fen {case.base_fen} moves {' '.join(moves)}"
 
 
+def _is_legal_repetition_move(case: RepetitionCase, moves: Sequence[str], move: str) -> bool:
+    """Return whether a non-null bestmove is legal after the supplied history."""
+    import chess
+
+    if move == "0000":
+        return False
+    board = chess.Board(case.base_fen)
+    for history_move in moves:
+        board.push_uci(history_move)
+    try:
+        return chess.Move.from_uci(move) in board.legal_moves
+    except ValueError:
+        return False
+
+
 def _run_repetition_checks(
     engine: FPGAUCISession,
     depth: int,
     startup_timeout: float,
     search_timeout: float,
 ) -> list[tuple[RepetitionCase, str]]:
-    """Test repetition choices after warming search state at the same board hash."""
+    """Test direct repetition detection separately from draw-move policy."""
     failures: list[tuple[RepetitionCase, str]] = []
     for case in REPETITION_CASES:
+        # First prove that the same child changes from playable at occurrence
+        # two to an immediate draw at occurrence three, with its TT entry warm.
+        engine.new_game(startup_timeout)
+        twofold_nodes, twofold_move, _, twofold_score = _search_position(
+            engine,
+            _repetition_position(case, case.cycle_moves),
+            f"go depth {depth}",
+            search_timeout,
+        )
+        threefold_nodes, threefold_move, _, threefold_score = _search_position(
+            engine,
+            _repetition_position(case, case.final_child_moves),
+            f"go depth {depth}",
+            search_timeout,
+        )
+        direct_searches = (
+            f"twofold={twofold_move} score={twofold_score} nodes={twofold_nodes}, "
+            f"threefold={threefold_move} score={threefold_score} nodes={threefold_nodes}"
+        )
+        if twofold_move == "0000":
+            failures.append((case, f"{direct_searches}, twofold child was incorrectly terminal"))
+        elif not _is_legal_repetition_move(case, case.cycle_moves, twofold_move):
+            failures.append((case, f"{direct_searches}, twofold child returned illegal move {twofold_move}"))
+        if threefold_move != "0000" or threefold_score != "cp 0":
+            failures.append((case, f"{direct_searches}, threefold child did not return a terminal draw"))
+
+        # Then test whether search chooses or avoids the now-proven draw based
+        # on the fixture's policy, preserving TT state only within this phase.
         engine.new_game(startup_timeout)
         primed_nodes, primed_move, _, primed_score = _search_position(
             engine,
-            _repetition_position(case, case.return_moves),
+            _repetition_position(case, case.moves_to_candidate_root),
             f"go depth {depth}",
             search_timeout,
         )
@@ -122,8 +165,12 @@ def _run_repetition_checks(
         )
         if primed_move == "0000":
             detail = f"{searches}, priming search returned null move"
+        elif not _is_legal_repetition_move(case, case.moves_to_candidate_root, primed_move):
+            detail = f"{searches}, priming search returned illegal move {primed_move}"
         elif actual_move == "0000":
             detail = f"{searches}, final search returned null move"
+        elif not _is_legal_repetition_move(case, case.final_moves, actual_move):
+            detail = f"{searches}, final search returned illegal move {actual_move}"
         elif chose_draw != case.should_choose_draw:
             expectation = (
                 f"play drawing move {case.draw_move}"
