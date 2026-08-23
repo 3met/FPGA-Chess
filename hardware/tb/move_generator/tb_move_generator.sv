@@ -75,7 +75,7 @@ module tb_move_generator;
         .THREAD_COUNT(2),
         .BUCKET_0_CAPACITY(32),
         .BUCKET_1_CAPACITY(32),
-        .BUCKET_2_CAPACITY(32),
+        .BUCKET_2_CAPACITY(64),
         .BUCKET_3_CAPACITY(32),
         .BUCKET_4_CAPACITY(32),
         .BUCKET_5_CAPACITY(32),
@@ -670,14 +670,19 @@ module tb_move_generator;
         cmd_thread = ThreadID'(0);
         pop_thread = ThreadID'(0);
         tops = '0;
-        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
-            tops, direct_valid, direct_move, tops);
+        for (int fill = 0; fill < 4 && !overflow_sticky; fill++) begin
+            run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+                tops, direct_valid, direct_move, tops);
+        end
         check(overflow_sticky && overflow_thread == ThreadID'(0)
             && overflow_bucket == QUIET_LOW_BUCKET && overflow_count != 16'd0,
-            "overflow identifies bucket and thread");
-        check(tops[QUIET_LOW_BUCKET] == MoveBucketTop'(32),
-            "overflow suppresses out-of-region top increment");
-        check(stat_bucket_high_water[QUIET_LOW_BUCKET] == MoveBucketTop'(32),
+            "overflow identifies the full low bucket and thread");
+        check(tops[QUIET_LOW_BUCKET] == MoveBucketTop'(64)
+                && tops[QUIET_MEDIUM_BUCKET] == MoveBucketTop'(0)
+                && tops[QUIET_HIGH_BUCKET] == MoveBucketTop'(0)
+                && tops[QUIET_HIGHEST_BUCKET] == MoveBucketTop'(0),
+            "overflow preserves strict quiet bucket assignment");
+        check(stat_bucket_high_water[QUIET_LOW_BUCKET] == MoveBucketTop'(64),
             "high-water telemetry reaches the configured bucket capacity");
 
         pop_thread = ThreadID'(1);

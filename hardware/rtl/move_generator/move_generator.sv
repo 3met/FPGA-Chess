@@ -8,7 +8,7 @@ module move_generator_pipeline #(
     parameter int THREAD_COUNT = 1,
     parameter int BUCKET_0_CAPACITY = 512,
     parameter int BUCKET_1_CAPACITY = 512,
-    parameter int BUCKET_2_CAPACITY = 512,
+    parameter int BUCKET_2_CAPACITY = 1024,
     parameter int BUCKET_3_CAPACITY = 512,
     parameter int BUCKET_4_CAPACITY = 512,
     parameter int BUCKET_5_CAPACITY = 512,
@@ -158,7 +158,7 @@ module move_generator_pipeline #(
         for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
             if (!is_power_of_two(int'(bucket_capacity(MoveBucketIndex'(bucket))))
                     || int'(bucket_capacity(MoveBucketIndex'(bucket))) > (1 << (MOVE_BUCKET_TOP_BITS - 1)))
-                $fatal(1, "move bucket capacities must be powers of two no larger than 512");
+                $fatal(1, "move bucket capacities must be powers of two no larger than 1024");
         end
     end
 `endif
@@ -1538,7 +1538,7 @@ module move_generator #(
     parameter int THREAD_COUNT = 1,
     parameter int BUCKET_0_CAPACITY = 512,
     parameter int BUCKET_1_CAPACITY = 512,
-    parameter int BUCKET_2_CAPACITY = 512,
+    parameter int BUCKET_2_CAPACITY = 1024,
     parameter int BUCKET_3_CAPACITY = 512,
     parameter int BUCKET_4_CAPACITY = 512,
     parameter int BUCKET_5_CAPACITY = 512,

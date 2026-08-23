@@ -4,7 +4,9 @@ package move_generator_defs;
     import general_chess_defs::*;
 
     localparam int MOVE_BUCKET_COUNT = 8;
-    localparam int MOVE_BUCKET_TOP_BITS = 10;
+    // Bucket tops include the one-past-last value for the 1,024-entry low
+    // quiet partition, so they require one more bit than its address.
+    localparam int MOVE_BUCKET_TOP_BITS = 11;
 
     typedef logic [2:0] MoveBucketIndex;
     typedef logic [MOVE_BUCKET_TOP_BITS-1:0] MoveBucketTop;

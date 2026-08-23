@@ -49,7 +49,7 @@ Each bucket is a synchronous simple-dual-port RAM divided into fixed per-thread 
 
 Every search node stores the eight current bucket tops. The parent's tops form the child's lower bounds, so descendants may reuse slots released by popped parent moves without overwriting unsearched ancestor moves. Restoring the parent stack record restores its remaining candidates; no allocator or per-move links are required.
 
-A write that would exceed a thread's region is suppressed and sets sticky overflow diagnostics. Correct search assumes the configured region is large enough for every reachable line.
+The low-history quiet partition has 1,024 entries per thread; every other partition has 512. A write that would exceed a bucket's thread region is suppressed and sets sticky overflow diagnostics.
 
 ## Lifecycle and Instrumentation
 
