@@ -358,6 +358,38 @@ class PuzzleAndRatingTests(unittest.TestCase):
         self.assertEqual(Engine.instances[0].new_game_calls, len(puzzles))
         self.assertEqual(Engine.instances[0].port, "/dev/ttyUSB0")
 
+    def test_rate_reports_progress_every_100_puzzles(self):
+        puzzles = [Puzzle("8/8/8/8/8/8/8/K6k w - - 0 1", ("a1a2", "h1h2"), 1200) for _ in range(101)]
+
+        class Engine:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def initialize(self, _timeout):
+                pass
+
+            def new_game(self, _timeout):
+                pass
+
+        output = io.StringIO()
+        with patch("software.benchmarks.cli.load_puzzles", return_value=(puzzles, 0)), \
+                patch("software.benchmarks.cli.FPGAUCISession", Engine), \
+                patch("software.benchmarks.cli.solve_puzzle", return_value=True), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_rate(Path("unused.csv"), 101, 0, 50, 1000, 1.0, 1.0, False), 0)
+
+        lines = output.getvalue().splitlines()
+        progress = [line for line in lines if line.startswith("progress:")]
+        self.assertEqual(len(progress), 1)
+        self.assertRegex(progress[0], r"^progress: 100/101; score 100/100; rating 4000\.0 unbounded \(all solved/failed\); elapsed=\d+\.\ds$")
+        self.assertFalse(any(line.startswith(("PASS", "FAIL")) for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -369,6 +369,13 @@ def estimate_rating(results: Sequence[tuple[float, bool]]) -> tuple[float, float
     return rating, 1.96 / math.sqrt(information)
 
 
+def _rating_text(results: Sequence[tuple[float, bool]]) -> str:
+    """Format the current Elo estimate and its 95% confidence interval."""
+    rating, interval = estimate_rating(results)
+    uncertainty = "unbounded (all solved/failed)" if interval is None else f"±{interval:.1f} (95% CI)"
+    return f"{rating:.1f} {uncertainty}"
+
+
 def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_rating: float, startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
     load_started = time.monotonic()
     puzzles, malformed = load_puzzles(puzzles_path, count, seed, min_rating)
@@ -385,16 +392,18 @@ def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_ra
             engine.new_game(startup_timeout)
             solved = solve_puzzle(engine, puzzle, movetime_ms, search_timeout)
             results.append((puzzle.rating, solved))
-            print(f"{'PASS' if solved else 'FAIL'} puzzle {index}/{count} rating={puzzle.rating:.0f}")
-    rating, interval = estimate_rating(results)
+            if index % 100 == 0:
+                print(
+                    f"progress: {index}/{count}; score {sum(result for _, result in results)}/{index}; "
+                    f"rating {_rating_text(results)}; elapsed={time.monotonic() - started:.1f}s"
+                )
     solved = sum(result for _, result in results)
     buckets: dict[int, list[bool]] = {}
     for puzzle_rating, result in results:
         buckets.setdefault(int(puzzle_rating // 200 * 200), []).append(result)
     bucket_text = ", ".join(f"{bucket}-{bucket + 199}: {sum(values)}/{len(values)}" for bucket, values in sorted(buckets.items()))
-    uncertainty = "unbounded (all solved/failed)" if interval is None else f"±{interval:.1f} (95% CI)"
     print(
-        f"rating: {rating:.1f} {uncertainty}; score {solved}/{count}; "
+        f"rating: {_rating_text(results)}; score {solved}/{count}; "
         f"ratings={min(p.rating for p in puzzles):.0f}-{max(p.rating for p in puzzles):.0f}; "
         f"minimum-rating={min_rating:g}; seed={seed}; movetime={movetime_ms}ms; load={load_seconds:.1f}s; elapsed={time.monotonic() - started:.1f}s"
     )
