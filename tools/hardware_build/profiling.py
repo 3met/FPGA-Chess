@@ -989,7 +989,8 @@ def _profile_parameter_args(config: dict, prefix: str) -> list[str]:
     remaining = search["remaining_time_fraction"]
     values = {
         "TT_TAG_BITS": config["tt_tag_bits"],
-        "ASPIRATION_HALF_WINDOW": search["aspiration_half_window"],
+        "ASPIRATION_STARTING_DELTA": search["aspiration_starting_delta"],
+        "ASPIRATION_DELTA_MULTIPLIER_Q3": search["aspiration_delta_multiplier_q3"],
         "LMR_A_Q8": search["lmr_a_q8"],
         "LMR_B_Q8": search["lmr_b_q8"],
         "LMR_MINIMUM_DEPTH": search["lmr_minimum_depth"],

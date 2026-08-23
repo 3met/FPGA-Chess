@@ -38,7 +38,7 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(config["threads"], 1)
         self.assertEqual(config["stack_depth"], 32)
         self.assertEqual(config["clock_frequency_hz"], 75_000_000)
-        self.assertEqual(config["search"]["aspiration_half_window"], 64)
+        self.assertEqual(config["search"]["aspiration_delta_multiplier_q3"], 12)
         self.assertEqual(config["search"]["lmr_a_q8"], 192)
         self.assertEqual(config["search"]["lmr_b_q8"], 614)
         self.assertEqual(len(config["digest"]), 64)
@@ -86,6 +86,10 @@ class EngineConfigTests(unittest.TestCase):
     def test_history_reward_must_fit_rtl_arithmetic(self):
         with self.assertRaisesRegex(BuildError, "between 1 and 127"):
             self.load_temporary_config({"history": {"maximum_reward": 128}})
+
+    def test_aspiration_multiplier_must_grow_the_delta(self):
+        with self.assertRaisesRegex(BuildError, "must be greater than one"):
+            self.load_temporary_config({"aspiration": {"delta_multiplier": 1.0}})
 
     def test_null_move_deep_threshold_must_follow_minimum(self):
         with self.assertRaisesRegex(BuildError, "must not precede minimum_depth"):

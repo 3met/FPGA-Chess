@@ -1,6 +1,7 @@
 {
   "aspiration": {
-    "half_window": 64
+    "starting_delta": 64,
+    "delta_multiplier": 1.5
   },
   "lmr": {
     "base": 0.75,

@@ -17,7 +17,8 @@ module search_controller #(
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int unsigned LMR_A_Q8 = 192,
     parameter int unsigned LMR_B_Q8 = 614,
-    parameter int ASPIRATION_HALF_WINDOW = 64,
+    parameter int ASPIRATION_STARTING_DELTA = 15,
+    parameter int unsigned ASPIRATION_DELTA_MULTIPLIER_Q3 = 12,
     parameter int LMR_MINIMUM_DEPTH = 3,
     parameter int LMR_MINIMUM_MOVE_NUMBER = 3,
     parameter int NULL_MINIMUM_DEPTH = 3,
@@ -88,7 +89,6 @@ module search_controller #(
     localparam int NULL_MIN_BETA_VALUE = -16640 + MAX_PLY_COUNT;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam EvalScore NULL_MIN_BETA = EvalScore'(NULL_MIN_BETA_VALUE);
-    localparam EvalScore ASPIRATION_DELTA = EvalScore'(ASPIRATION_HALF_WINDOW);
     localparam int LMR_LN2_Q8 = 177;
     localparam int LMR_MAX_REMAINING_DEPTH = SEARCH_STACK_DEPTH - 1;
     // Only floor-log2 buckets reachable by a legal configured search depth exist.
@@ -101,8 +101,10 @@ module search_controller #(
             $fatal(1, "SEARCH_THREAD_COUNT must fit the global ThreadID width");
         if (SEARCH_STACK_DEPTH < 1 || SEARCH_STACK_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "SEARCH_STACK_DEPTH must fit the global PlyIndex width");
-        if (ASPIRATION_HALF_WINDOW < 1)
-            $fatal(1, "ASPIRATION_HALF_WINDOW must be positive");
+        if (ASPIRATION_STARTING_DELTA < 1 || ASPIRATION_STARTING_DELTA > SEARCH_INF_VALUE)
+            $fatal(1, "ASPIRATION_STARTING_DELTA must fit the positive score range");
+        if (ASPIRATION_DELTA_MULTIPLIER_Q3 <= 8 || ASPIRATION_DELTA_MULTIPLIER_Q3 > 64)
+            $fatal(1, "ASPIRATION_DELTA_MULTIPLIER_Q3 must represent a value in (1, 8]");
         if (LMR_MINIMUM_DEPTH < 1 || LMR_MINIMUM_MOVE_NUMBER < 1)
             $fatal(1, "LMR eligibility values must be positive");
         if (NULL_MINIMUM_DEPTH < 1 || NULL_DEEP_DEPTH_THRESHOLD < NULL_MINIMUM_DEPTH)
@@ -121,7 +123,9 @@ module search_controller #(
     typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
     typedef logic [SEARCH_STACK_ADDR_BITS-1:0] SearchStackRamAddr;
     typedef logic [SEARCH_DEPTH_BITS-1:0] SearchDepth;
+    typedef logic [14:0] AspirationDelta;
     typedef logic [SEARCH_THREAD_COUNT-1:0] SearchThreadMask;
+    localparam AspirationDelta ASPIRATION_INITIAL_DELTA = AspirationDelta'(ASPIRATION_STARTING_DELTA);
     typedef struct packed {
         ThreadID main;
         ThreadID board;
@@ -294,6 +298,7 @@ module search_controller #(
     EvalScore search_completed_score;
     EvalScore search_thread_root_alpha[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_thread_root_beta[0:SEARCH_THREAD_COUNT-1];
+    AspirationDelta search_thread_aspiration_delta[0:SEARCH_THREAD_COUNT-1];
     logic search_thread_aspiration_active[0:SEARCH_THREAD_COUNT-1];
     Move search_thread_iteration_best_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_thread_iteration_score[0:SEARCH_THREAD_COUNT-1];
@@ -1071,16 +1076,34 @@ module search_controller #(
         return EvalScore'(total);
     endfunction : add_nnue_correction
 
+    // Grow the delta with a small constant Q3 multiply, which synthesizes to shifts and adds.
+    function automatic AspirationDelta aspiration_next_delta(input AspirationDelta delta);
+        automatic logic [31:0] scaled = delta * ASPIRATION_DELTA_MULTIPLIER_Q3;
+        automatic logic [31:0] rounded = (scaled + 32'd4) >> 3;
+        if (rounded >= 32'd32767)
+            return AspirationDelta'(32767);
+        // Ensure that quantization cannot leave a narrow window stuck at one size.
+        if (rounded <= delta)
+            return delta + AspirationDelta'(1);
+        return AspirationDelta'(rounded);
+    endfunction : aspiration_next_delta
+
     // Clamp aspiration bounds before narrowing them to the score representation.
-    function automatic EvalScore aspiration_lower_bound(input EvalScore score);
+    function automatic EvalScore aspiration_lower_bound(
+        input EvalScore score,
+        input AspirationDelta delta
+    );
         automatic logic signed [16:0] bound =
-            $signed({score[15], score}) - $signed({ASPIRATION_DELTA[15], ASPIRATION_DELTA});
+            $signed({score[15], score}) - $signed({2'b00, delta});
         return (bound <= -17'sd32767) ? -SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_lower_bound
 
-    function automatic EvalScore aspiration_upper_bound(input EvalScore score);
+    function automatic EvalScore aspiration_upper_bound(
+        input EvalScore score,
+        input AspirationDelta delta
+    );
         automatic logic signed [16:0] bound =
-            $signed({score[15], score}) + $signed({ASPIRATION_DELTA[15], ASPIRATION_DELTA});
+            $signed({score[15], score}) + $signed({2'b00, delta});
         return (bound >= 17'sd32767) ? SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_upper_bound
 
@@ -2123,6 +2146,7 @@ module search_controller #(
                 search_thread_target_depth[tid] <= SearchDepth'(0);
                 search_thread_root_alpha[tid] <= -SEARCH_INF;
                 search_thread_root_beta[tid] <= SEARCH_INF;
+                search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
                 search_thread_aspiration_active[tid] <= 1'b0;
                 search_thread_iteration_best_move[tid] <= NULL_MOVE;
                 search_thread_iteration_score[tid] <= EvalScore'(0);
@@ -2467,6 +2491,7 @@ module search_controller #(
                                                 ? SearchDepth'(0) : SearchDepth'(1);
                                         search_thread_root_alpha[tid] <= -SEARCH_INF;
                                         search_thread_root_beta[tid] <= SEARCH_INF;
+                                        search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
                                         search_thread_aspiration_active[tid] <= 1'b0;
                                         search_thread_iteration_best_move[tid] <= NULL_MOVE;
                                         search_thread_iteration_score[tid] <= EvalScore'(0);
@@ -3029,17 +3054,25 @@ module search_controller #(
                             automatic logic aspiration_failed;
                             automatic logic primary_thread;
                             automatic logic depth_finished;
+                            automatic AspirationDelta next_aspiration_delta;
 
                             aspiration_failed = search_thread_aspiration_active[tid]
                                 && (search_thread_iteration_score[tid] <= search_thread_root_alpha[tid]
                                     || search_thread_iteration_score[tid] >= search_thread_root_beta[tid]);
                             primary_thread = tid == 0;
                             depth_finished = search_thread_target_depth[tid] >= search_max_depth;
+                            next_aspiration_delta = aspiration_failed
+                                ? aspiration_next_delta(search_thread_aspiration_delta[tid])
+                                : ASPIRATION_INITIAL_DELTA;
 
                             if (aspiration_failed) begin
-                                search_thread_root_alpha[tid] <= -SEARCH_INF;
-                                search_thread_root_beta[tid] <= SEARCH_INF;
-                                search_thread_aspiration_active[tid] <= 1'b0;
+                                // Retry the same depth with a wider window centered on
+                                // the fail-soft value returned by the previous pass.
+                                search_thread_root_alpha[tid] <= aspiration_lower_bound(
+                                    search_thread_iteration_score[tid], next_aspiration_delta);
+                                search_thread_root_beta[tid] <= aspiration_upper_bound(
+                                    search_thread_iteration_score[tid], next_aspiration_delta);
+                                search_thread_aspiration_delta[tid] <= next_aspiration_delta;
                             end else begin
 `ifndef SYNTHESIS
                                 search_thread_completed_depth[tid] <= 8'(search_thread_target_depth[tid]);
@@ -3052,9 +3085,10 @@ module search_controller #(
                                 if (!depth_finished) begin
                                     search_thread_target_depth[tid] <= search_thread_target_depth[tid] + SearchDepth'(1);
                                     search_thread_root_alpha[tid]
-                                        <= aspiration_lower_bound(search_thread_iteration_score[tid]);
+                                        <= aspiration_lower_bound(search_thread_iteration_score[tid], ASPIRATION_INITIAL_DELTA);
                                     search_thread_root_beta[tid]
-                                        <= aspiration_upper_bound(search_thread_iteration_score[tid]);
+                                        <= aspiration_upper_bound(search_thread_iteration_score[tid], ASPIRATION_INITIAL_DELTA);
+                                    search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
                                     search_thread_aspiration_active[tid] <= 1'b1;
                                 end
                             end
@@ -3095,17 +3129,14 @@ module search_controller #(
                                         ? search_thread_target_depth[tid]
                                         : search_thread_target_depth[tid] + SearchDepth'(1);
                                 search_stack_top[tid].alpha
-                                    <= aspiration_failed
-                                        ? -SEARCH_INF
-                                        : aspiration_lower_bound(search_thread_iteration_score[tid]);
+                                    <= aspiration_lower_bound(
+                                        search_thread_iteration_score[tid], next_aspiration_delta);
                                 search_stack_top[tid].orig_alpha
-                                    <= aspiration_failed
-                                        ? -SEARCH_INF
-                                        : aspiration_lower_bound(search_thread_iteration_score[tid]);
+                                    <= aspiration_lower_bound(
+                                        search_thread_iteration_score[tid], next_aspiration_delta);
                                 search_stack_top[tid].beta
-                                    <= aspiration_failed
-                                        ? SEARCH_INF
-                                        : aspiration_upper_bound(search_thread_iteration_score[tid]);
+                                    <= aspiration_upper_bound(
+                                        search_thread_iteration_score[tid], next_aspiration_delta);
                                 search_return_move[tid] <= NULL_MOVE;
                                 active_count_next += ThreadCount'(1);
                             end

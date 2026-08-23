@@ -1651,10 +1651,10 @@ module tb_search_controller;
                 end
                 if (dut.search_thread_aspiration_active[0] && !aspiration_window_seen) begin
                     aspiration_window_seen = 1'b1;
-                    check(dut.search_thread_root_beta[0] - dut.search_thread_root_alpha[0] == EvalScore'(128),
-                        "aspiration window is one pawn wide");
-                    check(dut.search_thread_root_alpha[0] == dut.search_completed_score - EvalScore'(64)
-                            && dut.search_thread_root_beta[0] == dut.search_completed_score + EvalScore'(64),
+                    check(dut.search_thread_root_beta[0] - dut.search_thread_root_alpha[0] == EvalScore'(30),
+                        "aspiration window starts with the configured narrow delta");
+                    check(dut.search_thread_root_alpha[0] == dut.search_completed_score - EvalScore'(15)
+                            && dut.search_thread_root_beta[0] == dut.search_completed_score + EvalScore'(15),
                         "aspiration window is centered on the previous score");
                 end
                 if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin

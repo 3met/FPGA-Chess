@@ -10,7 +10,7 @@ Thread count, stack depth, search policy, and optional instrumentation are build
 
 The default search combines iterative deepening, aspiration windows, principal variation search (PVS), null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
 
-Aspiration failures repeat the same depth with a full window. If a time or node budget expires during an incomplete or failed pass, the engine returns the primary thread's most recent fully completed iteration. A legal root move from a partial first iteration may be used when no completed result exists.
+Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A fail-low or fail-high multiplies the window delta by the configured fixed-point multiplier and repeats the same depth with the wider window centered on the fail-soft score that caused the failure. If a time or node budget expires during an incomplete or failed pass, the engine returns the primary thread's most recent fully completed iteration. A legal root move from a partial first iteration may be used when no completed result exists.
 
 PVS searches the first legal move with the full window and later moves with a scout window, repeating a scout at full window when needed. LMR may first search eligible later moves at reduced depth; an alpha-raising reduced result is verified at full depth before it can affect the parent. The reduction policy is parameterized and computed without changing the search semantics.
 

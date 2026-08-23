@@ -106,7 +106,7 @@ def _validate_search(search: dict, path: Path) -> dict:
     timing = _object(search, "time_management", context)
     history = _object(search, "history", context)
     tt = _object(search, "transposition_table", context)
-    _require_keys(aspiration, {"half_window"}, f"{context}.aspiration")
+    _require_keys(aspiration, {"starting_delta", "delta_multiplier"}, f"{context}.aspiration")
     _require_keys(lmr, {"base", "divisor", "minimum_depth", "minimum_move_number"}, f"{context}.lmr")
     _require_keys(
         null_move,
@@ -145,6 +145,15 @@ def _validate_search(search: dict, path: Path) -> dict:
     if base_q8 <= 0 or divisor_q8 <= 0:
         raise BuildError(f"{context}.lmr coefficients are too small for unsigned Q8 representation")
 
+    aspiration_multiplier = _positive_number(
+        aspiration, "delta_multiplier", f"{context}.aspiration"
+    )
+    aspiration_multiplier_q3 = round(aspiration_multiplier * 8)
+    if aspiration_multiplier_q3 <= 8:
+        raise BuildError(f"{context}.aspiration.delta_multiplier must be greater than one")
+    if aspiration_multiplier_q3 > 64:
+        raise BuildError(f"{context}.aspiration.delta_multiplier must not exceed eight")
+
     null_minimum_depth = _integer(null_move, "minimum_depth", f"{context}.null_move", 1)
     null_deep_depth_threshold = _integer(null_move, "deep_depth_threshold", f"{context}.null_move", 1)
     null_shallow_reduction = _integer(null_move, "shallow_reduction", f"{context}.null_move", 1)
@@ -155,7 +164,10 @@ def _validate_search(search: dict, path: Path) -> dict:
         raise BuildError(f"{context}.null_move reductions must be smaller than their depth thresholds")
 
     return {
-        "aspiration_half_window": _integer(aspiration, "half_window", f"{context}.aspiration", 1),
+        "aspiration_starting_delta": _integer(
+            aspiration, "starting_delta", f"{context}.aspiration", 1, 32767
+        ),
+        "aspiration_delta_multiplier_q3": aspiration_multiplier_q3,
         "lmr_a_q8": base_q8,
         "lmr_b_q8": divisor_q8,
         "lmr_minimum_depth": _integer(lmr, "minimum_depth", f"{context}.lmr", 1),

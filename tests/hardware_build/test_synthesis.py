@@ -37,7 +37,7 @@ class EngineBuildConfigTests(unittest.TestCase):
             generated_config = (build_dir / "engine_build_config.svh").read_text(encoding="utf-8")
             self.assertIn("ENGINE_SEARCH_THREAD_COUNT = 1", generated_config)
             self.assertIn("ENGINE_SEARCH_STACK_DEPTH = 32", generated_config)
-            self.assertIn("ENGINE_ASPIRATION_HALF_WINDOW = 64", generated_config)
+            self.assertIn("ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3 = 12", generated_config)
             qsf = project.with_suffix(".qsf").read_text(encoding="utf-8")
             self.assertIn("engine_build_config.svh", qsf)
             self.assertIn('FPGA_CHESS_THREAD_CAPACITY=1', qsf)
