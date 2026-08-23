@@ -3995,8 +3995,10 @@ module search_controller #(
                                     && move_cmd == MOVE_GEN_GENERATE_NOISY) begin
                                 search_stack_top[search_move_issue_thread].move_order_state
                                     <= MOVE_ORDER_GENERATE_NOISY;
-                            end else if (move_cmd_valid && move_cmd == MOVE_GEN_VALIDATE_DIRECT) begin
-                                search_stack_top[search_move_issue_thread].tt_move <= move_cmd_suppress_move;
+                            end else if (move_cmd_valid && move_cmd == MOVE_GEN_VALIDATE_DIRECT
+                                    && !search_stack_top[search_move_issue_thread].has_tt_move) begin
+                                search_stack_top[search_move_issue_thread].tt_move
+                                    <= move_cmd_suppress_move;
                                 search_stack_top[search_move_issue_thread].has_tt_move <= 1'b1;
                             end
                             search_dispatch.move <= search_thread_after(search_move_issue_thread);

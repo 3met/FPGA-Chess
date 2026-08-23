@@ -1868,8 +1868,9 @@ module tb_search_controller;
                     && !dut.move_cmd_resp_direct_valid) begin
                 tt_validation_illegal_reject_count += 1;
             end
-            if (dut.search_board_result_valid
-                    && dut.search_tt_validation_pending[int'(dut.search_board_result_thread_id)]
+            if (dut.search_board_tag_valid_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN - 1]
+                    && dut.search_tt_validation_pending[
+                        int'(dut.search_board_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN - 1])]
                     && dut.board_update_mover_in_check) begin
                 tt_validation_illegal_reject_count += 1;
             end
@@ -1908,11 +1909,11 @@ module tb_search_controller;
                     lmr_depth_check_pending[lmr_tid] = 1'b1;
                 end
             end
-            if (dut.search_board_result_valid
+            if (dut.search_board_tag_valid_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN - 1]
                     && dut.search_board_op_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN - 1] != BOARD_REVERSE_MOVE_OP
                     && dut.board_update_mover_in_check) begin
                 automatic int illegal_tid;
-                illegal_tid = int'(dut.search_board_result_thread_id);
+                illegal_tid = int'(dut.search_board_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN - 1]);
                 lmr_illegal_candidate_seen = 1'b1;
                 check(dut.search_stack_top[illegal_tid].legal_move_count == lmr_issue_legal_count[illegal_tid],
                     "illegal pseudo-legal candidate does not advance m");
