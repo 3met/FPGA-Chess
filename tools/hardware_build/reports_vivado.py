@@ -91,6 +91,5 @@ def vivado_synth_report(build_dir: Path, verbose: bool = False) -> bool:
         print_table("Clock and timing", ["Result"], [[row] for row in clocks[:20]])
     else:
         print_unavailable("Clock and timing", "timing report not generated")
-    print_table("Utilization by component", ["Component", "Module", "LUTs", "Registers", "BRAM", "DSP"], component_rows)
+    print_table("Utilization by component", ["Component", "Module", "LUTs", "Registers", "BRAMs", "DSP"], component_rows)
     return True
-

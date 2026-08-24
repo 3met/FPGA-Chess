@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from tools.hardware_build.manifest import load_manifest
+from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count
 from tools.hardware_build.synthesis import new_build_id, write_engine_build_config, write_quartus_project
 
 
@@ -53,6 +54,20 @@ class EngineBuildConfigTests(unittest.TestCase):
             self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_EFFORT EXTRA", qsf)
+
+
+class QuartusReportTests(unittest.TestCase):
+    def test_bram_columns_are_device_family_independent(self):
+        headers = ["Block Memory Bits", "M10K blocks", "M20Ks", "DSP Blocks"]
+        indices = quartus_bram_columns(headers)
+
+        self.assertEqual(indices, [1, 2])
+        self.assertEqual(quartus_bram_count(["30,720", "2", "3", "0"], indices), "5")
+
+    def test_generic_ram_block_header_is_supported(self):
+        headers = ["Block Memory Bits", "Total RAM Blocks"]
+
+        self.assertEqual(quartus_bram_count(["10,240", "1"], quartus_bram_columns(headers)), "1")
 
 
 if __name__ == "__main__":

@@ -184,6 +184,31 @@ def hierarchy_depth(name: str) -> int:
     return (len(name) - len(name.lstrip())) // 3
 
 
+def quartus_bram_columns(headers: list[str]) -> list[int]:
+    """Find hard block-RAM count columns without assuming an FPGA family."""
+    indices = []
+    for index, header in enumerate(headers):
+        normalized = header.strip()
+        if re.fullmatch(r"M\d+K(?:\s+blocks?|s)?", normalized, re.IGNORECASE):
+            indices.append(index)
+        elif re.fullmatch(r"(?:total\s+)?(?:block\s+)?RAM\s+blocks?", normalized, re.IGNORECASE):
+            indices.append(index)
+        elif re.fullmatch(r"(?:embedded\s+)?memory\s+blocks?", normalized, re.IGNORECASE):
+            indices.append(index)
+    return indices
+
+
+def quartus_bram_count(row: list[str], indices: list[int]) -> str:
+    """Combine hard block-RAM columns when a device exposes multiple sizes."""
+    values = [row[index] for index in indices if row[index] not in ("", "N/A", "-")]
+    if not values:
+        return ""
+    try:
+        return str(sum(int(value.replace(",", "")) for value in values))
+    except ValueError:
+        return "/".join(values)
+
+
 def quartus_hierarchy(lines: list[str], fitter: bool, verbose: bool) -> list[list[str]]:
     title = "Fitter Resource Utilization by Entity" if fitter else "Analysis & Synthesis Resource Utilization by Entity"
     headers, raw_rows = quartus_table(lines, title)
@@ -193,6 +218,7 @@ def quartus_hierarchy(lines: list[str], fitter: bool, verbose: bool) -> list[lis
     name_index = indices["Compilation Hierarchy Node"]
     library_index = indices.get("Library Name")
     logic_header = "ALMs needed [=A-B+C]" if fitter else "Combinational ALUTs"
+    bram_indices = quartus_bram_columns(headers)
     selected: list[list[str]] = []
     for row in raw_rows:
         name = row[name_index]
@@ -207,6 +233,7 @@ def quartus_hierarchy(lines: list[str], fitter: bool, verbose: bool) -> list[lis
                 row[indices[logic_header]],
                 row[indices["Dedicated Logic Registers"]],
                 row[indices["Block Memory Bits"]],
+                quartus_bram_count(row, bram_indices),
                 row[indices["DSP Blocks"]],
             ]
         )
@@ -237,7 +264,7 @@ def quartus_synth_report(build_dir: Path, verbose: bool = False) -> bool:
         print_table("Clock summary", ["Clock", "Target", "Fmax", "Setup WNS", "Setup TNS", "Hold WNS"], timing_rows)
     else:
         print_unavailable("Clock and timing", "timing report not generated")
-    print_table("Utilization by component", ["Component", "Logic", "Registers", "Memory bits", "DSP"], components)
+    print_table("Utilization by component", ["Component", "Logic", "Registers", "Memory bits", "BRAMs", "DSP"], components)
     return True
 
 
@@ -363,4 +390,3 @@ def command_timing_paths(args: argparse.Namespace) -> int:
         print("  No setup paths were reported.")
     print(f"\n  Report: {rel(report)}")
     return 0
-
