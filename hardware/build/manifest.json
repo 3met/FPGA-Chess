@@ -32,6 +32,10 @@
       "@common",
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/move_generator/defs.sv",
+      "hardware/rtl/move_generator/move_generator_bucket_store.sv",
+      "hardware/rtl/move_generator/move_generator_history_table.sv",
+      "hardware/rtl/move_generator/move_generator_quiet_history.sv",
+      "hardware/rtl/move_generator/move_generator_lane.sv",
       "hardware/rtl/move_generator/move_generator.sv"
     ],
     "board-update-pipeline": [

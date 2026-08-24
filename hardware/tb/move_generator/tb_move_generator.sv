@@ -587,7 +587,7 @@ module tb_move_generator;
         check(found && same_move(popped, target) && popped_bucket == QUIET_HIGH_BUCKET,
             "positive history update raises quiet move bucket");
         repeat (8) history_update(target, 6'd63);
-        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
                 {target.from_pos, target.to_pos}])
                 == 9'sd238,
             "history gravity reduces bonuses as history approaches its limit");
@@ -595,13 +595,13 @@ module tb_move_generator;
         failed1 = make_move(Position'(1), Position'(11));
         failed2 = make_move(Position'(4), Position'(5));
         history_update_with_failures(target, failed0, failed1, failed2, 2'd3, 6'd4);
-        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
                 {failed0.from_pos, failed0.to_pos}]) == -9'sd8,
             "failed quiet zero history receives half-strength malus");
-        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
                 {failed1.from_pos, failed1.to_pos}]) == -9'sd8,
             "second failed quiet receives a malus");
-        check($signed(dut.quiet_pipeline.gen_history[0].gen_ram.history_ram.mem[
+        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
                 {failed2.from_pos, failed2.to_pos}]) == -9'sd8,
             "third failed quiet receives a malus");
 
