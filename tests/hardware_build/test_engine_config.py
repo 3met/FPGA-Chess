@@ -56,7 +56,7 @@ class EngineConfigTests(unittest.TestCase):
                 json.dumps({
                     "search_config": str(search_path),
                     "engine": {"threads": 17, "stack_depth": 65, "clock_frequency_hz": 1},
-                    "transposition_table": {"tag_bits": 32},
+                    "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
                     "instrumentation": {"search_statistics": False},
                 }),
                 encoding="utf-8",
@@ -75,7 +75,7 @@ class EngineConfigTests(unittest.TestCase):
                 json.dumps({
                     "search_config": "hardware/config/search/default.json",
                     "engine": {"threads": 0, "stack_depth": 1, "clock_frequency_hz": 1},
-                    "transposition_table": {"tag_bits": 32},
+                    "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
                     "instrumentation": {"search_statistics": False},
                 }),
                 encoding="utf-8",
@@ -104,6 +104,10 @@ class EngineConfigTests(unittest.TestCase):
     def test_tt_tag_must_leave_index_entropy(self):
         with self.assertRaisesRegex(BuildError, "between 1 and 63"):
             self.load_temporary_config(engine_updates={"transposition_table": {"tag_bits": 64}})
+
+    def test_tt_cache_index_bits_must_be_positive(self):
+        with self.assertRaisesRegex(BuildError, "at least 1"):
+            self.load_temporary_config(engine_updates={"transposition_table": {"cache_index_bits": 0}})
 
 
 if __name__ == "__main__":

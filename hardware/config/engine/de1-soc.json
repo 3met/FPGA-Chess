@@ -6,7 +6,8 @@
     "clock_frequency_hz": 75000000
   },
   "transposition_table": {
-    "tag_bits": 32
+    "tag_bits": 32,
+    "cache_index_bits": 11
   },
   "instrumentation": {
     "search_statistics": false

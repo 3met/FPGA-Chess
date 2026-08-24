@@ -12,6 +12,7 @@ module search_controller #(
     parameter int CLOCK_FREQ = 100_000_000,
     parameter int TT_INDEX_BITS = 10,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
+    parameter int TT_CACHE_INDEX_BITS = 10,
     parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
@@ -687,6 +688,7 @@ module search_controller #(
     generate
         if (EXTERNAL_TT) begin : external_tt_gen
             tt_external_load_store #(
+                .CACHE_INDEX_BITS(TT_CACHE_INDEX_BITS),
                 .TAG_BITS(TT_TAG_BITS),
                 .STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE)
             ) tt_load_store (

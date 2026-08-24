@@ -137,6 +137,7 @@ def write_engine_build_config(
             "ENGINE_SEARCH_THREAD_COUNT": engine_config["threads"],
             "ENGINE_SEARCH_STACK_DEPTH": engine_config["stack_depth"],
             "ENGINE_TT_TAG_BITS": engine_config["tt_tag_bits"],
+            "ENGINE_TT_CACHE_INDEX_BITS": engine_config["tt_cache_index_bits"],
             "ENGINE_ENABLE_SEARCH_STATS": int(engine_config["search_statistics"]),
             "ENGINE_ASPIRATION_STARTING_DELTA": search["aspiration_starting_delta"],
             "ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3": search["aspiration_delta_multiplier_q3"],

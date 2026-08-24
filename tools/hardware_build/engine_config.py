@@ -209,7 +209,7 @@ def load_engine_config(value: str) -> dict:
     tt = _object(engine_profile, "transposition_table", rel(engine_path))
     instrumentation = _object(engine_profile, "instrumentation", rel(engine_path))
     _require_keys(engine, {"threads", "stack_depth", "clock_frequency_hz"}, f"{rel(engine_path)}.engine")
-    _require_keys(tt, {"tag_bits"}, f"{rel(engine_path)}.transposition_table")
+    _require_keys(tt, {"tag_bits", "cache_index_bits"}, f"{rel(engine_path)}.transposition_table")
     _require_keys(instrumentation, {"search_statistics"}, f"{rel(engine_path)}.instrumentation")
     resolved = {
         "engine_config": rel(engine_path),
@@ -218,6 +218,7 @@ def load_engine_config(value: str) -> dict:
         "stack_depth": _integer(engine, "stack_depth", f"{rel(engine_path)}.engine", 1),
         "clock_frequency_hz": _integer(engine, "clock_frequency_hz", f"{rel(engine_path)}.engine", 1),
         "tt_tag_bits": _integer(tt, "tag_bits", f"{rel(engine_path)}.transposition_table", 1, 63),
+        "tt_cache_index_bits": _integer(tt, "cache_index_bits", f"{rel(engine_path)}.transposition_table", 1),
         "search_statistics": _boolean(instrumentation, "search_statistics", f"{rel(engine_path)}.instrumentation"),
         "search": search,
     }

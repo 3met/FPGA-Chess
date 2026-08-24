@@ -42,6 +42,7 @@ class EngineBuildConfigTests(unittest.TestCase):
             generated_config = (build_dir / "engine_build_config.svh").read_text(encoding="utf-8")
             self.assertIn(f"ENGINE_SEARCH_THREAD_COUNT = {resolved['threads']}", generated_config)
             self.assertIn(f"ENGINE_SEARCH_STACK_DEPTH = {resolved['stack_depth']}", generated_config)
+            self.assertIn(f"ENGINE_TT_CACHE_INDEX_BITS = {resolved['tt_cache_index_bits']}", generated_config)
             self.assertIn(
                 f"ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3 = {resolved['search']['aspiration_delta_multiplier_q3']}",
                 generated_config,
