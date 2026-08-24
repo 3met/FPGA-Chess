@@ -7,11 +7,6 @@ package chess_helper_funcs;
 
     import general_chess_defs::*;
 
-	// Returns true when a piece type is real (not NULL or SPARE).
-	function logic isRealPiece(PieceType piece_type);
-		return (piece_type != NULL_PIECE && piece_type != SPARE_PIECE);
-	endfunction
-
     // Returns the rank from a given position
 	function BoardRank getRank(input Position pos);
 		return BoardRank'(pos[5:3]);
@@ -25,11 +20,6 @@ package chess_helper_funcs;
 	// Returns the position from a given rank and file
 	function Position getPosition(input BoardRank rank, input BoardFile file);
 		return Position'({rank, file});
-	endfunction
-
-    // Checks if a move is NULL
-    function logic isNullMove(Move m);
-		return (m.from_pos == 6'd0 && m.to_pos == 6'd0 ? 1'b1 : 1'b0);
 	endfunction
 
     // Mirrors a position between the black and white sides of the board

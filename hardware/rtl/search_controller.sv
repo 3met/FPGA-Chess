@@ -532,7 +532,6 @@ module search_controller #(
     localparam int REPETITION_EPOCH_BITS = 4;
     logic [REPETITION_EPOCH_BITS-1:0] repetition_epoch;
     logic repetition_init_start;
-    logic repetition_init_busy;
     logic repetition_init_done;
     logic repetition_init_failed;
     logic repetition_history_reset;
@@ -613,7 +612,7 @@ module search_controller #(
         .clk(clk), .rst_n(rst_n), .flush(state == ST_FLUSH_RESPOND),
         .active_history_reset(repetition_history_reset), .active_history_write(repetition_history_write),
         .active_history_key(repetition_history_key), .init_start(repetition_init_start),
-        .init_busy(repetition_init_busy), .init_done(repetition_init_done), .init_failed(repetition_init_failed),
+        .init_busy(), .init_done(repetition_init_done), .init_failed(repetition_init_failed),
         .line_write_valid(repetition_line_write_valid), .line_write_thread(repetition_line_write_thread),
         .line_write_ply(repetition_line_write_ply), .line_write_key(repetition_line_write_key),
         .req_valid(repetition_req_valid), .req_thread(repetition_req_thread), .req_ply(repetition_req_ply),

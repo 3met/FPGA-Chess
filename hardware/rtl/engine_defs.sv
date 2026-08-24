@@ -94,7 +94,6 @@ package engine_defs;
         NodeCountType nodes_count;
         logic [7:0] completed_depth;
         logic [7:0] end_reason;
-        logic [3:0] board_rd_data;
     } EngineControllerResponse;
 
 endpackage : engine_defs
