@@ -33,14 +33,16 @@ class EngineConfigTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_de1_profile_resolves_search_policy(self):
+    def test_checked_in_profile_resolves_and_quantizes_search_policy(self):
+        engine = json.loads(Path("hardware/config/engine/de1-soc.json").read_text(encoding="utf-8"))
+        search = json.loads(Path(engine["search_config"]).read_text(encoding="utf-8"))
         config = load_engine_config("hardware/config/engine/de1-soc.json")
-        self.assertEqual(config["threads"], 1)
-        self.assertEqual(config["stack_depth"], 32)
-        self.assertEqual(config["clock_frequency_hz"], 75_000_000)
-        self.assertEqual(config["search"]["aspiration_delta_multiplier_q3"], 12)
-        self.assertEqual(config["search"]["lmr_a_q8"], 192)
-        self.assertEqual(config["search"]["lmr_b_q8"], 614)
+        self.assertEqual(config["threads"], engine["engine"]["threads"])
+        self.assertEqual(config["stack_depth"], engine["engine"]["stack_depth"])
+        self.assertEqual(config["clock_frequency_hz"], engine["engine"]["clock_frequency_hz"])
+        self.assertEqual(config["search"]["aspiration_delta_multiplier_q3"], round(search["aspiration"]["delta_multiplier"] * 8))
+        self.assertEqual(config["search"]["lmr_a_q8"], round(search["lmr"]["base"] * 256))
+        self.assertEqual(config["search"]["lmr_b_q8"], round(search["lmr"]["divisor"] * 256))
         self.assertEqual(len(config["digest"]), 64)
 
     def test_structural_values_have_no_policy_ceiling(self):

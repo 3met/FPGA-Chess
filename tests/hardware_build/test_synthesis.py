@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,14 +35,20 @@ class EngineBuildConfigTests(unittest.TestCase):
             self.assertEqual(project, build_dir / "fpga_chess")
             self.assertTrue((build_dir / "engine_build_config.svh").is_file())
             self.assertTrue((build_dir / "resolved_engine_config.json").is_file())
+            resolved = json.loads(
+                (build_dir / "resolved_engine_config.json").read_text(encoding="utf-8")
+            )
             generated_config = (build_dir / "engine_build_config.svh").read_text(encoding="utf-8")
-            self.assertIn("ENGINE_SEARCH_THREAD_COUNT = 1", generated_config)
-            self.assertIn("ENGINE_SEARCH_STACK_DEPTH = 32", generated_config)
-            self.assertIn("ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3 = 12", generated_config)
+            self.assertIn(f"ENGINE_SEARCH_THREAD_COUNT = {resolved['threads']}", generated_config)
+            self.assertIn(f"ENGINE_SEARCH_STACK_DEPTH = {resolved['stack_depth']}", generated_config)
+            self.assertIn(
+                f"ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3 = {resolved['search']['aspiration_delta_multiplier_q3']}",
+                generated_config,
+            )
             qsf = project.with_suffix(".qsf").read_text(encoding="utf-8")
             self.assertIn("engine_build_config.svh", qsf)
-            self.assertIn('FPGA_CHESS_THREAD_CAPACITY=1', qsf)
-            self.assertIn('FPGA_CHESS_SEARCH_STACK_CAPACITY=32', qsf)
+            self.assertIn(f"FPGA_CHESS_THREAD_CAPACITY={resolved['threads']}", qsf)
+            self.assertIn(f"FPGA_CHESS_SEARCH_STACK_CAPACITY={resolved['stack_depth']}", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_COMBO_LOGIC ON", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON", qsf)

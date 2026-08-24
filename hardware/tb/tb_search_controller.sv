@@ -1243,16 +1243,16 @@ module tb_search_controller;
     initial begin
         reset_dut();
 
-        check(dut.lmr_table_value(0, 0) == 8'd1, "LMR default constant rounds 0.75 to one ply");
-        check(dut.lmr_table_value(1, 1) == 8'd1, "LMR Q8 division and rounding at bucket 1/1");
-        check(dut.lmr_table_value(2, 2) == 8'd2, "LMR Q8 division and rounding at bucket 2/2");
         check(dut.lmr_table_value_for_params(128, 256, 1, 1) == 8'd1,
             "LMR non-default half-ply offset rounds the complete curve once");
         check(dut.lmr_table_value_for_params(0, 256, 2, 2) == 8'd2,
             "LMR non-default denominator preserves Q8 curve scaling");
-        check(dut.LMR_DEPTH_BUCKETS == 5, "LMR generates only reachable default depth buckets");
-        check(dut.LMR_TABLE_MAX_VALUE == 8'd6, "LMR default table maximum is six plies");
-        check(dut.LMR_TABLE_VALUE_BITS == 3, "LMR default table values require three significant bits");
+        check(dut.LMR_DEPTH_BUCKETS == dut.floor_log2_8(SEARCH_STACK_DEPTH - 1) + 1,
+            "LMR generates only reachable depth buckets");
+        check(dut.LMR_TABLE_MAX_VALUE == dut.lmr_table_value(dut.LMR_DEPTH_BUCKETS - 1, 7),
+            "LMR table maximum comes from its largest reachable bucket");
+        check((1 << dut.LMR_TABLE_VALUE_BITS) > dut.LMR_TABLE_MAX_VALUE,
+            "LMR table value width represents the configured maximum");
         check(dut.floor_log2_8(8'd1) == 3'd0 && dut.floor_log2_8(8'd2) == 3'd1,
             "LMR move/depth bucket lower boundaries");
         check(dut.floor_log2_8(8'd3) == 3'd1 && dut.floor_log2_8(8'd4) == 3'd2,

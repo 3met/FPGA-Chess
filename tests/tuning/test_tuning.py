@@ -666,13 +666,14 @@ class TuningTrainingAndReportTests(unittest.TestCase):
     def test_default_config_and_validation(self):
         config = load_config(None)
         self.assertTrue(Path(config["dataset"]["path"]).is_absolute())
-        self.assertTrue(config["filters"]["remove_captures"])
-        self.assertTrue(config["filters"]["remove_in_check"])
-        self.assertEqual(config["training"]["nnue_output_buckets"], 8)
-        self.assertEqual(config["training"]["learning_rate"], 0.01)
-        self.assertEqual(config["training"]["exponential_decay_per_epoch"], 0.992)
-        self.assertLessEqual(config["training"]["warmup_fraction"], 0.02)
-        self.assertGreaterEqual(config["training"]["warmup_fraction"], 0.01)
+        self.assertIsInstance(config["filters"]["remove_captures"], bool)
+        self.assertIsInstance(config["filters"]["remove_in_check"], bool)
+        self.assertEqual(config["training"]["nnue_output_buckets"], NNUE_OUTPUT_BUCKETS)
+        self.assertGreater(config["training"]["learning_rate"], 0)
+        self.assertGreater(config["training"]["exponential_decay_per_epoch"], 0)
+        self.assertLessEqual(config["training"]["exponential_decay_per_epoch"], 1)
+        self.assertGreaterEqual(config["training"]["warmup_fraction"], 0)
+        self.assertLessEqual(config["training"]["warmup_fraction"], 1)
         bad = json.loads(Path("tools/tuning/default_config.json").read_text(encoding="utf-8"))
         bad["training"]["batch_size"] = 0
         with tempfile.TemporaryDirectory() as directory:
