@@ -66,7 +66,7 @@ Move generation is pseudo-legal. The controller speculatively applies each candi
 
 History-sensitive TT scores are validated according to [transposition-table.md](transposition-table.md). A rejected score may still supply a legal ordering move. Null children bypass ordinary legality, repetition, legal-node counting, best-move selection, and move-history updates.
 
-Quiescence omits quiet generation except for legal evasions while in check. Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
+Quiescence omits quiet generation and both bad-noisy buckets except for legal evasions while in check. Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
 
 ## Stops and Results
 

@@ -16,7 +16,7 @@ PVS searches the first legal move with the full window and later moves with a sc
 
 Null-move pruning may search a reduced synthetic child at eligible non-root nodes that are not in check. Null children change only turn-dependent state, cannot follow another null move, and do not count as legal moves, update move ordering, enter repetition history, or become best moves.
 
-Quiescence search considers captures and promotions. A checked quiescence node has no stand-pat option and searches all legal evasions; otherwise quiet moves are omitted. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
+Quiescence search considers captures and promotions in the good-noisy buckets. A checked quiescence node has no stand-pat option and searches all legal evasions, including quiet and bad-noisy moves. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
 
 Search nodes are counted when a speculative real move passes king-safety validation and becomes a legal child. The root, null children, and rejected pseudo-legal candidates are not counted. A legal child still counts when repetition, terminal scoring, or a TT cutoff avoids deeper evaluation.
 

@@ -3602,7 +3602,7 @@ module search_controller #(
                                         search_stack_top[move_thread_id].move_order_state
                                             <= search_in_qsearch(move_thread_id)
                                                     && !search_board_in_check[move_thread_id]
-                                                ? MOVE_ORDER_BAD_NOISY : MOVE_ORDER_GENERATE_QUIET;
+                                                ? MOVE_ORDER_DONE : MOVE_ORDER_GENERATE_QUIET;
                                     MOVE_ORDER_QUIET:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_BAD_NOISY;
                                     default:
