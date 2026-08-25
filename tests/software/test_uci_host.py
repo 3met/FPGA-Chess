@@ -29,6 +29,7 @@ from software.engine.host import (
     INITIALIZATION_ATTEMPTS,
     INITIAL_STATUS_TIMEOUT_SECONDS,
     RESET_RECOVERY_SECONDS,
+    _input_lines,
 )
 from software.engine.transport import SerialTimeoutError
 
@@ -48,6 +49,17 @@ class UCIHostSpecTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             host.handle_line(command)
         return [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+
+    def test_input_lines_preserves_piped_uci_input(self):
+        stream = io.StringIO("uci\nisready\n")
+        with mock.patch("sys.stdin", stream):
+            self.assertEqual(list(_input_lines()), ["uci\n", "isready\n"])
+
+    def test_input_lines_uses_editable_input_for_a_terminal(self):
+        stream = mock.Mock()
+        stream.isatty.return_value = True
+        with mock.patch("sys.stdin", stream), mock.patch("builtins.input", side_effect=["uci", EOFError]):
+            self.assertEqual(list(_input_lines()), ["uci"])
 
     def test_leading_unknown_tokens_are_ignored(self):
         host = self.make_host()

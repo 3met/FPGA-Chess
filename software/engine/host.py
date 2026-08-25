@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -952,6 +952,26 @@ def _configure_logging(log_path: str | None, verbose: bool) -> logging.Logger:
     return logger
 
 
+def _input_lines() -> Iterable[str]:
+    """Read editable command lines from a terminal while preserving piped UCI input."""
+    if not sys.stdin.isatty():
+        yield from sys.stdin
+        return
+
+    try:
+        # Importing readline makes input() provide editing and command history on
+        # platforms that expose GNU readline without changing normal UCI pipes.
+        import readline  # noqa: F401
+    except ImportError:
+        pass
+
+    while True:
+        try:
+            yield input()
+        except EOFError:
+            return
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the FPGA Chess UCI host.")
     parser.add_argument(
@@ -982,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        for line in sys.stdin:
+        for line in _input_lines():
             if not host.handle_line(line):
                 break
     except (SerialDependencyError, SerialTimeoutError) as exc:
