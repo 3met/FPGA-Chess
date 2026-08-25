@@ -127,7 +127,7 @@ The canonical internal representation is two fields:
 
 | Field | Width | Meaning |
 | ----- | ----- | ------- |
-| `has_ep` | 1 bit | Current position has an en passant target file. |
+| `has_ep` | 1 bit | Current position has an en passant target file with an adjacent pawn able to make the pseudo-legal capture. |
 | `ep_file` | 3 bits | Target file if `has_ep` is asserted. |
 
 ### `FullBoard`
@@ -140,7 +140,7 @@ The canonical internal representation is two fields:
 | `king_positions` | 12 | Cached White and Black king squares indexed by `Color`. |
 | `turn` | 1 | Side to move. |
 | `castle_perms` | 4 | Castling permissions. |
-| `has_ep` | 1 | Whether en passant is available. |
+| `has_ep` | 1 | Whether canonical en passant state is available. |
 | `ep_file` | 3 | En passant file if available. |
 | `halfmove_clock` | 7 | Halfmove clock for the 50-move rule. |
 

@@ -217,7 +217,8 @@
     "zobrist-values": {
       "script": "hardware/scripts/generate_zobrist_values.py",
       "outputs": [
-        "hardware/data/zobrist/zobrist_values.hex",
+        "hardware/data/zobrist/zobrist_tile_values.hex",
+        "hardware/data/zobrist/zobrist_ep_values.hex",
         "hardware/rtl/generated/zobrist_values_pkg.sv"
       ]
     }
@@ -234,7 +235,7 @@
         "kind": "intel-pll",
         "template": "hardware/ip/pll"
       },
-      "seed": 6,
+      "seed": 1,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",

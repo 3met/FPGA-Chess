@@ -103,6 +103,22 @@ package chess_helper_funcs;
 		endcase
 	endfunction : isKnightShiftOnBoard
 
+	// Return whether the side to move has a pawn adjacent to an en-passant
+	// target. King safety is intentionally left to normal move validation.
+	function automatic logic hasEnPassantCapturer(
+		input FullBoard board,
+		input Color turn,
+		input BoardFile ep_file
+	);
+		automatic BoardRank pawn_rank = turn == WHITE ? BoardRank'(4) : BoardRank'(3);
+		automatic Tile pawn = Tile'({turn, PAWN});
+
+		return (ep_file != BoardFile'(0)
+				&& board.tiles[getPosition(pawn_rank, ep_file - BoardFile'(1))] == pawn)
+			|| (ep_file != BoardFile'(7)
+				&& board.tiles[getPosition(pawn_rank, ep_file + BoardFile'(1))] == pawn);
+	endfunction : hasEnPassantCapturer
+
     // Maps a piece type to an associated letter
     function string pieceToChar(Tile t);
 		case (t)
@@ -166,18 +182,9 @@ package chess_helper_funcs;
 		end
 
 		// Write En Passant Info
-		if (b.has_ep) begin
-            automatic Position ep_pos = Position'({b.turn == WHITE ? 3'd5 : 3'd2, b.ep_file});
-
-            // Check if EP is actually possible before printing location 
-            if (   (b.turn == WHITE && ((b.tiles[ep_pos-7] == WHITE_PAWN && getFile(ep_pos) < 'd7) || (b.tiles[ep_pos-9] == WHITE_PAWN && getFile(ep_pos) > 'd0)))
-                || (b.turn == BLACK && ((b.tiles[ep_pos+9] == BLACK_PAWN && getFile(ep_pos) < 'd7) || (b.tiles[ep_pos+7] == BLACK_PAWN && getFile(ep_pos) > 'd0)))) begin
-
-                if (b.turn == WHITE) str = {str, " ", byte'("a") + b.ep_file, "6"};
-                else                 str = {str, " ", byte'("a") + b.ep_file, "3"};
-            end else begin
-                str = {str, " -"};
-            end
+		if (b.has_ep && hasEnPassantCapturer(b, b.turn, b.ep_file)) begin
+			if (b.turn == WHITE) str = {str, " ", byte'("a") + b.ep_file, "6"};
+			else                 str = {str, " ", byte'("a") + b.ep_file, "3"};
 		end else begin
 			str = {str, " -"};
 		end

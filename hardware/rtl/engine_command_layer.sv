@@ -229,11 +229,11 @@ module engine_command_layer #(
             req.direct_board_op = BOARD_SET_CASTLE_PERMS_OP;
             req.board_wr_data = {3'b000, payload[32][3:0]};
         end else if (idx == 7'd65) begin
-            req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
-            req.board_wr_data = {3'b000, payload[33][3:0]};
-        end else if (idx == 7'd66) begin
             req.direct_board_op = BOARD_SET_TURN_OP;
             req.board_wr_data = {6'b000000, payload[34][0]};
+        end else if (idx == 7'd66) begin
+            req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
+            req.board_wr_data = {3'b000, payload[33][3:0]};
         end else begin
             req.direct_board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
             req.board_wr_data = payload[35][6:0];

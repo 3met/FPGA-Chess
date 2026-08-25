@@ -332,13 +332,13 @@ module tb_engine;
                             && captured.board_wr_data[3:0] == 4'hf,
                         "set board castle request");
                     65: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                            && captured.direct_board_op == BOARD_SET_EN_PASSANT_OP
-                            && captured.board_wr_data[3:0] == 4'h5,
-                        "set board en passant request");
-                    66: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
                             && captured.direct_board_op == BOARD_SET_TURN_OP
                             && captured.board_wr_data[0] == 1'b1,
                         "set board turn request");
+                    66: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
+                            && captured.direct_board_op == BOARD_SET_EN_PASSANT_OP
+                            && captured.board_wr_data[3:0] == 4'h5,
+                        "set board en passant request");
                     67: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
                             && captured.direct_board_op == BOARD_SET_HALFMOVE_CLOCK_OP
                             && captured.board_wr_data == 7'd2,

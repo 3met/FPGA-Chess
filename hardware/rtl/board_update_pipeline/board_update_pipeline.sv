@@ -42,7 +42,7 @@ module board_update_pipeline #(
 
     typedef struct packed {
         logic [ZOBRIST_TILE_READ_PORTS-1:0] enable;
-        ZobristAddr [ZOBRIST_TILE_READ_PORTS-1:0] address;
+        ZobristTileAddr [ZOBRIST_TILE_READ_PORTS-1:0] address;
     } ZobristReadPlan;
 
     typedef struct packed {
@@ -98,9 +98,9 @@ module board_update_pipeline #(
     ZobristKey zobrist_read_data[ZOBRIST_TILE_READ_PORTS];
     logic zobrist_turn_toggle, zobrist_turn_toggle_q;
     CastlePerms zobrist_castle_toggle, zobrist_castle_toggle_q;
-    logic zobrist_old_ep_enable, zobrist_new_ep_enable;
-    logic zobrist_old_ep_enable_q, zobrist_new_ep_enable_q;
-    ZobristAddr zobrist_old_ep_address, zobrist_new_ep_address;
+    logic zobrist_old_ep_valid, zobrist_new_ep_valid;
+    logic zobrist_old_ep_valid_q, zobrist_new_ep_valid_q;
+    BoardFile zobrist_old_ep_address, zobrist_new_ep_address;
     ZobristKey zobrist_old_ep_data, zobrist_new_ep_data;
     MoveEffects move_effects, move_effects_q;
     MoveEffects check_move_effects_d, check_move_effects_q;
@@ -110,24 +110,13 @@ module board_update_pipeline #(
     Tile check_mover_tile;
     Color check_mover_color;
 
-    localparam ZobristKey ZOBRIST_TURN_VALUE =
-        zobrist_value(ZobristAddr'(ZOBRIST_TURN_BLACK_ADDR));
-    localparam ZobristKey ZOBRIST_WHITE_KINGSIDE_VALUE =
-        zobrist_value(ZobristAddr'(ZOBRIST_CASTLE_BASE_ADDR));
-    localparam ZobristKey ZOBRIST_WHITE_QUEENSIDE_VALUE =
-        zobrist_value(ZobristAddr'(ZOBRIST_CASTLE_BASE_ADDR + 1));
-    localparam ZobristKey ZOBRIST_BLACK_KINGSIDE_VALUE =
-        zobrist_value(ZobristAddr'(ZOBRIST_CASTLE_BASE_ADDR + 2));
-    localparam ZobristKey ZOBRIST_BLACK_QUEENSIDE_VALUE =
-        zobrist_value(ZobristAddr'(ZOBRIST_CASTLE_BASE_ADDR + 3));
-
     genvar port_pair;
     generate
         for (port_pair = 0; port_pair < ZOBRIST_TILE_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_zobrist_rom
             sync_read_dual_port_rom #(
-                .NUM_WORDS(ZOBRIST_ENTRY_CNT),
+                .NUM_WORDS(ZOBRIST_TILE_ENTRY_CNT),
                 .WORD_SIZE($bits(ZobristKey)),
-                .MEM_INIT_FILE(ZOBRIST_MEM_INIT_FILE)
+                .MEM_INIT_FILE(ZOBRIST_TILE_MEM_INIT_FILE)
             ) zobrist_rom (
                 .clock(clk),
                 .address_a(zobrist_read_plan.address[port_pair * 2]),
@@ -142,17 +131,18 @@ module board_update_pipeline #(
 
     // Side-state hashing needs only the old and new en-passant file values.
     // Turn and castling keys are fixed constants, so keeping them out of the
-    // replicated piece ROMs halves the piece-table read-port requirement.
+    // replicated piece ROMs limits the tile table to the four move ports. The
+    // separate eight-entry EP ROM supplies both side-state reads directly.
     sync_read_dual_port_rom #(
-        .NUM_WORDS(ZOBRIST_ENTRY_CNT),
+        .NUM_WORDS(ZOBRIST_EP_ENTRY_CNT),
         .WORD_SIZE($bits(ZobristKey)),
-        .MEM_INIT_FILE(ZOBRIST_MEM_INIT_FILE)
+        .MEM_INIT_FILE(ZOBRIST_EP_MEM_INIT_FILE)
     ) zobrist_ep_rom (
         .clock(clk),
         .address_a(zobrist_old_ep_address),
         .address_b(zobrist_new_ep_address),
-        .rden_a(zobrist_old_ep_enable),
-        .rden_b(zobrist_new_ep_enable),
+        .rden_a(zobrist_old_ep_valid),
+        .rden_b(zobrist_new_ep_valid),
         .q_a(zobrist_old_ep_data),
         .q_b(zobrist_new_ep_data)
     );
@@ -361,10 +351,10 @@ module board_update_pipeline #(
     );
         zobrist_turn_toggle = (old_board.turn != new_turn);
         zobrist_castle_toggle = old_board.castle_perms ^ new_castle;
-        zobrist_old_ep_enable = old_board.has_ep;
-        zobrist_new_ep_enable = new_has_ep;
-        zobrist_old_ep_address = zobrist_ep_addr(old_board.ep_file);
-        zobrist_new_ep_address = zobrist_ep_addr(new_ep_file);
+        zobrist_old_ep_valid = old_board.has_ep;
+        zobrist_new_ep_valid = new_has_ep;
+        zobrist_old_ep_address = old_board.ep_file;
+        zobrist_new_ep_address = new_ep_file;
     endtask : plan_side_delta
 
     task automatic replace_tile(
@@ -470,8 +460,8 @@ module board_update_pipeline #(
         zobrist_read_enable_q <= zobrist_read_plan.enable;
         zobrist_turn_toggle_q <= zobrist_turn_toggle;
         zobrist_castle_toggle_q <= zobrist_castle_toggle;
-        zobrist_old_ep_enable_q <= zobrist_old_ep_enable;
-        zobrist_new_ep_enable_q <= zobrist_new_ep_enable;
+        zobrist_old_ep_valid_q <= zobrist_old_ep_valid;
+        zobrist_new_ep_valid_q <= zobrist_new_ep_valid;
         pst_read_enable_q <= pst_read_plan.enable;
         move_effects_q <= move_effects;
         check_move_effects_q <= check_move_effects_d;
@@ -536,10 +526,10 @@ module board_update_pipeline #(
 
         zobrist_turn_toggle = 1'b0;
         zobrist_castle_toggle = CastlePerms'(0);
-        zobrist_old_ep_enable = 1'b0;
-        zobrist_new_ep_enable = 1'b0;
-        zobrist_old_ep_address = ZobristAddr'(0);
-        zobrist_new_ep_address = ZobristAddr'(0);
+        zobrist_old_ep_valid = 1'b0;
+        zobrist_new_ep_valid = 1'b0;
+        zobrist_old_ep_address = BoardFile'(0);
+        zobrist_new_ep_address = BoardFile'(0);
 
         case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
@@ -580,7 +570,15 @@ module board_update_pipeline #(
                 if (from_pos == Position'('d4)  || from_pos == Position'('d0)  || to_pos == Position'('d0))  next_castle.white_queenside = 1'b0;
                 if (from_pos == Position'('d60) || from_pos == Position'('d63) || to_pos == Position'('d63)) next_castle.black_kingside = 1'b0;
                 if (from_pos == Position'('d60) || from_pos == Position'('d56) || to_pos == Position'('d56)) next_castle.black_queenside = 1'b0;
-                next_has_ep = (start_tile.piece_type == PAWN && ((moved_color == WHITE && getRank(from_pos) == BoardRank'('d1) && getRank(to_pos) == BoardRank'('d3)) || (moved_color == BLACK && getRank(from_pos) == BoardRank'('d6) && getRank(to_pos) == BoardRank'('d4))));
+                next_has_ep = start_tile.piece_type == PAWN
+                    && ((moved_color == WHITE
+                            && getRank(from_pos) == BoardRank'(1)
+                            && getRank(to_pos) == BoardRank'(3))
+                        || (moved_color == BLACK
+                            && getRank(from_pos) == BoardRank'(6)
+                            && getRank(to_pos) == BoardRank'(4)))
+                    && hasEnPassantCapturer(
+                        in.board, Color'(~in.board.turn), next_ep_file);
                 plan_side_delta(in.board, Color'(~in.board.turn), next_castle, next_has_ep, next_ep_file);
             end
 
@@ -635,17 +633,35 @@ module board_update_pipeline #(
                 automatic Position to_pos = in.move.to_pos;
                 automatic Tile old_tile = in.board.tiles[to_pos];
                 automatic Tile new_tile = Tile'(in.set_data[3:0]);
+                automatic FullBoard new_board = in.board;
+                automatic logic new_has_ep;
+                new_board.tiles[to_pos] = new_tile;
+                new_has_ep = in.board.has_ep
+                    && hasEnPassantCapturer(
+                        new_board, in.board.turn, in.board.ep_file);
                 plan.address[0] = zobrist_tile_addr(old_tile, to_pos);
                 plan.address[1] = zobrist_tile_addr(new_tile, to_pos);
                 plan.enable[0] = (old_tile.piece_type != NULL_PIECE);
                 plan.enable[1] = (new_tile.piece_type != NULL_PIECE);
+                plan_side_delta(in.board, in.board.turn, in.board.castle_perms,
+                    new_has_ep, in.board.ep_file);
             end
-            BOARD_SET_TURN_OP:
-                plan_side_delta(in.board, Color'(in.set_data[0]), in.board.castle_perms, in.board.has_ep, in.board.ep_file);
+            BOARD_SET_TURN_OP: begin
+                automatic Color new_turn = Color'(in.set_data[0]);
+                automatic logic new_has_ep = in.board.has_ep
+                    && hasEnPassantCapturer(in.board, new_turn, in.board.ep_file);
+                plan_side_delta(in.board, new_turn, in.board.castle_perms,
+                    new_has_ep, in.board.ep_file);
+            end
             BOARD_SET_CASTLE_PERMS_OP:
                 plan_side_delta(in.board, in.board.turn, CastlePerms'(in.set_data[3:0]), in.board.has_ep, in.board.ep_file);
-            BOARD_SET_EN_PASSANT_OP:
-                plan_side_delta(in.board, in.board.turn, in.board.castle_perms, in.set_data[0], BoardFile'(in.set_data[3:1]));
+            BOARD_SET_EN_PASSANT_OP: begin
+                automatic BoardFile new_ep_file = BoardFile'(in.set_data[3:1]);
+                automatic logic new_has_ep = in.set_data[0]
+                    && hasEnPassantCapturer(in.board, in.board.turn, new_ep_file);
+                plan_side_delta(in.board, in.board.turn, in.board.castle_perms,
+                    new_has_ep, new_ep_file);
+            end
             default: begin end
         endcase
         zobrist_read_plan = plan;
@@ -751,7 +767,7 @@ module board_update_pipeline #(
                 out.zobrist_key ^= zobrist_read_data[port_idx];
         end
         if (zobrist_turn_toggle_q)
-            out.zobrist_key ^= ZOBRIST_TURN_VALUE;
+            out.zobrist_key ^= ZOBRIST_TURN_BLACK_VALUE;
         if (zobrist_castle_toggle_q.white_kingside)
             out.zobrist_key ^= ZOBRIST_WHITE_KINGSIDE_VALUE;
         if (zobrist_castle_toggle_q.white_queenside)
@@ -760,9 +776,9 @@ module board_update_pipeline #(
             out.zobrist_key ^= ZOBRIST_BLACK_KINGSIDE_VALUE;
         if (zobrist_castle_toggle_q.black_queenside)
             out.zobrist_key ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
-        if (zobrist_old_ep_enable_q)
+        if (zobrist_old_ep_valid_q)
             out.zobrist_key ^= zobrist_old_ep_data;
-        if (zobrist_new_ep_enable_q)
+        if (zobrist_new_ep_valid_q)
             out.zobrist_key ^= zobrist_new_ep_data;
 
         case (in.board_op)
@@ -837,7 +853,7 @@ module board_update_pipeline #(
                 if (from_pos == Position'('d60) || from_pos == Position'('d63) || to_pos == Position'('d63)) next_castle.black_kingside = 1'b0;
                 if (from_pos == Position'('d60) || from_pos == Position'('d56) || to_pos == Position'('d56)) next_castle.black_queenside = 1'b0;
 
-                next_has_ep = (start_tile.piece_type == PAWN && ((moved_color == WHITE && getRank(from_pos) == BoardRank'('d1) && getRank(to_pos) == BoardRank'('d3)) || (moved_color == BLACK && getRank(from_pos) == BoardRank'('d6) && getRank(to_pos) == BoardRank'('d4))));
+                next_has_ep = zobrist_new_ep_valid_q;
                 next_halfmove = (is_ep || end_tile.piece_type != NULL_PIECE || start_tile.piece_type == PAWN) ? HalfmoveClock'('d0) : in.board.halfmove_clock + HalfmoveClock'('d1);
                 replace_side_data(out.board, Color'(~in.board.turn), next_castle, next_has_ep, next_ep_file, next_halfmove);
             end
@@ -926,10 +942,13 @@ module board_update_pipeline #(
                     - signed_piece_score(in.board.tiles[to_pos], pst_killed_out);
                 replace_tile(out.board, out.piece_count,
                     to_pos, in.board.tiles[to_pos], new_tile);
+                out.board.has_ep = zobrist_new_ep_valid_q;
             end
 
             BOARD_SET_TURN_OP: begin
-                replace_side_data(out.board, Color'(in.set_data[0]), in.board.castle_perms, in.board.has_ep, in.board.ep_file, in.board.halfmove_clock);
+                automatic Color new_turn = Color'(in.set_data[0]);
+                replace_side_data(out.board, new_turn, in.board.castle_perms,
+                    zobrist_new_ep_valid_q, in.board.ep_file, in.board.halfmove_clock);
             end
 
             BOARD_SET_CASTLE_PERMS_OP: begin
@@ -937,7 +956,9 @@ module board_update_pipeline #(
             end
 
             BOARD_SET_EN_PASSANT_OP: begin
-                replace_side_data(out.board, in.board.turn, in.board.castle_perms, in.set_data[0], BoardFile'(in.set_data[3:1]), in.board.halfmove_clock);
+                automatic BoardFile new_ep_file = BoardFile'(in.set_data[3:1]);
+                replace_side_data(out.board, in.board.turn, in.board.castle_perms,
+                    zobrist_new_ep_valid_q, new_ep_file, in.board.halfmove_clock);
             end
 
             BOARD_SET_HALFMOVE_CLOCK_OP: begin

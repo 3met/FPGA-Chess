@@ -4,6 +4,7 @@ import general_chess_defs::*;
 import chess_helper_funcs::*;
 import board_update_pipeline_defs::*;
 import zobrist_defs::*;
+import zobrist_values_pkg::*;
 
 module tb_board_update_pipeline;
 
@@ -25,7 +26,8 @@ module tb_board_update_pipeline;
     logic mover_in_check_out;
 
     PstScore pst_values[0:(6 * 64)-1];
-    ZobristKey zobrist_values[0:ZOBRIST_ENTRY_CNT-1];
+    ZobristKey zobrist_tile_values[0:ZOBRIST_TILE_ENTRY_CNT-1];
+    ZobristKey zobrist_ep_values[0:ZOBRIST_EP_ENTRY_CNT-1];
 
     FullBoard ref_board;
     MoveRecord ref_history[0:MAX_PLY_COUNT-1];
@@ -141,23 +143,37 @@ module tb_board_update_pipeline;
             return ZobristKey'(0);
         end
 
-        return zobrist_values[zobrist_tile_addr(normalized, pos)];
+        return zobrist_tile_values[zobrist_tile_addr(normalized, pos)];
+    endfunction
+
+    function automatic logic ref_ep_has_capturer(
+        input FullBoard board,
+        input Color turn,
+        input BoardFile ep_file
+    );
+        automatic BoardRank pawn_rank = turn == WHITE ? BoardRank'(4) : BoardRank'(3);
+        automatic Tile pawn = Tile'({turn, PAWN});
+
+        return (ep_file != BoardFile'(0)
+                && board.tiles[getPosition(pawn_rank, ep_file - BoardFile'(1))] == pawn)
+            || (ep_file != BoardFile'(7)
+                && board.tiles[getPosition(pawn_rank, ep_file + BoardFile'(1))] == pawn);
     endfunction
 
     function automatic ZobristKey ref_zobrist_full(input FullBoard board);
         automatic ZobristKey key = ZobristKey'(0);
 
         if (board.turn == BLACK) begin
-            key ^= zobrist_values[ZOBRIST_TURN_BLACK_ADDR];
+            key ^= ZOBRIST_TURN_BLACK_VALUE;
         end
 
-        if (board.castle_perms.white_kingside)  key ^= zobrist_values[zobrist_castle_addr(0)];
-        if (board.castle_perms.white_queenside) key ^= zobrist_values[zobrist_castle_addr(1)];
-        if (board.castle_perms.black_kingside)  key ^= zobrist_values[zobrist_castle_addr(2)];
-        if (board.castle_perms.black_queenside) key ^= zobrist_values[zobrist_castle_addr(3)];
+        if (board.castle_perms.white_kingside)  key ^= ZOBRIST_WHITE_KINGSIDE_VALUE;
+        if (board.castle_perms.white_queenside) key ^= ZOBRIST_WHITE_QUEENSIDE_VALUE;
+        if (board.castle_perms.black_kingside)  key ^= ZOBRIST_BLACK_KINGSIDE_VALUE;
+        if (board.castle_perms.black_queenside) key ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
 
-        if (board.has_ep) begin
-            key ^= zobrist_values[zobrist_ep_addr(board.ep_file)];
+        if (board.has_ep && ref_ep_has_capturer(board, board.turn, board.ep_file)) begin
+            key ^= zobrist_ep_values[board.ep_file];
         end
 
         for (int pos = 0; pos < 64; pos++) begin
@@ -254,10 +270,14 @@ module tb_board_update_pipeline;
         ref_board.tiles[move.to_pos] = tile;
         if (tile.piece_type == KING)
             ref_board.king_positions[tile.piece_color] = move.to_pos;
+        ref_board.has_ep = ref_board.has_ep
+            && ref_ep_has_capturer(ref_board, ref_board.turn, ref_board.ep_file);
     endtask
 
     task automatic ref_apply_set_turn(input logic [6:0] data);
         ref_board.turn = Color'(data[0]);
+        ref_board.has_ep = ref_board.has_ep
+            && ref_ep_has_capturer(ref_board, ref_board.turn, ref_board.ep_file);
     endtask
 
     task automatic ref_apply_set_castle_perms(input logic [6:0] data);
@@ -265,8 +285,9 @@ module tb_board_update_pipeline;
     endtask
 
     task automatic ref_apply_set_en_passant(input logic [6:0] data);
-        ref_board.has_ep = data[0];
         ref_board.ep_file = BoardFile'(data[3:1]);
+        ref_board.has_ep = data[0]
+            && ref_ep_has_capturer(ref_board, ref_board.turn, ref_board.ep_file);
     endtask
 
     task automatic ref_apply_set_halfmove_clock(input logic [6:0] data);
@@ -322,7 +343,12 @@ module tb_board_update_pipeline;
         if (from_pos == Position'('d60) || from_pos == Position'('d63) || to_pos == Position'('d63)) next_castle.black_kingside = 1'b0;
         if (from_pos == Position'('d60) || from_pos == Position'('d56) || to_pos == Position'('d56)) next_castle.black_queenside = 1'b0;
 
-        next_has_ep = (start_tile.piece_type == PAWN && ((moved_color == WHITE && getRank(from_pos) == BoardRank'('d1) && getRank(to_pos) == BoardRank'('d3)) || (moved_color == BLACK && getRank(from_pos) == BoardRank'('d6) && getRank(to_pos) == BoardRank'('d4))));
+        next_has_ep = start_tile.piece_type == PAWN
+            && ((moved_color == WHITE && getRank(from_pos) == BoardRank'(1)
+                    && getRank(to_pos) == BoardRank'(3))
+                || (moved_color == BLACK && getRank(from_pos) == BoardRank'(6)
+                    && getRank(to_pos) == BoardRank'(4)))
+            && ref_ep_has_capturer(ref_board, Color'(~ref_board.turn), getFile(to_pos));
         next_halfmove = (is_ep || end_tile.piece_type != NULL_PIECE || start_tile.piece_type == PAWN) ? HalfmoveClock'(0) : ref_board.halfmove_clock + HalfmoveClock'(1);
 
         ref_board.turn = Color'(~ref_board.turn);
@@ -578,12 +604,15 @@ module tb_board_update_pipeline;
         setup_start_position();
 
         push_move(Position'(12), Position'(28), PROMO_QUEEN, "e2e4");
+        expect_equal(!ref_board.has_ep, "e2e4 drops uncapturable en-passant target");
         expect_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0", "after e2e4");
         push_move(Position'(53), Position'(37), PROMO_QUEEN, "f7f5");
         expect_fen("rnbqkbnr/ppppp1pp/8/5p2/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0", "after f7f5");
         push_move(Position'(28), Position'(37), PROMO_QUEEN, "e4xf5");
         expect_fen("rnbqkbnr/ppppp1pp/8/5P2/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0", "after e4xf5");
         push_move(Position'(52), Position'(36), PROMO_QUEEN, "e7e5");
+        expect_equal(ref_board.has_ep && ref_board.ep_file == BoardFile'(4),
+            "e7e5 retains capturable en-passant target");
         expect_fen("rnbqkbnr/pppp2pp/8/4pP2/8/8/PPPP1PPP/RNBQKBNR w KQkq e6 0", "after e7e5");
         push_move(Position'(37), Position'(44), PROMO_QUEEN, "f5xe6 ep");
         expect_fen("rnbqkbnr/pppp2pp/4P3/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0", "after ep capture");
@@ -638,6 +667,8 @@ module tb_board_update_pipeline;
 
     task automatic test_null_move();
         setup_start_position();
+        set_tile(EMPTY_TILE, Position'(11), "null remove d2 pawn");
+        set_tile(WHITE_PAWN, Position'(35), "null place d5 pawn");
         set_en_passant(1'b1, BoardFile'(4), "null setup en passant");
         set_halfmove_clock(HalfmoveClock'(17), "null setup halfmove");
         push_null("push null");
@@ -650,6 +681,28 @@ module tb_board_update_pipeline;
             "null reverse restores en passant");
         expect_equal(ref_board.halfmove_clock == HalfmoveClock'(17),
             "null reverse restores halfmove clock");
+    endtask
+
+    task automatic test_en_passant_canonicalization();
+        automatic ZobristKey key_without_ep;
+
+        setup_start_position();
+        key_without_ep = ref_zobrist;
+        set_en_passant(1'b1, BoardFile'(4), "ignore uncapturable en passant");
+        expect_equal(!ref_board.has_ep, "uncapturable en-passant state is canonicalized away");
+        expect_equal(ref_zobrist == key_without_ep,
+            "uncapturable en-passant target does not change the key");
+
+        set_tile(EMPTY_TILE, Position'(11), "canonical EP remove d2 pawn");
+        set_tile(WHITE_PAWN, Position'(35), "canonical EP place d5 pawn");
+        key_without_ep = ref_zobrist;
+        set_en_passant(1'b1, BoardFile'(4), "retain capturable en passant");
+        expect_equal(ref_board.has_ep, "capturable en-passant state is retained");
+        expect_equal(ref_zobrist != key_without_ep,
+            "capturable en-passant target changes the key");
+        set_tile(EMPTY_TILE, Position'(35), "remove sole en-passant capturer");
+        expect_equal(!ref_board.has_ep,
+            "removing the sole capturer clears the en-passant state and key");
     endtask
 
     task automatic setup_castle_position(input Color color, input bit kingside);
@@ -903,7 +956,8 @@ module tb_board_update_pipeline;
 
     initial begin
         $readmemh("hardware/data/pst_values/pst_values.hex", pst_values);
-        $readmemh(ZOBRIST_MEM_INIT_FILE, zobrist_values);
+        $readmemh(ZOBRIST_TILE_MEM_INIT_FILE, zobrist_tile_values);
+        $readmemh(ZOBRIST_EP_MEM_INIT_FILE, zobrist_ep_values);
 
         clk = 1'b0;
         reset_ref_model();
@@ -915,6 +969,7 @@ module tb_board_update_pipeline;
         test_back_to_back_king_safety();
         test_main_move_sequence();
         test_null_move();
+        test_en_passant_canonicalization();
         test_castles();
         test_set_tile_overwrite();
         test_commit_history_not_written();

@@ -47,11 +47,11 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Board Setup
 
-The engine sets up a board through Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
+The engine sets up a board through Set Tile, Set Castle Perms, Set Turn, Set En Passant, and Set Halfmove Clock operations in that order. Applying the turn before en passant lets the pipeline canonicalize the target for the correct side to move. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
 
 ## Hashing
 
-Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. The deterministic generator produces the ROM data and SystemVerilog reference package used by RTL; pawn entries on unreachable ranks are zero.
+Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king-safety is checked through the normal move path. The deterministic generator derives uniform keys from SHA-256 with fixed seed `0`, validates their distribution and all three- and four-key XOR relations, emits separate piece-square and eight-entry en passant ROM images, and emits the fixed turn and castling constants used by RTL. Pawn entries on unreachable ranks are zero.
 
 The pipeline always maintains the cached king squares, Zobrist key, incremental material/PST evaluation, and six-bit piece count. The shared tile-replacement path increments the count only for empty-to-piece changes and decrements it only for piece-to-empty changes, so ordinary captures, en passant, setup, and reversal need no board scan. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
 

@@ -1019,10 +1019,10 @@ module search_controller #(
             setup_req.direct_board_op = BOARD_SET_CASTLE_PERMS_OP;
             setup_req.board_wr_data = 7'b000_1111;
         end else if (idx == 7'd65) begin
-            setup_req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
+            setup_req.direct_board_op = BOARD_SET_TURN_OP;
             setup_req.board_wr_data = 7'd0;
         end else if (idx == 7'd66) begin
-            setup_req.direct_board_op = BOARD_SET_TURN_OP;
+            setup_req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
             setup_req.board_wr_data = 7'd0;
         end else begin
             setup_req.direct_board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
