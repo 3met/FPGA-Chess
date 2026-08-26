@@ -24,9 +24,9 @@ Parameters configure the build ID, controller clock frequency, thread count, sta
 
 ## Commands
 
-The engine command byte and payload formats are defined in [laptop-fpga-communication.md](../protocols/laptop-fpga-communication.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
+The engine command byte and payload formats are defined in [host-fpga-protocol.md](../protocols/host-fpga-protocol.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
-The external protocol exposes `Set board` as a single fixed-size command. The engine decomposes it into multiple direct-board operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
+The external protocol exposes `Set board` as a single fixed-size command. The engine decomposes it into board-update operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
 
 ## States
 
@@ -34,7 +34,7 @@ The external protocol exposes `Set board` as a single fixed-size command. The en
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
 | Idle            | Engine is awaiting a command byte.                                                                          |
 | Receive Payload | Engine is collecting the fixed-size payload for the current command.                                        |
-| Direct Board    | Engine is applying setup or make-move operations through the search controller direct-board path.           |
+| Board Update    | Engine is applying position setup or game moves through the search controller's board-update path.          |
 | New Game        | Engine is clearing game/search state and resetting the active board to the normal starting position.        |
 | Search          | Engine has started a search and waits for completion, kill, or error.                                       |
 | Perft           | Engine has started a perft operation and waits for completion, kill, or error.                              |

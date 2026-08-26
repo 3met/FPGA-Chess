@@ -1,7 +1,7 @@
 // Dual-class frontend. Noisy and quiet jobs occupy independent lanes while the
 // shared pop interface preserves global bucket priority.
 
-import general_chess_defs::*;
+import chess_defs::*;
 import move_generator_defs::*;
 
 module move_generator #(

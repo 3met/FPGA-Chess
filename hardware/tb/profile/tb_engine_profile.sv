@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-import general_chess_defs::*;
+import chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 import move_generator_defs::*;

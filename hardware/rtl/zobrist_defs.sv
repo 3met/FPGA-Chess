@@ -2,7 +2,7 @@
 
 package zobrist_defs;
 
-    import general_chess_defs::*;
+    import chess_defs::*;
 
     localparam int ZOBRIST_PIECE_CNT = 6;
     localparam int ZOBRIST_COLOR_CNT = 2;

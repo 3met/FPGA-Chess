@@ -1,5 +1,5 @@
 // Shared full-key threefold-repetition history and lookup pipeline.
-import general_chess_defs::*;
+import chess_defs::*;
 
 module repetition_checker #(
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,

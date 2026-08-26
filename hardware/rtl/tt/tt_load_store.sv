@@ -1,6 +1,6 @@
 // By Emet Behrendt
 
-import general_chess_defs::*;
+import chess_defs::*;
 import tt_defs::*;
 
 module tt_load_store #(

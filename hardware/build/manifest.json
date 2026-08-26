@@ -8,8 +8,8 @@
   },
   "source_sets": {
     "common": [
-      "hardware/rtl/defs.sv",
-      "hardware/rtl/helper_functions.sv"
+      "hardware/rtl/chess_defs.sv",
+      "hardware/rtl/chess_helpers.sv"
     ],
     "async-fifo": [
       "hardware/rtl/memory/async_fifo.sv"

@@ -7,8 +7,8 @@ import tt_defs::*;
 module engine #(
     parameter logic [63:0] BUILD_ID = 64'h0000_0000_0000_0000,
     parameter int CLOCK_FREQ = 100_000_000,
-    parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
-    parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT,
+    parameter int SEARCH_THREAD_COUNT = chess_defs::THREAD_COUNT,
+    parameter int SEARCH_STACK_DEPTH = chess_defs::MAX_PLY_COUNT,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
     parameter int TT_CACHE_INDEX_BITS = 10,
     parameter int unsigned LMR_A_Q8 = 192,

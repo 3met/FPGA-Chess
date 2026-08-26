@@ -312,6 +312,12 @@ class CacheDataset:
     def __len__(self) -> int:
         return self.count
 
+    def __enter__(self) -> "CacheDataset":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def __getitem__(self, index: int):
         import torch
 

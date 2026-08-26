@@ -1,6 +1,6 @@
 # Data Model
 
-This document defines common datatypes and constants shared by the hardware modules. The corresponding SystemVerilog package is `general_chess_defs` in `hardware/rtl/defs.sv`.
+This document defines common datatypes and constants shared by the hardware modules. The corresponding SystemVerilog package is `chess_defs` in `hardware/rtl/chess_defs.sv`.
 
 Unless otherwise stated, multi-bit scalar values are unsigned. Numeric enum values are assigned in declaration order starting at zero.
 
@@ -12,7 +12,7 @@ Unless otherwise stated, multi-bit scalar values are unsigned. Numeric enum valu
 | ----- | ------- | ------- |
 | `0`   | `WHITE` | White piece or white side to move. |
 | `1`   | `BLACK` | Black piece or black side to move. |
-| `x`   | `UNKNOWN_COLOR` | Unknown or don't-care color. Used for empty tiles. |
+| `x`   | `UNKNOWN_COLOR` | Unknown or don't-care color used for empty tiles. |
 
 ### `PieceType`
 
@@ -75,7 +75,7 @@ Both are 3 bits wide.
 | `BoardRank` | Rank index from `0` for rank 1 through `7` for rank 8. |
 | `BoardFile` | File index from `0` for file a through `7` for file h. |
 
-The helper functions `getRank`, `getFile`, and `getPosition` follow the same convention.
+The helper functions `get_rank`, `get_file`, and `get_position` follow the same convention.
 
 `KingPositions` contains two `Position` values indexed by `Color`. `king_positions[WHITE]` and `king_positions[BLACK]` are maintained with the tiles for every complete legal position.
 
@@ -110,9 +110,9 @@ Common tile constants:
 
 `NULL_MOVE` is encoded as `{from_pos=0, to_pos=0, promo_piece=x}`.
 
-### `CastlePerms`
+### `CastlingRights`
 
-`CastlePerms` is a 4-bit packed struct.
+`CastlingRights` is a 4-bit packed struct.
 
 | Bit | Field | Meaning |
 | --- | ----- | ------- |
@@ -139,7 +139,7 @@ The canonical internal representation is two fields:
 | `tiles` | `64 * 4` | Board tiles indexed by `Position`. |
 | `king_positions` | 12 | Cached White and Black king squares indexed by `Color`. |
 | `turn` | 1 | Side to move. |
-| `castle_perms` | 4 | Castling permissions. |
+| `castling_rights` | 4 | Available castling rights. |
 | `has_ep` | 1 | Whether canonical en passant state is available. |
 | `ep_file` | 3 | En passant file if available. |
 | `halfmove_clock` | 7 | Halfmove clock for the 50-move rule. |

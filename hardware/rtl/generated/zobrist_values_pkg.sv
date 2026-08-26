@@ -2,7 +2,7 @@
 
 package zobrist_values_pkg;
 
-    import general_chess_defs::*;
+    import chess_defs::*;
 
     localparam ZobristKey ZOBRIST_TURN_BLACK_VALUE = ZobristKey'(64'h7E0046D0B72EC492);
     localparam ZobristKey ZOBRIST_WHITE_KINGSIDE_VALUE = ZobristKey'(64'h8479F5F333F79896);

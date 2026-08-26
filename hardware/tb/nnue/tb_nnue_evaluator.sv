@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-import general_chess_defs::*;
+import chess_defs::*;
 import nnue_defs::*;
 
 module tb_nnue_evaluator;

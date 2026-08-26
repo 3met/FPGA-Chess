@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-import general_chess_defs::*;
+import chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 import nnue_defs::*;
@@ -197,7 +197,7 @@ module tb_search_controller;
 
         request = EngineControllerRequest'('0);
         request.operation = ENGINE_CTRL_IDLE;
-        request.direct_board_op = BOARD_IDLE_OP;
+        request.board_op = BOARD_IDLE_OP;
         return request;
     endfunction : zero_request
 
@@ -317,15 +317,15 @@ module tb_search_controller;
             "new game leaves the NNUE datapath idle and ready");
     endtask : new_game
 
-    task automatic make_direct_move(input Move move, input string label);
+    task automatic apply_game_move(input Move move, input string label);
         automatic EngineControllerRequest request = zero_request();
 
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_COMMIT_MOVE_OP;
+        request.operation = ENGINE_CTRL_BOARD_UPDATE;
+        request.board_op = BOARD_COMMIT_MOVE_OP;
         request.move = move;
         hold_request_until_ready(request, label);
         check(!resp.error, {label, " response has no error"});
-    endtask : make_direct_move
+    endtask : apply_game_move
 
     task automatic run_perft(input logic [7:0] depth, input NodeCountType expected_nodes, input string label);
         automatic EngineControllerRequest request = zero_request();
@@ -545,15 +545,15 @@ module tb_search_controller;
         automatic int rejects_before;
 
         new_game();
-        make_direct_move(white_out, {label, " establish C"});
+        apply_game_move(white_out, {label, " establish C"});
         set_halfmove_clock(HalfmoveClock'(5), {label, " reset history at C"});
-        make_direct_move(black_out, {label, " first black out"});
-        make_direct_move(white_back, {label, " first white back"});
-        make_direct_move(black_back, {label, " establish R"});
-        make_direct_move(white_out, {label, " second C"});
-        make_direct_move(black_out, {label, " second black out"});
-        make_direct_move(white_back, {label, " second white back"});
-        make_direct_move(black_back, {label, " second R"});
+        apply_game_move(black_out, {label, " first black out"});
+        apply_game_move(white_back, {label, " first white back"});
+        apply_game_move(black_back, {label, " establish R"});
+        apply_game_move(white_out, {label, " second C"});
+        apply_game_move(black_out, {label, " second black out"});
+        apply_game_move(white_back, {label, " second white back"});
+        apply_game_move(black_back, {label, " second R"});
         preload_root_tt(white_out, EvalScore'(600), TTDepth'(9));
         rejects_before = tt_validation_repeat_reject_count;
         start_search_depth(8'd8, {label, " search"});
@@ -575,15 +575,15 @@ module tb_search_controller;
         automatic int rejects_before;
 
         new_game();
-        make_direct_move(white_out, {label, " establish I"});
-        make_direct_move(black_out, {label, " establish B"});
+        apply_game_move(white_out, {label, " establish I"});
+        apply_game_move(black_out, {label, " establish B"});
         set_halfmove_clock(HalfmoveClock'(5), {label, " reset history at B"});
-        make_direct_move(white_back, {label, " first white back"});
-        make_direct_move(black_back, {label, " establish R"});
-        make_direct_move(white_out, {label, " first I"});
-        make_direct_move(black_out, {label, " second B"});
-        make_direct_move(white_back, {label, " second white back"});
-        make_direct_move(black_back, {label, " second R"});
+        apply_game_move(white_back, {label, " first white back"});
+        apply_game_move(black_back, {label, " establish R"});
+        apply_game_move(white_out, {label, " first I"});
+        apply_game_move(black_out, {label, " second B"});
+        apply_game_move(white_back, {label, " second white back"});
+        apply_game_move(black_back, {label, " second R"});
         preload_root_tt(white_out, EvalScore'(600), TTDepth'(9));
         rejects_before = tt_validation_repeat_reject_count;
         start_search_depth(8'd8, {label, " search"});
@@ -920,8 +920,8 @@ module tb_search_controller;
         automatic EngineControllerRequest request = zero_request();
         automatic logic [3:0] tile_bits;
 
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_SET_TILE_OP;
+        request.operation = ENGINE_CTRL_BOARD_UPDATE;
+        request.board_op = BOARD_SET_TILE_OP;
         request.move.to_pos = pos;
         tile_bits = (tile.piece_type == NULL_PIECE) ? 4'h0 : tile;
         request.board_wr_data = {3'b000, tile_bits};
@@ -932,28 +932,28 @@ module tb_search_controller;
     task automatic set_turn(input Color color, input string label);
         automatic EngineControllerRequest request = zero_request();
 
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_SET_TURN_OP;
+        request.operation = ENGINE_CTRL_BOARD_UPDATE;
+        request.board_op = BOARD_SET_TURN_OP;
         request.board_wr_data = {6'b000000, color};
         hold_request_until_ready(request, label);
         check(!resp.error, {label, " no error"});
     endtask : set_turn
 
-    task automatic set_castle_perms(input CastlePerms castle_perms, input string label);
+    task automatic set_castling_rights(input CastlingRights castling_rights, input string label);
         automatic EngineControllerRequest request = zero_request();
 
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_SET_CASTLE_PERMS_OP;
-        request.board_wr_data = {3'b000, castle_perms};
+        request.operation = ENGINE_CTRL_BOARD_UPDATE;
+        request.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
+        request.board_wr_data = {3'b000, castling_rights};
         hold_request_until_ready(request, label);
         check(!resp.error, {label, " no error"});
-    endtask : set_castle_perms
+    endtask : set_castling_rights
 
     task automatic set_en_passant(input logic has_ep, input BoardFile ep_file, input string label);
         automatic EngineControllerRequest request = zero_request();
 
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_SET_EN_PASSANT_OP;
+        request.operation = ENGINE_CTRL_BOARD_UPDATE;
+        request.board_op = BOARD_SET_EN_PASSANT_OP;
         request.board_wr_data = {3'b000, ep_file, has_ep};
         hold_request_until_ready(request, label);
         check(!resp.error, {label, " no error"});
@@ -962,15 +962,15 @@ module tb_search_controller;
     task automatic set_halfmove_clock(input HalfmoveClock halfmove_clock, input string label);
         automatic EngineControllerRequest request = zero_request();
 
-        request.operation = ENGINE_CTRL_DIRECT_BOARD;
-        request.direct_board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+        request.operation = ENGINE_CTRL_BOARD_UPDATE;
+        request.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
         request.board_wr_data = halfmove_clock;
         hold_request_until_ready(request, label);
         check(!resp.error, {label, " no error"});
     endtask : set_halfmove_clock
 
     // Position builders always follow New Game, so clear only occupied start
-    // squares instead of issuing 64 mostly redundant direct-board requests.
+    // squares instead of issuing 64 mostly redundant board-update requests.
     task automatic clear_start_position(input string label);
         for (int pos = 0; pos < 16; pos++) begin
             set_tile(EMPTY_TILE, Position'(pos), $sformatf("%s clear square %0d", label, pos));
@@ -978,7 +978,7 @@ module tb_search_controller;
         for (int pos = 48; pos < 64; pos++) begin
             set_tile(EMPTY_TILE, Position'(pos), $sformatf("%s clear square %0d", label, pos));
         end
-        set_castle_perms(CastlePerms'(4'b0000), {label, " clear castle perms"});
+        set_castling_rights(CastlingRights'(4'b0000), {label, " clear castling rights"});
     endtask : clear_start_position
 
     task automatic setup_kings_only();
@@ -992,19 +992,19 @@ module tb_search_controller;
                 set_tile(EMPTY_TILE, Position'(pos), $sformatf("clear square %0d", pos));
             end
         end
-        set_castle_perms(CastlePerms'(4'b0000), "clear castle perms for kings only");
+        set_castling_rights(CastlingRights'(4'b0000), "clear castling rights for kings only");
     endtask : setup_kings_only
 
     task automatic setup_castling_perft_position();
-        automatic CastlePerms castle_perms;
+        automatic CastlingRights castling_rights;
 
-        castle_perms = CastlePerms'('0);
-        castle_perms.white_kingside = 1'b1;
+        castling_rights = CastlingRights'('0);
+        castling_rights.white_kingside = 1'b1;
         clear_start_position("castling perft");
         set_tile(WHITE_KING, Position'(4), "castling perft white king e1");
         set_tile(WHITE_ROOK, Position'(7), "castling perft white rook h1");
         set_tile(BLACK_KING, Position'(56), "castling perft black king a8");
-        set_castle_perms(castle_perms, "castling perft white kingside right");
+        set_castling_rights(castling_rights, "castling perft white kingside right");
         set_turn(WHITE, "castling perft white to move");
     endtask : setup_castling_perft_position
 
@@ -1054,7 +1054,7 @@ module tb_search_controller;
         setup_kings_only();
         set_tile(WHITE_ROOK, Position'(0), "place white rook a1");
         set_tile(BLACK_QUEEN, Position'(56), "place black queen a8");
-        set_castle_perms(CastlePerms'(4'b0000), "clear castle perms");
+        set_castling_rights(CastlingRights'(4'b0000), "clear castling rights");
         set_turn(WHITE, "white to move");
     endtask : setup_rook_takes_queen
 
@@ -1062,7 +1062,7 @@ module tb_search_controller;
         setup_kings_only();
         set_tile(BLACK_ROOK, Position'(56), "place black rook a8");
         set_tile(WHITE_QUEEN, Position'(0), "place white queen a1");
-        set_castle_perms(CastlePerms'(4'b0000), "clear castle perms for black capture");
+        set_castling_rights(CastlingRights'(4'b0000), "clear castling rights for black capture");
         set_turn(BLACK, "black to move");
     endtask : setup_black_rook_takes_queen
 
@@ -1174,10 +1174,10 @@ module tb_search_controller;
     endtask : run_halfmove_draw_search
 
     task automatic repeat_knight_shuffle_once(input string label);
-        make_direct_move(make_move(Position'(6), Position'(21), PROMO_QUEEN), {label, " g1f3"});
-        make_direct_move(make_move(Position'(62), Position'(45), PROMO_QUEEN), {label, " g8f6"});
-        make_direct_move(make_move(Position'(21), Position'(6), PROMO_QUEEN), {label, " f3g1"});
-        make_direct_move(make_move(Position'(45), Position'(62), PROMO_QUEEN), {label, " f6g8"});
+        apply_game_move(make_move(Position'(6), Position'(21), PROMO_QUEEN), {label, " g1f3"});
+        apply_game_move(make_move(Position'(62), Position'(45), PROMO_QUEEN), {label, " g8f6"});
+        apply_game_move(make_move(Position'(21), Position'(6), PROMO_QUEEN), {label, " f3g1"});
+        apply_game_move(make_move(Position'(45), Position'(62), PROMO_QUEEN), {label, " f6g8"});
     endtask : repeat_knight_shuffle_once
 
     task automatic run_repetition_draw_search(input string label);
@@ -1314,10 +1314,10 @@ module tb_search_controller;
 
         // Opposite-direction moves h2h4 and h5h3 must have distinct mask identities.
         new_game();
-        make_direct_move(make_move(Position'(12), Position'(20), PROMO_QUEEN), "perft regression e2e3");
-        make_direct_move(make_move(Position'(48), Position'(40), PROMO_QUEEN), "perft regression a7a6");
-        make_direct_move(make_move(Position'(3), Position'(39), PROMO_QUEEN), "perft regression d1h5");
-        make_direct_move(make_move(Position'(40), Position'(32), PROMO_QUEEN), "perft regression a6a5");
+        apply_game_move(make_move(Position'(12), Position'(20), PROMO_QUEEN), "perft regression e2e3");
+        apply_game_move(make_move(Position'(48), Position'(40), PROMO_QUEEN), "perft regression a7a6");
+        apply_game_move(make_move(Position'(3), Position'(39), PROMO_QUEEN), "perft regression d1h5");
+        apply_game_move(make_move(Position'(40), Position'(32), PROMO_QUEEN), "perft regression a6a5");
         run_perft(8'd1, NodeCountType'(44), "queen sortie perft depth 1");
 
         new_game();
@@ -1377,7 +1377,7 @@ module tb_search_controller;
         run_qsearch_quiet_evasion_test("qsearch quiet check evasion");
 
         new_game();
-        make_direct_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4");
+        apply_game_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4");
         run_perft(8'd1, NodeCountType'(20), "after e2e4 perft depth 1");
 
         new_game();

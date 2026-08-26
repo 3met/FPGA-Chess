@@ -1,6 +1,6 @@
 # Engine Runtime Profiling
 
-`python -m tools.hardware_build profile` runs the named test-position suite under Verilator or ModelSim/Questa and prints aggregate statistics. `python -m tools.hardware_build profile_position` runs one explicitly supplied FEN and prints the detailed statistics for that position. Both commands collect measurements in the testbench rather than synthesizing large instrumentation counters into the FPGA. The default `auto` backend prefers Verilator when available.
+`python -m tools.hardware_build profile` runs the named test-position suite under Verilator or ModelSim/Questa and prints aggregate statistics. `python -m tools.hardware_build profile-position` runs one explicitly supplied FEN and prints the detailed statistics for that position. Both commands collect measurements in the testbench rather than synthesizing large instrumentation counters into the FPGA. The default `auto` backend prefers Verilator when available.
 
 ## Simulated Hardware
 
@@ -13,8 +13,8 @@ python -m tools.hardware_build profile
 python -m tools.hardware_build profile --time-ms 100 --jobs 8
 python -m tools.hardware_build profile --nodes 10000 --threads 4 --stack-depth 32
 python -m tools.hardware_build profile --simulator modelsim --depth 3
-python -m tools.hardware_build profile_position --fen "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1" --depth 4
-python -m tools.hardware_build profile_position --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" --time-ms 100 --event-trace --waveform
+python -m tools.hardware_build profile-position --fen "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1" --depth 4
+python -m tools.hardware_build profile-position --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" --time-ms 100 --event-trace --waveform
 ```
 
 At most one of `--depth`, `--nodes`, or `--time-ms` selects the search limit; omitting all three uses 50 ms. The suite applies the same limit and hardware configuration to every position in `PROFILE_POSITIONS` from `software/benchmarks/positions.py`. `--engine-config` selects a layered FPGA engine profile and defaults to the production DE1-SoC profile; `--threads`, `--stack-depth`, and `--engine-clock-hz` override its structural values for experiments. Reports embed the resolved profile and digest, and the digest participates in simulator build caching. The Verilator cache automatically retains the ten most recently used completed builds. Independent Verilator simulations run concurrently: `--jobs` sets their count, while the default uses the CPUs available to the process divided by `--simulator-threads`. Since this design partitions poorly inside Verilator, the default of one simulator thread and multiple position processes normally gives the best throughput. ModelSim defaults to one job to avoid assuming multiple simulator licenses, but accepts an explicit `--jobs` value. Use `--output` to choose the artifact directory, `--timeout` to opt into a per-position simulator wall-time limit, and `--force-rebuild` to bypass the simulator build cache. Simulations have no wall-time limit when `--timeout` is omitted.

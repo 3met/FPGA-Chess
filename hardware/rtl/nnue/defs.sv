@@ -1,6 +1,6 @@
 package nnue_defs;
 
-    import general_chess_defs::*;
+    import chess_defs::*;
 
     localparam int NNUE_SIDE_COUNT = 2;
     localparam int NNUE_PIECE_CATEGORY_COUNT = 6;

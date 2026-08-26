@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-import general_chess_defs::*;
+import chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 
@@ -115,15 +115,15 @@ module tb_engine;
         end
         #1;
         captured = search_req;
-        if (captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                && captured.direct_board_op != BOARD_COMMIT_MOVE_OP
-                && captured.direct_board_op != BOARD_REVERSE_MOVE_OP) begin
+        if (captured.operation == ENGINE_CTRL_BOARD_UPDATE
+                && captured.board_op != BOARD_COMMIT_MOVE_OP
+                && captured.board_op != BOARD_REVERSE_MOVE_OP) begin
             search_resp = EngineControllerResponse'('0);
             search_resp_valid = 1'b1;
             do_clock(1);
             search_resp_valid = 1'b0;
             search_resp = EngineControllerResponse'('0);
-        end else if (captured.operation == ENGINE_CTRL_DIRECT_BOARD
+        end else if (captured.operation == ENGINE_CTRL_BOARD_UPDATE
                 || captured.operation == ENGINE_CTRL_NEW_GAME
                 || captured.operation == ENGINE_CTRL_KILL) begin
             do_clock(1);
@@ -297,7 +297,7 @@ module tb_engine;
         automatic logic [7:0] board_payload [0:35];
         automatic EngineControllerRequest captured;
 
-        $display("=== engine direct-board tests ===");
+        $display("=== engine board-update tests ===");
         for (int idx = 0; idx < 36; idx++) begin
             board_payload[idx] = 8'h00;
         end
@@ -320,27 +320,27 @@ module tb_engine;
                 expected_tile = idx[0]
                     ? board_payload[idx / 2][7:4]
                     : board_payload[idx / 2][3:0];
-                check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                        && captured.direct_board_op == BOARD_SET_TILE_OP
+                check(captured.operation == ENGINE_CTRL_BOARD_UPDATE
+                        && captured.board_op == BOARD_SET_TILE_OP
                         && captured.move.to_pos == Position'(idx)
                         && captured.board_wr_data[3:0] == expected_tile,
                     $sformatf("set board tile request %0d", idx));
             end else begin
                 case (idx)
-                    64: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                            && captured.direct_board_op == BOARD_SET_CASTLE_PERMS_OP
+                    64: check(captured.operation == ENGINE_CTRL_BOARD_UPDATE
+                            && captured.board_op == BOARD_SET_CASTLING_RIGHTS_OP
                             && captured.board_wr_data[3:0] == 4'hf,
                         "set board castle request");
-                    65: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                            && captured.direct_board_op == BOARD_SET_TURN_OP
+                    65: check(captured.operation == ENGINE_CTRL_BOARD_UPDATE
+                            && captured.board_op == BOARD_SET_TURN_OP
                             && captured.board_wr_data[0] == 1'b1,
                         "set board turn request");
-                    66: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                            && captured.direct_board_op == BOARD_SET_EN_PASSANT_OP
+                    66: check(captured.operation == ENGINE_CTRL_BOARD_UPDATE
+                            && captured.board_op == BOARD_SET_EN_PASSANT_OP
                             && captured.board_wr_data[3:0] == 4'h5,
                         "set board en passant request");
-                    67: check(captured.operation == ENGINE_CTRL_DIRECT_BOARD
-                            && captured.direct_board_op == BOARD_SET_HALFMOVE_CLOCK_OP
+                    67: check(captured.operation == ENGINE_CTRL_BOARD_UPDATE
+                            && captured.board_op == BOARD_SET_HALFMOVE_CLOCK_OP
                             && captured.board_wr_data == 7'd2,
                         "set board halfmove request");
                 endcase
@@ -352,8 +352,8 @@ module tb_engine;
         send_byte(8'h72);
         send_byte(8'h0c);
         capture_request_without_response(captured);
-        check(captured.operation == ENGINE_CTRL_DIRECT_BOARD, "make move direct op");
-        check(captured.direct_board_op == BOARD_COMMIT_MOVE_OP, "make move commit board op");
+        check(captured.operation == ENGINE_CTRL_BOARD_UPDATE, "make move board-update op");
+        check(captured.board_op == BOARD_COMMIT_MOVE_OP, "make move commit board op");
         check(captured.move.from_pos == Position'('d12), "make move from position");
         check(captured.move.to_pos == Position'('d28), "make move to position");
         check(captured.move.promo_piece == PROMO_ROOK, "make move promo");

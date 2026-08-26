@@ -334,6 +334,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         self.assertEqual(lines[0], "info string TT hits=2 lookups=8 hit_rate=25.00%")
         self.assertEqual(lines[1], "info string TT cache hits=3 lookups=4 hit_rate=75.00%")
         self.assertIn("ready=1", lines[2])
+        self.assertIn("store_publish=8", lines[2])
         self.assertIn("done=10", lines[2])
 
 

@@ -3,7 +3,7 @@
 
 package board_update_pipeline_defs;
 
-	import general_chess_defs::*;
+	import chess_defs::*;
 
     // Stage 0 captures the request and launches table reads, stage 1 aligns
     // their synchronous outputs, and stage 2 registers the transformed board.
@@ -15,7 +15,7 @@ package board_update_pipeline_defs;
         BOARD_COMMIT_MOVE_OP, // A move made to simply update the board
         BOARD_SET_TILE_OP,
         BOARD_SET_TURN_OP,
-        BOARD_SET_CASTLE_PERMS_OP,
+        BOARD_SET_CASTLING_RIGHTS_OP,
         BOARD_SET_EN_PASSANT_OP,
         BOARD_SET_HALFMOVE_CLOCK_OP,
         BOARD_REVERSE_MOVE_OP,
@@ -27,7 +27,7 @@ package board_update_pipeline_defs;
     typedef enum logic [1:0] {
 		NORM_MOVE,   // Move is a normal move
 		PROMO_MOVE,  // Move is promotion
-		EP_MOVE,     // Move is an en passant kill
+		EP_MOVE,     // Move is an en passant capture
 		CASTLE_MOVE  // Move is a castle
 	} MoveFlag;
 
@@ -35,10 +35,10 @@ package board_update_pipeline_defs;
 	typedef struct packed {
 		Position from_pos;         // Move origin position
 		Position to_pos;           // Move destination position
-		PieceType killed_piece;     // Stores NULL_PIECE if nothing is killed (all NULL for en passant kills)
-		CastlePerms castle_perms;   // Castle perms before move
+		PieceType captured_piece;     // NULL_PIECE for non-captures and en passant
+		CastlingRights castling_rights; // Castling rights before the move
 		MoveFlag move_flag;         // Flag indicating special moves
-		logic has_ep;               // Position contains an en passant kill tile
+		logic has_ep;               // Position has a canonical en passant target
 		BoardFile ep_file;          // En passant file
 		HalfmoveClock halfmove_clock; // Halfmove clock before the move
 	} MoveRecord;	// 32 bits total
@@ -52,7 +52,7 @@ package board_update_pipeline_defs;
         EvalScore pst_eval;
         PieceCount piece_count;
         Move move;
-        logic [6:0] set_data; // Tile, turn, castle perms, en passant, or halfmove info depending on the SET operation
+        logic [6:0] set_data; // Tile, turn, castling rights, en passant, or halfmove data for a SET operation
         ThreadID thread_id;
         PlyIndex search_ply;
 

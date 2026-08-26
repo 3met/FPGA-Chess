@@ -1,14 +1,14 @@
 // By Emet Behrendt
 
-import general_chess_defs::*;
+import chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 
 module engine_command_layer #(
     parameter logic [63:0] BUILD_ID = 64'h0000_0000_0000_0000,
     parameter int CLOCK_FREQ = 100_000_000,
-    parameter int SEARCH_THREAD_COUNT = general_chess_defs::THREAD_COUNT,
-    parameter int SEARCH_STACK_DEPTH = general_chess_defs::MAX_PLY_COUNT
+    parameter int SEARCH_THREAD_COUNT = chess_defs::THREAD_COUNT,
+    parameter int SEARCH_STACK_DEPTH = chess_defs::MAX_PLY_COUNT
 ) (
     input wire clk,
     input wire rst_n,
@@ -38,7 +38,7 @@ module engine_command_layer #(
         ST_IDLE,
         ST_RECEIVE_PAYLOAD,
         ST_PROCESS_PAYLOAD,
-        ST_DIRECT_BOARD,
+        ST_BOARD_UPDATE,
         ST_ISSUE_REQUEST,
         ST_WAIT_RESULT,
         ST_ISSUE_KILL,
@@ -69,12 +69,12 @@ module engine_command_layer #(
     logic payload_error;
     logic [7:0] payload [0:SET_BOARD_PAYLOAD_BYTES-1];
 
-    logic [6:0] direct_index;
+    logic [6:0] board_update_index;
     EngineControllerRequest request_reg;
     ResponseKind request_response_kind;
     logic request_waits_for_result;
     logic request_clears_error;
-    logic direct_request_inflight;
+    logic board_update_request_inflight;
     logic search_active;
     logic [7:0] active_operation;
 
@@ -208,7 +208,7 @@ module engine_command_layer #(
 
         req = EngineControllerRequest'('0);
         req.operation = ENGINE_CTRL_IDLE;
-        req.direct_board_op = BOARD_IDLE_OP;
+        req.board_op = BOARD_IDLE_OP;
         return req;
     endfunction : zero_request
 
@@ -217,25 +217,25 @@ module engine_command_layer #(
         automatic logic [7:0] tile_byte;
 
         req = zero_request();
-        req.operation = ENGINE_CTRL_DIRECT_BOARD;
+        req.operation = ENGINE_CTRL_BOARD_UPDATE;
         req.move = Move'('0);
 
         if (idx < 7'd64) begin
             tile_byte = payload[idx[6:1]];
-            req.direct_board_op = BOARD_SET_TILE_OP;
+            req.board_op = BOARD_SET_TILE_OP;
             req.move.to_pos = Position'(idx[5:0]);
             req.board_wr_data = idx[0] ? {3'b000, tile_byte[7:4]} : {3'b000, tile_byte[3:0]};
         end else if (idx == 7'd64) begin
-            req.direct_board_op = BOARD_SET_CASTLE_PERMS_OP;
+            req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
             req.board_wr_data = {3'b000, payload[32][3:0]};
         end else if (idx == 7'd65) begin
-            req.direct_board_op = BOARD_SET_TURN_OP;
+            req.board_op = BOARD_SET_TURN_OP;
             req.board_wr_data = {6'b000000, payload[34][0]};
         end else if (idx == 7'd66) begin
-            req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
+            req.board_op = BOARD_SET_EN_PASSANT_OP;
             req.board_wr_data = {3'b000, payload[33][3:0]};
         end else begin
-            req.direct_board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+            req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
             req.board_wr_data = payload[35][6:0];
         end
 
@@ -243,11 +243,11 @@ module engine_command_layer #(
     endfunction : set_board_request
 
     always_comb begin
-        search_req_valid = (state == ST_DIRECT_BOARD && !direct_request_inflight) || (state == ST_ISSUE_REQUEST) || (state == ST_ISSUE_KILL);
+        search_req_valid = (state == ST_BOARD_UPDATE && !board_update_request_inflight) || (state == ST_ISSUE_REQUEST) || (state == ST_ISSUE_KILL);
         // The request payload is irrelevant until valid; avoid preserving an idle mux value.
         search_req = 'x;
-        if (state == ST_DIRECT_BOARD && !direct_request_inflight) begin
-            search_req = set_board_request(direct_index);
+        if (state == ST_BOARD_UPDATE && !board_update_request_inflight) begin
+            search_req = set_board_request(board_update_index);
         end else if (state == ST_ISSUE_REQUEST || state == ST_ISSUE_KILL) begin
             search_req = request_reg;
         end
@@ -449,15 +449,15 @@ module engine_command_layer #(
             case (curr_opcode)
                 ENGINE_CMD_SET_BOARD: begin
                     active_operation <= ENGINE_CMD_SET_BOARD;
-                    direct_index <= 7'd0;
-                    direct_request_inflight <= 1'b0;
-                    state <= ST_DIRECT_BOARD;
+                    board_update_index <= 7'd0;
+                    board_update_request_inflight <= 1'b0;
+                    state <= ST_BOARD_UPDATE;
                 end
 
                 ENGINE_CMD_MAKE_MOVE: begin
                     active_operation <= ENGINE_CMD_MAKE_MOVE;
-                    req.operation = ENGINE_CTRL_DIRECT_BOARD;
-                    req.direct_board_op = BOARD_COMMIT_MOVE_OP;
+                    req.operation = ENGINE_CTRL_BOARD_UPDATE;
+                    req.board_op = BOARD_COMMIT_MOVE_OP;
                     req.move = decode_move();
                     issue_single_request(req, RESP_ACK, 1'b0, 1'b0);
                 end
@@ -524,12 +524,12 @@ module engine_command_layer #(
             curr_opcode <= 8'h00;
             payload_count <= 6'd0;
             payload_error <= 1'b0;
-            direct_index <= 7'd0;
+            board_update_index <= 7'd0;
             request_reg <= zero_request();
             request_response_kind <= RESP_NONE;
             request_waits_for_result <= 1'b0;
             request_clears_error <= 1'b0;
-            direct_request_inflight <= 1'b0;
+            board_update_request_inflight <= 1'b0;
             search_active <= 1'b0;
             active_operation <= 8'h00;
             last_move <= Move'('0);
@@ -575,21 +575,21 @@ module engine_command_layer #(
                     process_payload_command();
                 end
 
-                ST_DIRECT_BOARD: begin
-                    if (!direct_request_inflight && search_req_ready && !search_resp_valid) begin
-                        direct_request_inflight <= 1'b1;
-                    end else if ((direct_request_inflight && search_resp_valid)
-                            || (!direct_request_inflight && search_req_ready && search_resp_valid)) begin
-                        direct_request_inflight <= 1'b0;
+                ST_BOARD_UPDATE: begin
+                    if (!board_update_request_inflight && search_req_ready && !search_resp_valid) begin
+                        board_update_request_inflight <= 1'b1;
+                    end else if ((board_update_request_inflight && search_resp_valid)
+                            || (!board_update_request_inflight && search_req_ready && search_resp_valid)) begin
+                        board_update_request_inflight <= 1'b0;
                         if (search_resp_valid && search_resp.error) begin
                             error_code <= ENGINE_ERR_INTERNAL[2:0];
                             active_operation <= 8'h00;
                             start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
-                        end else if (direct_index == 7'd67) begin
+                        end else if (board_update_index == 7'd67) begin
                             active_operation <= 8'h00;
                             start_response(RESP_ACK, error_code, 1'b1, 1'b0);
                         end else begin
-                            direct_index <= direct_index + 7'd1;
+                            board_update_index <= board_update_index + 7'd1;
                         end
                     end
                 end

@@ -2,7 +2,7 @@
 
 package tt_defs;
 
-    import general_chess_defs::*;
+    import chess_defs::*;
 
     localparam int TT_DEFAULT_TAG_BITS = 32;
     localparam int TT_HASH_BITS = 32;

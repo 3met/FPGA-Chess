@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-import general_chess_defs::*;
+import chess_defs::*;
 import move_generator_defs::*;
 
 module tb_move_generator;
@@ -162,7 +162,7 @@ module tb_move_generator;
         for (int pos = 0; pos < 64; pos++) board.tiles[pos] = EMPTY_TILE;
         board.king_positions = KingPositions'(0);
         board.turn = turn;
-        board.castle_perms = CastlePerms'(0);
+        board.castling_rights = CastlingRights'(0);
         board.has_ep = 1'b0;
         board.ep_file = BoardFile'(0);
         board.halfmove_clock = HalfmoveClock'(0);
@@ -190,7 +190,7 @@ module tb_move_generator;
         board.tiles[63] = BLACK_ROOK;
         board.king_positions[WHITE] = Position'(4);
         board.king_positions[BLACK] = Position'(60);
-        board.castle_perms = CastlePerms'('1);
+        board.castling_rights = CastlingRights'('1);
     endtask
 
     task automatic idle_inputs();
@@ -557,7 +557,7 @@ module tb_move_generator;
         board.tiles[4] = WHITE_KING;
         board.tiles[7] = WHITE_ROOK;
         board.tiles[56] = BLACK_KING;
-        board.castle_perms.white_kingside = 1'b1;
+        board.castling_rights.white_kingside = 1'b1;
         target = make_move(Position'(4), Position'(6));
         tops = '0;
         run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,

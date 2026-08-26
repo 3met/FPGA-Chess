@@ -1,6 +1,6 @@
 // By Emet Behrendt
 
-import general_chess_defs::*;
+import chess_defs::*;
 
 module timer #(
     parameter int CLOCK_FREQ = 100_000_000

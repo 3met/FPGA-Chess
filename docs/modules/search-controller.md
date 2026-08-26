@@ -6,7 +6,7 @@ The search controller owns the active position, search threads and stacks, repet
 
 | Operation | Behavior |
 | --------- | -------- |
-| Direct Board | Apply a setup or game move to the active position. |
+| Board Update | Apply position setup or a game move to the active position. |
 | New Game | Cancel active work, clear game-dependent state, advance the TT generation, and restore the starting position. |
 | Search Depth | Search to a fixed depth. |
 | Search Fixed Time | Search until a fixed-time budget expires. |

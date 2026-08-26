@@ -341,29 +341,34 @@ def train(
         best_loss = float(report.get("best_validation_loss", float("inf")))
         best_step = int(report.get("best_step", 0))
         if initialize_run is not None:
-            initial_loss, initial_mae, initial_rmse = _evaluate(
-                torch, compiled, validation_loader, settings, device
-            )
-            best_loss = initial_loss
-            best_step = 0
-            initial_metric = {
-                "step": 0,
-                "validation_loss": initial_loss,
-                "validation_mae": initial_mae,
-                "validation_rmse": initial_rmse,
-            }
-            torch.save({
-                "model": model.state_dict(),
-                **initial_metric,
-            }, run / "best.pt")
-            report.update(initial_metric)
-            report.update({"best_validation_loss": best_loss, "best_step": best_step})
-            report.update(_parameter_report(model))
-            atomic_json(run / "report.json", report)
-            print(
-                f"Step 0/{settings['max_steps']:,}: validation={initial_loss:.4f}, "
-                f"MAE={initial_mae:.2f} cp (initialization candidate)."
-            )
+            try:
+                initial_loss, initial_mae, initial_rmse = _evaluate(
+                    torch, compiled, validation_loader, settings, device
+                )
+                best_loss = initial_loss
+                best_step = 0
+                initial_metric = {
+                    "step": 0,
+                    "validation_loss": initial_loss,
+                    "validation_mae": initial_mae,
+                    "validation_rmse": initial_rmse,
+                }
+                torch.save({
+                    "model": model.state_dict(),
+                    **initial_metric,
+                }, run / "best.pt")
+                report.update(initial_metric)
+                report.update({"best_validation_loss": best_loss, "best_step": best_step})
+                report.update(_parameter_report(model))
+                atomic_json(run / "report.json", report)
+                print(
+                    f"Step 0/{settings['max_steps']:,}: validation={initial_loss:.4f}, "
+                    f"MAE={initial_mae:.2f} cp (initialization candidate)."
+                )
+            except BaseException:
+                train_data.close()
+                validation_data.close()
+                raise
         stale_validations = 0
         metrics_path = run / "metrics.jsonl"
         start_time = time.monotonic()
@@ -544,8 +549,11 @@ def train(
             if wandb_run is not None:
                 wandb_run.finish(exit_code=1)
             raise
-    train_data.close()
-    validation_data.close()
+        finally:
+            # DataLoader iteration opens memory maps lazily; release them on every
+            # completed, failed, or interrupted training path.
+            train_data.close()
+            validation_data.close()
     return run
 
 

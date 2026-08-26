@@ -1,7 +1,7 @@
 // One independently scheduled destination-centric generation lane.
 
-import general_chess_defs::*;
-import chess_helper_funcs::*;
+import chess_defs::*;
+import chess_helpers::*;
 import move_generator_defs::*;
 
 module move_generator_lane #(
@@ -132,7 +132,7 @@ module move_generator_lane #(
 
 `ifndef SYNTHESIS
     initial begin
-        if (THREAD_COUNT < 1 || THREAD_COUNT > general_chess_defs::THREAD_COUNT)
+        if (THREAD_COUNT < 1 || THREAD_COUNT > chess_defs::THREAD_COUNT)
             $fatal(1, "move_generator THREAD_COUNT exceeds ThreadID capacity");
         if (!(QUIET_THRESHOLD_1 < QUIET_THRESHOLD_2
                 && QUIET_THRESHOLD_2 < QUIET_THRESHOLD_3))
@@ -277,19 +277,19 @@ module move_generator_lane #(
         input FullBoard board,
         input Position destination
     );
-        if (getRank(destination) == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))) begin
-            return isShiftOnBoard(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)
-                && board.tiles[shiftPos(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)]
+        if (get_rank(destination) == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))) begin
+            return is_shift_on_board(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)
+                && board.tiles[shift_position(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)]
                     == Tile'({board.turn, PAWN});
         end
-        if (board.has_ep && getFile(destination) == board.ep_file
-                && getRank(destination) == (board.turn == WHITE ? BoardRank'(5) : BoardRank'(2))) begin
-            return (isShiftOnBoard(destination, board.turn == WHITE ? SOUTH_WEST : NORTH_WEST, 3'd1)
-                    && board.tiles[shiftPos(destination,
+        if (board.has_ep && get_file(destination) == board.ep_file
+                && get_rank(destination) == (board.turn == WHITE ? BoardRank'(5) : BoardRank'(2))) begin
+            return (is_shift_on_board(destination, board.turn == WHITE ? SOUTH_WEST : NORTH_WEST, 3'd1)
+                    && board.tiles[shift_position(destination,
                         board.turn == WHITE ? SOUTH_WEST : NORTH_WEST, 3'd1)]
                         == Tile'({board.turn, PAWN}))
-                || (isShiftOnBoard(destination, board.turn == WHITE ? SOUTH_EAST : NORTH_EAST, 3'd1)
-                    && board.tiles[shiftPos(destination,
+                || (is_shift_on_board(destination, board.turn == WHITE ? SOUTH_EAST : NORTH_EAST, 3'd1)
+                    && board.tiles[shift_position(destination,
                         board.turn == WHITE ? SOUTH_EAST : NORTH_EAST, 3'd1)]
                         == Tile'({board.turn, PAWN}));
         end
@@ -307,7 +307,7 @@ module move_generator_lane #(
                         && board.tiles[pos].piece_color != board.turn
                         && board.tiles[pos].piece_type != KING)
                         || (board.tiles[pos].piece_type == NULL_PIECE
-                            && getRank(Position'(pos))
+                            && get_rank(Position'(pos))
                                 == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))
                             && noisy_pawn_destination_has_source(board, Position'(pos))))
                     mask[pos] = 1'b1;
@@ -328,8 +328,8 @@ module move_generator_lane #(
     endfunction
 
     function automatic logic [2:0] ray_max_distance(input Position pos, input Direction dir);
-        automatic BoardRank rank = getRank(pos);
-        automatic BoardFile file = getFile(pos);
+        automatic BoardRank rank = get_rank(pos);
+        automatic BoardFile file = get_file(pos);
         case (dir)
             NORTH:      return 3'd7 - rank;
             NORTH_EAST: return ((3'd7 - rank) < (3'd7 - file))
@@ -356,7 +356,7 @@ module move_generator_lane #(
         for (int index = 0; index < 7; index++) begin
             automatic logic on_ray = 3'(index + 1)
                 <= ray_max_distance(destination, dir);
-            automatic Position pos = shiftPos(destination, dir, 3'(index + 1));
+            automatic Position pos = shift_position(destination, dir, 3'(index + 1));
             candidates[index] = board.tiles[pos];
             occupied[index] = on_ray
                 && candidates[index].piece_type != NULL_PIECE;
@@ -381,10 +381,10 @@ module move_generator_lane #(
         input Position from_pos,
         input Position to_pos
     );
-        automatic BoardRank from_rank = getRank(from_pos);
-        automatic BoardFile from_file = getFile(from_pos);
-        automatic BoardRank to_rank = getRank(to_pos);
-        automatic BoardFile to_file = getFile(to_pos);
+        automatic BoardRank from_rank = get_rank(from_pos);
+        automatic BoardFile from_file = get_file(from_pos);
+        automatic BoardRank to_rank = get_rank(to_pos);
+        automatic BoardFile to_file = get_file(to_pos);
         automatic logic signed [1:0] rank_step =
             (to_rank > from_rank) ? 2'sd1 : (to_rank < from_rank) ? -2'sd1 : 2'sd0;
         automatic logic signed [1:0] file_step =
@@ -405,61 +405,13 @@ module move_generator_lane #(
         return 1'b1;
     endfunction
 
-    function automatic logic line_attacker(input PieceType piece, input Direction dir);
-        return piece == QUEEN
-            || (piece == ROOK && isDirCardinal(dir))
-            || (piece == BISHOP && isDirDiag(dir));
-    endfunction
-
-    function automatic logic square_attacked(
-        input FullBoard board,
-        input Position square,
-        input Color attacker_color
-    );
-        automatic Position test_pos;
-        automatic Tile test_tile;
-        if (attacker_color == WHITE) begin
-            if (isShiftOnBoard(square, SOUTH_WEST, 3'd1)
-                    && board.tiles[shiftPos(square, SOUTH_WEST, 3'd1)] == WHITE_PAWN) return 1'b1;
-            if (isShiftOnBoard(square, SOUTH_EAST, 3'd1)
-                    && board.tiles[shiftPos(square, SOUTH_EAST, 3'd1)] == WHITE_PAWN) return 1'b1;
-        end else begin
-            if (isShiftOnBoard(square, NORTH_WEST, 3'd1)
-                    && board.tiles[shiftPos(square, NORTH_WEST, 3'd1)] == BLACK_PAWN) return 1'b1;
-            if (isShiftOnBoard(square, NORTH_EAST, 3'd1)
-                    && board.tiles[shiftPos(square, NORTH_EAST, 3'd1)] == BLACK_PAWN) return 1'b1;
-        end
-        for (int dir = 0; dir < 8; dir++) begin
-            if (isKnightShiftOnBoard(square, KnightDirection'(dir))) begin
-                test_pos = shiftKnightPos(square, KnightDirection'(dir));
-                if (board.tiles[test_pos] == Tile'({attacker_color, KNIGHT})) return 1'b1;
-            end
-        end
-        for (int dir = 0; dir < 8; dir++) begin
-            for (int distance = 1; distance < 8; distance++) begin
-                if (isShiftOnBoard(square, Direction'(dir), 3'(distance))) begin
-                    test_pos = shiftPos(square, Direction'(dir), 3'(distance));
-                    test_tile = board.tiles[test_pos];
-                    if (test_tile.piece_type != NULL_PIECE) begin
-                        if (test_tile.piece_color == attacker_color) begin
-                            if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
-                            if (line_attacker(test_tile.piece_type, Direction'(dir))) return 1'b1;
-                        end
-                        break;
-                    end
-                end
-            end
-        end
-        return 1'b0;
-    endfunction
-
     // Standard chess has only four castling paths. Keeping their squares
     // constant lets synthesis remove the dynamic board-index muxes from the
     // direct-validation path without adding a pipeline stage.
     function automatic logic white_kingside_castle_pseudo_legal(input FullBoard board);
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
-        if (board.turn != WHITE || !board.castle_perms.white_kingside
+        if (board.turn != WHITE || !board.castling_rights.white_kingside
                 || board.tiles[4] != WHITE_KING || board.tiles[7] != WHITE_ROOK
                 || board.tiles[5].piece_type != NULL_PIECE
                 || board.tiles[6].piece_type != NULL_PIECE) return 1'b0;
@@ -477,7 +429,7 @@ module move_generator_lane #(
     function automatic logic white_queenside_castle_pseudo_legal(input FullBoard board);
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
-        if (board.turn != WHITE || !board.castle_perms.white_queenside
+        if (board.turn != WHITE || !board.castling_rights.white_queenside
                 || board.tiles[4] != WHITE_KING || board.tiles[0] != WHITE_ROOK
                 || board.tiles[1].piece_type != NULL_PIECE
                 || board.tiles[2].piece_type != NULL_PIECE
@@ -496,7 +448,7 @@ module move_generator_lane #(
     function automatic logic black_kingside_castle_pseudo_legal(input FullBoard board);
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
-        if (board.turn != BLACK || !board.castle_perms.black_kingside
+        if (board.turn != BLACK || !board.castling_rights.black_kingside
                 || board.tiles[60] != BLACK_KING || board.tiles[63] != BLACK_ROOK
                 || board.tiles[61].piece_type != NULL_PIECE
                 || board.tiles[62].piece_type != NULL_PIECE) return 1'b0;
@@ -514,7 +466,7 @@ module move_generator_lane #(
     function automatic logic black_queenside_castle_pseudo_legal(input FullBoard board);
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
-        if (board.turn != BLACK || !board.castle_perms.black_queenside
+        if (board.turn != BLACK || !board.castling_rights.black_queenside
                 || board.tiles[60] != BLACK_KING || board.tiles[56] != BLACK_ROOK
                 || board.tiles[57].piece_type != NULL_PIECE
                 || board.tiles[58].piece_type != NULL_PIECE
@@ -547,10 +499,10 @@ module move_generator_lane #(
     );
         automatic Tile source = board.tiles[move.from_pos];
         automatic Tile destination = board.tiles[move.to_pos];
-        automatic BoardRank from_rank = getRank(move.from_pos);
-        automatic BoardFile from_file = getFile(move.from_pos);
-        automatic BoardRank to_rank = getRank(move.to_pos);
-        automatic BoardFile to_file = getFile(move.to_pos);
+        automatic BoardRank from_rank = get_rank(move.from_pos);
+        automatic BoardFile from_file = get_file(move.from_pos);
+        automatic BoardRank to_rank = get_rank(move.to_pos);
+        automatic BoardFile to_file = get_file(move.to_pos);
         automatic logic signed [3:0] dr =
             $signed({1'b0, to_rank}) - $signed({1'b0, from_rank});
         automatic logic signed [3:0] df =
@@ -609,8 +561,8 @@ module move_generator_lane #(
                     && (dir == SOUTH_WEST || dir == SOUTH_EAST))
                 || (source.piece_color == BLACK
                     && (dir == NORTH_WEST || dir == NORTH_EAST)));
-            BISHOP: return isDirDiag(dir);
-            ROOK: return isDirCardinal(dir);
+            BISHOP: return is_diagonal_direction(dir);
+            ROOK: return is_cardinal_direction(dir);
             QUEEN: return 1'b1;
             KING: return distance == 0;
             default: return 1'b0;
@@ -707,12 +659,12 @@ module move_generator_lane #(
 
     function automatic logic kingside_castle_permitted(input FullBoard board);
         return board.turn == WHITE
-            ? board.castle_perms.white_kingside : board.castle_perms.black_kingside;
+            ? board.castling_rights.white_kingside : board.castling_rights.black_kingside;
     endfunction
 
     function automatic logic queenside_castle_permitted(input FullBoard board);
         return board.turn == WHITE
-            ? board.castle_perms.white_queenside : board.castle_perms.black_queenside;
+            ? board.castling_rights.white_queenside : board.castling_rights.black_queenside;
     endfunction
 
     function automatic logic [3:0] first_source(input logic [15:0] mask);
@@ -734,13 +686,13 @@ module move_generator_lane #(
         automatic logic destination_occupied =
             destination_tile.piece_type != NULL_PIECE;
         automatic logic promotion_destination =
-            getRank(destination) == BoardRank'(0)
-            || getRank(destination) == BoardRank'(7);
+            get_rank(destination) == BoardRank'(0)
+            || get_rank(destination) == BoardRank'(7);
         automatic logic ep_destination = board.has_ep
             && !destination_occupied
-            && getFile(destination) == board.ep_file
-            && ((board.turn == WHITE && getRank(destination) == BoardRank'(5))
-                || (board.turn == BLACK && getRank(destination) == BoardRank'(2)));
+            && get_file(destination) == board.ep_file
+            && ((board.turn == WHITE && get_rank(destination) == BoardRank'(5))
+                || (board.turn == BLACK && get_rank(destination) == BoardRank'(2)));
         automatic logic phase_matches = GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
             ? destination_occupied : !destination_occupied;
 
@@ -758,7 +710,7 @@ module move_generator_lane #(
                     return !promotion_destination && dir == SOUTH
                         && (ray.distance == 3'd0
                             || (ray.distance == 3'd1
-                                && getRank(destination) == BoardRank'(3)));
+                                && get_rank(destination) == BoardRank'(3)));
                 end
                 if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                     return (!destination_occupied && promotion_destination
@@ -769,10 +721,10 @@ module move_generator_lane #(
                 return !promotion_destination && dir == NORTH
                     && (ray.distance == 3'd0
                         || (ray.distance == 3'd1
-                            && getRank(destination) == BoardRank'(4)));
+                            && get_rank(destination) == BoardRank'(4)));
             end
-            BISHOP: return phase_matches && isDirDiag(dir);
-            ROOK: return phase_matches && isDirCardinal(dir);
+            BISHOP: return phase_matches && is_diagonal_direction(dir);
+            ROOK: return phase_matches && is_cardinal_direction(dir);
             QUEEN: return phase_matches;
             KING: return phase_matches && ray.distance == 3'd0;
             default: return 1'b0;
@@ -800,9 +752,9 @@ module move_generator_lane #(
             selected_context_ray[dir] =
                 nearest_ray(job_board, context_destination, Direction'(dir));
             selected_context_knight[dir] =
-                isKnightShiftOnBoard(context_destination, KnightDirection'(dir))
+                is_knight_shift_on_board(context_destination, KnightDirection'(dir))
                     ? job_board.tiles[
-                        shiftKnightPos(context_destination, KnightDirection'(dir))
+                        shift_knight_position(context_destination, KnightDirection'(dir))
                     ] : EMPTY_TILE;
             selected_source_mask[dir] = potential_ray_source(
                 job_board, context_destination, context_destination_tile,
@@ -855,15 +807,15 @@ module move_generator_lane #(
         move.promo_piece = PROMO_QUEEN;
         if (source_select_index < 4'd8) begin
             source = context_ray[source_select_index].tile;
-            move.from_pos = shiftPos(context_destination, Direction'(source_select_index),
+            move.from_pos = shift_position(context_destination, Direction'(source_select_index),
                 3'(context_ray[source_select_index].distance + 3'd1));
             ep_move = source.piece_type == PAWN && job_board.has_ep
                 && context_destination_tile.piece_type == NULL_PIECE
-                && getFile(context_destination) == job_board.ep_file
-                && ((job_board.turn == WHITE && getRank(move.from_pos) == BoardRank'(4)
-                        && getRank(context_destination) == BoardRank'(5))
-                    || (job_board.turn == BLACK && getRank(move.from_pos) == BoardRank'(3)
-                        && getRank(context_destination) == BoardRank'(2)));
+                && get_file(context_destination) == job_board.ep_file
+                && ((job_board.turn == WHITE && get_rank(move.from_pos) == BoardRank'(4)
+                        && get_rank(context_destination) == BoardRank'(5))
+                    || (job_board.turn == BLACK && get_rank(move.from_pos) == BoardRank'(3)
+                        && get_rank(context_destination) == BoardRank'(2)));
             geometry_ok = 1'b0;
             case (source.piece_type)
                 PAWN: begin
@@ -872,7 +824,7 @@ module move_generator_lane #(
                                 && context_destination_tile.piece_type == NULL_PIECE)
                             geometry_ok = context_ray[source_select_index].distance == 0
                                 || (context_ray[source_select_index].distance == 1
-                                    && getRank(context_destination) == BoardRank'(3));
+                                    && get_rank(context_destination) == BoardRank'(3));
                         else geometry_ok = context_ray[source_select_index].distance == 0
                             && (Direction'(source_select_index) == SOUTH_WEST
                                 || Direction'(source_select_index) == SOUTH_EAST)
@@ -883,7 +835,7 @@ module move_generator_lane #(
                                 && context_destination_tile.piece_type == NULL_PIECE)
                             geometry_ok = context_ray[source_select_index].distance == 0
                                 || (context_ray[source_select_index].distance == 1
-                                    && getRank(context_destination) == BoardRank'(4));
+                                    && get_rank(context_destination) == BoardRank'(4));
                         else geometry_ok = context_ray[source_select_index].distance == 0
                             && (Direction'(source_select_index) == NORTH_WEST
                                 || Direction'(source_select_index) == NORTH_EAST)
@@ -891,8 +843,8 @@ module move_generator_lane #(
                                 && context_destination_tile.piece_color == WHITE) || ep_move);
                     end
                 end
-                BISHOP: geometry_ok = isDirDiag(Direction'(source_select_index));
-                ROOK: geometry_ok = isDirCardinal(Direction'(source_select_index));
+                BISHOP: geometry_ok = is_diagonal_direction(Direction'(source_select_index));
+                ROOK: geometry_ok = is_cardinal_direction(Direction'(source_select_index));
                 QUEEN: geometry_ok = 1'b1;
                 KING: geometry_ok = context_ray[source_select_index].distance == 0;
                 default: geometry_ok = 1'b0;
@@ -904,8 +856,8 @@ module move_generator_lane #(
                 source_is_ep = ep_move;
                 source_is_capture = ep_move || context_destination_tile.piece_type != NULL_PIECE;
                 source_is_promotion = source.piece_type == PAWN
-                    && (getRank(context_destination) == BoardRank'(0)
-                        || getRank(context_destination) == BoardRank'(7));
+                    && (get_rank(context_destination) == BoardRank'(0)
+                        || get_rank(context_destination) == BoardRank'(7));
                 source_lane = Direction'(source_select_index);
                 source_valid = (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
                     ? source_is_capture || source_is_promotion
@@ -915,7 +867,7 @@ module move_generator_lane #(
             automatic int knight_index = int'(source_select_index) - 8;
             source = context_knight[knight_index];
             if (source.piece_type == KNIGHT && source.piece_color == job_board.turn) begin
-                move.from_pos = shiftKnightPos(context_destination, KnightDirection'(knight_index));
+                move.from_pos = shift_knight_position(context_destination, KnightDirection'(knight_index));
                 source_attacker = source;
                 source_move = move;
                 source_is_capture = context_destination_tile.piece_type != NULL_PIECE;

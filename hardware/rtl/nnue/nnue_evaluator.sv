@@ -1,4 +1,4 @@
-import general_chess_defs::*;
+import chess_defs::*;
 import nnue_defs::*;
 
 module nnue_evaluator #(

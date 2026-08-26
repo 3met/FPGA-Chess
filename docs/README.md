@@ -20,7 +20,7 @@ Implementation details are documented only when they establish a contract, expla
 | System overview | [architecture/chip-design.md](architecture/chip-design.md) |
 | Shared RTL types | [architecture/data-model.md](architecture/data-model.md) |
 | Search and evaluation | [architecture/search-design.md](architecture/search-design.md) and [architecture/evaluation-design.md](architecture/evaluation-design.md) |
-| Host protocol | [protocols/laptop-fpga-communication.md](protocols/laptop-fpga-communication.md) and [protocols/binary-encoding.md](protocols/binary-encoding.md) |
+| Host protocol | [protocols/host-fpga-protocol.md](protocols/host-fpga-protocol.md) and [protocols/binary-encoding.md](protocols/binary-encoding.md) |
 | Build and verification | [development/build-test-synthesis.md](development/build-test-synthesis.md) |
 | Runtime profiling | [development/engine-profiling.md](development/engine-profiling.md) |
 | Evaluation tuning | [development/evaluation-tuning.md](development/evaluation-tuning.md) |

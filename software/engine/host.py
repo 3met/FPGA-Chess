@@ -23,10 +23,8 @@ from software.engine.protocol import (
     DebugStatResponse,
     DebugStatAddress,
     PerftResultResponse,
-    ProtocolError,
     SearchResultResponse,
     StatusResponse,
-    STARTPOS_FEN,
     cmd_get_search_result,
     cmd_get_status,
     cmd_get_debug_stat,
@@ -34,20 +32,15 @@ from software.engine.protocol import (
     cmd_kill,
     cmd_make_move,
     cmd_new_game,
-    cmd_perft,
-    cmd_search_depth,
-    cmd_search_fixed_time,
-    cmd_search_nodes,
-    cmd_search_on_clock,
     cmd_set_board,
     move_to_uci,
     read_response,
 )
+from software.engine.search_metadata import SEARCH_STAT_PHASES
 from software.engine.transport import SerialByteTransport, SerialDependencyError, SerialTimeoutError, describe_serial_ports, list_serial_ports
+from software.engine.uci_commands import KNOWN_COMMANDS, parse_go_command, parse_position_args, split_command_line
 
 
-MAX_SEARCH_DEPTH = 31
-DEFAULT_SEARCH_DEPTH = MAX_SEARCH_DEPTH
 SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
 # BREAK restarts the DE1 SDRAM path. Startup time is negligible beside search
 # time, so wait for board initialization instead of queuing across reset.
@@ -58,18 +51,6 @@ INITIALIZATION_ATTEMPTS = 3
 # a forced mate as MATE_SCORE minus the distance in plies.
 MATE_THRESHOLD = 0x4000
 MATE_SCORE = 0x4100
-SEARCH_PHASE_NAMES = (
-    "ready",
-    "tt_wait",
-    "eval_wait",
-    "move_wait",
-    "board_wait",
-    "reverse_wait",
-    "repetition_wait",
-    "store_wait",
-    "terminal_wait",
-    "done",
-)
 
 
 class HostError(RuntimeError):
@@ -323,29 +304,13 @@ class FPGAUCIHost:
 
     def handle_line(self, line: str) -> bool:
         stripped = line.strip()
-        if not stripped:
+        parsed = split_command_line(line)
+        if parsed is None:
             return True
-        tokens = stripped.split()
-        known_commands = {
-            "uci",
-            "debug",
-            "isready",
-            "setoption",
-            "register",
-            "ucinewgame",
-            "position",
-            "go",
-            "stop",
-            "ponderhit",
-            "quit",
-            "help",
-        }
-        command_index = next((idx for idx, token in enumerate(tokens) if token.lower() in known_commands), None)
-        if command_index is None:
-            self.emit(f"info string unknown command: {tokens[0]}")
+        command, args = parsed
+        if command not in KNOWN_COMMANDS:
+            self.emit(f"info string unknown command: {command}")
             return True
-        command = tokens[command_index].lower()
-        args = tokens[command_index + 1 :]
         try:
             if command == "uci":
                 self._handle_uci()
@@ -545,7 +510,7 @@ class FPGAUCIHost:
                 return
             thread_count = read_stat(DebugStatAddress.THREAD_COUNT)
             phase_count = read_stat(DebugStatAddress.PHASE_COUNT)
-            if phase_count != len(SEARCH_PHASE_NAMES):
+            if phase_count != len(SEARCH_STAT_PHASES):
                 raise HostError(f"FPGA reports unsupported search phase count {phase_count}")
             tt_lookups = read_stat(DebugStatAddress.TT_LOOKUPS)
             tt_hits = read_stat(DebugStatAddress.TT_HITS)
@@ -563,7 +528,7 @@ class FPGAUCIHost:
             for thread_id in range(thread_count):
                 values = [
                     f"{name}={read_stat(DebugStatAddress.PHASE_BASE + thread_id * phase_count + phase)}"
-                    for phase, name in enumerate(SEARCH_PHASE_NAMES)
+                    for phase, name in enumerate(SEARCH_STAT_PHASES)
                 ]
                 self.emit(f"info string search thread={thread_id} cycles " + " ".join(values))
             return
@@ -614,87 +579,17 @@ class FPGAUCIHost:
         thread.start()
 
     def _parse_position_args(self, args: list[str]) -> tuple[str, list[str]]:
-        if not args:
-            raise HostError("position command missing arguments")
-        if args[0] == "startpos":
-            base_fen = STARTPOS_FEN
-            rest = args[1:]
-        elif args[0] == "fen":
-            if "moves" in args:
-                moves_idx = args.index("moves")
-                fen_fields = args[1:moves_idx]
-                rest = args[moves_idx:]
-            else:
-                fen_fields = args[1:]
-                rest = []
-            if len(fen_fields) not in (4, 6):
-                raise HostError("position fen requires 4 or 6 FEN fields")
-            base_fen = " ".join(fen_fields)
-        else:
-            raise HostError("position must use startpos or fen")
-
-        move_tokens: list[str] = []
-        if rest:
-            if rest[0] != "moves":
-                raise HostError("Unexpected tokens after position base")
-            move_tokens = rest[1:]
-        return base_fen, move_tokens
+        try:
+            return parse_position_args(args)
+        except ValueError as exc:
+            raise HostError(str(exc)) from exc
 
     def _build_go_command(self, args: list[str]) -> tuple[bytes, bool, bool]:
-        values = self._go_values(args)
-        wait_for_stop = "infinite" in values or "ponder" in values
-        if "perft" in values:
-            return cmd_perft(self._parse_depth(values["perft"], "perft")), True, False
-        if "depth" in values:
-            return cmd_search_depth(self._parse_depth(values["depth"], "depth")), False, wait_for_stop
-        if "movetime" in values:
-            return cmd_search_fixed_time(self._parse_time(values["movetime"], "movetime")), False, wait_for_stop
-        if "nodes" in values:
-            return cmd_search_nodes(self._parse_nodes(values["nodes"])), False, wait_for_stop
-        if "wtime" in values and "btime" in values:
-            return (
-                cmd_search_on_clock(
-                    self._parse_time(values["wtime"], "wtime"),
-                    self._parse_time(values["btime"], "btime"),
-                    self._parse_time(values.get("winc", "0"), "winc"),
-                    self._parse_time(values.get("binc", "0"), "binc"),
-                ),
-                False,
-                wait_for_stop,
-            )
-        return cmd_search_depth(DEFAULT_SEARCH_DEPTH), False, wait_for_stop
-
-    def _go_values(self, args: list[str]) -> dict[str, str]:
-        value_keys = {"searchmoves", "ponder", "wtime", "btime", "winc", "binc", "movestogo", "depth", "nodes", "mate", "movetime", "infinite", "perft"}
-        values: dict[str, str] = {}
-        idx = 0
-        while idx < len(args):
-            key = args[idx].lower()
-            if key == "searchmoves":
-                idx += 1
-                moves: list[str] = []
-                while idx < len(args) and args[idx].lower() not in value_keys:
-                    moves.append(args[idx])
-                    idx += 1
-                values[key] = " ".join(moves)
-                continue
-            if key in {"ponder", "infinite"}:
-                values[key] = "1"
-                idx += 1
-                continue
-            if key in value_keys:
-                if idx + 1 >= len(args):
-                    idx += 1
-                    continue
-                values[key] = args[idx + 1]
-                idx += 2
-                continue
-            idx += 1
-        if "searchmoves" in values and self.debug:
-            self.emit("info string searchmoves is ignored by this FPGA protocol")
-        if ("mate" in values or "movestogo" in values) and self.debug:
-            self.emit("info string mate/movestogo constraints are ignored")
-        return values
+        parsed = parse_go_command(args)
+        if self.debug:
+            for warning in parsed.warnings:
+                self.emit(f"info string {warning}")
+        return parsed.command, parsed.is_perft, parsed.wait_for_stop
 
     def _search_worker(self, command: bytes, is_perft: bool, board_snapshot: Any, wait_for_stop: bool) -> None:
         try:
@@ -914,28 +809,6 @@ class FPGAUCIHost:
 
         name = getattr(value, "name", None)
         return name.lower() if isinstance(name, str) else str(value)
-
-    @staticmethod
-    def _parse_depth(value: str, name: str) -> int:
-        depth = int(value)
-        if not 0 <= depth <= MAX_SEARCH_DEPTH:
-            raise ProtocolError(f"{name} must be between 0 and {MAX_SEARCH_DEPTH}")
-        return depth
-
-    @staticmethod
-    def _parse_time(value: str, name: str) -> int:
-        milliseconds = int(value)
-        if milliseconds < 0:
-            raise ProtocolError(f"{name} must be nonnegative")
-        return milliseconds
-
-    @staticmethod
-    def _parse_nodes(value: str) -> int:
-        nodes = int(value)
-        if nodes < 0:
-            raise ProtocolError("nodes must be nonnegative")
-        return nodes
-
 
 def _configure_logging(log_path: str | None, verbose: bool) -> logging.Logger:
     logger = logging.getLogger("fpga_chess_uci")

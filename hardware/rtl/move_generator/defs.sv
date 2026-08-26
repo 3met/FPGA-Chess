@@ -1,7 +1,7 @@
 // Definitions for streamed move generation and bucketed move ordering.
 package move_generator_defs;
 
-    import general_chess_defs::*;
+    import chess_defs::*;
 
     localparam int MOVE_BUCKET_COUNT = 8;
     // Bucket tops include the one-past-last value for the 1,024-entry low

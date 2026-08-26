@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-import general_chess_defs::*;
+import chess_defs::*;
 
 module tb_repetition_checker;
     logic clk = 1'b0;

@@ -1,6 +1,6 @@
 // Portable cached TT frontend for a 16-bit burst-memory backend.
 
-import general_chess_defs::*;
+import chess_defs::*;
 import tt_defs::*;
 
 module tt_external_load_store #(

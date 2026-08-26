@@ -13,7 +13,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Input | `pst_eval_in` | Current White-relative piece-square-table evaluation. |
 | Input | `piece_count_in` | Current total number of occupied squares, from 0 through 32. |
 | Input | `move_in` | Move to apply for push/commit operations, or destination square for set-tile operations. |
-| Input | `set_data` | Tile, turn, castle perms, en passant info, or halfmove clock depending on the set operation. This signal is 7 bits wide; narrow setup values use the low bits. |
+| Input | `set_data` | Tile, turn, castling rights, en passant state, or halfmove clock depending on the set operation. This signal is 7 bits wide; narrow setup values use the low bits. |
 | Input | `thread_id` | Search thread whose move-history record should be read or written. |
 | Input | `search_ply` | Search ply before the current operation. |
 | Output | `board_out` | Output `FullBoard` state. |
@@ -27,11 +27,11 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Operation | Inputs Required | Description |
 | --------- | --------------- | ----------- |
 | Push Move | `move_in` | Makes a reversible search move and writes a move-history record. |
-| Push Null | None | Makes a reversible synthetic search null move, toggling the turn, clearing en passant, and incrementing the halfmove clock without changing tiles, castling permissions, or evaluation. |
+| Push Null | None | Makes a reversible synthetic search null move, toggling the turn, clearing en passant, and incrementing the halfmove clock without changing tiles, castling rights, or evaluation. |
 | Commit Move | `move_in` | Makes an irreversible active-game move without writing a search move-history record. |
 | Set Tile | `move_in.to_pos`, `set_data` tile | Places a piece or `NULL_PIECE` on one square. |
 | Set Turn | `set_data[0]` | Updates the side to move without changing tiles. |
-| Set Castle Perms | `set_data[3:0]` | Updates castling permissions without changing tiles. |
+| Set Castling Rights | `set_data[3:0]` | Updates castling rights without changing tiles. |
 | Set En Passant | `{ep_file[2:0], has_ep}` | Updates en passant state without changing tiles. |
 | Set Halfmove Clock | `set_data[6:0]` | Updates the 50-move-rule halfmove clock without changing tiles. |
 | Reverse Move | `thread_id`, `search_ply` | Reverses the previous pushed move for the thread. |
@@ -47,7 +47,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Board Setup
 
-The engine sets up a board through Set Tile, Set Castle Perms, Set Turn, Set En Passant, and Set Halfmove Clock operations in that order. Applying the turn before en passant lets the pipeline canonicalize the target for the correct side to move. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
+The engine sets up a board through Set Tile, Set Castling Rights, Set Turn, Set En Passant, and Set Halfmove Clock operations in that order. Applying the turn before en passant lets the pipeline canonicalize the target for the correct side to move. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
 
 ## Hashing
 

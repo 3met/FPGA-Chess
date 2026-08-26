@@ -1,7 +1,7 @@
 `timescale 1ns/1ns
 
-import general_chess_defs::*;
-import chess_helper_funcs::*;
+import chess_defs::*;
+import chess_helpers::*;
 import board_update_pipeline_defs::*;
 import zobrist_defs::*;
 import zobrist_values_pkg::*;
@@ -111,7 +111,7 @@ module tb_board_update_pipeline;
             return EvalScore'(0);
         end
 
-        pst_pos = (normalized.piece_color == BLACK) ? mirrorPos(pos) : pos;
+        pst_pos = (normalized.piece_color == BLACK) ? mirror_position(pos) : pos;
         pst_idx = (int'(normalized.piece_type) - 1) * 64 + int'(pst_pos);
         score = PIECE_VALS_128[normalized.piece_type] + EvalScore'(pst_values[pst_idx]);
         return (normalized.piece_color == WHITE) ? score : -score;
@@ -155,9 +155,9 @@ module tb_board_update_pipeline;
         automatic Tile pawn = Tile'({turn, PAWN});
 
         return (ep_file != BoardFile'(0)
-                && board.tiles[getPosition(pawn_rank, ep_file - BoardFile'(1))] == pawn)
+                && board.tiles[get_position(pawn_rank, ep_file - BoardFile'(1))] == pawn)
             || (ep_file != BoardFile'(7)
-                && board.tiles[getPosition(pawn_rank, ep_file + BoardFile'(1))] == pawn);
+                && board.tiles[get_position(pawn_rank, ep_file + BoardFile'(1))] == pawn);
     endfunction
 
     function automatic ZobristKey ref_zobrist_full(input FullBoard board);
@@ -167,10 +167,10 @@ module tb_board_update_pipeline;
             key ^= ZOBRIST_TURN_BLACK_VALUE;
         end
 
-        if (board.castle_perms.white_kingside)  key ^= ZOBRIST_WHITE_KINGSIDE_VALUE;
-        if (board.castle_perms.white_queenside) key ^= ZOBRIST_WHITE_QUEENSIDE_VALUE;
-        if (board.castle_perms.black_kingside)  key ^= ZOBRIST_BLACK_KINGSIDE_VALUE;
-        if (board.castle_perms.black_queenside) key ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
+        if (board.castling_rights.white_kingside)  key ^= ZOBRIST_WHITE_KINGSIDE_VALUE;
+        if (board.castling_rights.white_queenside) key ^= ZOBRIST_WHITE_QUEENSIDE_VALUE;
+        if (board.castling_rights.black_kingside)  key ^= ZOBRIST_BLACK_KINGSIDE_VALUE;
+        if (board.castling_rights.black_queenside) key ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
 
         if (board.has_ep && ref_ep_has_capturer(board, board.turn, board.ep_file)) begin
             key ^= zobrist_ep_values[board.ep_file];
@@ -190,7 +190,7 @@ module tb_board_update_pipeline;
 
         board.king_positions = KingPositions'(0);
         board.turn = WHITE;
-        board.castle_perms = CastlePerms'(4'b0000);
+        board.castling_rights = CastlingRights'(4'b0000);
         board.has_ep = 1'b0;
         board.ep_file = BoardFile'(0);
         board.halfmove_clock = HalfmoveClock'(0);
@@ -244,7 +244,7 @@ module tb_board_update_pipeline;
         automatic ZobristKey expected_zobrist = ref_zobrist_full(expected_board);
 
         expect_equal(board_out === expected_board,
-            $sformatf("%s board mismatch expected=%s found=%s", test_name, toFen(expected_board), toFen(board_out)));
+            $sformatf("%s board mismatch expected=%s found=%s", test_name, to_fen(expected_board), to_fen(board_out)));
         expect_equal(pst_eval_out === expected_pst,
             $sformatf("%s PST mismatch expected=%0d found=%0d", test_name, expected_pst, pst_eval_out));
         expect_equal(piece_count_out === ref_piece_count(expected_board),
@@ -259,7 +259,7 @@ module tb_board_update_pipeline;
     endtask
 
     task automatic expect_fen(input string expected_fen, input string test_name);
-        automatic string found_fen = toFen(ref_board);
+        automatic string found_fen = to_fen(ref_board);
 
         expect_equal(found_fen == expected_fen,
             $sformatf("%s FEN mismatch expected=%s found=%s", test_name, expected_fen, found_fen));
@@ -280,8 +280,8 @@ module tb_board_update_pipeline;
             && ref_ep_has_capturer(ref_board, ref_board.turn, ref_board.ep_file);
     endtask
 
-    task automatic ref_apply_set_castle_perms(input logic [6:0] data);
-        ref_board.castle_perms = CastlePerms'(data[3:0]);
+    task automatic ref_apply_set_castling_rights(input logic [6:0] data);
+        ref_board.castling_rights = CastlingRights'(data[3:0]);
     endtask
 
     task automatic ref_apply_set_en_passant(input logic [6:0] data);
@@ -297,27 +297,27 @@ module tb_board_update_pipeline;
     task automatic ref_apply_move(input Move move, input bit writes_history);
         automatic Position from_pos = move.from_pos;
         automatic Position to_pos = move.to_pos;
-        automatic Tile start_tile = norm_tile(ref_board.tiles[from_pos]);
-        automatic Tile end_tile = norm_tile(ref_board.tiles[to_pos]);
-        automatic Color moved_color = start_tile.piece_color;
+        automatic Tile moving_tile = norm_tile(ref_board.tiles[from_pos]);
+        automatic Tile destination_tile = norm_tile(ref_board.tiles[to_pos]);
+        automatic Color moved_color = moving_tile.piece_color;
         automatic Color captured_color = Color'(~moved_color);
-        automatic logic is_promo = (start_tile.piece_type == PAWN && (getRank(to_pos) == BoardRank'('d0) || getRank(to_pos) == BoardRank'('d7)));
-        automatic logic is_castle = (start_tile.piece_type == KING && getFile(from_pos) == BoardFile'('d4) && (getFile(to_pos) == BoardFile'('d2) || getFile(to_pos) == BoardFile'('d6)));
-        automatic logic is_ep = (start_tile.piece_type == PAWN && ref_board.has_ep && ref_board.ep_file == getFile(to_pos) && end_tile.piece_type == NULL_PIECE && ((moved_color == WHITE && getRank(to_pos) == BoardRank'('d5)) || (moved_color == BLACK && getRank(to_pos) == BoardRank'('d2))));
-        automatic PieceType placed_piece = is_promo ? ref_promo_to_piece(move.promo_piece) : start_tile.piece_type;
+        automatic logic is_promo = (moving_tile.piece_type == PAWN && (get_rank(to_pos) == BoardRank'('d0) || get_rank(to_pos) == BoardRank'('d7)));
+        automatic logic is_castle = (moving_tile.piece_type == KING && get_file(from_pos) == BoardFile'('d4) && (get_file(to_pos) == BoardFile'('d2) || get_file(to_pos) == BoardFile'('d6)));
+        automatic logic is_ep = (moving_tile.piece_type == PAWN && ref_board.has_ep && ref_board.ep_file == get_file(to_pos) && destination_tile.piece_type == NULL_PIECE && ((moved_color == WHITE && get_rank(to_pos) == BoardRank'('d5)) || (moved_color == BLACK && get_rank(to_pos) == BoardRank'('d2))));
+        automatic PieceType placed_piece = is_promo ? ref_promo_to_piece(move.promo_piece) : moving_tile.piece_type;
         automatic Tile placed_tile = Tile'({moved_color, placed_piece});
-        automatic Position ep_capture_pos = getPosition(getRank(from_pos), getFile(to_pos));
+        automatic Position ep_capture_pos = get_position(get_rank(from_pos), get_file(to_pos));
         automatic Position rook_from = ref_castle_rook_from(to_pos);
         automatic Position rook_to = ref_castle_rook_to(to_pos);
-        automatic CastlePerms next_castle = ref_board.castle_perms;
+        automatic CastlingRights next_castle = ref_board.castling_rights;
         automatic logic next_has_ep;
         automatic HalfmoveClock next_halfmove;
 
         if (writes_history) begin
             ref_history[ref_ply].from_pos = from_pos;
             ref_history[ref_ply].to_pos = to_pos;
-            ref_history[ref_ply].killed_piece = is_ep ? NULL_PIECE : end_tile.piece_type;
-            ref_history[ref_ply].castle_perms = ref_board.castle_perms;
+            ref_history[ref_ply].captured_piece = is_ep ? NULL_PIECE : destination_tile.piece_type;
+            ref_history[ref_ply].castling_rights = ref_board.castling_rights;
             ref_history[ref_ply].move_flag = is_promo ? PROMO_MOVE : is_castle ? CASTLE_MOVE : is_ep ? EP_MOVE : NORM_MOVE;
             ref_history[ref_ply].has_ep = ref_board.has_ep;
             ref_history[ref_ply].ep_file = ref_board.ep_file;
@@ -326,7 +326,7 @@ module tb_board_update_pipeline;
 
         ref_board.tiles[from_pos] = EMPTY_TILE;
         ref_board.tiles[to_pos] = placed_tile;
-        if (start_tile.piece_type == KING)
+        if (moving_tile.piece_type == KING)
             ref_board.king_positions[moved_color] = to_pos;
 
         if (is_ep) begin
@@ -343,18 +343,18 @@ module tb_board_update_pipeline;
         if (from_pos == Position'('d60) || from_pos == Position'('d63) || to_pos == Position'('d63)) next_castle.black_kingside = 1'b0;
         if (from_pos == Position'('d60) || from_pos == Position'('d56) || to_pos == Position'('d56)) next_castle.black_queenside = 1'b0;
 
-        next_has_ep = start_tile.piece_type == PAWN
-            && ((moved_color == WHITE && getRank(from_pos) == BoardRank'(1)
-                    && getRank(to_pos) == BoardRank'(3))
-                || (moved_color == BLACK && getRank(from_pos) == BoardRank'(6)
-                    && getRank(to_pos) == BoardRank'(4)))
-            && ref_ep_has_capturer(ref_board, Color'(~ref_board.turn), getFile(to_pos));
-        next_halfmove = (is_ep || end_tile.piece_type != NULL_PIECE || start_tile.piece_type == PAWN) ? HalfmoveClock'(0) : ref_board.halfmove_clock + HalfmoveClock'(1);
+        next_has_ep = moving_tile.piece_type == PAWN
+            && ((moved_color == WHITE && get_rank(from_pos) == BoardRank'(1)
+                    && get_rank(to_pos) == BoardRank'(3))
+                || (moved_color == BLACK && get_rank(from_pos) == BoardRank'(6)
+                    && get_rank(to_pos) == BoardRank'(4)))
+            && ref_ep_has_capturer(ref_board, Color'(~ref_board.turn), get_file(to_pos));
+        next_halfmove = (is_ep || destination_tile.piece_type != NULL_PIECE || moving_tile.piece_type == PAWN) ? HalfmoveClock'(0) : ref_board.halfmove_clock + HalfmoveClock'(1);
 
         ref_board.turn = Color'(~ref_board.turn);
-        ref_board.castle_perms = next_castle;
+        ref_board.castling_rights = next_castle;
         ref_board.has_ep = next_has_ep;
-        ref_board.ep_file = getFile(to_pos);
+        ref_board.ep_file = get_file(to_pos);
         ref_board.halfmove_clock = next_halfmove;
 
         if (writes_history) begin
@@ -368,14 +368,14 @@ module tb_board_update_pipeline;
         automatic Position to_pos = rec.to_pos;
         automatic Color moved_color = Color'(~ref_board.turn);
         automatic Color captured_color = ref_board.turn;
-        automatic Tile end_tile = norm_tile(ref_board.tiles[to_pos]);
+        automatic Tile destination_tile = norm_tile(ref_board.tiles[to_pos]);
         automatic logic is_promo = (rec.move_flag == PROMO_MOVE);
         automatic logic is_ep = (rec.move_flag == EP_MOVE);
         automatic logic is_castle = (rec.move_flag == CASTLE_MOVE);
-        automatic PieceType restored_piece = is_promo ? PAWN : end_tile.piece_type;
+        automatic PieceType restored_piece = is_promo ? PAWN : destination_tile.piece_type;
         automatic Tile restored_mover = Tile'({moved_color, restored_piece});
-        automatic Tile restored_capture = (rec.killed_piece == NULL_PIECE) ? EMPTY_TILE : Tile'({captured_color, rec.killed_piece});
-        automatic Position ep_capture_pos = getPosition(getRank(from_pos), getFile(to_pos));
+        automatic Tile restored_capture = (rec.captured_piece == NULL_PIECE) ? EMPTY_TILE : Tile'({captured_color, rec.captured_piece});
+        automatic Position ep_capture_pos = get_position(get_rank(from_pos), get_file(to_pos));
         automatic Position rook_from = ref_castle_rook_from(to_pos);
         automatic Position rook_to = ref_castle_rook_to(to_pos);
 
@@ -397,7 +397,7 @@ module tb_board_update_pipeline;
         end
 
         ref_board.turn = moved_color;
-        ref_board.castle_perms = rec.castle_perms;
+        ref_board.castling_rights = rec.castling_rights;
         ref_board.has_ep = rec.has_ep;
         ref_board.ep_file = rec.ep_file;
         ref_board.halfmove_clock = rec.halfmove_clock;
@@ -407,8 +407,8 @@ module tb_board_update_pipeline;
     task automatic ref_apply_null();
         ref_history[ref_ply].from_pos = Position'(0);
         ref_history[ref_ply].to_pos = Position'(0);
-        ref_history[ref_ply].killed_piece = NULL_PIECE;
-        ref_history[ref_ply].castle_perms = ref_board.castle_perms;
+        ref_history[ref_ply].captured_piece = NULL_PIECE;
+        ref_history[ref_ply].castling_rights = ref_board.castling_rights;
         ref_history[ref_ply].move_flag = NORM_MOVE;
         ref_history[ref_ply].has_ep = ref_board.has_ep;
         ref_history[ref_ply].ep_file = ref_board.ep_file;
@@ -425,7 +425,7 @@ module tb_board_update_pipeline;
             BOARD_COMMIT_MOVE_OP:         ref_apply_move(move, 1'b0);
             BOARD_SET_TILE_OP:            ref_apply_set_tile(move, data);
             BOARD_SET_TURN_OP:            ref_apply_set_turn(data);
-            BOARD_SET_CASTLE_PERMS_OP:    ref_apply_set_castle_perms(data);
+            BOARD_SET_CASTLING_RIGHTS_OP:    ref_apply_set_castling_rights(data);
             BOARD_SET_EN_PASSANT_OP:      ref_apply_set_en_passant(data);
             BOARD_SET_HALFMOVE_CLOCK_OP:  ref_apply_set_halfmove_clock(data);
             BOARD_REVERSE_MOVE_OP:        ref_apply_reverse();
@@ -516,14 +516,14 @@ module tb_board_update_pipeline;
         run_op(BOARD_SET_TURN_OP, NULL_MOVE, data, test_name, verify);
     endtask
 
-    task automatic set_castle_perms(
-        input CastlePerms castle_perms,
+    task automatic set_castling_rights(
+        input CastlingRights castling_rights,
         input string test_name,
         input bit verify = 1'b1
     );
         automatic logic [6:0] data = 7'd0;
-        data[3:0] = castle_perms;
-        run_op(BOARD_SET_CASTLE_PERMS_OP, NULL_MOVE, data, test_name, verify);
+        data[3:0] = castling_rights;
+        run_op(BOARD_SET_CASTLING_RIGHTS_OP, NULL_MOVE, data, test_name, verify);
     endtask
 
     task automatic set_en_passant(
@@ -590,7 +590,7 @@ module tb_board_update_pipeline;
         set_tile(BLACK_KNIGHT, Position'(62), "setup g8", 1'b0);
         set_tile(BLACK_ROOK,   Position'(63), "setup h8", 1'b0);
         set_turn(WHITE, "setup turn", 1'b0);
-        set_castle_perms(CastlePerms'(4'b1111), "setup castle perms", 1'b0);
+        set_castling_rights(CastlingRights'(4'b1111), "setup castling rights", 1'b0);
         set_en_passant(1'b0, BoardFile'(0), "setup en passant", 1'b0);
         set_halfmove_clock(HalfmoveClock'(0), "setup halfmove clock", 1'b0);
         expect_ref_state("start position setup");
@@ -713,12 +713,12 @@ module tb_board_update_pipeline;
             set_tile(WHITE_KING, Position'(4), "castle setup white king", 1'b0);
             set_tile(WHITE_ROOK, kingside ? Position'(7) : Position'(0), "castle setup white rook", 1'b0);
             set_turn(WHITE, "castle setup white turn", 1'b0);
-            set_castle_perms(kingside ? CastlePerms'(4'b1000) : CastlePerms'(4'b0100), "castle setup white perms", 1'b0);
+            set_castling_rights(kingside ? CastlingRights'(4'b1000) : CastlingRights'(4'b0100), "castle setup white rights", 1'b0);
         end else begin
             set_tile(BLACK_KING, Position'(60), "castle setup black king", 1'b0);
             set_tile(BLACK_ROOK, kingside ? Position'(63) : Position'(56), "castle setup black rook", 1'b0);
             set_turn(BLACK, "castle setup black turn", 1'b0);
-            set_castle_perms(kingside ? CastlePerms'(4'b0010) : CastlePerms'(4'b0001), "castle setup black perms", 1'b0);
+            set_castling_rights(kingside ? CastlingRights'(4'b0010) : CastlingRights'(4'b0001), "castle setup black rights", 1'b0);
         end
 
         set_en_passant(1'b0, BoardFile'(0), "castle setup ep", 1'b0);

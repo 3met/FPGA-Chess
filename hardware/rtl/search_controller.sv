@@ -1,7 +1,7 @@
 // By Emet Behrendt
 
-import general_chess_defs::*;
-import chess_helper_funcs::*;
+import chess_defs::*;
+import chess_helpers::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 import move_generator_defs::*;
@@ -890,63 +890,16 @@ module search_controller #(
         return move.from_pos == Position'(0) && move.to_pos == Position'(0);
     endfunction : is_null_move
 
-    function automatic logic is_direct_setup_op(input BoardOp op);
+    function automatic logic is_setup_op(input BoardOp op);
         return op == BOARD_SET_TILE_OP
             || op == BOARD_SET_TURN_OP
-            || op == BOARD_SET_CASTLE_PERMS_OP
+            || op == BOARD_SET_CASTLING_RIGHTS_OP
             || op == BOARD_SET_EN_PASSANT_OP
             || op == BOARD_SET_HALFMOVE_CLOCK_OP;
-    endfunction : is_direct_setup_op
-
-    function automatic logic is_line_attacker(input PieceType piece, input Direction dir);
-        return (piece == QUEEN || (piece == ROOK && isDirCardinal(dir)) || (piece == BISHOP && isDirDiag(dir)));
-    endfunction : is_line_attacker
-
-    function automatic logic square_attacked(input FullBoard board, input Position square, input Color attacker_color);
-        automatic Position test_pos;
-        automatic Tile test_tile;
-
-        if (attacker_color == WHITE) begin
-            if (isShiftOnBoard(square, SOUTH_WEST, 3'd1)
-                    && board.tiles[shiftPos(square, SOUTH_WEST, 3'd1)] == WHITE_PAWN) return 1'b1;
-            if (isShiftOnBoard(square, SOUTH_EAST, 3'd1)
-                    && board.tiles[shiftPos(square, SOUTH_EAST, 3'd1)] == WHITE_PAWN) return 1'b1;
-        end else begin
-            if (isShiftOnBoard(square, NORTH_WEST, 3'd1)
-                    && board.tiles[shiftPos(square, NORTH_WEST, 3'd1)] == BLACK_PAWN) return 1'b1;
-            if (isShiftOnBoard(square, NORTH_EAST, 3'd1)
-                    && board.tiles[shiftPos(square, NORTH_EAST, 3'd1)] == BLACK_PAWN) return 1'b1;
-        end
-
-        for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
-            if (isKnightShiftOnBoard(square, KnightDirection'(knight_dir))) begin
-                test_pos = shiftKnightPos(square, KnightDirection'(knight_dir));
-                if (board.tiles[test_pos] == Tile'({attacker_color, KNIGHT})) return 1'b1;
-            end
-        end
-
-        for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
-            automatic Direction dir = Direction'(dir_idx);
-            for (int distance = 1; distance < 8; distance++) begin
-                if (isShiftOnBoard(square, dir, distance[2:0])) begin
-                    test_pos = shiftPos(square, dir, distance[2:0]);
-                    test_tile = board.tiles[test_pos];
-                    if (test_tile.piece_type != NULL_PIECE) begin
-                        if (test_tile.piece_color == attacker_color) begin
-                            if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
-                            if (is_line_attacker(test_tile.piece_type, dir)) return 1'b1;
-                        end
-                        break;
-                    end
-                end
-            end
-        end
-
-        return 1'b0;
-    endfunction : square_attacked
+    endfunction : is_setup_op
 
     function automatic logic side_in_check(input FullBoard board);
-        return square_attacked(board, kingPosition(board, board.turn), Color'(~board.turn));
+        return square_attacked(board, king_position(board, board.turn), Color'(~board.turn));
     endfunction : side_in_check
 
     function automatic logic committed_move_is_irreversible(
@@ -954,14 +907,14 @@ module search_controller #(
         input FullBoard after_board,
         input Move move
     );
-        automatic Tile start_tile;
-        automatic Tile end_tile;
+        automatic Tile moving_tile;
+        automatic Tile destination_tile;
 
-        start_tile = before_board.tiles[move.from_pos];
-        end_tile = before_board.tiles[move.to_pos];
-        return start_tile.piece_type == PAWN
-            || end_tile.piece_type != NULL_PIECE
-            || before_board.castle_perms != after_board.castle_perms;
+        moving_tile = before_board.tiles[move.from_pos];
+        destination_tile = before_board.tiles[move.to_pos];
+        return moving_tile.piece_type == PAWN
+            || destination_tile.piece_type != NULL_PIECE
+            || before_board.castling_rights != after_board.castling_rights;
     endfunction : committed_move_is_irreversible
 
     function automatic EvalScore terminal_no_move_score(input logic in_check, input PlyIndex ply);
@@ -971,7 +924,7 @@ module search_controller #(
         return DRAW_EVAL_SCORE;
     endfunction : terminal_no_move_score
 
-    function automatic Tile start_tile(input int pos);
+    function automatic Tile initial_tile(input int pos);
         case (pos)
             0: return WHITE_ROOK;
             1: return WHITE_KNIGHT;
@@ -993,39 +946,39 @@ module search_controller #(
             63: return BLACK_ROOK;
             default: return EMPTY_TILE;
         endcase
-    endfunction : start_tile
+    endfunction : initial_tile
 
-    function automatic logic [3:0] start_tile_bits(input int pos);
+    function automatic logic [3:0] initial_tile_bits(input int pos);
         automatic Tile tile;
 
-        tile = start_tile(pos);
+        tile = initial_tile(pos);
         if (tile.piece_type == NULL_PIECE) begin
             return 4'h0;
         end
         return tile;
-    endfunction : start_tile_bits
+    endfunction : initial_tile_bits
 
     function automatic EngineControllerRequest new_game_setup_request(input logic [6:0] idx);
         automatic EngineControllerRequest setup_req;
 
         setup_req = EngineControllerRequest'('0);
-        setup_req.operation = ENGINE_CTRL_DIRECT_BOARD;
-        setup_req.direct_board_op = BOARD_IDLE_OP;
+        setup_req.operation = ENGINE_CTRL_BOARD_UPDATE;
+        setup_req.board_op = BOARD_IDLE_OP;
         if (idx < 7'd64) begin
-            setup_req.direct_board_op = BOARD_SET_TILE_OP;
+            setup_req.board_op = BOARD_SET_TILE_OP;
             setup_req.move.to_pos = Position'(idx[5:0]);
-            setup_req.board_wr_data = {3'b000, start_tile_bits(int'(idx))};
+            setup_req.board_wr_data = {3'b000, initial_tile_bits(int'(idx))};
         end else if (idx == 7'd64) begin
-            setup_req.direct_board_op = BOARD_SET_CASTLE_PERMS_OP;
+            setup_req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
             setup_req.board_wr_data = 7'b000_1111;
         end else if (idx == 7'd65) begin
-            setup_req.direct_board_op = BOARD_SET_TURN_OP;
+            setup_req.board_op = BOARD_SET_TURN_OP;
             setup_req.board_wr_data = 7'd0;
         end else if (idx == 7'd66) begin
-            setup_req.direct_board_op = BOARD_SET_EN_PASSANT_OP;
+            setup_req.board_op = BOARD_SET_EN_PASSANT_OP;
             setup_req.board_wr_data = 7'd0;
         end else begin
-            setup_req.direct_board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+            setup_req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
             setup_req.board_wr_data = 7'd0;
         end
         return setup_req;
@@ -1686,9 +1639,9 @@ module search_controller #(
         board_update_ply = PlyIndex'(0);
 
         if (state == ST_BOARD_ISSUE) begin
-            board_update_op = active_req.direct_board_op;
+            board_update_op = active_req.board_op;
         end else if (state == ST_NEW_SETUP_ISSUE) begin
-            board_update_op = setup_req_comb.direct_board_op;
+            board_update_op = setup_req_comb.board_op;
             board_update_move = setup_req_comb.move;
             board_update_set_data = setup_req_comb.board_wr_data;
         end else if (state == ST_PERFT_GEN_WAIT
@@ -2356,8 +2309,8 @@ module search_controller #(
                     if (req_valid) begin
                         active_req <= req;
                         case (req.operation)
-                            ENGINE_CTRL_DIRECT_BOARD: begin
-                                if (req.direct_board_op == BOARD_REVERSE_MOVE_OP) begin
+                            ENGINE_CTRL_BOARD_UPDATE: begin
+                                if (req.board_op == BOARD_REVERSE_MOVE_OP) begin
                                     resp_reg <= EngineControllerResponse'('0);
                                     resp_reg.error <= 1'b1;
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
@@ -2595,7 +2548,7 @@ module search_controller #(
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         active_piece_count <= board_update_piece_count_out;
-                        if (active_req.direct_board_op == BOARD_COMMIT_MOVE_OP) begin
+                        if (active_req.board_op == BOARD_COMMIT_MOVE_OP) begin
                             if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
                                 repetition_history_reset <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
@@ -2603,7 +2556,7 @@ module search_controller #(
                                 repetition_history_write <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
                             end
-                        end else if (is_direct_setup_op(active_req.direct_board_op)) begin
+                        end else if (is_setup_op(active_req.board_op)) begin
                             repetition_history_reset <= 1'b1;
                             repetition_history_key <= board_update_zobrist_out;
                         end

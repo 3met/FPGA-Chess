@@ -1,6 +1,6 @@
 // Per-lane move-bucket RAM ownership and addressing.
 
-import general_chess_defs::*;
+import chess_defs::*;
 import move_generator_defs::*;
 
 module move_generator_bucket_store #(

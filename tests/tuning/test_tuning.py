@@ -13,6 +13,7 @@ from tools.tuning.config import ConfigError, load_config
 from tools.tuning.data import (
     BufferedShuffleSampler,
     CacheBatchLoader,
+    CacheDataset,
     build_cache,
     cache_datasets,
     encode_board,
@@ -104,6 +105,13 @@ def config_for(directory: Path, dataset: Path, validation_size=2):
 
 
 class TuningDataTests(unittest.TestCase):
+    def test_cache_dataset_context_manager_closes_resources(self):
+        dataset = CacheDataset(Path("unused"), 0, 0)
+        with mock.patch.object(dataset, "close") as close:
+            with dataset as opened:
+                self.assertIs(opened, dataset)
+        close.assert_called_once_with()
+
     def test_highest_depth_and_first_pv_are_selected_with_stable_ties(self):
         item = record()
         item["evals"] = [
@@ -517,10 +525,10 @@ class TuningModelAndExportTests(unittest.TestCase):
             run = Path(directory)
             weights = engine_combined_cp().reshape(6, 64).tolist()
             atomic_json(run / "parameters.json", {"combined_pst": weights})
-            before = Path("hardware/rtl/defs.sv").read_bytes()
+            before = Path("hardware/rtl/chess_defs.sv").read_bytes()
             with contextlib.redirect_stdout(io.StringIO()):
                 commit_parameters(run, dry_run=True)
-            self.assertEqual(before, Path("hardware/rtl/defs.sv").read_bytes())
+            self.assertEqual(before, Path("hardware/rtl/chess_defs.sv").read_bytes())
 
     def test_failed_generation_rolls_back_canonical_parameters(self):
         with tempfile.TemporaryDirectory() as directory:

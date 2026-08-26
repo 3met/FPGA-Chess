@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser.set_defaults(func=command_profile)
 
     position_parser = subparsers.add_parser(
-        "profile_position", help="Profile one specified position in the cycle-accurate engine simulation"
+        "profile-position", help="Profile one specified position in the cycle-accurate engine simulation"
     )
     position_parser.add_argument("--fen", required=True, help="Position to profile in FEN notation")
     add_profile_options(position_parser)

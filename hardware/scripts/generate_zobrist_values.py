@@ -138,7 +138,7 @@ def render_sv_package(turn_value: int, castle_values: list[int]) -> str:
         "",
         "package zobrist_values_pkg;",
         "",
-        "    import general_chess_defs::*;",
+        "    import chess_defs::*;",
         "",
     ]
     lines.extend(

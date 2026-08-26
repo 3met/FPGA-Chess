@@ -5,7 +5,15 @@ import unittest
 from pathlib import Path
 
 from tools.hardware_build.common import BuildError
-from tools.hardware_build.profiling import (
+from tools.hardware_build.profile_format import format_profile_report, format_profile_suite_report
+from tools.hardware_build.profile_report import (
+    build_profile_report,
+    build_profile_suite_report,
+    parse_metric_records,
+    percent,
+    rate,
+)
+from tools.hardware_build.profile_schema import (
     CONTROLLER_STATES,
     ENGINE_STATES,
     MOVE_BUCKETS,
@@ -13,17 +21,12 @@ from tools.hardware_build.profiling import (
     MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
     THREAD_PHASES,
+)
+from tools.hardware_build.profiling import (
     _prune_verilator_profile_cache,
     _profile_job_count,
     _resolve_profile_config,
     _validate_profile_args,
-    build_profile_report,
-    build_profile_suite_report,
-    format_profile_report,
-    format_profile_suite_report,
-    parse_metric_records,
-    percent,
-    rate,
 )
 
 
@@ -228,7 +231,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Peak queued", text)
         self.assertIn("Per-depth breakdown", text)
         self.assertIn("max ply  status", text)
-        self.assertIn("Deepest search ply reached (including qsearch): 3", text)
+        self.assertIn("Deepest search ply reached (including quiescence search): 3", text)
         self.assertIn("Metric", text)
         self.assertIn("T0", text)
         self.assertIn("Pipeline request accepted", text)

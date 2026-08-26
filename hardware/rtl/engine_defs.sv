@@ -2,7 +2,7 @@
 
 package engine_defs;
 
-    import general_chess_defs::*;
+    import chess_defs::*;
     import board_update_pipeline_defs::*;
 
     localparam logic [7:0] ENGINE_CMD_GET_STATUS        = 8'h00;
@@ -63,7 +63,7 @@ package engine_defs;
 
     typedef enum logic [3:0] {
         ENGINE_CTRL_IDLE,
-        ENGINE_CTRL_DIRECT_BOARD,
+        ENGINE_CTRL_BOARD_UPDATE,
         ENGINE_CTRL_NEW_GAME,
         ENGINE_CTRL_SEARCH_DEPTH,
         ENGINE_CTRL_SEARCH_FIXED_TIME,
@@ -75,7 +75,7 @@ package engine_defs;
 
     typedef struct packed {
         EngineControllerOp operation;
-        BoardOp direct_board_op;
+        BoardOp board_op;
         Move move;
         logic [6:0] board_wr_data;
         TimeType time_limit;

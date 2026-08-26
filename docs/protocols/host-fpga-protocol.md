@@ -1,8 +1,8 @@
-# Laptop-FPGA Communication
+# Host-FPGA Protocol
 
 The host communicates with the FPGA as a single in-order byte stream. The host is responsible for UCI parsing, chess legality of incoming position and move commands, command serialization, and avoiding FIFO overflow.
 
-The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command is complete or is explicitly killed.
+The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command completes or is canceled with Kill.
 
 ## UART Configuration
 
@@ -48,7 +48,7 @@ The command payload encodings are defined in [binary-encoding.md](binary-encodin
 
 Perft is a supported hardware command in the engine/controller protocol and is enabled in every RTL target.
 
-`Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castle Perms, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
+`Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castling Rights, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
 
 `New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
 

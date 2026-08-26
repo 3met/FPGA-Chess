@@ -1,6 +1,6 @@
 // Quiet-move history lookup, update sequencing, and RAM ownership.
 
-import general_chess_defs::*;
+import chess_defs::*;
 
 module move_generator_quiet_history #(
     parameter int REWARD_PER_DEPTH = 4,

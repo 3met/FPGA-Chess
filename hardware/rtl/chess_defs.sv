@@ -1,11 +1,8 @@
 
 // By Emet Behrendt
 
-// This file contains the general_chess_defs package which holds
-// definitions of various basic datatypes and constants.
-
-// A Package for general chess/engine definitions
-package general_chess_defs;
+// Shared chess and engine types and constants.
+package chess_defs;
 	// Build tools may size packed identifiers to the selected FPGA profile.
 	`ifndef FPGA_CHESS_SEARCH_STACK_CAPACITY
 		`define FPGA_CHESS_SEARCH_STACK_CAPACITY 64
@@ -50,7 +47,7 @@ package general_chess_defs;
 		logic white_queenside;
 		logic black_kingside;
 		logic black_queenside;
-	} CastlePerms;
+	} CastlingRights;
 
 
 	// -- Data Type for a Half-Move Clock --
@@ -224,10 +221,10 @@ package general_chess_defs;
 		Tile [63:0] tiles;
 		KingPositions king_positions;
 		Color turn;
-		CastlePerms castle_perms;
+		CastlingRights castling_rights;
 		logic has_ep;
 		BoardFile ep_file;
 		HalfmoveClock halfmove_clock;
 	} FullBoard;
 
-endpackage : general_chess_defs
+endpackage : chess_defs

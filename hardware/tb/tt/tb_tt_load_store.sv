@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-import general_chess_defs::*;
+import chess_defs::*;
 import tt_defs::*;
 
 module tb_tt_load_store;
