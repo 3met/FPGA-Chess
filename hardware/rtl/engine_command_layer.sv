@@ -79,6 +79,7 @@ module engine_command_layer #(
     logic [7:0] active_operation;
 
     Move last_move;
+    Move last_ponder_move;
     EvalScore last_score;
     NodeCountType last_node_count;
     logic [7:0] last_completed_depth;
@@ -134,7 +135,7 @@ module engine_command_layer #(
         case (kind)
             RESP_STATUS: return 4'd4;
             RESP_ACK:    return 4'd2;
-            RESP_SEARCH: return 4'd12;
+            RESP_SEARCH: return 4'd14;
             RESP_PERFT:  return 4'd7;
             RESP_DEBUG:  return 4'd7;
             RESP_ERROR:  return 4'd3;
@@ -282,7 +283,11 @@ module engine_command_layer #(
 
                 RESP_SEARCH: begin
                     case (response_index)
-                        5'd1:  data_out = {last_move.to_pos, last_move.promo_piece};
+                        5'd1:  data_out = {
+                            last_move.to_pos,
+                            (last_move.from_pos == Position'(0) && last_move.to_pos == Position'(0))
+                                ? 2'b00 : last_move.promo_piece
+                        };
                         5'd2:  data_out = {2'b00, last_move.from_pos};
                         5'd3:  data_out = last_score[7:0];
                         5'd4:  data_out = last_score[15:8];
@@ -293,6 +298,13 @@ module engine_command_layer #(
                         5'd9:  data_out = last_node_count[39:32];
                         5'd10: data_out = last_completed_depth;
                         5'd11: data_out = last_end_reason;
+                        5'd12: data_out = {
+                            last_ponder_move.to_pos,
+                            (last_ponder_move.from_pos == Position'(0)
+                                && last_ponder_move.to_pos == Position'(0))
+                                ? 2'b00 : last_ponder_move.promo_piece
+                        };
+                        5'd13: data_out = {2'b00, last_ponder_move.from_pos};
                         default: data_out = 'x;
                     endcase
                 end
@@ -533,6 +545,7 @@ module engine_command_layer #(
             search_active <= 1'b0;
             active_operation <= 8'h00;
             last_move <= Move'('0);
+            last_ponder_move <= Move'('0);
             last_score <= EvalScore'(0);
             last_node_count <= NodeCountType'(0);
             last_completed_depth <= 8'd0;
@@ -599,6 +612,7 @@ module engine_command_layer #(
                         if (request_clears_error) begin
                             error_code <= ENGINE_ERR_NONE[2:0];
                             last_move <= Move'('0);
+                            last_ponder_move <= Move'('0);
                             last_score <= EvalScore'(0);
                             last_node_count <= NodeCountType'(0);
                             last_completed_depth <= 8'd0;
@@ -626,6 +640,7 @@ module engine_command_layer #(
                             start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
                         end else begin
                             last_move <= search_resp.best_move;
+                            last_ponder_move <= search_resp.ponder_move;
                             last_score <= search_resp.score;
                             last_node_count <= search_resp.nodes_count;
                             last_completed_depth <= search_resp.completed_depth;

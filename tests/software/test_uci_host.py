@@ -99,7 +99,7 @@ class UCIHostSpecTests(unittest.TestCase):
         self.assertEqual(
             self.capture_lines(host, "help"),
             [
-                "info string commands: uci, isready, setoption, ucinewgame, position, go, stop, quit, debug, help",
+                "info string commands: uci, isready, setoption, ucinewgame, position, go, stop, ponderhit, quit, debug, help",
                 "info string use 'debug help' for diagnostics",
             ],
         )
@@ -112,18 +112,17 @@ class UCIHostSpecTests(unittest.TestCase):
         self.assertEqual(lines, ["readyok"])
 
     def test_unknown_go_tokens_are_ignored(self):
-        host = self.make_host()
-        command, is_perft, wait_for_stop = host._build_go_command(["nonsense", "depth", "3"])
-        self.assertEqual(command, bytes([Command.SEARCH_DEPTH, 3]))
-        self.assertFalse(is_perft)
-        self.assertFalse(wait_for_stop)
+        parsed = self.make_host()._build_go_command(["nonsense", "depth", "3"])
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
+        self.assertFalse(parsed.is_perft)
+        self.assertFalse(parsed.wait_for_stop)
+        self.assertFalse(parsed.is_ponder)
 
     def test_infinite_search_waits_for_stop(self):
-        host = self.make_host()
-        command, is_perft, wait_for_stop = host._build_go_command(["infinite"])
-        self.assertEqual(command, bytes([Command.SEARCH_DEPTH, 31]))
-        self.assertFalse(is_perft)
-        self.assertTrue(wait_for_stop)
+        parsed = self.make_host()._build_go_command(["infinite"])
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
+        self.assertFalse(parsed.is_perft)
+        self.assertTrue(parsed.wait_for_stop)
 
     def test_eval_score_uci_representation(self):
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(128), ("cp", 100))
@@ -148,6 +147,36 @@ class UCIHostSpecTests(unittest.TestCase):
         )
 
         self.assertEqual(lines, ["info depth 3 score mate 1 nodes 42", "bestmove 0000"])
+
+    def test_search_result_emits_legal_ponder_move(self):
+        host = self.make_host()
+        lines: list[str] = []
+        host.emit = lines.append
+
+        host._emit_search_result(
+            SearchResultResponse(
+                Move(12, 28), 20, nodes=42, completed_depth=3,
+                end_reason=EndReason.DEPTH_LIMIT, ponder_move=Move(52, 36),
+            ),
+            host.chess.Board(),
+        )
+
+        self.assertEqual(lines[-1], "bestmove e2e4 ponder e7e5")
+
+    def test_search_result_omits_illegal_ponder_move(self):
+        host = self.make_host()
+        lines: list[str] = []
+        host.emit = lines.append
+
+        host._emit_search_result(
+            SearchResultResponse(
+                Move(12, 28), 20, nodes=42, completed_depth=3,
+                end_reason=EndReason.DEPTH_LIMIT, ponder_move=Move(8, 16),
+            ),
+            host.chess.Board(),
+        )
+
+        self.assertEqual(lines[-1], "bestmove e2e4")
 
 
 class UCIHostDiagnosticTests(unittest.TestCase):
@@ -179,6 +208,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
                 "id author Emet Behrendt",
                 "option name Port type string default auto",
                 "option name Baud type spin default 2000000 min 9600 max 4000000",
+                "option name Ponder type check default false",
                 "option name Threads type spin default 3 min 3 max 3",
                 "option name Clock Frequency Hz type spin default 40000000 min 40000000 max 40000000",
                 "option name Search Stack Depth type spin default 24 min 24 max 24",
@@ -246,6 +276,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         host._search_lock = threading.Lock()
         host._search_active = True
         host._hardware_search_inflight = True
+        host._hardware_kill_requested = False
         host._search_thread = None
         host._stop_event = threading.Event()
         host.client = mock.Mock()
@@ -255,12 +286,74 @@ class UCIHostDiagnosticTests(unittest.TestCase):
 
         host.client.kill.assert_called_once_with()
 
+    def test_repeated_ponderhit_sends_one_kill(self):
+        host = object.__new__(FPGAUCIHost)
+        host._search_lock = threading.Lock()
+        host._search_active = True
+        host._search_is_ponder = True
+        host._hardware_search_inflight = True
+        host._hardware_kill_requested = False
+        host._stop_event = threading.Event()
+        host._ponderhit_event = threading.Event()
+        host.client = mock.Mock()
+        host.logger = logging.getLogger("test_ponderhit")
+
+        host._handle_ponderhit()
+        host._handle_ponderhit()
+
+        host.client.kill.assert_called_once_with()
+
+    def test_ponderhit_restarts_saved_search_limit(self):
+        host = object.__new__(FPGAUCIHost)
+        host._search_lock = threading.Lock()
+        host._hardware_search_inflight = False
+        host._hardware_kill_requested = False
+        host._stop_event = threading.Event()
+        host._ponderhit_event = threading.Event()
+        host._ponderhit_event.set()
+        resumed_result = SearchResultResponse(
+            Move(6, 21), 10, nodes=12, completed_depth=2,
+            end_reason=EndReason.TIME_LIMIT,
+        )
+        client = mock.Mock()
+        client.search_request.return_value = resumed_result
+
+        response, _elapsed = host._finish_ponder_search(
+            client,
+            StatusResponse(status=1, error=EngineError.NONE, active_operation=0),
+            cmd_search_depth(4),
+            1.0,
+        )
+
+        self.assertIs(response, resumed_result)
+        client.search_request.assert_called_once()
+        self.assertEqual(client.search_request.call_args.args[0], cmd_search_depth(4))
+
+    def test_stop_during_ponder_does_not_restart(self):
+        host = object.__new__(FPGAUCIHost)
+        host._search_lock = threading.Lock()
+        host._hardware_search_inflight = False
+        host._hardware_kill_requested = False
+        host._stop_event = threading.Event()
+        host._stop_event.set()
+        host._ponderhit_event = threading.Event()
+        client = mock.Mock()
+        killed = StatusResponse(status=1, error=EngineError.NONE, active_operation=0)
+
+        response, elapsed = host._finish_ponder_search(client, killed, cmd_search_depth(4), 1.0)
+
+        self.assertIs(response, killed)
+        self.assertEqual(elapsed, 1.0)
+        client.search_request.assert_not_called()
+
     def test_stop_before_search_write_is_honored_after_write(self):
         host = object.__new__(FPGAUCIHost)
         host._search_lock = threading.Lock()
         host._hardware_search_inflight = False
+        host._hardware_kill_requested = False
         host._stop_event = threading.Event()
         host._stop_event.set()
+        host._ponderhit_event = threading.Event()
         client = mock.Mock()
 
         host._mark_hardware_search_started(client)

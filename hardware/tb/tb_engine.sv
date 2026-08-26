@@ -129,6 +129,13 @@ module tb_engine;
             do_clock(1);
             search_resp = EngineControllerResponse'('0);
             if (captured.operation == ENGINE_CTRL_KILL) begin
+                // The controller returns its current completed iteration on
+                // Kill even though the command layer emits a Status packet.
+                search_resp.best_move = make_move(Position'('d12), Position'('d28), PROMO_QUEEN);
+                search_resp.ponder_move = make_move(Position'('d52), Position'('d36), PROMO_QUEEN);
+                search_resp.score = EvalScore'(24);
+                search_resp.nodes_count = NodeCountType'(9);
+                search_resp.completed_depth = 8'd2;
                 search_resp.end_reason = ENGINE_END_KILLED;
             end
             search_resp_valid = 1'b1;
@@ -166,10 +173,12 @@ module tb_engine;
         input EvalScore score,
         input NodeCountType nodes,
         input logic [7:0] depth,
-        input logic [7:0] end_reason
+        input logic [7:0] end_reason,
+        input Move ponder_move
     );
         search_resp = EngineControllerResponse'('0);
         search_resp.best_move = best_move;
+        search_resp.ponder_move = ponder_move;
         search_resp.score = score;
         search_resp.nodes_count = nodes;
         search_resp.completed_depth = depth;
@@ -358,7 +367,7 @@ module tb_engine;
         check(captured.move.to_pos == Position'('d28), "make move to position");
         check(captured.move.promo_piece == PROMO_ROOK, "make move promo");
         expect_no_output(5, "make move waits for controller completion");
-        send_mock_response(NULL_MOVE, EvalScore'(0), NodeCountType'(0), 8'd0, ENGINE_END_NORMAL);
+        send_mock_response(NULL_MOVE, EvalScore'(0), NodeCountType'(0), 8'd0, ENGINE_END_NORMAL, NULL_MOVE);
         expect_ack(8'h01);
 
     endtask : test_set_board_and_moves
@@ -366,9 +375,11 @@ module tb_engine;
     task automatic test_search_and_perft();
         automatic EngineControllerRequest captured;
         automatic Move best_move;
+        automatic Move ponder_move;
 
         $display("=== engine search/perft tests ===");
         best_move = make_move(Position'('d12), Position'('d28), PROMO_QUEEN);
+        ponder_move = make_move(Position'('d52), Position'('d36), PROMO_QUEEN);
 
         send_byte(ENGINE_CMD_SEARCH_DEPTH);
         send_byte(8'd5);
@@ -376,7 +387,7 @@ module tb_engine;
         check(captured.operation == ENGINE_CTRL_SEARCH_DEPTH, "search depth request op");
         check(captured.depth_limit == 8'd5, "search depth limit");
         do_clock(2);
-        send_mock_response(best_move, EvalScore'(-16), NodeCountType'(40'h0102_0304_05), 8'd5, ENGINE_END_DEPTH_LIMIT);
+        send_mock_response(best_move, EvalScore'(-16), NodeCountType'(40'h0102_0304_05), 8'd5, ENGINE_END_DEPTH_LIMIT, ponder_move);
         expect_byte(ENGINE_RESP_SEARCH_RESULT, "search response type");
         expect_byte(8'h70, "search best move byte 0");
         expect_byte(8'h0c, "search best move byte 1");
@@ -389,6 +400,8 @@ module tb_engine;
         expect_byte(8'h01, "search nodes byte 4");
         expect_byte(8'h05, "search completed depth");
         expect_byte(ENGINE_END_DEPTH_LIMIT, "search end reason");
+        expect_byte(8'h90, "search ponder move byte 0");
+        expect_byte(8'h34, "search ponder move byte 1");
 
         send_byte(ENGINE_CMD_GET_SEARCH_RESULT);
         expect_byte(ENGINE_RESP_SEARCH_RESULT, "cached search response type");
@@ -403,6 +416,8 @@ module tb_engine;
         expect_byte(8'h01, "cached search nodes byte 4");
         expect_byte(8'h05, "cached search completed depth");
         expect_byte(ENGINE_END_DEPTH_LIMIT, "cached search end reason");
+        expect_byte(8'h90, "cached search ponder move byte 0");
+        expect_byte(8'h34, "cached search ponder move byte 1");
 
         send_byte(ENGINE_CMD_PERFT);
         send_byte(8'd3);
@@ -410,7 +425,7 @@ module tb_engine;
         check(captured.operation == ENGINE_CTRL_PERFT, "perft request op");
         check(captured.depth_limit == 8'd3, "perft depth limit");
         do_clock(1);
-        send_mock_response(best_move, EvalScore'(0), NodeCountType'(40'h0000_0000_2a), 8'd3, ENGINE_END_DEPTH_LIMIT);
+        send_mock_response(best_move, EvalScore'(0), NodeCountType'(40'h0000_0000_2a), 8'd3, ENGINE_END_DEPTH_LIMIT, NULL_MOVE);
         expect_byte(ENGINE_RESP_PERFT_RESULT, "perft response type");
         expect_byte(8'h2a, "perft nodes byte 0");
         expect_byte(8'h00, "perft nodes byte 1");
@@ -434,7 +449,7 @@ module tb_engine;
         accept_request(captured);
         check(captured.operation == ENGINE_CTRL_SEARCH_FIXED_TIME, "fixed-time request op");
         check(captured.time_limit == TimeType'(24'h123456), "fixed-time payload little-endian");
-        send_mock_response(best_move, EvalScore'(12), NodeCountType'(2), 8'd0, ENGINE_END_TIME_LIMIT);
+        send_mock_response(best_move, EvalScore'(12), NodeCountType'(2), 8'd0, ENGINE_END_TIME_LIMIT, NULL_MOVE);
         expect_byte(ENGINE_RESP_SEARCH_RESULT, "fixed-time response type");
         expect_byte(8'h41, "fixed-time best move byte 0");
         expect_byte(8'h08, "fixed-time best move byte 1");
@@ -447,6 +462,8 @@ module tb_engine;
         expect_byte(8'h00, "fixed-time nodes byte 4");
         expect_byte(8'h00, "fixed-time completed depth");
         expect_byte(ENGINE_END_TIME_LIMIT, "fixed-time end reason");
+        expect_byte(8'h00, "fixed-time ponder move byte 0");
+        expect_byte(8'h00, "fixed-time ponder move byte 1");
 
         send_byte(ENGINE_CMD_SEARCH_ON_CLOCK);
         send_byte(8'h01);
@@ -467,7 +484,7 @@ module tb_engine;
         check(captured.btime == TimeType'(2), "clock search btime");
         check(captured.winc == TimeType'(3), "clock search winc");
         check(captured.binc == TimeType'(4), "clock search binc");
-        send_mock_response(best_move, EvalScore'(0), NodeCountType'(3), 8'd1, ENGINE_END_TIME_LIMIT);
+        send_mock_response(best_move, EvalScore'(0), NodeCountType'(3), 8'd1, ENGINE_END_TIME_LIMIT, NULL_MOVE);
         expect_byte(ENGINE_RESP_SEARCH_RESULT, "clock search response type");
         expect_byte(8'h41, "clock search best move byte 0");
         expect_byte(8'h08, "clock search best move byte 1");
@@ -480,6 +497,8 @@ module tb_engine;
         expect_byte(8'h00, "clock search nodes byte 4");
         expect_byte(8'h01, "clock search completed depth");
         expect_byte(ENGINE_END_TIME_LIMIT, "clock search end reason");
+        expect_byte(8'h00, "clock search ponder move byte 0");
+        expect_byte(8'h00, "clock search ponder move byte 1");
 
         send_byte(ENGINE_CMD_SEARCH_NODES);
         send_byte(8'h05);
@@ -490,7 +509,7 @@ module tb_engine;
         accept_request(captured);
         check(captured.operation == ENGINE_CTRL_SEARCH_NODES, "normal nodes request op");
         check(captured.node_limit == NodeCountType'(40'h0102_0304_05), "normal nodes payload little-endian");
-        send_mock_response(best_move, EvalScore'(0), NodeCountType'(5), 8'd2, ENGINE_END_NODE_LIMIT);
+        send_mock_response(best_move, EvalScore'(0), NodeCountType'(5), 8'd2, ENGINE_END_NODE_LIMIT, NULL_MOVE);
         expect_byte(ENGINE_RESP_SEARCH_RESULT, "normal nodes response type");
         expect_byte(8'h41, "normal nodes best move byte 0");
         expect_byte(8'h08, "normal nodes best move byte 1");
@@ -503,6 +522,8 @@ module tb_engine;
         expect_byte(8'h00, "normal nodes count byte 4");
         expect_byte(8'h02, "normal nodes completed depth");
         expect_byte(ENGINE_END_NODE_LIMIT, "normal nodes end reason");
+        expect_byte(8'h00, "normal nodes ponder move byte 0");
+        expect_byte(8'h00, "normal nodes ponder move byte 1");
     endtask : test_search_limit_payloads
 
     task automatic test_kill_and_active_reject();
@@ -523,6 +544,22 @@ module tb_engine;
         accept_request(captured);
         check(captured.operation == ENGINE_CTRL_KILL, "in-band kill request op");
         expect_status_response(8'h01, ENGINE_ERR_NONE, 8'h00);
+
+        send_byte(ENGINE_CMD_GET_SEARCH_RESULT);
+        expect_byte(ENGINE_RESP_SEARCH_RESULT, "killed cached search response type");
+        expect_byte(8'h70, "killed cached best move byte 0");
+        expect_byte(8'h0c, "killed cached best move byte 1");
+        expect_byte(8'h18, "killed cached score byte 0");
+        expect_byte(8'h00, "killed cached score byte 1");
+        expect_byte(8'h09, "killed cached nodes byte 0");
+        expect_byte(8'h00, "killed cached nodes byte 1");
+        expect_byte(8'h00, "killed cached nodes byte 2");
+        expect_byte(8'h00, "killed cached nodes byte 3");
+        expect_byte(8'h00, "killed cached nodes byte 4");
+        expect_byte(8'h02, "killed cached completed depth");
+        expect_byte(ENGINE_END_KILLED, "killed cached end reason");
+        expect_byte(8'h90, "killed cached ponder move byte 0");
+        expect_byte(8'h34, "killed cached ponder move byte 1");
 
         send_byte(ENGINE_CMD_KILL);
         do_clock(3);

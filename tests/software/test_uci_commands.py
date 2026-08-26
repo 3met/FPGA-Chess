@@ -25,6 +25,8 @@ class UCICommandParsingTests(unittest.TestCase):
         self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
         self.assertFalse(parsed.is_perft)
         self.assertFalse(parsed.wait_for_stop)
+        self.assertFalse(parsed.is_ponder)
+        self.assertIsNone(parsed.resume_command)
         self.assertEqual(
             parsed.warnings,
             (
@@ -38,6 +40,17 @@ class UCICommandParsingTests(unittest.TestCase):
             parse_go_command(["depth", "32"])
         with self.assertRaisesRegex(ProtocolError, "nodes must be nonnegative"):
             parse_go_command(["nodes", "-1"])
+
+    def test_ponder_searches_to_max_depth_then_resumes_the_clock_limit(self):
+        parsed = parse_go_command(["ponder", "wtime", "1000", "btime", "2000", "winc", "10"])
+
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
+        self.assertTrue(parsed.is_ponder)
+        self.assertFalse(parsed.wait_for_stop)
+        self.assertEqual(
+            parsed.resume_command,
+            bytes.fromhex("12e80300d007000a0000000000"),
+        )
 
 
 if __name__ == "__main__":

@@ -90,6 +90,8 @@ python -m software.engine --port <serial-port>
 
 When `--port` is omitted, the host uses `FPGA_CHESS_PORT` or waits briefly to identify a clear USB-UART candidate; on Linux it supplements pyserial discovery with `/dev/serial/by-id`, `/dev/ttyUSB*`, and `/dev/ttyACM*`. It will not guess a generic system serial port or choose between similarly plausible USB adapters. A new connection sends UART BREAK, waits for board reinitialization, verifies clean status, and starts a new game before use. During the UCI handshake the host reads the FPGA build information and advertises its thread count, clock frequency, and search stack depth as fixed `spin` options whose default, minimum, and maximum are the synthesized value. If build-information discovery fails, the host reports the failure as an `info string` and still completes the handshake with `uciok`. The FPGA command and response format is specified in [Host-FPGA Protocol](docs/protocols/host-fpga-protocol.md).
 
+The host advertises the standard UCI `Ponder` option. Search results include the primary thread's predicted reply; `go ponder` searches the speculative position to the hardware depth ceiling without consuming the ordinary clock budget, and `ponderhit` restarts the saved search limit on the same TT-warmed position.
+
 ## Profiling, Tuning, and Benchmarks
 
 Cycle-accurate simulation profiling is documented in [Engine Runtime Profiling](docs/development/engine-profiling.md). Evaluation training is documented in [Evaluation Tuning](docs/development/evaluation-tuning.md).

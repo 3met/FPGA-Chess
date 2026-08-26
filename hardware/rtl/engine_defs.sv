@@ -90,6 +90,7 @@ package engine_defs;
     typedef struct packed {
         logic error;
         Move best_move;
+        Move ponder_move;
         EvalScore score;
         NodeCountType nodes_count;
         logic [7:0] completed_depth;

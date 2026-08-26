@@ -52,13 +52,14 @@ class ProtocolEncodingTests(unittest.TestCase):
         self.assertEqual(encode_time_ms(0x010203), bytes.fromhex("030201"))
 
     def test_search_response_decoding(self):
-        response = decode_response(bytes.fromhex("82700cf0ff05040302010501"))
+        response = decode_response(bytes.fromhex("82700cf0ff050403020105019034"))
         self.assertIsInstance(response, SearchResultResponse)
         self.assertEqual(response.best_move, Move(12, 28, 0))
         self.assertEqual(response.score, -16)
         self.assertEqual(response.nodes, 0x0102030405)
         self.assertEqual(response.completed_depth, 5)
         self.assertEqual(response.end_reason, EndReason.DEPTH_LIMIT)
+        self.assertEqual(response.ponder_move, Move(52, 36, 0))
 
     def test_debug_stat_command_and_response(self):
         self.assertEqual(cmd_get_debug_stat(0x12), bytes.fromhex("2112"))
@@ -84,7 +85,7 @@ class ProtocolEncodingTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError, "Unknown engine error"):
             decode_response(bytes.fromhex("80010600"))
         with self.assertRaisesRegex(ProtocolError, "Unknown search end reason"):
-            decode_response(bytes.fromhex("820000000000000000000006"))
+            decode_response(bytes.fromhex("8200000000000000000000060000"))
         with self.assertRaisesRegex(ProtocolError, "error flag and error code disagree"):
             decode_response(bytes.fromhex("80090000"))
 

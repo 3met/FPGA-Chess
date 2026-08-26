@@ -156,6 +156,7 @@ class SearchResultResponse:
     nodes: int
     completed_depth: int
     end_reason: EndReason
+    ponder_move: Move = Move(0, 0, 0)
 
 
 @dataclass(frozen=True)
@@ -426,7 +427,7 @@ def response_payload_length(response_type: int) -> int:
     if response_type == ResponseType.ACK:
         return 1
     if response_type == ResponseType.SEARCH_RESULT:
-        return 11
+        return 13
     if response_type == ResponseType.PERFT_RESULT:
         return 6
     if response_type == ResponseType.DEBUG_STAT:
@@ -469,6 +470,7 @@ def decode_response(packet: bytes) -> EngineResponse:
             nodes=int.from_bytes(payload[4:9], "little", signed=False),
             completed_depth=payload[9],
             end_reason=_known_enum(EndReason, payload[10], "search end reason"),
+            ponder_move=decode_move(payload[11:13]),
         )
     if response_type == ResponseType.PERFT_RESULT:
         return PerftResultResponse(

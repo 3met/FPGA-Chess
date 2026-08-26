@@ -68,7 +68,7 @@ Every response starts with a response-type byte followed by a fixed-size payload
 | ------------- | ---- | ------- |
 | `0x80` | Status | Status byte, error byte, active operation byte. |
 | `0x81` | Ack | Status byte. |
-| `0x82` | Search result | Best move, score, node count, completed depth, end reason. |
+| `0x82` | Search result | Best move, score, node count, completed depth, end reason, and predicted reply. |
 | `0x83` | Perft result | Node count and completed depth. |
 | `0x84` | Debug statistic | Requested address followed by an unsigned 40-bit little-endian value. |
 | `0x85` | Build information | Build ID, search-thread count, engine clock frequency, and search stack depth. |
@@ -94,6 +94,9 @@ Search result payload:
 | Node count | 5 bytes | `NodeCountType`. |
 | Completed depth | 1 byte | Unsigned depth. |
 | End reason | 1 byte | `0` normal, `1` depth limit, `2` time limit, `3` node limit, `4` killed, `5` error. |
+| Ponder move | 2 bytes | `Move` containing the second move of the completed primary-thread PV, or the null move when unavailable. |
+
+Kill retains the best completed iteration and any associated predicted reply in the cached search result. If no iteration completed, it may retain a legal root move from partial work and omits the predicted reply when none is safely associated with that move.
 
 Status byte bits:
 

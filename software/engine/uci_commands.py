@@ -57,6 +57,8 @@ class ParsedGoCommand:
     command: bytes
     is_perft: bool
     wait_for_stop: bool
+    is_ponder: bool
+    resume_command: bytes | None
     warnings: tuple[str, ...]
 
 
@@ -154,7 +156,8 @@ def _go_values(args: list[str]) -> dict[str, str]:
 def parse_go_command(args: list[str]) -> ParsedGoCommand:
     """Parse UCI go arguments and encode the supported FPGA operation."""
     values = _go_values(args)
-    wait_for_stop = "infinite" in values or "ponder" in values
+    is_ponder = "ponder" in values
+    wait_for_stop = "infinite" in values and not is_ponder
     warnings = []
     if "searchmoves" in values:
         warnings.append("searchmoves is ignored by this FPGA protocol")
@@ -163,7 +166,7 @@ def parse_go_command(args: list[str]) -> ParsedGoCommand:
 
     if "perft" in values:
         command = cmd_perft(parse_depth(values["perft"], "perft"))
-        return ParsedGoCommand(command, True, False, tuple(warnings))
+        return ParsedGoCommand(command, True, False, False, None, tuple(warnings))
     if "depth" in values:
         command = cmd_search_depth(parse_depth(values["depth"], "depth"))
     elif "movetime" in values:
@@ -179,4 +182,15 @@ def parse_go_command(args: list[str]) -> ParsedGoCommand:
         )
     else:
         command = cmd_search_depth(DEFAULT_SEARCH_DEPTH)
-    return ParsedGoCommand(command, False, wait_for_stop, tuple(warnings))
+    if is_ponder:
+        # Pondering must not consume the ordinary move budget. Search to the
+        # hardware depth ceiling, then restart the saved limit on ponderhit.
+        return ParsedGoCommand(
+            cmd_search_depth(DEFAULT_SEARCH_DEPTH),
+            False,
+            False,
+            True,
+            command,
+            tuple(warnings),
+        )
+    return ParsedGoCommand(command, False, wait_for_stop, False, None, tuple(warnings))

@@ -38,7 +38,13 @@ from software.engine.protocol import (
 )
 from software.engine.search_metadata import SEARCH_STAT_PHASES
 from software.engine.transport import SerialByteTransport, SerialDependencyError, SerialTimeoutError, describe_serial_ports, list_serial_ports
-from software.engine.uci_commands import KNOWN_COMMANDS, parse_go_command, parse_position_args, split_command_line
+from software.engine.uci_commands import (
+    KNOWN_COMMANDS,
+    ParsedGoCommand,
+    parse_go_command,
+    parse_position_args,
+    split_command_line,
+)
 
 
 SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -230,7 +236,10 @@ class FPGAUCIHost:
         self._search_thread: threading.Thread | None = None
         self._search_active = False
         self._hardware_search_inflight = False
+        self._hardware_kill_requested = False
+        self._search_is_ponder = False
         self._stop_event = threading.Event()
+        self._ponderhit_event = threading.Event()
 
     def emit(self, line: str) -> None:
         with self._stdout_lock:
@@ -288,10 +297,12 @@ class FPGAUCIHost:
             active = self._search_active
             hardware_inflight = self._hardware_search_inflight
             thread = self._search_thread
-            kill_needed = active and not self._stop_event.is_set()
+            kill_needed = active and hardware_inflight and not self._hardware_kill_requested
             if active:
                 self._stop_event.set()
-        if kill_needed and hardware_inflight and self.client is not None:
+            if kill_needed:
+                self._hardware_kill_requested = True
+        if kill_needed and self.client is not None:
             try:
                 self.client.kill()
             except Exception as exc:
@@ -336,7 +347,7 @@ class FPGAUCIHost:
             elif command == "stop":
                 self.stop_search(wait=False)
             elif command == "ponderhit":
-                pass
+                self._handle_ponderhit()
             elif command == "quit":
                 self.close()
                 return False
@@ -354,6 +365,7 @@ class FPGAUCIHost:
         self.emit("id author Emet Behrendt")
         self.emit("option name Port type string default auto")
         self.emit(f"option name Baud type spin default {BAUD_RATE} min 9600 max 4000000")
+        self.emit("option name Ponder type check default false")
         try:
             build_info = self._get_build_info()
             self._emit_fixed_spin_option("Threads", build_info.thread_count)
@@ -372,7 +384,10 @@ class FPGAUCIHost:
 
     def _handle_help(self) -> None:
         """Print the supported host commands for interactive use."""
-        self.emit("info string commands: uci, isready, setoption, ucinewgame, position, go, stop, quit, debug, help")
+        self.emit(
+            "info string commands: uci, isready, setoption, ucinewgame, position, "
+            "go, stop, ponderhit, quit, debug, help"
+        )
         self.emit("info string use 'debug help' for diagnostics")
 
     def _handle_isready(self) -> None:
@@ -415,6 +430,9 @@ class FPGAUCIHost:
             self.port = None if value.lower() == "auto" else value
         elif name == "baud":
             self.baudrate = int(value)
+        elif name == "ponder":
+            if value.lower() not in {"true", "false"}:
+                raise HostError("Ponder must be true or false")
         elif name in {"threads", "clock frequency hz", "search stack depth"}:
             build_info = self._get_build_info()
             fixed_values = {
@@ -562,12 +580,23 @@ class FPGAUCIHost:
         if not self.position_synced:
             self._handle_position(["fen", *self.board.fen().split()])
 
-        command, is_perft, wait_for_stop = self._build_go_command(args)
+        parsed = self._build_go_command(args)
         board_snapshot = self.board.copy(stack=False)
         self._stop_event.clear()
+        self._ponderhit_event.clear()
 
-        target = self._perft_divide_worker if is_perft else self._search_worker
-        worker_args = (command[1], board_snapshot) if is_perft else (command, False, board_snapshot, wait_for_stop)
+        target = self._perft_divide_worker if parsed.is_perft else self._search_worker
+        worker_args = (
+            (parsed.command[1], board_snapshot)
+            if parsed.is_perft
+            else (
+                parsed.command,
+                board_snapshot,
+                parsed.wait_for_stop,
+                parsed.is_ponder,
+                parsed.resume_command,
+            )
+        )
         thread = threading.Thread(
             target=target,
             args=worker_args,
@@ -575,6 +604,7 @@ class FPGAUCIHost:
         )
         with self._search_lock:
             self._search_active = True
+            self._search_is_ponder = parsed.is_ponder
             self._search_thread = thread
         thread.start()
 
@@ -584,25 +614,61 @@ class FPGAUCIHost:
         except ValueError as exc:
             raise HostError(str(exc)) from exc
 
-    def _build_go_command(self, args: list[str]) -> tuple[bytes, bool, bool]:
+    def _build_go_command(self, args: list[str]) -> ParsedGoCommand:
         parsed = parse_go_command(args)
         if self.debug:
             for warning in parsed.warnings:
                 self.emit(f"info string {warning}")
-        return parsed.command, parsed.is_perft, parsed.wait_for_stop
+        return parsed
 
-    def _search_worker(self, command: bytes, is_perft: bool, board_snapshot: Any, wait_for_stop: bool) -> None:
+    def _handle_ponderhit(self) -> None:
+        """Convert the live speculative search into an ordinary timed search."""
+        with self._search_lock:
+            if not self._search_active or not self._search_is_ponder or self._stop_event.is_set():
+                return
+            first_hit = not self._ponderhit_event.is_set()
+            self._ponderhit_event.set()
+            hardware_inflight = self._hardware_search_inflight
+            kill_needed = first_hit and hardware_inflight and not self._hardware_kill_requested
+            if kill_needed:
+                self._hardware_kill_requested = True
+        if kill_needed and self.client is not None:
+            try:
+                self.client.kill()
+            except Exception as exc:
+                if isinstance(exc, FPGACommunicationError):
+                    self._invalidate_client()
+                self.emit(f"info string ponderhit failed: {exc}")
+                self.logger.exception("Failed to stop ponder search on ponderhit")
+
+    def _search_worker(
+        self,
+        command: bytes,
+        board_snapshot: Any,
+        wait_for_stop: bool,
+        is_ponder: bool,
+        resume_command: bytes | None,
+    ) -> None:
         try:
             client = self.connect()
             search_start = time.monotonic()
             response = client.search_request(
                 command,
-                command_sent=lambda: self._mark_hardware_search_started(client),
+                command_sent=lambda: self._mark_hardware_search_started(client, honor_ponderhit=is_ponder),
             )
             search_elapsed = time.monotonic() - search_start
             with self._search_lock:
                 self._hardware_search_inflight = False
-            if wait_for_stop and not self._stop_event.is_set():
+                self._hardware_kill_requested = False
+
+            if is_ponder:
+                response, search_elapsed = self._finish_ponder_search(
+                    client,
+                    response,
+                    resume_command,
+                    search_elapsed,
+                )
+            elif wait_for_stop and not self._stop_event.is_set():
                 self._stop_event.wait()
             # UCI consumers may submit a new position as soon as bestmove is printed.
             # The FPGA response is complete here, so release the host search state first.
@@ -617,8 +683,7 @@ class FPGAUCIHost:
                 self.emit(f"info string hardware error: {response.error}")
                 self.emit("bestmove 0000")
             else:
-                kind = "perft" if is_perft else "search"
-                self.emit(f"info string unexpected {kind} response: {response}")
+                self.emit(f"info string unexpected search response: {response}")
                 self.emit("bestmove 0000")
         except FPGACommunicationError as exc:
             self._invalidate_client()
@@ -632,19 +697,56 @@ class FPGAUCIHost:
         finally:
             self._clear_search_state()
 
+    def _finish_ponder_search(
+        self,
+        client: FPGAClient,
+        response: Any,
+        resume_command: bytes | None,
+        ponder_elapsed: float,
+    ) -> tuple[Any, float]:
+        """Wait for the ponder decision and restart the saved limit after a hit."""
+        if isinstance(response, SearchResultResponse):
+            while not self._stop_event.is_set() and not self._ponderhit_event.is_set():
+                self._stop_event.wait(0.05)
+            return response, ponder_elapsed
+
+        if not isinstance(response, StatusResponse):
+            return response, ponder_elapsed
+        if self._stop_event.is_set() or not self._ponderhit_event.is_set():
+            return response, ponder_elapsed
+        if resume_command is None:
+            raise HostError("ponder search has no command to resume on ponderhit")
+
+        search_start = time.monotonic()
+        resumed = client.search_request(
+            resume_command,
+            command_sent=lambda: self._mark_hardware_search_started(client, honor_ponderhit=False),
+        )
+        with self._search_lock:
+            self._hardware_search_inflight = False
+            self._hardware_kill_requested = False
+        return resumed, time.monotonic() - search_start
+
     def _clear_search_state(self) -> None:
         """Mark a completed host search idle before exposing its terminal UCI output."""
         with self._search_lock:
             self._hardware_search_inflight = False
+            self._hardware_kill_requested = False
             self._search_active = False
+            self._search_is_ponder = False
             self._search_thread = None
 
-    def _mark_hardware_search_started(self, client: FPGAClient) -> None:
+    def _mark_hardware_search_started(self, client: FPGAClient, honor_ponderhit: bool = False) -> None:
         """Publish a completed search write and honor any stop that raced ahead of it."""
         with self._search_lock:
             self._hardware_search_inflight = True
-            stop_already_requested = self._stop_event.is_set()
-        if stop_already_requested:
+            self._hardware_kill_requested = False
+            kill_already_requested = self._stop_event.is_set() or (
+                honor_ponderhit and self._ponderhit_event.is_set()
+            )
+            if kill_already_requested:
+                self._hardware_kill_requested = True
+        if kill_already_requested:
             client.kill()
 
     def _perft_divide_worker(self, depth: int, board_snapshot: Any) -> None:
@@ -676,6 +778,7 @@ class FPGAUCIHost:
                     )
                     with self._search_lock:
                         self._hardware_search_inflight = False
+                        self._hardware_kill_requested = False
                     if not isinstance(response, PerftResultResponse):
                         self._raise_on_error_response(response, f"perft {move.uci()}")
                         raise HostError(f"perft {move.uci()} returned unexpected response: {response}")
@@ -703,7 +806,9 @@ class FPGAUCIHost:
             finally:
                 with self._search_lock:
                     self._hardware_search_inflight = False
+                    self._hardware_kill_requested = False
                     self._search_active = False
+                    self._search_is_ponder = False
                     self._search_thread = None
         # Emit completion only after restoring the position and releasing the search state.
         if perft_complete and self.position_synced:
@@ -731,7 +836,26 @@ class FPGAUCIHost:
         self.emit(
             f"info depth {response.completed_depth} score {score_kind} {score_value}{elapsed} nodes {response.nodes}{nps}"
         )
-        self.emit(f"bestmove {self._format_bestmove(response.best_move, board_snapshot)}")
+        bestmove = self._format_bestmove(response.best_move, board_snapshot)
+        pondermove = self._format_ponder_move(response.ponder_move, bestmove, board_snapshot)
+        suffix = f" ponder {pondermove}" if pondermove is not None else ""
+        self.emit(f"bestmove {bestmove}{suffix}")
+
+    def _format_ponder_move(self, move: Any, bestmove: str, board_snapshot: Any) -> str | None:
+        """Return a legal PV reply for UCI output, or omit an unusable hint."""
+        if move.is_null or bestmove == "0000" or board_snapshot is None:
+            return None
+        try:
+            child = board_snapshot.copy(stack=False)
+            root_move = child.parse_uci(bestmove)
+            if root_move not in child.legal_moves:
+                return None
+            child.push(root_move)
+            pondermove = self._format_bestmove(move, child)
+            candidate = child.parse_uci(pondermove)
+            return pondermove if candidate in child.legal_moves else None
+        except (ValueError, TypeError):
+            return None
 
     @staticmethod
     def _eval_score_to_centipawns(score: int) -> int:

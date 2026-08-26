@@ -242,6 +242,7 @@ module search_controller #(
 
     // Per-thread search context and shared-pipeline bookkeeping.
     (* maxfan = 12, max_fanout = 12 *) Move search_best_move[0:SEARCH_THREAD_COUNT-1];
+    Move search_ponder_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
     NodeCountType search_nodes;
     NodeCountType search_thread_nodes[0:SEARCH_THREAD_COUNT-1];
@@ -291,17 +292,20 @@ module search_controller #(
     SearchStackRamAddr search_stack_read_addr[0:SEARCH_THREAD_COUNT-1];
     SearchStackRamAddr search_stack_write_addr[0:SEARCH_THREAD_COUNT-1];
     Move search_return_move[0:SEARCH_THREAD_COUNT-1];
+    Move search_return_ponder_move[0:SEARCH_THREAD_COUNT-1];
     PlyIndex search_ply[0:SEARCH_THREAD_COUNT-1];
     SearchDepth search_thread_target_depth[0:SEARCH_THREAD_COUNT-1];
     SearchDepth search_max_depth;
     SearchDepth search_completed_depth;
     Move search_completed_best_move;
+    Move search_completed_ponder_move;
     EvalScore search_completed_score;
     EvalScore search_thread_root_alpha[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_thread_root_beta[0:SEARCH_THREAD_COUNT-1];
     AspirationDelta search_thread_aspiration_delta[0:SEARCH_THREAD_COUNT-1];
     logic search_thread_aspiration_active[0:SEARCH_THREAD_COUNT-1];
     Move search_thread_iteration_best_move[0:SEARCH_THREAD_COUNT-1];
+    Move search_thread_iteration_ponder_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_thread_iteration_score[0:SEARCH_THREAD_COUNT-1];
 `ifndef SYNTHESIS
     logic [7:0] search_thread_completed_depth[0:SEARCH_THREAD_COUNT-1];
@@ -2042,6 +2046,7 @@ module search_controller #(
             search_max_depth <= SearchDepth'(0);
             search_completed_depth <= SearchDepth'(0);
             search_completed_best_move <= NULL_MOVE;
+            search_completed_ponder_move <= NULL_MOVE;
             search_completed_score <= EvalScore'(0);
             search_thread_id <= ThreadID'(0);
             search_dispatch <= '0;
@@ -2093,6 +2098,7 @@ module search_controller #(
 `endif
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 search_best_move[tid] <= NULL_MOVE;
+                search_ponder_move[tid] <= NULL_MOVE;
                 search_root_best_score[tid] <= -SEARCH_INF;
                 search_thread_status[tid] <= SEARCH_THREAD_IDLE;
                 search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
@@ -2103,6 +2109,7 @@ module search_controller #(
                 search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
                 search_thread_aspiration_active[tid] <= 1'b0;
                 search_thread_iteration_best_move[tid] <= NULL_MOVE;
+                search_thread_iteration_ponder_move[tid] <= NULL_MOVE;
                 search_thread_iteration_score[tid] <= EvalScore'(0);
 `ifndef SYNTHESIS
                 search_thread_completed_depth[tid] <= 8'd0;
@@ -2149,6 +2156,7 @@ module search_controller #(
                 nnue_state_valid[tid] <= 1'b0;
                 search_stack_top[tid] <= empty_search_stack_entry();
                 search_return_move[tid] <= NULL_MOVE;
+                search_return_ponder_move[tid] <= NULL_MOVE;
                 history_update_pending[tid] <= 1'b0;
                 history_update_pending_color[tid] <= WHITE;
                 history_update_pending_from[tid] <= Position'(0);
@@ -2260,9 +2268,51 @@ module search_controller #(
             end
 
             if (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE) begin
+                automatic logic killing_search;
+                automatic logic primary_aspiration_failed;
+                automatic Move kill_best_move;
+                automatic Move kill_ponder_move;
+                automatic EvalScore kill_score;
+                automatic SearchDepth kill_completed_depth;
+
+                killing_search = active_req.operation == ENGINE_CTRL_SEARCH_DEPTH
+                    || active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
+                    || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK
+                    || active_req.operation == ENGINE_CTRL_SEARCH_NODES;
+                primary_aspiration_failed = search_thread_aspiration_active[0]
+                    && (search_thread_iteration_score[0] <= search_thread_root_alpha[0]
+                        || search_thread_iteration_score[0] >= search_thread_root_beta[0]);
+                kill_best_move = NULL_MOVE;
+                kill_ponder_move = NULL_MOVE;
+                kill_score = EvalScore'(0);
+                kill_completed_depth = search_completed_depth;
+                if (killing_search && search_completed_depth != SearchDepth'(0)) begin
+                    kill_best_move = search_completed_best_move;
+                    kill_ponder_move = search_completed_ponder_move;
+                    kill_score = search_completed_score;
+                end
+                if (killing_search && search_thread_status[0] == SEARCH_THREAD_DONE
+                        && !primary_aspiration_failed) begin
+                    kill_best_move = search_thread_iteration_best_move[0];
+                    kill_ponder_move = search_thread_iteration_ponder_move[0];
+                    kill_score = search_thread_iteration_score[0];
+                    kill_completed_depth = search_thread_target_depth[0];
+                end
+                if (killing_search && !is_null_move(search_best_move[0])
+                        && (kill_completed_depth == SearchDepth'(0)
+                            || search_root_best_score[0] > kill_score)) begin
+                    kill_best_move = search_best_move[0];
+                    kill_ponder_move = search_ponder_move[0];
+                    kill_score = search_root_best_score[0];
+                end
                 repetition_epoch <= repetition_epoch + 1'b1;
                 terminal_result_valid_pipe <= 1'b0;
                 resp_reg <= EngineControllerResponse'('0);
+                resp_reg.best_move <= kill_best_move;
+                resp_reg.ponder_move <= kill_ponder_move;
+                resp_reg.score <= kill_score;
+                resp_reg.nodes_count <= killing_search ? search_nodes : NodeCountType'(0);
+                resp_reg.completed_depth <= killing_search ? 8'(kill_completed_depth) : 8'd0;
                 resp_reg.end_reason <= ENGINE_END_KILLED;
                 for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                     search_board_wait_count[tid] <= BoardWaitCount'(0);
@@ -2413,13 +2463,13 @@ module search_controller #(
                                     search_max_depth <= SearchDepth'(requested_search_depth(req));
                                     search_completed_depth <= SearchDepth'(0);
                                     search_completed_best_move <= NULL_MOVE;
+                                    search_completed_ponder_move <= NULL_MOVE;
                                     search_completed_score <= EvalScore'(0);
                                     search_thread_id <= ThreadID'(0);
                                     search_dispatch <= '0;
                                     search_active_thread_count <= ThreadCount'(0);
                                     search_nodes <= NodeCountType'(0);
                                     nnue_roots_initialized <= 1'b0;
-                                    search_best_move[search_thread_id] <= NULL_MOVE;
                                     search_pending_move[search_thread_id] <= NULL_MOVE;
                                     search_return_score[search_thread_id] <= EvalScore'(0);
                                     search_return_valid[search_thread_id] <= 1'b0;
@@ -2437,6 +2487,9 @@ module search_controller #(
                                         search_budget_ms <= TimeType'('1);
                                     end
                                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                                        search_best_move[tid] <= NULL_MOVE;
+                                        search_ponder_move[tid] <= NULL_MOVE;
+                                        search_root_best_score[tid] <= -SEARCH_INF;
                                         search_thread_nodes[tid] <= NodeCountType'(0);
                                         search_thread_status[tid] <= SEARCH_THREAD_IDLE;
                                         search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
@@ -2448,6 +2501,7 @@ module search_controller #(
                                         search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
                                         search_thread_aspiration_active[tid] <= 1'b0;
                                         search_thread_iteration_best_move[tid] <= NULL_MOVE;
+                                        search_thread_iteration_ponder_move[tid] <= NULL_MOVE;
                                         search_thread_iteration_score[tid] <= EvalScore'(0);
 `ifndef SYNTHESIS
                                         search_thread_completed_depth[tid] <= 8'd0;
@@ -2472,6 +2526,7 @@ module search_controller #(
                                         search_return_was_reduced[tid] <= 1'b0;
                                         search_return_was_null[tid] <= 1'b0;
                                         search_pvs_research[tid] <= 1'b0;
+                                        search_return_ponder_move[tid] <= NULL_MOVE;
                                         nnue_plan_pending[tid] <= 1'b0;
                                         nnue_plan_inflight[tid] <= 1'b0;
                                         nnue_state_valid[tid] <= 1'b0;
@@ -2749,6 +2804,7 @@ module search_controller #(
                         search_piece_count[tid] <= active_piece_count;
                         search_ply[tid] <= PlyIndex'(0);
                         search_best_move[tid] <= NULL_MOVE;
+                        search_ponder_move[tid] <= NULL_MOVE;
                         search_root_best_score[tid] <= -SEARCH_INF;
                         search_pending_move[tid] <= NULL_MOVE;
                         search_return_score[tid] <= EvalScore'(0);
@@ -2757,6 +2813,7 @@ module search_controller #(
                         search_return_was_reduced[tid] <= 1'b0;
                         search_return_was_null[tid] <= 1'b0;
                         search_pvs_research[tid] <= 1'b0;
+                        search_return_ponder_move[tid] <= NULL_MOVE;
                         search_eval_is_stand_pat[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
                         search_tt_validation_pending[tid] <= 1'b0;
@@ -3034,6 +3091,7 @@ module search_controller #(
                                 if (primary_thread) begin
                                     search_completed_depth <= search_thread_target_depth[tid];
                                     search_completed_best_move <= search_thread_iteration_best_move[tid];
+                                    search_completed_ponder_move <= search_thread_iteration_ponder_move[tid];
                                     search_completed_score <= search_thread_iteration_score[tid];
                                 end
                                 if (!depth_finished) begin
@@ -3050,6 +3108,7 @@ module search_controller #(
                             if (primary_thread && !aspiration_failed && depth_finished) begin
                                 resp_reg <= EngineControllerResponse'('0);
                                 resp_reg.best_move <= search_thread_iteration_best_move[tid];
+                                resp_reg.ponder_move <= search_thread_iteration_ponder_move[tid];
                                 resp_reg.score <= search_thread_iteration_score[tid];
                                 resp_reg.nodes_count <= search_nodes;
                                 resp_reg.completed_depth <= search_thread_target_depth[tid];
@@ -3065,6 +3124,7 @@ module search_controller #(
                                 search_piece_count[tid] <= active_piece_count;
                                 search_ply[tid] <= PlyIndex'(0);
                                 search_best_move[tid] <= NULL_MOVE;
+                                search_ponder_move[tid] <= NULL_MOVE;
                                 search_root_best_score[tid] <= -SEARCH_INF;
                                 search_pending_move[tid] <= NULL_MOVE;
                                 search_return_score[tid] <= EvalScore'(0);
@@ -3074,6 +3134,7 @@ module search_controller #(
                                 search_return_was_null[tid] <= 1'b0;
                                 search_pvs_research[tid] <= 1'b0;
                                 search_eval_is_stand_pat[tid] <= 1'b0;
+                                search_return_ponder_move[tid] <= NULL_MOVE;
                                 search_stack_top[tid] <= empty_search_stack_entry();
                                 search_tt_validation_pending[tid] <= 1'b0;
                                 search_tt_validation_passed[tid] <= 1'b0;
@@ -3112,11 +3173,13 @@ module search_controller #(
                     end
                     if (search_stop_requested()) begin
                         automatic Move stop_best_move;
+                        automatic Move stop_ponder_move;
                         automatic EvalScore stop_score;
                         automatic SearchDepth stop_completed_depth;
                         automatic logic primary_aspiration_failed;
 
                         stop_best_move = NULL_MOVE;
+                        stop_ponder_move = NULL_MOVE;
                         stop_score = EvalScore'(0);
                         stop_completed_depth = search_completed_depth;
                         primary_aspiration_failed = search_thread_aspiration_active[0]
@@ -3124,6 +3187,7 @@ module search_controller #(
                                 || search_thread_iteration_score[0] >= search_thread_root_beta[0]);
                         if (search_completed_depth != SearchDepth'(0)) begin
                             stop_best_move = search_completed_best_move;
+                            stop_ponder_move = search_completed_ponder_move;
                             stop_score = search_completed_score;
                         end
                         // A primary pass that completed on the budget boundary
@@ -3131,6 +3195,7 @@ module search_controller #(
                         if (search_thread_status[0] == SEARCH_THREAD_DONE
                                 && !primary_aspiration_failed) begin
                             stop_best_move = search_thread_iteration_best_move[0];
+                            stop_ponder_move = search_thread_iteration_ponder_move[0];
                             stop_score = search_thread_iteration_score[0];
                             stop_completed_depth = search_thread_target_depth[0];
                         end
@@ -3140,11 +3205,13 @@ module search_controller #(
                                 && (stop_completed_depth == SearchDepth'(0)
                                     || search_root_best_score[0] > stop_score)) begin
                             stop_best_move = search_best_move[0];
+                            stop_ponder_move = search_ponder_move[0];
                             stop_score = search_root_best_score[0];
                         end
 
                         resp_reg <= EngineControllerResponse'('0);
                         resp_reg.best_move <= stop_best_move;
+                        resp_reg.ponder_move <= stop_ponder_move;
                         resp_reg.score <= stop_score;
                         resp_reg.nodes_count <= search_nodes;
                         resp_reg.completed_depth <= stop_completed_depth;
@@ -3172,6 +3239,8 @@ module search_controller #(
                                 search_thread_iteration_score[terminal_thread_id] <= node_score;
                                 search_thread_iteration_best_move[terminal_thread_id]
                                     <= search_best_move[terminal_thread_id];
+                                search_thread_iteration_ponder_move[terminal_thread_id]
+                                    <= search_ponder_move[terminal_thread_id];
 `ifndef SYNTHESIS
                                 search_thread_completed_best_move[terminal_thread_id] <= search_best_move[terminal_thread_id];
 `endif
@@ -3206,6 +3275,12 @@ module search_controller #(
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 search_return_move[board_thread_id] <= search_stack_top[board_thread_id].move;
+                                // Preserve the child's best reply while its stack
+                                // record is still live so the root can publish PV2.
+                                search_return_ponder_move[board_thread_id]
+                                    <= !is_null_move(search_stack_top[board_thread_id].best_move)
+                                        ? search_stack_top[board_thread_id].best_move
+                                        : search_stack_top[board_thread_id].tt_move;
                                 search_return_was_scout[board_thread_id] <= search_stack_top[board_thread_id].scout_search;
                                 search_return_was_reduced[board_thread_id]
                                     <= search_stack_top[board_thread_id].remaining_depth + SearchDepth'(1)
@@ -3599,6 +3674,7 @@ module search_controller #(
                                         search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
                                         search_thread_iteration_score[eval_thread_id] <= eval_score;
                                         search_thread_iteration_best_move[eval_thread_id] <= NULL_MOVE;
+                                        search_thread_iteration_ponder_move[eval_thread_id] <= NULL_MOVE;
 `ifndef SYNTHESIS
                                         search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
 `endif
@@ -3617,6 +3693,7 @@ module search_controller #(
                                     search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_iteration_score[eval_thread_id] <= eval_score;
                                     search_thread_iteration_best_move[eval_thread_id] <= NULL_MOVE;
+                                    search_thread_iteration_ponder_move[eval_thread_id] <= NULL_MOVE;
 `ifndef SYNTHESIS
                                     search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
 `endif
@@ -3707,6 +3784,7 @@ module search_controller #(
                                     search_thread_phase[lookup_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_iteration_score[lookup_thread_id] <= lookup_resp.score;
                                     search_thread_iteration_best_move[lookup_thread_id] <= lookup_resp.best_move;
+                                    search_thread_iteration_ponder_move[lookup_thread_id] <= NULL_MOVE;
 `ifndef SYNTHESIS
                                     search_thread_completed_best_move[lookup_thread_id] <= lookup_resp.best_move;
 `endif
@@ -3777,6 +3855,8 @@ module search_controller #(
                                     search_stack_top[return_thread_id].best_move <= search_return_move[return_thread_id];
                                     if (return_ply == PlyIndex'(0)) begin
                                         search_best_move[return_thread_id] <= search_return_move[return_thread_id];
+                                        search_ponder_move[return_thread_id]
+                                            <= search_return_ponder_move[return_thread_id];
                                         search_root_best_score[return_thread_id] <= parent_score;
                                     end
                                 end
@@ -3833,6 +3913,10 @@ module search_controller #(
                                         search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
                                         search_thread_iteration_score[return_thread_id] <= parent_score;
                                         search_thread_iteration_best_move[return_thread_id] <= root_move;
+                                        search_thread_iteration_ponder_move[return_thread_id]
+                                            <= is_null_move(search_best_move[return_thread_id])
+                                                ? search_return_ponder_move[return_thread_id]
+                                                : search_ponder_move[return_thread_id];
 `ifndef SYNTHESIS
                                         search_thread_completed_best_move[return_thread_id] <= root_move;
 `endif
@@ -3929,6 +4013,7 @@ module search_controller #(
                                     search_thread_phase[terminal_thread_id] <= SEARCH_PHASE_DONE;
                                     search_thread_iteration_score[terminal_thread_id] <= DRAW_EVAL_SCORE;
                                     search_thread_iteration_best_move[terminal_thread_id] <= NULL_MOVE;
+                                    search_thread_iteration_ponder_move[terminal_thread_id] <= NULL_MOVE;
 `ifndef SYNTHESIS
                                     search_thread_completed_best_move[terminal_thread_id] <= NULL_MOVE;
 `endif
@@ -4060,6 +4145,8 @@ module search_controller #(
                                 search_thread_iteration_score[store_thread_id] <= search_return_score[store_thread_id];
                                 search_thread_iteration_best_move[store_thread_id]
                                     <= search_stack_top[store_thread_id].best_move;
+                                search_thread_iteration_ponder_move[store_thread_id]
+                                    <= search_ponder_move[store_thread_id];
 `ifndef SYNTHESIS
                                 search_thread_completed_best_move[store_thread_id] <= search_stack_top[store_thread_id].best_move;
 `endif

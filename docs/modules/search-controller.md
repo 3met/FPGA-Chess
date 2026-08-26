@@ -70,9 +70,9 @@ Quiescence omits quiet generation and both bad-noisy buckets except for legal ev
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. If a pass is interrupted, the controller returns the primary thread's most recent fully completed iteration when one exists. The reported depth is therefore a completed depth rather than the deepest partial work reached.
+Depth, node, and time limits are checked at safe search boundaries. If a pass is interrupted, the controller returns the primary thread's most recent fully completed iteration when one exists. The reported depth is therefore a completed depth rather than the deepest partial work reached. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
 
-Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation.
+Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation. A killed search snapshots its best completed iteration, or a usable partial root move when no iteration completed, into the cached search result before retiring.
 
 Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
 

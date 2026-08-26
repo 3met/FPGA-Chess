@@ -364,6 +364,8 @@ module tb_search_controller;
         check(resp.completed_depth == depth, {label, " completed requested depth"});
         check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
         check(!(resp.best_move.from_pos == Position'(0) && resp.best_move.to_pos == Position'(0)), {label, " best move is non-null"});
+        if (depth >= 8'd2)
+            check(!is_null_move(resp.ponder_move), {label, " ponder move is non-null"});
         check(repetition_root_request_seen, {label, " checks root repetition"});
         check(repetition_child_request_seen, {label, " checks legal child repetition"});
         last_move_generation_cycles =
@@ -858,11 +860,16 @@ module tb_search_controller;
         automatic EngineControllerRequest request = zero_request();
         automatic EngineControllerRequest kill_request = zero_request();
         automatic logic nnue_metadata_clear = 1'b1;
+        automatic int completion_wait_cycles = 0;
 
         request.operation = ENGINE_CTRL_SEARCH_DEPTH;
         request.depth_limit = 8'd4;
         pulse_request(request, {label, " start"});
-        do_clock(80);
+        while (dut.search_completed_depth == 0 && completion_wait_cycles < 200_000) begin
+            do_clock(1);
+            completion_wait_cycles += 1;
+        end
+        check(dut.search_completed_depth != 0, {label, " completed an iteration before kill"});
 
         kill_request.operation = ENGINE_CTRL_KILL;
         req = kill_request;
@@ -875,6 +882,8 @@ module tb_search_controller;
         wait_response(label);
         check(!resp.error, {label, " kill no error"});
         check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
+        check(!is_null_move(resp.best_move), {label, " kill preserves completed best move"});
+        check(resp.completed_depth != 0, {label, " kill preserves completed depth"});
         check(dut.nnue_update_idle && dut.nnue_eval_ready,
             {label, " flushes queued NNUE work"});
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
@@ -915,6 +924,31 @@ module tb_search_controller;
                 $sformatf("%s move tag pipe %0d canceled", label, idx));
         end
     endtask : kill_active_search
+
+    task automatic kill_search_before_root_init(input string label);
+        automatic EngineControllerRequest request = zero_request();
+        automatic EngineControllerRequest kill_request = zero_request();
+
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd4;
+        pulse_request(request, {label, " start"});
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            check(is_null_move(dut.search_best_move[tid]),
+                $sformatf("%s thread %0d best move cleared", label, tid));
+            check(is_null_move(dut.search_ponder_move[tid]),
+                $sformatf("%s thread %0d ponder move cleared", label, tid));
+            check(dut.search_root_best_score[tid] == -dut.SEARCH_INF,
+                $sformatf("%s thread %0d root score cleared", label, tid));
+        end
+
+        kill_request.operation = ENGINE_CTRL_KILL;
+        pulse_request(kill_request, {label, " kill"});
+        wait_response(label);
+        check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
+        check(is_null_move(resp.best_move), {label, " does not return a stale best move"});
+        check(is_null_move(resp.ponder_move), {label, " does not return a stale ponder move"});
+        check(resp.completed_depth == 8'd0, {label, " has no completed depth"});
+    endtask : kill_search_before_root_init
 
     task automatic set_tile(input Tile tile, input Position pos, input string label);
         automatic EngineControllerRequest request = zero_request();
@@ -1311,6 +1345,7 @@ module tb_search_controller;
         check(pvs_scout_seen, "startpos depth 2 used a PVS scout window");
         check(pvs_research_seen, "startpos depth 2 re-searched a PVS scout fail-high");
         check(aspiration_window_seen, "startpos depth 2 used an aspiration window");
+        kill_search_before_root_init("early search kill");
 
         // Opposite-direction moves h2h4 and h5h3 must have distinct mask identities.
         new_game();
