@@ -260,20 +260,40 @@ def format_profile_report(
         )
 
     move_generator = report["components"]["move_generator"]
+    operation_rows = []
+    for name in MOVE_GENERATOR_OPERATIONS:
+        operation = move_generator["operations"][name]
+        operation_rows.append(
+            (
+                MOVE_GENERATOR_OPERATION_LABELS[name],
+                f"{operation['count']:,}",
+                f"{operation['total_cycles']:,}",
+                _format_number(operation["average_cycles"]),
+                f"{operation['maximum_cycles']:,}",
+            )
+        )
+    operation_headers = ("Operation", "Count", "Total cycles", "Avg", "Max")
+    operation_widths = [
+        max(len(operation_headers[index]), *(len(row[index]) for row in operation_rows))
+        for index in range(len(operation_headers))
+    ]
     lines += [
         "",
         "Move generator operations",
-        "  Operation                 Count   Total cycles       Avg       Max",
+        "  " + " ".join(
+            f"{value:<{operation_widths[index]}}" if index == 0
+            else f"{value:>{operation_widths[index]}}"
+            for index, value in enumerate(operation_headers)
+        ),
     ]
-    for name in MOVE_GENERATOR_OPERATIONS:
-        operation = move_generator["operations"][name]
-        lines.append(
-            f"  {MOVE_GENERATOR_OPERATION_LABELS[name]:<22}"
-            f"{operation['count']:>9,}"
-            f"{operation['total_cycles']:>15,}"
-            f"{_format_number(operation['average_cycles']):>10}"
-            f"{operation['maximum_cycles']:>10,}"
+    lines.extend(
+        "  " + " ".join(
+            f"{value:<{operation_widths[index]}}" if index == 0
+            else f"{value:>{operation_widths[index]}}"
+            for index, value in enumerate(row)
         )
+        for row in operation_rows
+    )
     lines += [
         "",
         "Move generation work",

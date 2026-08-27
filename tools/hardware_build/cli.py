@@ -56,8 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
         limits.add_argument("--nodes", type=int, help="Node-limited search")
         limits.add_argument("--time-ms", type=int, help="Fixed simulated search time; defaults to 50 ms")
         profile_command.add_argument(
-            "--engine-config", default="hardware/config/engine/de1-soc.json",
-            help="Layered FPGA engine profile; defaults to the DE1-SoC profile",
+            "--target", default="quartus-de1-soc",
+            help="Synthesis target whose engine configuration is profiled; defaults to quartus-de1-soc",
+        )
+        profile_command.add_argument(
+            "--engine-config",
+            help="Layered FPGA engine profile overriding the synthesis target's profile",
         )
         profile_command.add_argument("--threads", type=int, help="Override the engine profile's search threads")
         profile_command.add_argument("--stack-depth", type=int, help="Override the engine profile's stack plies")

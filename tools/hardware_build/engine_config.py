@@ -17,6 +17,47 @@ def engine_config_digest(config: dict) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
+    """Translate one resolved engine profile into the shared RTL parameters."""
+    search = config["search"]
+    thresholds = search["quiet_bucket_thresholds"]
+    increment = search["increment_fraction"]
+    remaining = search["remaining_time_fraction"]
+    return {
+        "SEARCH_THREAD_COUNT": config["threads"],
+        "SEARCH_STACK_DEPTH": config["stack_depth"],
+        "TT_TAG_BITS": config["tt_tag_bits"],
+        "TT_CACHE_INDEX_BITS": config["tt_cache_index_bits"],
+        "ENABLE_SEARCH_STATS": int(config["search_statistics"]),
+        "ASPIRATION_STARTING_DELTA": search["aspiration_starting_delta"],
+        "ASPIRATION_DELTA_MULTIPLIER_Q3": search["aspiration_delta_multiplier_q3"],
+        "LMR_A_Q8": search["lmr_a_q8"],
+        "LMR_B_Q8": search["lmr_b_q8"],
+        "LMR_MINIMUM_DEPTH": search["lmr_minimum_depth"],
+        "LMR_MINIMUM_MOVE_NUMBER": search["lmr_minimum_move_number"],
+        "NULL_MINIMUM_DEPTH": search["null_minimum_depth"],
+        "NULL_DEEP_DEPTH_THRESHOLD": search["null_deep_depth_threshold"],
+        "NULL_SHALLOW_REDUCTION": search["null_shallow_reduction"],
+        "NULL_DEEP_REDUCTION": search["null_deep_reduction"],
+        "MOVE_OVERHEAD_MS": search["move_overhead_ms"],
+        "MINIMUM_SEARCH_MS": search["minimum_search_ms"],
+        "INCREMENT_NUMERATOR": increment[0],
+        "INCREMENT_DENOMINATOR": increment[1],
+        "REMAINING_TIME_NUMERATOR": remaining[0],
+        "REMAINING_TIME_DENOMINATOR": remaining[1],
+        "HISTORY_REWARD_PER_DEPTH": search["history_reward_per_depth"],
+        "HISTORY_MAXIMUM_REWARD": search["history_maximum_reward"],
+        "HISTORY_MALUS_DIVISOR": search["history_malus_divisor"],
+        "QUIET_THRESHOLD_1": thresholds[0],
+        "QUIET_THRESHOLD_2": thresholds[1],
+        "QUIET_THRESHOLD_3": thresholds[2],
+        "CASTLING_HISTORY_BONUS": search["castling_history_bonus"],
+        "TT_VALIDATE_MINIMUM_DEPTH": search["tt_history_validation_minimum_depth"],
+        "TT_VALIDATE_BYPASS_HALFMOVES": search["tt_history_validation_bypass_halfmoves"],
+        "TT_STALE_DEPTH_TOLERANCE": search["tt_stale_entry_depth_tolerance"],
+    }
+
+
 def _load_object(path: Path, label: str) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

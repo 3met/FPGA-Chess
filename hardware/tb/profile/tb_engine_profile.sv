@@ -14,6 +14,8 @@ module tb_engine_profile #(
     parameter int SEARCH_THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = 24,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
+    parameter int TT_CACHE_INDEX_BITS = 10,
+    parameter bit ENABLE_SEARCH_STATS = 1'b0,
     parameter int ASPIRATION_STARTING_DELTA = 15,
     parameter int unsigned ASPIRATION_DELTA_MULTIPLIER_Q3 = 12,
     parameter int unsigned LMR_A_Q8 = 192,
@@ -128,6 +130,7 @@ module tb_engine_profile #(
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         .TT_TAG_BITS(TT_TAG_BITS),
+        .TT_CACHE_INDEX_BITS(TT_CACHE_INDEX_BITS),
         .ASPIRATION_STARTING_DELTA(ASPIRATION_STARTING_DELTA),
         .ASPIRATION_DELTA_MULTIPLIER_Q3(ASPIRATION_DELTA_MULTIPLIER_Q3),
         .LMR_A_Q8(LMR_A_Q8), .LMR_B_Q8(LMR_B_Q8),
@@ -151,7 +154,7 @@ module tb_engine_profile #(
         .TT_VALIDATE_BYPASS_HALFMOVES(TT_VALIDATE_BYPASS_HALFMOVES),
         .TT_STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE),
         .EXTERNAL_TT(1'b1),
-        .ENABLE_SEARCH_STATS(1'b1)
+        .ENABLE_SEARCH_STATS(ENABLE_SEARCH_STATS)
     ) dut (
         .clk(engine_clk), .rst_n(engine_rst_n),
         .data_in, .data_in_valid, .ready_for_result,
@@ -253,6 +256,7 @@ module tb_engine_profile #(
     longint unsigned bucket_writes[0:MOVE_BUCKET_COUNT-1];
     longint unsigned bucket_pops[0:MOVE_BUCKET_COUNT-1];
     longint unsigned bucket_cutoffs[0:MOVE_BUCKET_COUNT-1];
+    longint unsigned bucket_high_water[0:MOVE_BUCKET_COUNT-1];
     longint unsigned legal_ordinal_histogram[0:ORDINAL_BUCKET_COUNT-1];
     longint unsigned cutoff_ordinal_histogram[0:ORDINAL_BUCKET_COUNT-1];
     longint unsigned direct_move_cutoffs;
@@ -271,6 +275,7 @@ module tb_engine_profile #(
     longint unsigned noisy_destinations_examined, quiet_destinations_examined;
     longint unsigned noisy_destinations_with_sources, quiet_destinations_with_sources;
     longint unsigned noisy_candidates_emitted, quiet_candidates_emitted;
+    longint unsigned candidates_analyzed, history_lookups, move_generation_cycles;
     longint unsigned evaluations, eval_completions;
     longint unsigned nnue_update_requests, nnue_root_rows, nnue_rebuild_rows;
     longint unsigned nnue_rebuilds, nnue_delta_requests;
@@ -395,10 +400,10 @@ module tb_engine_profile #(
                 nnue_update_busy_cycles = nnue_update_busy_cycles + 1;
             if (dut.controller.nnue_update_valid && !dut.controller.nnue_update_ready)
                 nnue_update_backpressure_cycles = nnue_update_backpressure_cycles + 1;
-            generator_state_cycles[int'(dut.controller.move_generator.noisy_pipeline.state)] =
-                generator_state_cycles[int'(dut.controller.move_generator.noisy_pipeline.state)] + 1;
-            generator_state_cycles[int'(dut.controller.move_generator.quiet_pipeline.state)] =
-                generator_state_cycles[int'(dut.controller.move_generator.quiet_pipeline.state)] + 1;
+            generator_state_cycles[int'(dut.controller.move_generator.noisy_lane.state)] =
+                generator_state_cycles[int'(dut.controller.move_generator.noisy_lane.state)] + 1;
+            generator_state_cycles[int'(dut.controller.move_generator.quiet_lane.state)] =
+                generator_state_cycles[int'(dut.controller.move_generator.quiet_lane.state)] + 1;
             tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] =
                 tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] + 1;
             if (dut.controller.external_tt_gen.tt_load_store.store_fifo_count
@@ -640,14 +645,26 @@ module tb_engine_profile #(
             // Destination/source events are classified by the active
             // generation command. Candidate emission is counted below at the
             // common ordering-bucket write interface.
-            if (dut.controller.move_generator.noisy_pipeline.destination_examined_event)
+            if (dut.controller.move_generator.noisy_lane.destination_examined_event)
                 noisy_destinations_examined = noisy_destinations_examined + 1;
-            if (dut.controller.move_generator.quiet_pipeline.destination_examined_event)
+            if (dut.controller.move_generator.quiet_lane.destination_examined_event)
                 quiet_destinations_examined = quiet_destinations_examined + 1;
-            if (dut.controller.move_generator.noisy_pipeline.destination_with_source_event)
+            if (dut.controller.move_generator.noisy_lane.destination_with_source_event)
                 noisy_destinations_with_sources = noisy_destinations_with_sources + 1;
-            if (dut.controller.move_generator.quiet_pipeline.destination_with_source_event)
+            if (dut.controller.move_generator.quiet_lane.destination_with_source_event)
                 quiet_destinations_with_sources = quiet_destinations_with_sources + 1;
+            if (dut.controller.move_generator.noisy_lane.profile_candidate_event)
+                candidates_analyzed = candidates_analyzed + 1;
+            if (dut.controller.move_generator.quiet_lane.profile_candidate_event)
+                candidates_analyzed = candidates_analyzed + 1;
+            if (dut.controller.move_generator.noisy_lane.generator_history_read)
+                history_lookups = history_lookups + 1;
+            if (dut.controller.move_generator.quiet_lane.generator_history_read)
+                history_lookups = history_lookups + 1;
+            if (int'(dut.controller.move_generator.noisy_lane.state) != 0)
+                move_generation_cycles = move_generation_cycles + 1;
+            if (int'(dut.controller.move_generator.quiet_lane.state) != 0)
+                move_generation_cycles = move_generation_cycles + 1;
             if (dut.controller.move_pop_resp_valid) begin
                 if (dut.controller.move_pop_resp_found) begin
                     bucket_pops[int'(dut.controller.move_pop_resp_bucket)] <=
@@ -663,13 +680,21 @@ module tb_engine_profile #(
                 end
             end
             for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
-                if (dut.controller.move_generator.noisy_pipeline.bucket_wr_en[bucket]) begin
+                if (dut.controller.move_generator.noisy_lane.bucket_wr_en[bucket]) begin
                     bucket_writes[bucket] <= bucket_writes[bucket] + 1;
                     noisy_candidates_emitted = noisy_candidates_emitted + 1;
+                    if (int'(dut.controller.move_generator.noisy_lane.bucket_wr_top) + 1
+                            > bucket_high_water[bucket])
+                        bucket_high_water[bucket] =
+                            int'(dut.controller.move_generator.noisy_lane.bucket_wr_top) + 1;
                 end
-                if (dut.controller.move_generator.quiet_pipeline.bucket_wr_en[bucket]) begin
+                if (dut.controller.move_generator.quiet_lane.bucket_wr_en[bucket]) begin
                     bucket_writes[bucket] <= bucket_writes[bucket] + 1;
                     quiet_candidates_emitted = quiet_candidates_emitted + 1;
+                    if (int'(dut.controller.move_generator.quiet_lane.bucket_wr_top) + 1
+                            > bucket_high_water[bucket])
+                        bucket_high_water[bucket] =
+                            int'(dut.controller.move_generator.quiet_lane.bucket_wr_top) + 1;
                 end
             end
             // An accepted evaluator request is one static evaluation.
@@ -973,20 +998,20 @@ module tb_engine_profile #(
             emit($sformatf("move_order.bucket_writes.%0d", bucket), bucket_writes[bucket]);
             emit($sformatf("move_order.bucket_pops.%0d", bucket), bucket_pops[bucket]);
             emit($sformatf("move_order.bucket_cutoffs.%0d", bucket), bucket_cutoffs[bucket]);
-            emit($sformatf("move_order.bucket_high_water.%0d", bucket),
-                dut.controller.move_stat_bucket_high_water[bucket]);
+            emit($sformatf("move_order.bucket_high_water.%0d", bucket), bucket_high_water[bucket]);
         end
         for (int idx = 0; idx < ORDINAL_BUCKET_COUNT; idx++)
             emit($sformatf("move_order.legal_ordinal.%0d", idx), legal_ordinal_histogram[idx]);
         for (int idx = 0; idx < ORDINAL_BUCKET_COUNT; idx++)
             emit($sformatf("move_order.cutoff_ordinal.%0d", idx), cutoff_ordinal_histogram[idx]);
         emit("move_order.direct_cutoffs", direct_move_cutoffs);
-        emit("move_order.noisy_jobs", dut.controller.move_stat_noisy_count);
-        emit("move_order.quiet_jobs", dut.controller.move_stat_quiet_count);
-        emit("move_order.destinations", dut.controller.move_stat_destination_count);
-        emit("move_order.candidates", dut.controller.move_stat_candidate_count);
-        emit("move_order.history_lookups", dut.controller.move_stat_history_lookup_count);
-        emit("move_order.generation_cycles", dut.controller.move_stat_generation_cycles);
+        emit("move_order.noisy_jobs", noisy_candidates_emitted);
+        emit("move_order.quiet_jobs", quiet_candidates_emitted);
+        emit("move_order.destinations",
+            noisy_destinations_examined + quiet_destinations_examined);
+        emit("move_order.candidates", candidates_analyzed);
+        emit("move_order.history_lookups", history_lookups);
+        emit("move_order.generation_cycles", move_generation_cycles);
         emit("move_order.overflows", dut.controller.move_overflow_count);
         emit("algorithm.main_board_issues", main_search_board_issues);
         emit("algorithm.qsearch_board_issues", qsearch_board_issues);
@@ -1067,6 +1092,11 @@ module tb_engine_profile #(
         quiet_destinations_with_sources = 0;
         noisy_candidates_emitted = 0;
         quiet_candidates_emitted = 0;
+        candidates_analyzed = 0;
+        history_lookups = 0;
+        move_generation_cycles = 0;
+        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++)
+            bucket_high_water[bucket] = 0;
         evaluations = 0;
         eval_completions = 0;
         nnue_update_requests = 0;

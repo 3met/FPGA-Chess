@@ -30,7 +30,11 @@ from .common import (
     require_tool,
     run_command,
 )
-from .engine_config import engine_config_digest, load_engine_config
+from .engine_config import (
+    engine_config_digest,
+    engine_rtl_parameter_values,
+    load_engine_config,
+)
 from .manifest import expand_source_set, load_manifest
 from .profile_format import format_profile_report, format_profile_suite_report
 from .profile_report import (
@@ -42,6 +46,7 @@ from .simulation import has_sim_errors
 
 
 VERILATOR_PROFILE_CACHE_LIMIT = 10
+DEFAULT_PROFILE_TARGET = "quartus-de1-soc"
 
 def _profile_fingerprint(sources: list[Path], extra: str = "") -> str:
     digest = hashlib.sha256()
@@ -54,46 +59,24 @@ def _profile_fingerprint(sources: list[Path], extra: str = "") -> str:
 
 
 def _profile_parameter_args(config: dict, prefix: str) -> list[str]:
-    """Translate a resolved search profile into simulator top-level parameters."""
-    search = config["search"]
-    thresholds = search["quiet_bucket_thresholds"]
-    increment = search["increment_fraction"]
-    remaining = search["remaining_time_fraction"]
-    values = {
-        "TT_TAG_BITS": config["tt_tag_bits"],
-        "ASPIRATION_STARTING_DELTA": search["aspiration_starting_delta"],
-        "ASPIRATION_DELTA_MULTIPLIER_Q3": search["aspiration_delta_multiplier_q3"],
-        "LMR_A_Q8": search["lmr_a_q8"],
-        "LMR_B_Q8": search["lmr_b_q8"],
-        "LMR_MINIMUM_DEPTH": search["lmr_minimum_depth"],
-        "LMR_MINIMUM_MOVE_NUMBER": search["lmr_minimum_move_number"],
-        "NULL_MINIMUM_DEPTH": search["null_minimum_depth"],
-        "NULL_DEEP_DEPTH_THRESHOLD": search["null_deep_depth_threshold"],
-        "NULL_SHALLOW_REDUCTION": search["null_shallow_reduction"],
-        "NULL_DEEP_REDUCTION": search["null_deep_reduction"],
-        "MOVE_OVERHEAD_MS": search["move_overhead_ms"],
-        "MINIMUM_SEARCH_MS": search["minimum_search_ms"],
-        "INCREMENT_NUMERATOR": increment[0],
-        "INCREMENT_DENOMINATOR": increment[1],
-        "REMAINING_TIME_NUMERATOR": remaining[0],
-        "REMAINING_TIME_DENOMINATOR": remaining[1],
-        "HISTORY_REWARD_PER_DEPTH": search["history_reward_per_depth"],
-        "HISTORY_MAXIMUM_REWARD": search["history_maximum_reward"],
-        "HISTORY_MALUS_DIVISOR": search["history_malus_divisor"],
-        "QUIET_THRESHOLD_1": thresholds[0],
-        "QUIET_THRESHOLD_2": thresholds[1],
-        "QUIET_THRESHOLD_3": thresholds[2],
-        "CASTLING_HISTORY_BONUS": search["castling_history_bonus"],
-        "TT_VALIDATE_MINIMUM_DEPTH": search["tt_history_validation_minimum_depth"],
-        "TT_VALIDATE_BYPASS_HALFMOVES": search["tt_history_validation_bypass_halfmoves"],
-        "TT_STALE_DEPTH_TOLERANCE": search["tt_stale_entry_depth_tolerance"],
-    }
+    """Translate the same resolved RTL parameters used by synthesis."""
+    values = engine_rtl_parameter_values(config)
     return [f"{prefix}{name}={value}" for name, value in values.items()]
 
 
-def _resolve_profile_config(args: argparse.Namespace) -> dict:
-    """Apply structural CLI overrides to the selected FPGA engine profile."""
-    config = load_engine_config(args.engine_config)
+def _resolve_profile_config(args: argparse.Namespace, manifest: dict | None = None) -> dict:
+    """Resolve the synthesis target's engine profile and apply CLI overrides."""
+    if manifest is None:
+        manifest = load_manifest()
+    target_name = getattr(args, "target", DEFAULT_PROFILE_TARGET)
+    targets = manifest["synthesis_targets"]
+    if target_name not in targets:
+        raise BuildError(f"Unknown synthesis target '{target_name}'")
+    engine_config = getattr(args, "engine_config", None) or targets[target_name].get("engine_config")
+    if engine_config is None:
+        raise BuildError(f"Synthesis target '{target_name}' has no engine configuration")
+    args.synthesis_target = target_name
+    config = load_engine_config(engine_config)
     if args.threads is None:
         args.threads = config["threads"]
     if args.stack_depth is None:
@@ -107,13 +90,26 @@ def _resolve_profile_config(args: argparse.Namespace) -> dict:
     return config
 
 
+def _compact_verilator_profile_build(build_dir: Path) -> None:
+    """Keep only reusable outputs after Verilator has linked the simulator."""
+    keep = {"profile_sim.exe" if os.name == "nt" else "profile_sim", "fingerprint.txt", "compile.log"}
+    for path in build_dir.iterdir():
+        if path.name in keep:
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
 def _prune_verilator_profile_cache(cache_root: Path, active_dir: Path) -> None:
-    """Retain only the most recently used completed Verilator profiler builds."""
+    """Compact completed builds and retain the ten most recently used executables."""
     completed = []
     for build_dir in cache_root.iterdir():
         fingerprint = build_dir / "fingerprint.txt"
         executable = build_dir / ("profile_sim.exe" if os.name == "nt" else "profile_sim")
         if build_dir.is_dir() and fingerprint.is_file() and executable.is_file():
+            _compact_verilator_profile_build(build_dir)
             completed.append((fingerprint.stat().st_mtime_ns, build_dir))
     completed.sort(reverse=True)
     for _, build_dir in completed[VERILATOR_PROFILE_CACHE_LIMIT:]:
@@ -144,6 +140,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         and fingerprint_path.read_text(encoding="utf-8").strip() == fingerprint
     ):
         fingerprint_path.touch()
+        _compact_verilator_profile_build(build_dir)
         _prune_verilator_profile_cache(build_dir.parent, build_dir)
         return executable
 
@@ -179,8 +176,6 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         executable.name,
         f"-GENGINE_CLOCK_FREQ={args.engine_clock_hz}",
         f"-GENGINE_HALF_PERIOD_PS={half_period_ps}",
-        f"-GSEARCH_THREAD_COUNT={args.threads}",
-        f"-GSEARCH_STACK_DEPTH={args.stack_depth}",
         *_profile_parameter_args(args.resolved_engine_config, "-G"),
     ]
     if args.waveform:
@@ -191,6 +186,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         print_failure_excerpt(output)
         raise BuildError(f"Verilator profile build failed; see {rel(build_dir / 'compile.log')}")
     fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
+    _compact_verilator_profile_build(build_dir)
     _prune_verilator_profile_cache(build_dir.parent, build_dir)
     return executable
 
@@ -258,9 +254,10 @@ def _validate_profile_args(args: argparse.Namespace) -> tuple[str, int]:
     return "time", 50
 
 
-def _prepare_profile_simulator(args: argparse.Namespace) -> tuple[dict, str, Path | None, Path | None]:
+def _prepare_profile_simulator(
+    args: argparse.Namespace, manifest: dict
+) -> tuple[dict, str, Path | None, Path | None]:
     """Compile the selected backend once for one position or a complete suite."""
-    manifest = load_manifest()
     sources = expand_source_set(manifest, "engine-profile")
     simulator = args.simulator
     if simulator == "auto":
@@ -292,7 +289,7 @@ def _run_profile_position(
     board_path = run_dir / "board.hex"
     metrics_path = run_dir / "metrics.tsv"
     transcript_path = run_dir / "transcript.log"
-    stdout_path = run_dir / f"{simulator}.stdout.log"
+    stdout_path = transcript_path if simulator == "verilator" else run_dir / f"{simulator}.stdout.log"
     transient_wave = run_dir / ("wave.wlf" if args.waveform else "transient.wlf")
     board_path.write_text("".join(f"{value:02x}\n" for value in board_payload), encoding="ascii")
 
@@ -326,8 +323,6 @@ def _run_profile_position(
             str(library),
             f"-gENGINE_CLOCK_FREQ={args.engine_clock_hz}",
             f"-gENGINE_HALF_PERIOD_PS={half_period_ps}",
-            f"-gSEARCH_THREAD_COUNT={args.threads}",
-            f"-gSEARCH_STACK_DEPTH={args.stack_depth}",
             *_profile_parameter_args(args.resolved_engine_config, "-g"),
             *plusargs,
         ]
@@ -342,8 +337,6 @@ def _run_profile_position(
     code, output, elapsed = run_command(
         cmd, REPO_ROOT, stdout_path, timeout_seconds=args.timeout
     )
-    if simulator == "verilator":
-        transcript_path.write_text(output, encoding="utf-8")
     transcript = transcript_path.read_text(encoding="utf-8", errors="replace") if transcript_path.exists() else output
     if code != 0 or has_sim_errors(transcript) or not metrics_path.exists():
         print_failure_excerpt(transcript)
@@ -365,11 +358,12 @@ def _run_profile_position(
         "stack_depth": args.stack_depth,
         "engine_clock_hz": args.engine_clock_hz,
         "engine_profile": args.resolved_engine_config,
+        "synthesis_target": args.synthesis_target,
         "memory_clock_hz": 100_000_000,
         "tt_tag_bits": args.resolved_engine_config["tt_tag_bits"],
         "tt_entry_words": tt_entry_words,
         "tt_entries": (1 << 25) // tt_entry_words,
-        "tt_cache_lines": 1024,
+        "tt_cache_lines": 1 << args.resolved_engine_config["tt_cache_index_bits"],
         "tt_initial_state": "cold",
         "memory_path": "external-cache-cdc-sdr-sdram",
         "simulator": simulator,
@@ -396,19 +390,20 @@ def _profile_output_dir(args: argparse.Namespace) -> Path:
     """Resolve an explicit output directory or allocate a timestamped one."""
     if args.output:
         return Path(args.output).expanduser().resolve()
-    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
     return BUILD_ROOT / "profile" / timestamp
 
 
 def command_profile_position(args: argparse.Namespace) -> int:
     """Run the detailed profiler for one explicitly supplied FEN."""
-    args.resolved_engine_config = _resolve_profile_config(args)
+    manifest = load_manifest()
+    args.resolved_engine_config = _resolve_profile_config(args, manifest)
     search_kind, search_limit = _validate_profile_args(args)
     try:
         encode_fen(args.fen)
     except ProtocolError as exc:
         raise BuildError(f"Invalid FEN: {exc}") from exc
-    manifest, simulator, library, executable = _prepare_profile_simulator(args)
+    manifest, simulator, library, executable = _prepare_profile_simulator(args, manifest)
     run_dir = _profile_output_dir(args)
     report = _run_profile_position(
         args, args.fen, run_dir, search_kind, search_limit,
@@ -437,11 +432,12 @@ def _profile_job_count(args: argparse.Namespace, simulator: str) -> int:
 
 def command_profile(args: argparse.Namespace) -> int:
     """Profile the standard named position suite and print only its summary."""
-    args.resolved_engine_config = _resolve_profile_config(args)
+    manifest = load_manifest()
+    args.resolved_engine_config = _resolve_profile_config(args, manifest)
     search_kind, search_limit = _validate_profile_args(args)
     if args.jobs is not None and args.jobs < 1:
         raise BuildError("--jobs must be positive")
-    manifest, simulator, library, executable = _prepare_profile_simulator(args)
+    manifest, simulator, library, executable = _prepare_profile_simulator(args, manifest)
     jobs = _profile_job_count(args, simulator)
     run_dir = _profile_output_dir(args)
     run_dir.mkdir(parents=True, exist_ok=True)

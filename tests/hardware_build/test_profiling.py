@@ -23,8 +23,10 @@ from tools.hardware_build.profile_schema import (
     THREAD_PHASES,
 )
 from tools.hardware_build.profiling import (
+    _compact_verilator_profile_build,
     _prune_verilator_profile_cache,
     _profile_job_count,
+    _profile_parameter_args,
     _resolve_profile_config,
     _validate_profile_args,
 )
@@ -272,6 +274,40 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Main-search move pushes", text)
         self.assertLess(text.index("Good noisy high"), text.index("Bad noisy low"))
 
+    def test_move_generator_operation_table_is_dense_and_aligned(self):
+        metrics = sample_metrics()
+        counts = [1_890_533, 26_132_510, 5_124_774, 129_484_860]
+        totals = [3_781_066, 549_674_678, 520_589_377, 129_484_860]
+        maximums = [2, 41, 132, 1]
+        for index in range(4):
+            metrics[f"components.move_generator.operations.{index}.count"] = counts[index]
+            metrics[f"components.move_generator.operations.{index}.total_cycles"] = totals[index]
+            metrics[f"components.move_generator.operations.{index}.max_cycles"] = maximums[index]
+        metrics["components.move.commands"] = sum(counts[:3])
+        metrics["components.move.pops"] = counts[3]
+        report = build_profile_report(
+            {"fen": "x", "threads": 1, "engine_clock_hz": 100},
+            metrics,
+            {
+                "best_move.from": 0, "best_move.to": 0, "best_move.promotion": 0,
+                "score": 0, "nodes": 5, "completed_depth": 0,
+                "deepest_search_ply": 0, "end_reason": 0, "error": 0,
+            },
+            1,
+        )
+
+        text = format_profile_report(report)
+
+        self.assertIn(
+            "Move generator operations\n"
+            "  Operation               Count Total cycles    Avg Max\n"
+            "  Direct validation   1,890,533    3,781,066   2.00   2\n"
+            "  Noisy generation   26,132,510  549,674,678  21.03  41\n"
+            "  Quiet generation    5,124,774  520,589,377 101.58 132\n"
+            "  Bucket pop        129,484,860  129,484,860   1.00   1\n",
+            text,
+        )
+
     def test_phase_total_mismatch_fails(self):
         metrics = sample_metrics()
         metrics["threads.0.phases.1"] = 9
@@ -503,6 +539,23 @@ class ProfileArgumentTests(unittest.TestCase):
         self.assertEqual(config["stack_depth"], 65)
         self.assertEqual(config["clock_frequency_hz"], 60_000_000)
 
+    def test_default_profile_comes_from_synthesis_target(self):
+        args = self.namespace(threads=None, stack_depth=None, engine_clock_hz=None)
+        args.target = "quartus-de1-soc"
+        args.engine_config = None
+        config = _resolve_profile_config(args)
+        self.assertEqual(args.synthesis_target, "quartus-de1-soc")
+        self.assertEqual(config["engine_config"], "hardware/config/engine/de1-soc.json")
+
+    def test_all_resolved_rtl_parameters_are_forwarded(self):
+        args = self.namespace(threads=None, stack_depth=None, engine_clock_hz=None)
+        args.target = "quartus-de1-soc"
+        args.engine_config = None
+        config = _resolve_profile_config(args)
+        parameters = _profile_parameter_args(config, "-G")
+        self.assertIn("-GTT_CACHE_INDEX_BITS=11", parameters)
+        self.assertIn("-GENABLE_SEARCH_STATS=0", parameters)
+
 
 class ProfileSuiteTests(unittest.TestCase):
     def make_report(self, fen: str, nodes: int, wall_seconds: float) -> dict:
@@ -602,6 +655,22 @@ class ProfileSuiteTests(unittest.TestCase):
             self.assertFalse(builds[1].exists())
             self.assertTrue(all(build.exists() for build in builds[2:]))
             self.assertTrue(incomplete.exists())
+
+    def test_completed_verilator_build_is_compacted_to_reusable_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build = make_completed_verilator_build(Path(temporary), "build", 1)
+            (build / "compile.log").write_text("complete", encoding="utf-8")
+            (build / "generated.cpp").write_text("generated", encoding="utf-8")
+            object_dir = build / "objects"
+            object_dir.mkdir()
+            (object_dir / "generated.o").touch()
+
+            _compact_verilator_profile_build(build)
+
+            self.assertEqual(
+                {path.name for path in build.iterdir()},
+                {"profile_sim.exe" if os.name == "nt" else "profile_sim", "fingerprint.txt", "compile.log"},
+            )
 
 
 if __name__ == "__main__":

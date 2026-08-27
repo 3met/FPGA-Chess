@@ -20,7 +20,7 @@ Generated projects, simulator libraries, logs, and reports are written under `wo
 
 Reusable chess-search policies live under `hardware/config/search/`. Per-FPGA engine profiles live under `hardware/config/engine/`, reference one search policy, and select structural settings such as thread count, stack depth, engine clock, TT tag width, external-TT cache index width, and optional instrumentation. A cache index width of `N` synthesizes `2^N` on-chip cache lines. A synthesis target selects its engine profile with `engine_config`; vendor, device, source, constraint, and fitter settings remain in the build manifest.
 
-The build validates and resolves both layers, records their SHA-256 digest, and generates `engine_build_config.svh` inside the target build directory. Packed thread, ply, and TT-depth widths derive from the resolved structural settings rather than imposing the portable defaults as configuration limits. A new FPGA normally needs a new engine profile and synthesis target, while multiple FPGA profiles may share the same search policy.
+The build validates and resolves both layers, records their SHA-256 digest, and generates `engine_build_config.svh` inside the target build directory. Synthesis and runtime profiling share the same resolved RTL-parameter mapping so the simulated thread, stack, TT-cache, instrumentation, and search-policy settings match the selected target. Packed thread, ply, and TT-depth widths derive from the resolved structural settings rather than imposing the portable defaults as configuration limits. A new FPGA normally needs a new engine profile and synthesis target, while multiple FPGA profiles may share the same search policy.
 
 ## Commands
 

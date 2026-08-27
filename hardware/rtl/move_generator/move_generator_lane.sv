@@ -170,6 +170,9 @@ module move_generator_lane #(
     logic [15:0] selected_source_mask;
     logic destination_examined_event;
     logic destination_with_source_event;
+`ifdef FPGA_CHESS_PROFILE
+    logic profile_candidate_event;
+`endif
     logic castle_index;
 
     Move candidate_move;
@@ -772,6 +775,13 @@ module move_generator_lane #(
         destination_examined_event = state == GEN_BUILD_CONTEXT;
         destination_with_source_event =
             destination_examined_event && selected_source_mask != 16'd0;
+`ifdef FPGA_CHESS_PROFILE
+        // Candidate analysis precedes suppression and may therefore exceed writes.
+        profile_candidate_event =
+            (state == GEN_EXPAND_SOURCE && candidate_slot_ready
+                && source_mask != 16'd0 && source_valid)
+            || castle_candidate_pseudo_legal;
+`endif
     end
 
     // Castling uses the same pending writeback stage as ordinary quiet moves.
