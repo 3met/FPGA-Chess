@@ -156,6 +156,8 @@ module search_controller #(
         logic has_tt_move;
         logic stand_pat_done;
         logic scout_search;
+        // Cache beta == alpha + 1 so null eligibility does not add on dispatch.
+        logic unit_window;
         logic count_move_on_return;
         logic null_attempted;
         logic entered_by_null;
@@ -213,19 +215,6 @@ module search_controller #(
         SEARCH_PHASE_TERMINAL_WAIT,
         SEARCH_PHASE_DONE
     } SearchThreadPhase;
-
-    // Classify each runnable thread once, then derive the independent pipeline
-    // request masks from this ordered action instead of rebuilding the search
-    // priority chain separately for every shared subsystem.
-    typedef enum logic [2:0] {
-        SEARCH_ACTION_NONE,
-        SEARCH_ACTION_TERMINAL,
-        SEARCH_ACTION_TT_LOOKUP,
-        SEARCH_ACTION_NULL,
-        SEARCH_ACTION_EVAL,
-        SEARCH_ACTION_MOVE,
-        SEARCH_ACTION_QUIET
-    } SearchThreadAction;
 
     // Chain the next move-order operation directly from a response when the
     // target generator lane is already ready on that response cycle.
@@ -334,7 +323,6 @@ module search_controller #(
     SearchThreadMask search_null_mask;
     SearchThreadMask search_terminal_mask;
     SearchThreadMask search_terminal_no_move_mask;
-    SearchThreadAction search_thread_action[0:SEARCH_THREAD_COUNT-1];
     logic search_null_candidate[0:SEARCH_THREAD_COUNT-1];
     SearchThreadPhase search_thread_phase[0:SEARCH_THREAD_COUNT-1];
     ThreadCount search_active_thread_count;
@@ -1106,6 +1094,7 @@ module search_controller #(
         entry.has_tt_move = 1'b0;
         entry.stand_pat_done = 1'b0;
         entry.scout_search = 1'b0;
+        entry.unit_window = 1'b0;
         entry.count_move_on_return = 1'b0;
         entry.null_attempted = 1'b0;
         entry.entered_by_null = 1'b0;
@@ -1320,6 +1309,28 @@ module search_controller #(
         return search_thread_phase[thread_index] == SEARCH_PHASE_READY;
     endfunction : search_thread_ready
 
+    function automatic logic should_probe_search_tt(input ThreadID thread, input PlyIndex ply);
+        return !(ply == PlyIndex'(0) && thread != ThreadID'(0));
+    endfunction : should_probe_search_tt
+
+    function automatic logic search_thread_terminal_ready(input int thread_index);
+        return search_thread_ready(thread_index)
+            && (search_board[thread_index].halfmove_clock >= HalfmoveClock'(100)
+                || search_stack_top[thread_index].move_order_state == MOVE_ORDER_DONE);
+    endfunction : search_thread_terminal_ready
+
+    // Keep TT arbitration independent of the later alpha/beta decisions. This
+    // avoids placing the null-window adder ahead of the multi-thread TT index.
+    function automatic logic search_thread_tt_lookup_ready(input int thread_index);
+        return search_thread_ready(thread_index)
+            && !search_thread_terminal_ready(thread_index)
+            && !search_in_qsearch(ThreadID'(thread_index))
+            && !search_stack_top[thread_index].tt_checked
+            && should_probe_search_tt(
+                ThreadID'(thread_index), search_ply[thread_index])
+            && !search_tt_lookup_inflight[thread_index];
+    endfunction : search_thread_tt_lookup_ready
+
     function automatic logic search_thread_store_pending(input int thread_index);
         return search_thread_phase[thread_index] == SEARCH_PHASE_STORE_PUBLISH;
     endfunction : search_thread_store_pending
@@ -1393,46 +1404,53 @@ module search_controller #(
             && halfmove_depth_sum < 8'(100 + int'(reduction));
     endfunction : search_thread_null_candidate
 
-    function automatic SearchThreadAction search_ready_action(input int thread_index);
-        automatic MoveOrderState order_state =
-            search_stack_top[thread_index].move_order_state;
-        automatic logic null_ready = search_stack_top[thread_index].tt_checked
+    function automatic logic search_thread_null_ready(input int thread_index);
+        return search_thread_ready(thread_index)
+            && !search_thread_terminal_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && search_stack_top[thread_index].tt_checked
             && !search_stack_top[thread_index].null_attempted
             && search_null_candidate[thread_index]
-            && search_stack_top[thread_index].beta
-                == search_stack_top[thread_index].alpha + EvalScore'(1)
+            && search_stack_top[thread_index].unit_window
             && search_stack_top[thread_index].beta > NULL_MIN_BETA;
-        automatic logic eval_ready = (search_in_qsearch(ThreadID'(thread_index))
-                    && !search_board_in_check[thread_index]
+    endfunction : search_thread_null_ready
+
+    function automatic logic search_thread_eval_ready(input int thread_index);
+        return search_thread_ready(thread_index)
+            && !search_thread_terminal_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && !search_thread_null_ready(thread_index)
+            && ((search_in_qsearch(ThreadID'(thread_index))
                     && !search_stack_top[thread_index].stand_pat_done)
-                || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1;
+                || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1);
+    endfunction : search_thread_eval_ready
 
-        if (!search_thread_ready(thread_index)) return SEARCH_ACTION_NONE;
-        if (search_board[thread_index].halfmove_clock >= HalfmoveClock'(100)
-                || order_state == MOVE_ORDER_DONE)
-            return SEARCH_ACTION_TERMINAL;
-        if (!search_in_qsearch(ThreadID'(thread_index))
-                && !search_stack_top[thread_index].tt_checked
-                && should_probe_search_tt(
-                    ThreadID'(thread_index), search_ply[thread_index])
-                && !search_tt_lookup_inflight[thread_index])
-            return SEARCH_ACTION_TT_LOOKUP;
-        if (null_ready) return SEARCH_ACTION_NULL;
-        if (eval_ready) return SEARCH_ACTION_EVAL;
-        if (order_state == MOVE_ORDER_GENERATE_QUIET)
-            return move_quiet_cmd_ready && !search_move_inflight[thread_index]
-                ? SEARCH_ACTION_QUIET : SEARCH_ACTION_NONE;
-        if (!search_move_inflight[thread_index]
-                && ((order_state != MOVE_ORDER_DIRECT
-                        && order_state != MOVE_ORDER_GENERATE_NOISY)
-                    || move_cmd_ready))
-            return SEARCH_ACTION_MOVE;
-        return SEARCH_ACTION_NONE;
-    endfunction : search_ready_action
+    function automatic logic search_thread_move_ready(input int thread_index);
+        automatic MoveOrderState order_state =
+            search_stack_top[thread_index].move_order_state;
+        return search_thread_ready(thread_index)
+            && !search_thread_terminal_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && !search_thread_null_ready(thread_index)
+            && !search_thread_eval_ready(thread_index)
+            && order_state != MOVE_ORDER_GENERATE_QUIET
+            && !search_move_inflight[thread_index]
+            && ((order_state != MOVE_ORDER_DIRECT
+                    && order_state != MOVE_ORDER_GENERATE_NOISY)
+                || move_cmd_ready);
+    endfunction : search_thread_move_ready
 
-    function automatic logic should_probe_search_tt(input ThreadID thread, input PlyIndex ply);
-        return !(ply == PlyIndex'(0) && thread != ThreadID'(0));
-    endfunction : should_probe_search_tt
+    function automatic logic search_thread_quiet_ready(input int thread_index);
+        return search_thread_ready(thread_index)
+            && !search_thread_terminal_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && !search_thread_null_ready(thread_index)
+            && !search_thread_eval_ready(thread_index)
+            && search_stack_top[thread_index].move_order_state
+                == MOVE_ORDER_GENERATE_QUIET
+            && move_quiet_cmd_ready
+            && !search_move_inflight[thread_index];
+    endfunction : search_thread_quiet_ready
 
     function automatic logic should_store_search_tt(input ThreadID thread, input PlyIndex ply);
         return !search_in_qsearch(thread);
@@ -1543,25 +1561,19 @@ module search_controller #(
             end
         end
         for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++) begin
-            search_thread_action[idx] = search_ready_action(idx);
             search_store_mask[idx] = search_thread_store_pending(idx);
             search_board_mask[idx] = search_thread_board_pending(idx)
                 || search_thread_reverse_pending(idx);
-            search_move_mask[idx] =
-                search_thread_action[idx] == SEARCH_ACTION_MOVE;
-            search_quiet_mask[idx] =
-                search_thread_action[idx] == SEARCH_ACTION_QUIET;
-            search_eval_mask[idx] = search_thread_action[idx] == SEARCH_ACTION_EVAL
+            search_move_mask[idx] = search_thread_move_ready(idx);
+            search_quiet_mask[idx] = search_thread_quiet_ready(idx);
+            search_eval_mask[idx] = search_thread_eval_ready(idx)
                 && (!(nnue_delta_busy || nnue_plan_any)
                     || nnue_state_valid[idx]);
-            search_tt_lookup_mask[idx] =
-                search_thread_action[idx] == SEARCH_ACTION_TT_LOOKUP;
+            search_tt_lookup_mask[idx] = search_thread_tt_lookup_ready(idx);
             search_return_mask[idx] = search_thread_return_pending(idx);
             search_tt_response_mask[idx] = search_thread_tt_response_pending(idx);
-            search_null_mask[idx] =
-                search_thread_action[idx] == SEARCH_ACTION_NULL;
-            search_terminal_mask[idx] =
-                search_thread_action[idx] == SEARCH_ACTION_TERMINAL;
+            search_null_mask[idx] = search_thread_null_ready(idx);
+            search_terminal_mask[idx] = search_thread_terminal_ready(idx);
             search_terminal_no_move_mask[idx] = search_terminal_mask[idx]
                 && search_stack_top[idx].move_order_state == MOVE_ORDER_DONE;
         end
@@ -2891,6 +2903,10 @@ module search_controller #(
                         search_stack_top[tid].alpha <= search_thread_root_alpha[tid];
                         search_stack_top[tid].orig_alpha <= search_thread_root_alpha[tid];
                         search_stack_top[tid].beta <= search_thread_root_beta[tid];
+                        search_stack_top[tid].stand_pat_done <= active_board_in_check;
+                        search_stack_top[tid].unit_window
+                            <= search_thread_root_beta[tid]
+                                == search_thread_root_alpha[tid] + EvalScore'(1);
                         search_return_move[tid] <= NULL_MOVE;
                     end
                     search_thread_id <= ThreadID'(0);
@@ -2945,6 +2961,20 @@ module search_controller #(
                     nodes_next = search_nodes;
                     nnue_eval_enqueued = nnue_eval_valid && nnue_eval_ready;
                     nnue_eval_dequeued = nnue_result_valid;
+
+`ifndef SYNTHESIS
+                    for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                        assert (search_stack_top[tid].unit_window
+                                == (search_stack_top[tid].beta
+                                    == search_stack_top[tid].alpha + EvalScore'(1)))
+                            else $fatal(1, "cached unit-window state disagrees for thread %0d", tid);
+                        if (search_thread_ready(tid) && search_in_qsearch(ThreadID'(tid))
+                                && search_board_in_check[tid]) begin
+                            assert (search_stack_top[tid].stand_pat_done)
+                                else $fatal(1, "checked qsearch thread did not bypass stand pat: %0d", tid);
+                        end
+                    end
+`endif
 
                     if (nnue_build_busy && !nnue_build_draining) begin
                         automatic Tile build_tile =
@@ -3207,6 +3237,13 @@ module search_controller #(
                                 search_stack_top[tid].beta
                                     <= aspiration_upper_bound(
                                         search_thread_iteration_score[tid], next_aspiration_delta);
+                                search_stack_top[tid].stand_pat_done <= active_board_in_check;
+                                search_stack_top[tid].unit_window
+                                    <= aspiration_upper_bound(
+                                            search_thread_iteration_score[tid], next_aspiration_delta)
+                                        == aspiration_lower_bound(
+                                                search_thread_iteration_score[tid], next_aspiration_delta)
+                                            + EvalScore'(1);
                                 search_return_move[tid] <= NULL_MOVE;
                                 active_count_next += ThreadCount'(1);
                             end
@@ -3419,8 +3456,10 @@ module search_controller #(
                                 search_stack_top[board_thread_id].direct_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
-                                search_stack_top[board_thread_id].stand_pat_done <= 1'b0;
+                                search_stack_top[board_thread_id].stand_pat_done
+                                    <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].scout_search <= 1'b1;
+                                search_stack_top[board_thread_id].unit_window <= 1'b1;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b1;
                                 search_stack_top[board_thread_id].nnue_delta_valid <= 1'b0;
@@ -3591,11 +3630,14 @@ module search_controller #(
                                     search_stack_top[board_thread_id].orig_alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b1;
+                                    search_stack_top[board_thread_id].unit_window <= 1'b1;
                                 end else begin
                                     search_stack_top[board_thread_id].alpha <= -search_stack_top[board_thread_id].beta;
                                     search_stack_top[board_thread_id].orig_alpha <= -search_stack_top[board_thread_id].beta;
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b0;
+                                    search_stack_top[board_thread_id].unit_window
+                                        <= search_stack_top[board_thread_id].unit_window;
                                 end
                                 search_pvs_research[board_thread_id] <= 1'b0;
                                 search_stack_top[board_thread_id].remaining_depth <= search_pending_child_depth[board_thread_id];
@@ -3612,7 +3654,8 @@ module search_controller #(
                                 search_stack_top[board_thread_id].direct_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
-                                search_stack_top[board_thread_id].stand_pat_done <= 1'b0;
+                                search_stack_top[board_thread_id].stand_pat_done
+                                    <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b0;
                                 // A new logical node reuses stale address bits but starts with no failed quiets.
@@ -3734,6 +3777,9 @@ module search_controller #(
                                 search_stack_top[eval_thread_id].best_score <= eval_score;
                                 if (eval_score > search_stack_top[eval_thread_id].alpha) begin
                                     search_stack_top[eval_thread_id].alpha <= eval_score;
+                                    search_stack_top[eval_thread_id].unit_window
+                                        <= search_stack_top[eval_thread_id].beta
+                                            == eval_score + EvalScore'(1);
                                 end
                                 if (eval_score >= search_stack_top[eval_thread_id].beta) begin
                                     search_return_score[eval_thread_id] <= eval_score;
@@ -3812,6 +3858,9 @@ module search_controller #(
                                     if (lookup_resp.score > search_stack_top[lookup_thread_id].alpha) begin
                                         tt_alpha_after = lookup_resp.score;
                                         search_stack_top[lookup_thread_id].alpha <= lookup_resp.score;
+                                        search_stack_top[lookup_thread_id].unit_window
+                                            <= search_stack_top[lookup_thread_id].beta
+                                                == lookup_resp.score + EvalScore'(1);
                                     end
                                     if (tt_alpha_after >= search_stack_top[lookup_thread_id].beta) begin
                                         search_return_score[lookup_thread_id] <= lookup_resp.score;
@@ -3925,6 +3974,9 @@ module search_controller #(
                                 search_stack_top[return_thread_id].has_legal <= 1'b1;
                                 if (parent_score > search_stack_top[return_thread_id].alpha) begin
                                     search_stack_top[return_thread_id].alpha <= parent_score;
+                                    search_stack_top[return_thread_id].unit_window
+                                        <= search_stack_top[return_thread_id].beta
+                                            == parent_score + EvalScore'(1);
                                 end
                                 search_return_valid[return_thread_id] <= 1'b0;
                                 search_return_was_scout[return_thread_id] <= 1'b0;
@@ -4092,7 +4144,6 @@ module search_controller #(
                             search_thread_id <= search_eval_issue_thread;
                             search_thread_phase[search_eval_issue_thread] <= SEARCH_PHASE_EVAL_WAIT;
                             search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_eval_issue_thread)
-                                && !search_board_in_check[search_eval_issue_thread]
                                 && !search_stack_top[search_eval_issue_thread].stand_pat_done;
                             search_dispatch.eval <= search_thread_after(search_eval_issue_thread);
                             nnue_build_busy <= 1'b1;
