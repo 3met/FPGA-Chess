@@ -50,7 +50,9 @@ module tb_search_controller;
     bit store_wait_dispatch_seen;
     bit store_wait_issue_seen;
     bit return_pending_dispatch_seen;
-    bit tt_response_pending_dispatch_seen;
+    bit move_followup_seen;
+    bit tt_response_consume_seen;
+    bit tt_response_direct_consume_seen;
     bit multi_move_inflight_seen;
     bit pipeline_overlap_seen;
     bit pvs_scout_seen;
@@ -113,9 +115,6 @@ module tb_search_controller;
     bit thread_eval_inflight_seen[0:THREAD_COUNT-1];
     bit thread_tt_lookup_inflight_seen[0:THREAD_COUNT-1];
     bit thread_tt_store_inflight_seen[0:THREAD_COUNT-1];
-    bit thread_board_wait_seen[0:THREAD_COUNT-1];
-    bit thread_move_wait_seen[0:THREAD_COUNT-1];
-    bit thread_eval_wait_seen[0:THREAD_COUNT-1];
     bit thread_board_tag_seen[0:THREAD_COUNT-1];
     bit thread_move_tag_seen[0:THREAD_COUNT-1];
     bit thread_eval_tag_seen[0:THREAD_COUNT-1];
@@ -656,7 +655,9 @@ module tb_search_controller;
         store_wait_dispatch_seen = 1'b0;
         store_wait_issue_seen = 1'b0;
         return_pending_dispatch_seen = 1'b0;
-        tt_response_pending_dispatch_seen = 1'b0;
+        move_followup_seen = 1'b0;
+        tt_response_consume_seen = 1'b0;
+        tt_response_direct_consume_seen = 1'b0;
         multi_move_inflight_seen = 1'b0;
         pipeline_overlap_seen = 1'b0;
         for (int idx = 0; idx < THREAD_COUNT; idx++) begin
@@ -682,9 +683,6 @@ module tb_search_controller;
             thread_eval_inflight_seen[idx] = 1'b0;
             thread_tt_lookup_inflight_seen[idx] = 1'b0;
             thread_tt_store_inflight_seen[idx] = 1'b0;
-            thread_board_wait_seen[idx] = 1'b0;
-            thread_move_wait_seen[idx] = 1'b0;
-            thread_eval_wait_seen[idx] = 1'b0;
             thread_board_tag_seen[idx] = 1'b0;
             thread_move_tag_seen[idx] = 1'b0;
             thread_eval_tag_seen[idx] = 1'b0;
@@ -709,8 +707,10 @@ module tb_search_controller;
         check(tt_response_thread_seen[0], {label, " received root TT response on primary thread"});
         check(thread_tt_lookup_inflight_seen[0], {label, " tracked TT lookup in-flight on primary thread"});
         check(thread_tt_lookup_cursor_seen[0], {label, " advanced TT lookup dispatch cursor on primary thread"});
-        check(tt_response_pending_dispatch_seen, {label, " held pending TT response in run scheduler"});
-        check(thread_tt_response_cursor_seen[0], {label, " applied pending TT response through response cursor"});
+        check(tt_response_consume_seen, {label, " consumed TT response in run scheduler"});
+        check(tt_response_direct_consume_seen,
+            {label, " consumed an uncontended TT response without a pending cycle"});
+        check(thread_tt_response_cursor_seen[0], {label, " advanced TT response cursor"});
         check(all_threads_root_active_seen, {label, " initialized all threads active before root scheduling"});
         check(search_dispatch_state_seen, {label, " used concurrent search run state"});
         check(active_thread_count_full_seen, {label, " initialized active-thread count"});
@@ -719,6 +719,8 @@ module tb_search_controller;
         check(store_wait_dispatch_seen, {label, " held pending TT store in run scheduler"});
         check(store_wait_issue_seen, {label, " issued pending TT store from store-wait phase"});
         check(return_pending_dispatch_seen, {label, " held pending child return in run scheduler"});
+        check(move_followup_seen,
+            {label, " chained a move-order operation on its response cycle"});
         if (THREAD_COUNT > 1) begin
             check(multi_move_inflight_seen, {label, " overlapped multiple move-generator requests"});
             check(pipeline_overlap_seen, {label, " overlapped different tagged pipelines"});
@@ -764,28 +766,16 @@ module tb_search_controller;
                 $sformatf("%s thread %0d retained selected root move on stack", label, idx));
             check(dut.search_thread_nodes[idx] > NodeCountType'(0),
                 $sformatf("%s thread %0d searched nonzero nodes", label, idx));
-            check(dut.search_thread_status[idx] == dut.SEARCH_THREAD_DONE,
-                $sformatf("%s thread %0d lifecycle done", label, idx));
             check(dut.search_thread_phase[idx] == dut.SEARCH_PHASE_DONE,
-                $sformatf("%s thread %0d phase done", label, idx));
+                $sformatf("%s thread %0d lifecycle done", label, idx));
             check(!dut.search_board_inflight[idx],
                 $sformatf("%s thread %0d board in-flight cleared", label, idx));
             check(!dut.search_move_inflight[idx],
                 $sformatf("%s thread %0d move in-flight cleared", label, idx));
-            check(!dut.search_eval_inflight[idx],
-                $sformatf("%s thread %0d eval in-flight cleared", label, idx));
             check(!dut.search_tt_lookup_inflight[idx],
                 $sformatf("%s thread %0d TT lookup in-flight cleared", label, idx));
-            check(!dut.search_tt_store_inflight[idx],
-                $sformatf("%s thread %0d TT store in-flight cleared", label, idx));
             check(dut.search_active_thread_count == 0,
                 $sformatf("%s active-thread count cleared after thread %0d checks", label, idx));
-            check(thread_board_wait_seen[idx],
-                $sformatf("%s thread %0d used board wait state", label, idx));
-            check(thread_move_wait_seen[idx],
-                $sformatf("%s thread %0d used move wait state", label, idx));
-            check(thread_eval_wait_seen[idx],
-                $sformatf("%s thread %0d used eval wait state", label, idx));
             check(thread_board_tag_seen[idx],
                 $sformatf("%s thread %0d produced board result tag", label, idx));
             check(thread_move_tag_seen[idx],
@@ -889,30 +879,20 @@ module tb_search_controller;
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
             nnue_metadata_clear &= !dut.nnue_plan_pending[tid];
             nnue_metadata_clear &= !dut.nnue_state_valid[tid];
-            check(dut.search_board_wait_count[tid] == 0,
-                $sformatf("%s thread %0d board wait canceled", label, tid));
-            check(dut.search_move_wait_count[tid] == 0,
-                $sformatf("%s thread %0d move wait canceled", label, tid));
-            check(dut.search_eval_wait_count[tid] == 0,
-                $sformatf("%s thread %0d eval wait canceled", label, tid));
             check(!dut.search_board_inflight[tid],
                 $sformatf("%s thread %0d board in-flight canceled", label, tid));
             check(!dut.search_move_inflight[tid],
                 $sformatf("%s thread %0d move in-flight canceled", label, tid));
-            check(!dut.search_eval_inflight[tid],
-                $sformatf("%s thread %0d eval in-flight canceled", label, tid));
             check(!dut.search_tt_lookup_inflight[tid],
                 $sformatf("%s thread %0d TT lookup in-flight canceled", label, tid));
-            check(!dut.search_tt_store_inflight[tid],
-                $sformatf("%s thread %0d TT store in-flight canceled", label, tid));
             check(!dut.search_return_was_scout[tid],
                 $sformatf("%s thread %0d PVS scout return canceled", label, tid));
             check(!dut.search_return_was_reduced[tid],
                 $sformatf("%s thread %0d reduced return canceled", label, tid));
             check(!dut.search_pvs_research[tid],
                 $sformatf("%s thread %0d PVS re-search canceled", label, tid));
-            check(dut.search_thread_status[tid] == dut.SEARCH_THREAD_IDLE,
-                $sformatf("%s thread %0d status idle after kill", label, tid));
+            check(dut.search_thread_phase[tid] == dut.SEARCH_PHASE_IDLE,
+                $sformatf("%s thread %0d phase idle after kill", label, tid));
         end
         check(nnue_metadata_clear, {label, " invalidates NNUE state metadata"});
         for (int idx = 0; idx < dut.SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
@@ -1493,8 +1473,6 @@ module tb_search_controller;
                 $sformatf("search adds NNUE correction: baseline=%0d corrected=%0d",
                     baseline_score, nnue_score));
         end
-        check(dut.EVAL_WAIT_CYCLES == NNUE_OUTPUT_MAC_CYCLES + 1,
-            "NNUE evaluation wait includes MAC and registered-result cycles");
         check(nnue_delta_seen, "NNUE child states apply physical move deltas");
         check(nnue_reverse_delta_seen,
             "NNUE restores parent state with an inverse stack delta");
@@ -1705,15 +1683,6 @@ module tb_search_controller;
                 root_first_stack_move[idx] = dut.search_stack_top[idx].move;
                     root_stack_capture_pending[idx] = 1'b0;
                 end
-                if (dut.search_board_wait_count[idx] != 0) begin
-                    thread_board_wait_seen[idx] = 1'b1;
-                end
-                if (dut.search_move_wait_count[idx] != 0) begin
-                    thread_move_wait_seen[idx] = 1'b1;
-                end
-                if (dut.search_eval_wait_count[idx] != 0) begin
-                    thread_eval_wait_seen[idx] = 1'b1;
-                end
                 if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_READY) begin
                     thread_ready_phase_seen[idx] = 1'b1;
                 end
@@ -1741,7 +1710,7 @@ module tb_search_controller;
                         thread_move_cursor_seen[idx] = 1'b1;
                     end
                 end
-                if (dut.search_eval_inflight[idx]) begin
+                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_EVAL_WAIT) begin
                     thread_eval_inflight_seen[idx] = 1'b1;
                     if (dut.search_dispatch.eval == expected_next_thread(idx)) begin
                         thread_eval_cursor_seen[idx] = 1'b1;
@@ -1753,7 +1722,7 @@ module tb_search_controller;
                         thread_tt_lookup_cursor_seen[idx] = 1'b1;
                     end
                 end
-                if (dut.search_tt_store_inflight[idx]) begin
+                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH) begin
                     thread_tt_store_inflight_seen[idx] = 1'b1;
                 end
                 if (thread_tt_store_inflight_seen[idx]
@@ -1786,7 +1755,7 @@ module tb_search_controller;
                     end
                 end
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_eval_inflight[idx]) begin
+                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_EVAL_WAIT) begin
                         active_pipeline_count += 1;
                         break;
                     end
@@ -1798,8 +1767,7 @@ module tb_search_controller;
             if (dut.state == dut.ST_SEARCH_RUN) begin
                 search_dispatch_state_seen = 1'b1;
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH
-                            && dut.search_tt_store_inflight[idx]) begin
+                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH) begin
                         store_wait_dispatch_seen = 1'b1;
                     end
                     if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_MOVE_WAIT
@@ -1807,19 +1775,18 @@ module tb_search_controller;
                             && !dut.search_move_inflight[idx]) begin
                         return_pending_dispatch_seen = 1'b1;
                     end
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_TT_WAIT
-                            && dut.search_tt_response_pending[idx]
-                            && !dut.search_tt_lookup_inflight[idx]) begin
-                        tt_response_pending_dispatch_seen = 1'b1;
-                    end
                 end
             end
+            if (dut.state == dut.ST_SEARCH_RUN && dut.search_tt_consume_valid) begin
+                tt_response_consume_seen = 1'b1;
+                if (dut.search_tt_consume_direct)
+                    tt_response_direct_consume_seen = 1'b1;
+                thread_tt_response_cursor_seen[int'(dut.search_tt_consume_thread)] = 1'b1;
+            end
+            if (dut.state == dut.ST_SEARCH_RUN && dut.move_followup_accepted)
+                move_followup_seen = 1'b1;
             if (dut.state == dut.ST_SEARCH_RUN) begin
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_tt_response_pending[idx]
-                            && dut.search_thread_phase[idx] == dut.SEARCH_PHASE_TT_WAIT) begin
-                        thread_tt_response_cursor_seen[idx] = 1'b1;
-                    end
                     if (dut.search_return_valid[idx]
                             && !dut.search_move_inflight[idx]
                             && dut.search_thread_phase[idx] == dut.SEARCH_PHASE_MOVE_WAIT) begin
@@ -1881,19 +1848,17 @@ module tb_search_controller;
                     && dut.repetition_resp_count != 2'd0) begin
                 tt_validation_repeat_reject_count += 1;
             end
-            if (dut.state == dut.ST_SEARCH_RUN && |dut.search_tt_response_mask) begin
-                automatic ThreadID validation_tid = dut.search_select_thread(
-                    dut.search_tt_response_mask,
-                    dut.search_dispatch.tt_response
-                );
-                if (dut.search_tt_response[validation_tid].hit
-                        && dut.search_tt_response[validation_tid].depth
-                            >= dut.search_remaining_depth(validation_tid)
+            if (dut.state == dut.ST_SEARCH_RUN && dut.search_tt_consume_valid) begin
+                automatic ThreadID validation_tid = dut.search_tt_consume_thread;
+                automatic TTLookupResponse validation_resp =
+                    dut.search_tt_consume_response;
+                if (validation_resp.hit
+                        && validation_resp.depth >= dut.search_remaining_depth(validation_tid)
                         && dut.search_remaining_depth(validation_tid)
                             >= dut.TT_VALIDATE_MINIMUM_DEPTH
                         && dut.search_board[validation_tid].halfmove_clock
                             > HalfmoveClock'(dut.TT_VALIDATE_BYPASS_HALFMOVES)
-                        && dut.search_tt_response[validation_tid].score <= DRAW_EVAL_SCORE
+                        && validation_resp.score <= DRAW_EVAL_SCORE
                         && !dut.search_tt_validation_passed[validation_tid]) begin
                     tt_validation_nonpositive_reject_count += 1;
                 end
@@ -1962,7 +1927,8 @@ module tb_search_controller;
 
                 all_active = 1'b1;
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_status[idx] != dut.SEARCH_THREAD_ACTIVE) begin
+                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_IDLE
+                            || dut.search_thread_phase[idx] == dut.SEARCH_PHASE_DONE) begin
                         all_active = 1'b0;
                     end
                 end

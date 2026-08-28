@@ -58,9 +58,13 @@ module tb_engine_profile #(
     // enum-item references, which trigger a Verilator width-analysis bug.
     localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 18;
     localparam int CONTROLLER_STATE_SEARCH_RUN = 19;
+    localparam int THREAD_PHASE_IDLE = 0;
     localparam int THREAD_PHASE_READY = 1;
+    localparam int THREAD_PHASE_EVAL_WAIT = 3;
     localparam int THREAD_PHASE_MOVE_WAIT = 4;
     localparam int THREAD_PHASE_REPETITION_WAIT = 7;
+    localparam int THREAD_PHASE_STORE_PUBLISH = 8;
+    localparam int THREAD_PHASE_DONE = 10;
     localparam int MOVE_ORDER_STATE_COUNT = 7;
     localparam int ORDINAL_BUCKET_COUNT = 8;
     localparam int GENERATOR_STATE_COUNT = 8;
@@ -506,7 +510,9 @@ module tb_engine_profile #(
                         thread_ready_transition[tid] = thread_ready_transition[tid] + 1;
                     end
                 end
-                if (dut.controller.search_thread_status[tid] == 1) begin
+                if (int'(dut.controller.search_thread_phase[tid]) != THREAD_PHASE_IDLE
+                        && int'(dut.controller.search_thread_phase[tid])
+                            != THREAD_PHASE_DONE) begin
                     active_count++;
                     thread_move_order_cycles[tid][int'(dut.controller.search_stack_top[tid].move_order_state)] =
                         thread_move_order_cycles[tid][int'(dut.controller.search_stack_top[tid].move_order_state)] + 1;
@@ -519,9 +525,11 @@ module tb_engine_profile #(
                 end
                 if (dut.controller.search_board_inflight[tid]) inflight_count++;
                 if (dut.controller.search_move_inflight[tid]) inflight_count++;
-                if (dut.controller.search_eval_inflight[tid]) inflight_count++;
+                if (int'(dut.controller.search_thread_phase[tid])
+                        == THREAD_PHASE_EVAL_WAIT) inflight_count++;
                 if (dut.controller.search_tt_lookup_inflight[tid]) inflight_count++;
-                if (dut.controller.search_tt_store_inflight[tid]) inflight_count++;
+                if (int'(dut.controller.search_thread_phase[tid])
+                        == THREAD_PHASE_STORE_PUBLISH) inflight_count++;
             end
             active_thread_histogram[active_count] = active_thread_histogram[active_count] + 1;
             if (inflight_count > 5) inflight_count = 5;
