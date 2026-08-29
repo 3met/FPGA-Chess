@@ -8,17 +8,19 @@ Thread count, stack depth, search policy, and optional instrumentation are build
 
 ## Search Algorithm
 
-The default search combines iterative deepening, aspiration windows, principal variation search (PVS), reverse futility pruning (RFP), null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
+Search combines iterative deepening, aspiration windows, principal variation search (PVS), reverse futility pruning (RFP), null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
 
-Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A fail-low or fail-high multiplies the window delta by the configured fixed-point multiplier and repeats the same depth with the wider window centered on the fail-soft score that caused the failure. If a time or node budget expires during an incomplete or failed pass, the engine returns the primary thread's most recent fully completed iteration. A legal root move from a partial first iteration may be used when no completed result exists. The primary thread also retains the second move of its completed principal variation as a predicted opponent reply for UCI pondering; partial results omit that move unless it is paired with the selected root result.
+Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A fail-low or fail-high widens the window around the fail-soft score and repeats the depth.
+
+If a time or node budget expires during an incomplete pass, the engine returns the primary thread's most recent fully completed iteration. A legal root move from a partial first iteration may be used when no completed result exists. Completed results may include the second principal-variation move for UCI pondering.
 
 PVS searches the first legal move with the full window and later moves with a scout window, repeating a scout at full window when needed. LMR may first search eligible later moves at reduced depth; an alpha-raising reduced result is verified at full depth before it can affect the parent. The reduction policy is parameterized and computed without changing the search semantics.
 
-RFP evaluates eligible non-checking main-search nodes after the TT probe and before null-move pruning. At a zero-window node no deeper than the configured maximum, with a finite non-mate beta bound, it returns the fail-soft static evaluation when `static_eval - (base_margin + margin_per_depth * remaining_depth) >= beta`; the default maximum depth is 5 and the default margins are 64 plus 128 per remaining ply.
+RFP evaluates eligible non-checking main-search nodes after the TT probe and before null-move pruning. At a shallow zero-window node with a finite non-mate beta bound, it returns the fail-soft static evaluation when the configured depth-scaled margin proves a beta cutoff.
 
 Null-move pruning may search a reduced synthetic child at eligible non-root nodes that are not in check. Null children change only turn-dependent state, cannot follow another null move, and do not count as legal moves, update move ordering, enter repetition history, or become best moves.
 
-Quiescence search considers captures and promotions in the good-noisy buckets. A checked quiescence node has no stand-pat option and searches all legal evasions, including quiet and bad-noisy moves. Outside check, a legal capture is delta-pruned when `static_eval + victim_value + margin <= alpha`; the default margin is 384 evaluation units (300 centipawns). Checking moves, promotions, and immediate recaptures onto the previous move's destination are exempt. Delta pruning uses the saved stand-pat evaluation, skips the move without updating the local best value, and is not combined with additional SEE pruning. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
+Quiescence search considers captures and promotions in the good-noisy buckets. A checked quiescence node has no stand-pat option and searches all legal evasions, including quiet and bad-noisy moves. Outside check, delta pruning skips captures that cannot raise alpha under the configured material margin; checking moves, promotions, and immediate recaptures are exempt. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
 
 Search nodes are counted when a speculative real move passes king-safety validation and becomes a legal child. The root, null children, and rejected pseudo-legal candidates are not counted. A legal child still counts when repetition, terminal scoring, or a TT cutoff avoids deeper evaluation.
 

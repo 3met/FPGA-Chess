@@ -48,15 +48,17 @@ The command payload encodings are defined in [binary-encoding.md](binary-encodin
 
 Perft is a supported hardware command in the engine/controller protocol and is enabled in every RTL target.
 
-`Set board` is the preferred way for the host to replace the active position. The engine may internally decompose that command into `board_update_pipeline` Set Tile, Set Turn, Set Castling Rights, Set En Passant, and Set Halfmove Clock operations, but the external protocol should not require the host to stream primitive board writes for normal UCI position setup.
+`Set board` replaces the active position atomically.
 
 `New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
 
 Ack responses for Set Board, Make Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
 
-UART BREAK, defined as RX held low for at least 20 bit times, is the only out-of-band reset signal. The FPGA holds the RX FIFO, engine-side command layer, search controller, memory path, and transmitter in reset for the full BREAK interval. The host must leave RX high for at least two bit times after BREAK before transmitting another byte so every domain can observe release, and board-specific hosts may wait longer for memories to reinitialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream and must not be intercepted by RX decode because the same byte values may appear inside fixed-size payloads.
+UART BREAK, defined as RX held low for at least 20 bit times, is the out-of-band reset signal. It holds the RX FIFO, engine, memory path, and transmitter in reset for the full interval.
 
-Every new Python host connection starts by clearing queued host output, sending BREAK, clearing interrupted input, and waiting for board initialization. It then requires a clean idle Status response followed by a successful New Game acknowledgment. The complete reset-and-verification sequence is retried up to three times.
+The host must leave RX high for at least two bit times after BREAK before transmitting another byte and must wait for board memory to initialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream because the same values may appear inside payloads.
+
+Every Python host connection clears queued output, sends BREAK, waits for board initialization, verifies idle status, and starts a new game. A failed reset sequence is retried as a complete unit.
 
 Because packets have no request ID, length field, or checksum, a timeout, partial response, malformed response, or response of the wrong type makes the byte-stream position unknowable. The host marks that connection unusable, closes it, and requires the next connection to complete the BREAK sequence before sending normal commands. It never retries an ambiguous command in place. Repeated UCI `stop` commands produce at most one in-band Kill byte for a search.
 
@@ -83,7 +85,15 @@ Build information payload:
 | Engine clock frequency | 4 bytes | Unsigned little-endian frequency in hertz. |
 | Search stack depth | 1 byte | Number of plies allocated per search thread. |
 
-Debug statistic addresses `0`, `1`, and `2` report whether search statistics are enabled, the configured search-thread count, and the search-phase count. Addresses `3` through `6` report TT lookups, TT hits, TT-cache lookup probes, and TT-cache lookup hits. Addresses starting at `16` report per-thread phase cycles in thread-major order for ready, TT wait, evaluation wait, move wait, board wait, reverse wait, repetition wait, store wait, terminal wait, and done. Disabled builds return zero except for the configuration metadata. Statistics reset when a new search command is accepted and are intended to be read only after search completion.
+Debug statistic address ranges are:
+
+| Addresses | Meaning |
+| --------- | ------- |
+| `0..2` | Statistics enablement, search-thread count, and phase count. |
+| `3..6` | TT lookups, TT hits, cache probes, and cache hits. |
+| `16+` | Per-thread phase-cycle counts in thread-major order. |
+
+Disabled builds return zero except for configuration metadata. Statistics reset when a search begins and are read after it completes.
 
 Search result payload:
 

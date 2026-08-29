@@ -18,9 +18,9 @@ Generated projects, simulator libraries, logs, and reports are written under `wo
 
 ## Engine Configuration
 
-Reusable chess-search policies live under `hardware/config/search/`. Per-FPGA engine profiles live under `hardware/config/engine/`, reference one search policy, and select structural settings such as thread count, stack depth, engine clock, TT tag width, external-TT cache index width, and optional instrumentation. A cache index width of `N` synthesizes `2^N` on-chip cache lines. A synthesis target selects its engine profile with `engine_config`; vendor, device, source, constraint, and fitter settings remain in the build manifest.
+Reusable search policies live under `hardware/config/search/`. Engine profiles live under `hardware/config/engine/` and select structural settings such as thread count, stack depth, clock frequency, TT sizing, and instrumentation. Synthesis targets reference an engine profile while vendor, device, source, constraint, and fitter settings remain in the build manifest.
 
-The build validates and resolves both layers, records their SHA-256 digest, and generates `engine_build_config.svh` inside the target build directory. Synthesis and runtime profiling share the same resolved RTL-parameter mapping so the simulated thread, stack, TT-cache, instrumentation, and search-policy settings match the selected target. Packed thread, ply, and TT-depth widths derive from the resolved structural settings rather than imposing the portable defaults as configuration limits. A new FPGA normally needs a new engine profile and synthesis target, while multiple FPGA profiles may share the same search policy.
+Synthesis and runtime profiling resolve profiles through the same path so they use matching structural and search settings. A board target may define its own engine profile while reusing an existing search policy.
 
 ## Commands
 
@@ -37,14 +37,14 @@ The build validates and resolves both layers, records their SHA-256 digest, and 
 | `python -m tools.hardware_build profile-position --fen "..."` | Profile one position and print its detailed results; see [engine-profiling.md](engine-profiling.md). |
 | `python -m tools.hardware_build synth --target <target>` | Synthesize a configured target. |
 | `python -m tools.hardware_build flash --target quartus-de1-soc` | Program a volatile Quartus image through JTAG. |
-| `python -m tools.hardware_build synth-report` | Summarize the latest or selected synthesis result. |
+| `python -m tools.hardware_build synth-report` | Summarize the selected or most recent synthesis result. |
 | `python -m tools.hardware_build timing-paths --target quartus-de1-soc` | Report the worst or tightest setup paths from an existing Quartus fit. |
 
 Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`. `check --tuning` includes the optional tuning tests when `requirements-tuning.txt` is installed.
 
-Synthesis verifies generated data before invoking the vendor flow. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Every run records portable status and timing metadata in `synthesis.json` beside the vendor reports, allowing `synth-report` to summarize completed, failed, and interrupted runs.
+Synthesis verifies generated data before invoking the vendor flow. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Results and timing metadata are stored beside the vendor reports for `synth-report`.
 
-The DE1-SoC engine profile runs the engine at 75 MHz with one search thread, a 32-ply stack, and the default search policy. Synthesis generates its Quartus project, configured PLL IP, build ID, resolved engine constants, and configuration digest under `work/build/quartus-de1-soc/`. The profile clock is the single source of truth for both PLL configuration, the runtime profiler default, and `engine.CLOCK_FREQ`. The portable RTL and TT memory protocol remain independent of the board-specific clocks, pins, and external-memory wrapper. The current design uses extra-effort timing-driven physical optimization and cycle-preserving register retiming.
+The DE1-SoC profile runs the engine at 75 MHz with one search thread and a 32-ply stack. Synthesis generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from the profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 

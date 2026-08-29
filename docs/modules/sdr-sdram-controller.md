@@ -18,11 +18,11 @@ Initialization and refresh timing are properties of the memory device and contro
 
 ## Transactions
 
-The controller accepts one transaction at a time. Addresses and lengths are expressed in 16-bit words. A transaction contains between one word and the configured compact TT entry width; the default 32-bit tag uses five words.
+The controller accepts one transaction at a time. Addresses and lengths are expressed in 16-bit words, and a transaction contains between one word and one physical TT entry.
 
 For writes, the controller buffers the complete transaction before issuing the SDRAM WRITE command because the physical burst cannot be stalled. For reads, it captures the complete physical burst before exposing words on the backpressured read-data channel.
 
-Transactions crossing a row boundary are divided into legal physical segments while remaining one logical request. The controller tracks the open row in each bank and reuses it on a row hit; otherwise it precharges and activates as required. Reads retain their rows so a conditional TT replacement can write back without another activation. After a terminal runtime write, the controller closes that bank only if a short grace period finds no queued request, hiding precharge in a genuine command gap while preserving rows under active traffic. Sequential validity clearing always retains its row.
+Transactions crossing a row boundary are divided into legal physical segments while remaining one logical request. The controller tracks and reuses open rows, precharging and activating banks as required. Reads may retain their row for a conditional TT replacement, while idle banks may be closed between requests.
 
 Every accepted request terminates with one completion. Invalid lengths, malformed write termination, or memory-controller faults set the persistent error output and mark the completion as failed.
 

@@ -53,4 +53,4 @@ TT lookups are more latency-sensitive than stores and receive priority when memo
 
 ## Vendor Support
 
-The logical design attempts to be FPGA-vendor neutral. Vendor-specific resources are isolated behind wrappers or generated modules with stable logical interfaces. RAMs, FIFOs, external memory controllers, clocking, and board-level I/O support both Intel/Altera and Xilinx implementations.
+The portable RTL isolates vendor-specific resources behind wrappers or generated modules with stable interfaces. The repository provides a complete Intel/Altera DE1-SoC target and generic Xilinx synthesis targets for portable subsystems.

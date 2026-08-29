@@ -2,13 +2,13 @@
 
 FPGA Chess is an experimental chess engine implemented primarily in SystemVerilog. The FPGA performs move generation, board updates, evaluation, iterative-deepening search, and transposition-table access; a Python host exposes the engine through UCI and translates commands to the FPGA byte protocol.
 
-The design targets both Intel/Altera and Xilinx synthesis. The DE1-SoC configuration uses the board's SDR SDRAM for the transposition table.
+The complete board target is the Intel/Altera DE1-SoC, where the FPGA-side SDR SDRAM stores the transposition table. The portable RTL also has generic Xilinx Vivado synthesis targets for compatibility and resource checks.
 
 ## Repository Layout
 
 | Path | Purpose |
 | ---- | ------- |
-| [`docs/`](docs/README.md) | Final-design specifications and development documentation. |
+| [`docs/`](docs/README.md) | Architecture, module, protocol, usage, and development documentation. |
 | `hardware/rtl/` | Vendor-neutral chess RTL, memory components, and board wrappers. |
 | `hardware/tb/` | SystemVerilog testbenches. |
 | `hardware/build/manifest.json` | Source sets, tests, generated data, and synthesis targets. |
@@ -50,7 +50,7 @@ Run a specific RTL test:
 python -m tools.hardware_build test --name <test-name>
 ```
 
-ModelSim or Questa supplies `vlib`, `vlog`, and `vsim` for RTL compilation and tests. The Python build CLI itself uses only the standard library and supports Windows and Linux.
+Python 3.10 or newer is required. ModelSim or Questa supplies `vlib`, `vlog`, and `vsim` for RTL compilation and tests. The Python build CLI itself uses only the standard library and supports Windows and Linux.
 
 ## Synthesis and Hardware
 
@@ -88,9 +88,7 @@ Run the engine:
 python -m software.engine --port <serial-port>
 ```
 
-When `--port` is omitted, the host uses `FPGA_CHESS_PORT` or waits briefly to identify a clear USB-UART candidate; on Linux it supplements pyserial discovery with `/dev/serial/by-id`, `/dev/ttyUSB*`, and `/dev/ttyACM*`. It will not guess a generic system serial port or choose between similarly plausible USB adapters. A new connection sends UART BREAK, waits for board reinitialization, verifies clean status, and starts a new game before use. During the UCI handshake the host reads the FPGA build information and advertises its thread count, clock frequency, and search stack depth as fixed `spin` options whose default, minimum, and maximum are the synthesized value. If build-information discovery fails, the host reports the failure as an `info string` and still completes the handshake with `uciok`. The FPGA command and response format is specified in [Host-FPGA Protocol](docs/protocols/host-fpga-protocol.md).
-
-The host advertises the standard UCI `Ponder` option. Search results include the primary thread's predicted reply; `go ponder` searches the speculative position to the hardware depth ceiling without consuming the ordinary clock budget, and `ponderhit` restarts the saved search limit on the same TT-warmed position.
+When `--port` is omitted, the host uses `FPGA_CHESS_PORT` or attempts to identify an unambiguous USB-UART adapter. See [DE1-SoC and UCI Host Setup](docs/usage/de1-soc-uci.md) for wiring, port selection, connection behavior, and pondering. The FPGA command and response format is specified in [Host-FPGA Protocol](docs/protocols/host-fpga-protocol.md).
 
 ## Profiling, Tuning, and Benchmarks
 

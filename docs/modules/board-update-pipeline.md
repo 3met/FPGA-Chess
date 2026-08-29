@@ -39,11 +39,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Pipeline
 
-| Pipeline Stage | Description                                                               |
-| -------------- | ------------------------------------------------------------------------- |
-| 0              | Register inputs, select the mover's tracked post-move king square, fetch reverse history, decode move effects, and launch table reads. |
-| 1              | Align synchronous table outputs with the registered request and decoded effects, and evaluate push-move king safety. |
-| 2              | Apply tile, side-data, Zobrist, and PST updates, register outputs including push legality, and write pushed move history. |
+The fixed three-stage pipeline decodes the operation and starts table reads, checks push-move king safety, then applies and registers the board and side-data updates.
 
 ## Board Setup
 
@@ -51,7 +47,7 @@ The engine sets up a board through Set Tile, Set Castling Rights, Set Turn, Set 
 
 ## Hashing
 
-Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king-safety is checked through the normal move path. The deterministic generator derives uniform keys from SHA-256 with fixed seed `0`, validates their distribution and all three- and four-key XOR relations, emits separate piece-square and eight-entry en passant ROM images, and emits the fixed turn and castling constants used by RTL. Pawn entries on unreachable ranks are zero.
+Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king safety is checked through the normal move path. Deterministic generated data supplies the piece-square, en passant, turn, and castling keys.
 
 The pipeline always maintains the cached king squares, Zobrist key, incremental material/PST evaluation, and six-bit piece count. The shared tile-replacement path increments the count only for empty-to-piece changes and decrements it only for piece-to-empty changes, so ordinary captures, en passant, setup, and reversal need no board scan. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
 

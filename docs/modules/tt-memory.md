@@ -41,8 +41,6 @@ On a cache miss, the frontend reads the existing external entry before respondin
 
 Each direct-mapped cache line stores entry data, the complete external-index tag, and validity. Lookup and store probes are arbitrated through the cache without changing the logical TT semantics.
 
-With the current 32-bit compact tag, each of the 1,024 cache lines contains 1 valid bit, a 23-bit external-entry index, and 75 entry-data bits, for 99 effective bits per line. The DE1-SoC Quartus build maps this 1,024 x 99 cache to 10 M10Ks.
-
 ## Clearing
 
 New Game advances the logical TT generation. Cached entries from older generations do not hit. When the finite generation counter wraps, the external validity metadata is cleared before requests resume. Reset also invalidates the on-chip cache before the frontend becomes available.

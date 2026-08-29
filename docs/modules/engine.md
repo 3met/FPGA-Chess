@@ -20,27 +20,13 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status of the selected TT memory backend. |
 | Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral TT memory command, write-data, read-data, and completion channels. |
 
-Parameters configure the build ID, controller clock frequency, thread count, stack depth, search policy, move-history policy, TT backend and policy, and optional search statistics. FPGA engine profiles and their referenced search profiles are resolved into constants passed by the board wrapper; clock, configuration-digest, and metadata generation remain outside the portable core.
+Parameters configure the engine clock, thread count, stack depth, search policy, move-history policy, TT backend, build metadata, and optional statistics. Engine and search profiles supply these values through the board wrapper without adding target-specific logic to the portable core.
 
 ## Commands
 
 The engine command byte and payload formats are defined in [host-fpga-protocol.md](../protocols/host-fpga-protocol.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
 The external protocol exposes `Set board` as a single fixed-size command. The engine decomposes it into board-update operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
-
-## States
-
-| State           | Description                                                                                                 |
-| --------------- | ----------------------------------------------------------------------------------------------------------- |
-| Idle            | Engine is awaiting a command byte.                                                                          |
-| Receive Payload | Engine is collecting the fixed-size payload for the current command.                                        |
-| Board Update    | Engine is applying position setup or game moves through the search controller's board-update path.          |
-| New Game        | Engine is clearing game/search state and resetting the active board to the normal starting position.        |
-| Search          | Engine has started a search and waits for completion, kill, or error.                                       |
-| Perft           | Engine has started a perft operation and waits for completion, kill, or error.                              |
-| Output Result   | Engine is streaming a response one byte at a time.                                                          |
-| Output Paused   | Engine has response bytes pending but `ready_for_result` is deasserted.                                     |
-| Error           | Engine detected a malformed command, unsupported opcode, or internal error and will emit an error response. |
 
 ## New Game Semantics
 

@@ -4,9 +4,7 @@
 
 ## RTL Organization
 
-The top-level frontend owns only cross-lane policy: it instantiates both lanes, routes each command interface, selects the lane for a globally prioritized pop, and combines responses and diagnostics. Each lane has independent control and candidate-expansion state, so noisy and quiet work can execute concurrently even though both instantiate the same `move_generator_lane` RTL.
-
-`move_generator_bucket_store` owns the per-lane bucket RAM layout and addressing. `move_generator_quiet_history` owns history clearing, lookup/update arbitration, gravity updates, and the dual-color tables provided by `move_generator_history_table`. The common lane retains destination selection, source expansion, candidate writeback, direct validation, castling sequencing, and class-specific ordering decisions because those operations share one tightly coupled generation schedule.
+The top level coordinates independent noisy/direct and quiet lanes and selects moves by global bucket priority. Shared lane logic performs destination selection, source expansion, validation, and candidate storage; separate storage and quiet-history modules own their RAM interfaces.
 
 ## Commands
 
@@ -55,7 +53,7 @@ Each bucket is a synchronous simple-dual-port RAM divided into fixed per-thread 
 
 Every search node stores the eight current bucket tops. The parent's tops form the child's lower bounds, so descendants may reuse slots released by popped parent moves without overwriting unsearched ancestor moves. Restoring the parent stack record restores its remaining candidates; no allocator or per-move links are required.
 
-The low-history quiet partition has 1,024 entries per thread; every other partition has 512. A write that would exceed a bucket's thread region is suppressed and sets sticky overflow diagnostics.
+A write that exceeds a bucket's per-thread region is suppressed and sets sticky overflow diagnostics.
 
 ## Lifecycle and Instrumentation
 

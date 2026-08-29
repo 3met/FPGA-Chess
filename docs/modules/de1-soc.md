@@ -10,9 +10,9 @@ The controller's simulator-only initialization shortcut must not be enabled in h
 
 ## Clocking and Reset
 
-`CLOCK_50` is the board reference clock. The synthesis flow configures board-specific Intel PLL IP from the target's engine-clock setting and generates matching `ENGINE_CLOCK_FREQ` and `FPGA_BUILD_ID` constants. The PLL also supplies the SDRAM and UART clock domains and the phase relationships required by SDRAM I/O timing. The 100 MHz SDRAM pin clock leads the controller clock by 2.5 ns, a phase supported by the PLL divider settings used for the 75 MHz engine clock.
+`CLOCK_50` is the board reference clock. The synthesis flow configures the Intel PLL from the target's engine-clock setting and generates matching engine metadata. The PLL supplies the engine, UART, and SDRAM clocks, including the phase relationships required by SDRAM timing.
 
-A startup controller holds the design in reset until the PLL is stable and retries if lock is lost. It reuses one maximal-length LFSR period for reset hold, lock timeout, and lock verification, trading irrelevant startup latency for a shift/XOR path instead of arithmetic counters. Each clock domain releases reset through a two-flop local synchronizer. UART BREAK holds the engine, memory path, and transmitter in reset until BREAK release so the board can recover remotely without a physical reset. A UART framing error or RX overflow fails closed until the next BREAK.
+A startup controller holds the design in reset until the PLL is stable and restarts it if lock is lost. Each clock domain releases reset locally. UART BREAK resets the engine, memory path, and transmitter so the board can recover without a physical reset; UART framing and overflow errors hold the engine inactive until the next BREAK.
 
 Clock generation and device-specific constraints remain confined to this wrapper. A new board wrapper may use another vendor's PLL/MMCM or a suitable board clock, but it must set `engine.CLOCK_FREQ` to the frequency actually driven on `engine.clk`.
 
@@ -24,7 +24,7 @@ The SDRAM geometry and timing follow the [Intel DE1-SoC SDRAM tutorial](https://
 | -------- | ---- |
 | `CLOCK_50` | Reference for board-specific clock generation. |
 | `KEY` | Physical reset and PLL-restart controls. |
-| UART GPIO | Host RX/TX connection through `rx_decode` and `tx_encode`. |
+| [UART GPIO](../usage/de1-soc-uci.md#hardware-connection) | Host RX/TX connection through `rx_decode` and `tx_encode`. |
 | `DRAM_*` | External transposition-table memory interface. |
 | LEDs and seven-segment displays | Optional visibility into traffic, readiness, errors, and PLL status. |
 | `SW[9]` | Blanks the diagnostic displays. |

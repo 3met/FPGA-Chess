@@ -1,31 +1,19 @@
+# Generated build, simulation, profiling, and tuning artifacts
+/work/
+/db/
+/transcript
+/*_stacktrace.vstf
 
-/db
-/output_files
-/simulation
-/incremental_db
-c5_pin_model_dump.txt
-main.qsf
-*.qpf
-/build
-*.bak
-*.mti
-*.mpf
-/work
-transcript
-*.bsf
-*.cmp
-*.ppf
-*.sip
-*.spd
-*.f
-*.vo
-*.vstf
-*.wlf
-/puzzles
+# Local datasets
+/puzzles/
 /training-data/
-/greybox_tmp
-*.ver
-*.qws
-.obsidian/
+
+# Python environments and bytecode
+/.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Editor and operating-system artifacts
+.obsidian/
+.DS_Store
+Thumbs.db

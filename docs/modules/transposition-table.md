@@ -45,20 +45,20 @@ Mate scores are normalized when stored so they are relative to the stored node r
 
 The live Zobrist key remains 64 bits. `TT_TAG_BITS` selects the low key bits stored as the compact entry tag. Every remaining high key bit participates in a shared XOR-fold and xorshift index hash; power-of-two tables fold that hash into their address width, while non-power-of-two tables use multiply-high range reduction. Configurations with fewer index-hash entropy bits than address bits are invalid, and configurations with less than eight bits of entropy margin emit a simulation warning.
 
-The default compact logical entry is 75 bits:
+The compact entry fields are:
 
 | Width | Field |
 | ----- | ----- |
-| 32 | Low Zobrist-key tag. |
+| `TT_TAG_BITS` | Low Zobrist-key tag. |
 | 14 | Encoded best move. |
 | 16 | Side-to-move score. |
 | `ceil(log2(search stack depth))` | Search depth; six bits in the DE1-SoC profile. |
 | 2 | Bound type. |
 | 5 | Age/generation. |
 
-The external 16-bit backend pads the default compact entry to 80 physical bits, transferring five words and fitting 6,710,886 entries in the 64 MiB memory. Changing `TT_TAG_BITS` changes the compact width, aligned physical width, burst length, and external entry count together. Other backends may choose alignment appropriate to their native memory width without changing the logical fields.
+The DE1-SoC profile uses a 32-bit tag, producing a 75-bit logical entry padded to five 16-bit words and fitting 6,710,886 entries in 64 MiB. Changing `TT_TAG_BITS` changes the compact width, physical alignment, burst length, and entry count together.
 
-A 123-bit full-key profile stores the complete 64-bit key, best move, score, depth, bound, age, and 16 auxiliary bits. It is used when full-key verification or native memory alignment warrants the additional storage.
+The on-chip full-key format stores the complete 64-bit key, best move, score, depth, bound, age, and auxiliary bits.
 
 ## Hit Verification
 
@@ -68,7 +68,7 @@ An entry hits only when:
 - its generation is current,
 - and its stored full key or compact low-bit tag matches the request.
 
-Compact verification can admit a false hit if two distinct keys share both the hashed table index and stored tag. The full-key profile eliminates that possibility.
+Compact verification can admit a false hit if two distinct keys share both the hashed table index and stored tag. Full-key storage eliminates that possibility.
 
 ## Replacement
 
@@ -80,7 +80,7 @@ The TT stores one logical entry at each index. A store replaces the indexed entr
 | Entry belongs to an older generation and the new depth is at least `old_depth - 4` | Prefer fresh search information without discarding a substantially deeper result. |
 | New depth exceeds the stored depth | Preserve the deepest available result. |
 | Depths are equal and the stored result is not exact | Allow bounds to refresh peers and exact scores to replace bounds. |
-| Depths are equal and both results are exact | Allow the latest exact score and move to refresh the entry. |
+| Depths are equal and both results are exact | Allow the incoming exact score and move to refresh the entry. |
 
 Skipping a store is not an error. Generation comparison uses equality with the current generation; New Game advances that generation.
 

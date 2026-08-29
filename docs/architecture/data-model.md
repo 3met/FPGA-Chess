@@ -48,7 +48,7 @@ Unless otherwise stated, multi-bit scalar values are unsigned. Numeric enum valu
 
 `Position` is 6 bits wide and indexes a square from `0` to `63`.
 
-The final indexing convention is:
+The indexing convention is:
 
 | Square | Position |
 | ------ | -------- |

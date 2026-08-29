@@ -6,7 +6,7 @@ The NNUE evaluator produces a side-to-move-relative correction that search adds 
 
 Each perspective uses 768 direct piece-square features: six friendly and six opposing piece types over 64 vertically oriented squares. The Black perspective flips ranks before indexing, so both perspectives share one transformer. Kings are ordinary features; there are no king buckets or horizontal mirroring.
 
-Transformer rows contain 256 signed two-bit weights packed four per byte. Each perspective therefore has 256 accumulator lanes. Each feature addition or removal updates all 512 perspective lanes in one request cycle, preserving the existing one-row-per-cycle update throughput. Direct features make every legal board change incremental, including castling; null moves require no feature change.
+Transformer rows contain 256 signed two-bit weights packed four per byte. Each perspective therefore has 256 accumulator lanes. Each feature addition or removal updates both perspectives together. Direct features make every legal board change incremental, including castling; null moves require no feature change.
 
 ## Accumulator Updates
 
@@ -14,13 +14,13 @@ Each thread owns White and Black accumulator vectors. A clear starts a perspecti
 
 Before search, the controller builds the root accumulator for every thread. An ordinary move applies compact feature deltas to the live child state, stores the reversible delta with the ply record, and applies its inverse after board reversal. Castling updates the king and rook features; a null child keeps the parent accumulator unchanged.
 
-The final request in an update plan marks completion and returns the tagged thread and ply. Real feature requests always update both perspectives together, while an ordered completion-only request bypasses the accumulator datapath and its wide state write. Requests from different thread plans share one streaming update port, while evaluation uses a logically independent accumulator read path. The storage implementation is portable inferred memory and does not depend on vendor primitives.
+The final request in an update plan marks completion and returns the tagged thread and ply. Requests from different threads share the update path, while evaluation has an independent accumulator read path.
 
 Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumulator RAM contents need not be erased because the controller tracks which per-thread state is valid.
 
 ## Output Layer
 
-Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Eight output heads use the incrementally maintained total piece count for the ranges 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. Grouping four adjacent counts gives scarce endgames more training data while retaining phase-specific output parameters. A 128-lane MAC evaluates the 512 inputs in four cycles; a synchronous block-ROM prefetch supplies one 384-bit weight row ahead of the MAC, so output-head selection adds neither a cycle nor combinational selection muxes. Every signed activation-weight product uses generic multiplication so each synthesis target may choose its own LUT, DSP, packing, and MAC implementation. The result is clipped to the finite search-score range.
+Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The result is clipped to the finite search-score range.
 
 Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
 
@@ -47,6 +47,4 @@ The tuning and export workflow is described in [evaluation-tuning.md](../develop
 | Output biases | `8 * 5` bits | 5 B |
 | Total trained parameters |  | 50,789 B (49.6 KiB) |
 
-Runtime accumulator storage is separate from trained parameter memory. Each thread has two 256-lane signed-five-bit perspectives, or 320 B per logical state. Multi-thread builds keep update and evaluation mirrors to provide independent read paths; a single-thread build snapshots the update state directly and lets synthesis remove the otherwise wasteful one-word evaluation mirror.
-
-On the single-thread Cyclone V target, the transformer maps to 393,216 block-memory bits in 52 M10Ks. The 12,288-bit output-weight table retains its 384-bit read width; fitted resource counts must be refreshed after the next synthesis. The accumulator and output biases remain in logic.
+Runtime accumulator storage is separate from trained parameter memory. Each thread has two 256-lane signed-five-bit perspectives.
