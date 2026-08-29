@@ -20,6 +20,9 @@
     "margin_per_depth": 128,
     "maximum_depth": 5
   },
+  "qsearch_delta_pruning": {
+    "margin": 384
+  },
   "time_management": {
     "move_overhead_ms": 5,
     "minimum_search_ms": 5,

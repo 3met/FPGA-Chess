@@ -18,7 +18,7 @@ RFP evaluates eligible non-checking main-search nodes after the TT probe and bef
 
 Null-move pruning may search a reduced synthetic child at eligible non-root nodes that are not in check. Null children change only turn-dependent state, cannot follow another null move, and do not count as legal moves, update move ordering, enter repetition history, or become best moves.
 
-Quiescence search considers captures and promotions in the good-noisy buckets. A checked quiescence node has no stand-pat option and searches all legal evasions, including quiet and bad-noisy moves. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
+Quiescence search considers captures and promotions in the good-noisy buckets. A checked quiescence node has no stand-pat option and searches all legal evasions, including quiet and bad-noisy moves. Outside check, a legal capture is delta-pruned when `static_eval + victim_value + margin <= alpha`; the default margin is 384 evaluation units (300 centipawns). Checking moves, promotions, and immediate recaptures onto the previous move's destination are exempt. Delta pruning uses the saved stand-pat evaluation, skips the move without updating the local best value, and is not combined with additional SEE pruning. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
 
 Search nodes are counted when a speculative real move passes king-safety validation and becomes a legal child. The root, null children, and rejected pseudo-legal candidates are not counted. A legal child still counts when repetition, terminal scoring, or a TT cutoff avoids deeper evaluation.
 

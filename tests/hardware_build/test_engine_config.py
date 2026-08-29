@@ -46,10 +46,18 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(config["search"]["rfp_base_margin"], search["rfp"]["base_margin"])
         self.assertEqual(config["search"]["rfp_margin_per_depth"], search["rfp"]["margin_per_depth"])
         self.assertEqual(config["search"]["rfp_maximum_depth"], search["rfp"]["maximum_depth"])
+        self.assertEqual(
+            config["search"]["qdelta_margin"],
+            search["qsearch_delta_pruning"]["margin"],
+        )
         rtl_parameters = engine_rtl_parameter_values(config)
         self.assertEqual(rtl_parameters["RFP_BASE_MARGIN"], search["rfp"]["base_margin"])
         self.assertEqual(rtl_parameters["RFP_MARGIN_PER_DEPTH"], search["rfp"]["margin_per_depth"])
         self.assertEqual(rtl_parameters["RFP_MAXIMUM_DEPTH"], search["rfp"]["maximum_depth"])
+        self.assertEqual(
+            rtl_parameters["QDELTA_MARGIN"],
+            search["qsearch_delta_pruning"]["margin"],
+        )
         self.assertEqual(len(config["digest"]), 64)
 
     def test_structural_values_have_no_policy_ceiling(self):
@@ -115,6 +123,10 @@ class EngineConfigTests(unittest.TestCase):
     def test_rfp_maximum_depth_must_be_positive(self):
         with self.assertRaisesRegex(BuildError, "at least 1"):
             self.load_temporary_config({"rfp": {"maximum_depth": 0}})
+
+    def test_qdelta_margin_must_fit_the_evaluation_range(self):
+        with self.assertRaisesRegex(BuildError, "between 0 and 32767"):
+            self.load_temporary_config({"qsearch_delta_pruning": {"margin": 32768}})
 
     def test_rfp_maximum_depth_must_fit_the_engine_stack(self):
         with self.assertRaisesRegex(BuildError, "must not exceed the engine stack depth"):

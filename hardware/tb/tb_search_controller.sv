@@ -1307,6 +1307,31 @@ module tb_search_controller;
         check(dut.rfp_prunes(EvalScore'(92), EvalScore'(-100), 5'd1)
                 && !dut.rfp_prunes(EvalScore'(91), EvalScore'(-100), 5'd1),
             "RFP returns static evaluation exactly at the configured margin boundary");
+        check(dut.qdelta_prunes(
+                EvalScore'(-128), EvalScore'(384), PAWN,
+                1'b0, 1'b0, 1'b0, 1'b1, 1'b0),
+            "qsearch delta pruning includes the exact alpha boundary");
+        check(!dut.qdelta_prunes(
+                EvalScore'(-127), EvalScore'(384), PAWN,
+                1'b0, 1'b0, 1'b0, 1'b1, 1'b0),
+            "qsearch delta pruning keeps a capture above the alpha boundary");
+        check(!dut.qdelta_prunes(
+                EvalScore'(-128), EvalScore'(384), PAWN,
+                1'b1, 1'b0, 1'b0, 1'b1, 1'b0)
+                && !dut.qdelta_prunes(
+                    EvalScore'(-128), EvalScore'(384), PAWN,
+                    1'b0, 1'b1, 1'b0, 1'b1, 1'b0),
+            "qsearch delta pruning exempts checked nodes and checking moves");
+        check(!dut.qdelta_prunes(
+                EvalScore'(-128), EvalScore'(384), PAWN,
+                1'b0, 1'b0, 1'b1, 1'b1, 1'b0)
+                && !dut.qdelta_prunes(
+                    EvalScore'(-128), EvalScore'(384), PAWN,
+                    1'b0, 1'b0, 1'b0, 1'b0, 1'b0)
+                && !dut.qdelta_prunes(
+                    EvalScore'(-128), EvalScore'(384), PAWN,
+                    1'b0, 1'b0, 1'b0, 1'b1, 1'b1),
+            "qsearch delta pruning exempts promotions, non-captures, and recaptures");
         force dut.search_stack_top[0].remaining_depth = 5'd6;
         check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
             "null reduction is two plies below depth seven");

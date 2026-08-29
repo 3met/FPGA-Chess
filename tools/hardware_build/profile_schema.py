@@ -60,6 +60,7 @@ ALGORITHM_LABELS = {
     "pvs_researches": "PVS full-window re-searches",
     "lmr_reduced_issues": "LMR reduced move pushes",
     "rfp_cutoffs": "Reverse futility pruning cutoffs",
+    "qdelta_pruned_moves": "Quiescence delta-pruned moves",
     "terminal_checkmates": "Checkmate terminals",
     "terminal_stalemates": "Stalemate terminals",
     "terminal_main_exhausted": "Main-search nodes that exhausted every move",

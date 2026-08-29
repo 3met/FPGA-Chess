@@ -29,6 +29,8 @@ module search_controller #(
     parameter int RFP_BASE_MARGIN = 64,
     parameter int RFP_MARGIN_PER_DEPTH = 128,
     parameter int RFP_MAXIMUM_DEPTH = 5,
+    // Scores use 1/128-pawn units, so 384 is a 300-centipawn margin.
+    parameter int QDELTA_MARGIN = 384,
     parameter int MOVE_OVERHEAD_MS = 5,
     parameter int MINIMUM_SEARCH_MS = 5,
     parameter int INCREMENT_NUMERATOR = 3,
@@ -117,6 +119,8 @@ module search_controller #(
                 || RFP_MARGIN_PER_DEPTH < 0 || RFP_MARGIN_PER_DEPTH > SEARCH_INF_VALUE
                 || RFP_MAXIMUM_DEPTH < 1 || RFP_MAXIMUM_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "RFP parameters must fit the score range at a positive supported depth");
+        if (QDELTA_MARGIN < 0 || QDELTA_MARGIN > SEARCH_INF_VALUE)
+            $fatal(1, "QDELTA_MARGIN must fit the positive score range");
         if (INCREMENT_DENOMINATOR < 1 || REMAINING_TIME_DENOMINATOR < 1)
             $fatal(1, "time-management denominators must be positive");
     end
@@ -148,6 +152,9 @@ module search_controller #(
         Move move;
         Move best_move;
         EvalScore best_score;
+        // Preserve stand pat after best_score changes so qsearch delta pruning
+        // always uses the node's static evaluation.
+        EvalScore static_eval;
         EvalScore alpha;
         EvalScore orig_alpha;
         EvalScore beta;
@@ -354,6 +361,7 @@ module search_controller #(
     logic profile_terminal_event;
     logic [1:0] profile_terminal_kind;
     logic profile_rfp_cutoff_event;
+    logic profile_qdelta_prune_event;
     logic profile_beta_cutoff_event;
     ThreadID profile_beta_cutoff_thread;
     PlyIndex profile_beta_cutoff_ply;
@@ -1085,6 +1093,64 @@ module search_controller #(
             && beta < MATE_THRESHOLD;
     endfunction : rfp_node_eligible
 
+    // Prune a non-checking qsearch capture whose optimistic material gain
+    // cannot raise alpha. Callers separately restrict this to qsearch nodes.
+    function automatic logic qdelta_prunes(
+        input EvalScore static_eval,
+        input EvalScore alpha,
+        input PieceType victim,
+        input logic in_check,
+        input logic gives_check,
+        input logic promotion,
+        input logic capture,
+        input logic immediate_recapture
+    );
+        automatic logic signed [31:0] static_eval_wide =
+            $signed({{16{static_eval[15]}}, static_eval});
+        automatic logic signed [31:0] alpha_wide =
+            $signed({{16{alpha[15]}}, alpha});
+        automatic logic signed [31:0] victim_value = PIECE_VALS_128[victim];
+        return !in_check
+            && !gives_check
+            && !promotion
+            && capture
+            && !immediate_recapture
+            && static_eval_wide + victim_value + QDELTA_MARGIN <= alpha_wide;
+    endfunction : qdelta_prunes
+
+    // Decode capture, promotion, en-passant, and recapture properties from the
+    // unchanged parent board after the speculative move has proved legal.
+    function automatic logic qdelta_move_prunes(
+        input FullBoard board,
+        input Move previous_move,
+        input Move move,
+        input EvalScore static_eval,
+        input EvalScore alpha,
+        input logic in_check,
+        input logic gives_check
+    );
+        automatic Tile mover = board.tiles[move.from_pos];
+        automatic Tile destination = board.tiles[move.to_pos];
+        automatic logic en_passant_capture = mover.piece_type == PAWN
+            && move.from_pos[2:0] != move.to_pos[2:0]
+            && destination.piece_type == NULL_PIECE;
+        automatic logic promotion = mover.piece_type == PAWN
+            && (move.to_pos[5:3] == BoardRank'(0)
+                || move.to_pos[5:3] == BoardRank'(7));
+        automatic PieceType victim = en_passant_capture
+            ? PAWN : destination.piece_type;
+        return qdelta_prunes(
+            static_eval,
+            alpha,
+            victim,
+            in_check,
+            gives_check,
+            promotion,
+            destination.piece_type != NULL_PIECE || en_passant_capture,
+            !is_null_move(previous_move) && move.to_pos == previous_move.to_pos
+        );
+    endfunction : qdelta_move_prunes
+
     // Grow the delta with a small constant Q3 multiply, which synthesizes to shifts and adds.
     function automatic AspirationDelta aspiration_next_delta(input AspirationDelta delta);
         automatic logic [31:0] scaled = delta * ASPIRATION_DELTA_MULTIPLIER_Q3;
@@ -1122,6 +1188,7 @@ module search_controller #(
         entry.move = NULL_MOVE;
         entry.best_move = NULL_MOVE;
         entry.best_score = -SEARCH_INF;
+        entry.static_eval = EvalScore'(0);
         entry.alpha = -SEARCH_INF;
         entry.orig_alpha = -SEARCH_INF;
         entry.beta = SEARCH_INF;
@@ -2262,6 +2329,7 @@ module search_controller #(
             profile_terminal_event <= 1'b0;
             profile_terminal_kind <= 2'd0;
             profile_rfp_cutoff_event <= 1'b0;
+            profile_qdelta_prune_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
             profile_beta_cutoff_thread <= ThreadID'(0);
             profile_beta_cutoff_ply <= PlyIndex'(0);
@@ -2359,6 +2427,7 @@ module search_controller #(
 `ifdef FPGA_CHESS_PROFILE
             profile_terminal_event <= 1'b0;
             profile_rfp_cutoff_event <= 1'b0;
+            profile_qdelta_prune_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
 `endif
             if (state != ST_SEARCH_RUN) begin
@@ -3590,6 +3659,22 @@ module search_controller #(
                                 // speculative result; its history entry will be
                                 // overwritten by the next candidate at this ply.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                            end else if (search_in_qsearch(board_thread_id)
+                                    && qdelta_move_prunes(
+                                        search_board[board_thread_id],
+                                        search_stack_top[board_thread_id].move,
+                                        search_pending_move[board_thread_id],
+                                        search_stack_top[board_thread_id].static_eval,
+                                        search_stack_top[board_thread_id].alpha,
+                                        search_board_in_check[board_thread_id],
+                                        board_update_side_in_check
+                                    )) begin
+`ifdef FPGA_CHESS_PROFILE
+                                profile_qdelta_prune_event <= 1'b1;
+`endif
+                                // The speculative pipeline is stateless, so a
+                                // pruned legal move needs no board reversal.
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else begin
                                 automatic Tile delta_mover =
                                     search_board[board_thread_id].tiles[
@@ -3861,6 +3946,7 @@ module search_controller #(
                             if (search_eval_is_stand_pat[eval_thread_id]) begin
                                 search_stack_top[eval_thread_id].stand_pat_done <= 1'b1;
                                 search_stack_top[eval_thread_id].best_score <= eval_score;
+                                search_stack_top[eval_thread_id].static_eval <= eval_score;
                                 if (eval_score > search_stack_top[eval_thread_id].alpha) begin
                                     search_stack_top[eval_thread_id].alpha <= eval_score;
                                     search_stack_top[eval_thread_id].unit_window

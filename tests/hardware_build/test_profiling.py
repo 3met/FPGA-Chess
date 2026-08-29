@@ -75,6 +75,7 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "algorithm.main_board_issues": 1,
         "algorithm.qsearch_board_issues": 1,
         "algorithm.rfp_cutoffs": 3,
+        "algorithm.qdelta_pruned_moves": 4,
         "tt.lookups": 2,
         "tt.hits": 1,
         "tt.stores": 1,
@@ -248,6 +249,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Move generator busy; a generation request was waiting", text)
         self.assertIn("2 candidate pushes: 1 legal, 1 illegal; 0 reversals", text)
         self.assertIn("NNUE evaluator: 1 evaluations", text)
+        self.assertIn("Quiescence delta-pruned moves: 4", text)
         self.assertIn("updates: 5 accepted", text)
         self.assertIn("update busy=5 cycles", text)
         self.assertEqual(report["components"]["nnue_evaluator"]["evaluations"], 1)
