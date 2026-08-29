@@ -56,7 +56,7 @@ Before search, NNUE builds a valid root accumulator for every thread. Legal chil
 A main-search node follows this logical order:
 
 1. Check terminal draw state and probe the TT.
-2. Try eligible pruning operations and direct ordering moves.
+2. Try eligible RFP and null-move pruning operations, then direct ordering moves.
 3. Generate and search noisy moves.
 4. Generate and search quiet moves.
 5. Search deferred unfavorable captures.
@@ -78,6 +78,6 @@ Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. S
 
 ## Configuration and Instrumentation
 
-Thread count, stack depth, repetition capacity, aspiration policy, LMR policy, null-move policy, time allocation, move-history policy, clock frequency, TT backend, TT policy, TT tag width, and optional statistics are synthesis parameters. Per-FPGA engine profiles select structural values and reference reusable search-policy profiles. Build-generated packed identifier widths follow the selected thread count and stack depth.
+Thread count, stack depth, repetition capacity, aspiration policy, LMR policy, RFP margins and maximum depth, null-move policy, time allocation, move-history policy, clock frequency, TT backend, TT policy, TT tag width, and optional statistics are synthesis parameters. Per-FPGA engine profiles select structural values and reference reusable search-policy profiles. Build-generated packed identifier widths follow the selected thread count and stack depth.
 
 Optional statistics report pipeline activity, search phases, TT/cache behavior, move-generation work, and overflow state without affecting search semantics.

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from tools.hardware_build.common import BuildError
-from tools.hardware_build.engine_config import load_engine_config
+from tools.hardware_build.engine_config import engine_rtl_parameter_values, load_engine_config
 
 
 class EngineConfigTests(unittest.TestCase):
@@ -43,6 +43,13 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(config["search"]["aspiration_delta_multiplier_q3"], round(search["aspiration"]["delta_multiplier"] * 8))
         self.assertEqual(config["search"]["lmr_a_q8"], round(search["lmr"]["base"] * 256))
         self.assertEqual(config["search"]["lmr_b_q8"], round(search["lmr"]["divisor"] * 256))
+        self.assertEqual(config["search"]["rfp_base_margin"], search["rfp"]["base_margin"])
+        self.assertEqual(config["search"]["rfp_margin_per_depth"], search["rfp"]["margin_per_depth"])
+        self.assertEqual(config["search"]["rfp_maximum_depth"], search["rfp"]["maximum_depth"])
+        rtl_parameters = engine_rtl_parameter_values(config)
+        self.assertEqual(rtl_parameters["RFP_BASE_MARGIN"], search["rfp"]["base_margin"])
+        self.assertEqual(rtl_parameters["RFP_MARGIN_PER_DEPTH"], search["rfp"]["margin_per_depth"])
+        self.assertEqual(rtl_parameters["RFP_MAXIMUM_DEPTH"], search["rfp"]["maximum_depth"])
         self.assertEqual(len(config["digest"]), 64)
 
     def test_structural_values_have_no_policy_ceiling(self):
@@ -100,6 +107,21 @@ class EngineConfigTests(unittest.TestCase):
     def test_null_move_reductions_must_leave_child_depth(self):
         with self.assertRaisesRegex(BuildError, "smaller than their depth thresholds"):
             self.load_temporary_config({"null_move": {"shallow_reduction": 3}})
+
+    def test_rfp_margins_must_fit_the_evaluation_range(self):
+        with self.assertRaisesRegex(BuildError, "between 0 and 32767"):
+            self.load_temporary_config({"rfp": {"margin_per_depth": 32768}})
+
+    def test_rfp_maximum_depth_must_be_positive(self):
+        with self.assertRaisesRegex(BuildError, "at least 1"):
+            self.load_temporary_config({"rfp": {"maximum_depth": 0}})
+
+    def test_rfp_maximum_depth_must_fit_the_engine_stack(self):
+        with self.assertRaisesRegex(BuildError, "must not exceed the engine stack depth"):
+            self.load_temporary_config(
+                {"rfp": {"maximum_depth": 5}},
+                {"engine": {"stack_depth": 4}},
+            )
 
     def test_tt_tag_must_leave_index_entropy(self):
         with self.assertRaisesRegex(BuildError, "between 1 and 63"):

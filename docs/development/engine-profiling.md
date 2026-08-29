@@ -28,7 +28,7 @@ Single-position runs write a text report, JSON report, tab-separated metrics, en
 
 Search measurements begin when the controller accepts the search request and end when it presents the response. Setup, response serialization, and post-search TT-store drain are labeled separately. Per-thread phase totals and other exclusive state totals are checked against the measured window so instrumentation drift fails loudly.
 
-The reports cover search throughput and node growth, pipeline issues and stalls, thread lifecycle, move ordering, PVS/LMR activity, TT and cache behavior, clock-domain backpressure, SDRAM traffic and row locality, and simulator speed. Per-depth data is attributed to the primary thread's target depth; helper threads may be searching another depth during the same interval. Quiescence continuations can make the maximum reached ply exceed the nominal iteration depth.
+The reports cover search throughput and node growth, pipeline issues and stalls, thread lifecycle, move ordering, PVS/LMR activity, RFP cutoff counts, TT and cache behavior, clock-domain backpressure, SDRAM traffic and row locality, and simulator speed. Per-depth data is attributed to the primary thread's target depth; helper threads may be searching another depth during the same interval. Quiescence continuations can make the maximum reached ply exceed the nominal iteration depth.
 
 Profiler counters are 64-bit testbench state and do not exist in synthesis builds. The smaller optional `ENABLE_SEARCH_STATS` counters remain the hardware-visible diagnostic interface.
 

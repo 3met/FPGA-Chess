@@ -39,6 +39,9 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
         "NULL_DEEP_DEPTH_THRESHOLD": search["null_deep_depth_threshold"],
         "NULL_SHALLOW_REDUCTION": search["null_shallow_reduction"],
         "NULL_DEEP_REDUCTION": search["null_deep_reduction"],
+        "RFP_BASE_MARGIN": search["rfp_base_margin"],
+        "RFP_MARGIN_PER_DEPTH": search["rfp_margin_per_depth"],
+        "RFP_MAXIMUM_DEPTH": search["rfp_maximum_depth"],
         "MOVE_OVERHEAD_MS": search["move_overhead_ms"],
         "MINIMUM_SEARCH_MS": search["minimum_search_ms"],
         "INCREMENT_NUMERATOR": increment[0],
@@ -138,12 +141,13 @@ def _validate_search(search: dict, path: Path) -> dict:
     context = rel(path)
     _require_keys(
         search,
-        {"aspiration", "lmr", "null_move", "time_management", "history", "transposition_table"},
+        {"aspiration", "lmr", "null_move", "rfp", "time_management", "history", "transposition_table"},
         context,
     )
     aspiration = _object(search, "aspiration", context)
     lmr = _object(search, "lmr", context)
     null_move = _object(search, "null_move", context)
+    rfp = _object(search, "rfp", context)
     timing = _object(search, "time_management", context)
     history = _object(search, "history", context)
     tt = _object(search, "transposition_table", context)
@@ -153,6 +157,11 @@ def _validate_search(search: dict, path: Path) -> dict:
         null_move,
         {"minimum_depth", "deep_depth_threshold", "shallow_reduction", "deep_reduction"},
         f"{context}.null_move",
+    )
+    _require_keys(
+        rfp,
+        {"base_margin", "margin_per_depth", "maximum_depth"},
+        f"{context}.rfp",
     )
     _require_keys(
         timing,
@@ -217,6 +226,9 @@ def _validate_search(search: dict, path: Path) -> dict:
         "null_deep_depth_threshold": null_deep_depth_threshold,
         "null_shallow_reduction": null_shallow_reduction,
         "null_deep_reduction": null_deep_reduction,
+        "rfp_base_margin": _integer(rfp, "base_margin", f"{context}.rfp", 0, 32767),
+        "rfp_margin_per_depth": _integer(rfp, "margin_per_depth", f"{context}.rfp", 0, 32767),
+        "rfp_maximum_depth": _integer(rfp, "maximum_depth", f"{context}.rfp", 1),
         "move_overhead_ms": _integer(timing, "move_overhead_ms", f"{context}.time_management"),
         "minimum_search_ms": _integer(timing, "minimum_search_ms", f"{context}.time_management"),
         "increment_fraction": _fraction(timing, "increment_fraction", f"{context}.time_management"),
@@ -263,6 +275,10 @@ def load_engine_config(value: str) -> dict:
         "search_statistics": _boolean(instrumentation, "search_statistics", f"{rel(engine_path)}.instrumentation"),
         "search": search,
     }
+    if search["rfp_maximum_depth"] > resolved["stack_depth"]:
+        raise BuildError(
+            f"{rel(engine_path)} RFP maximum depth must not exceed the engine stack depth"
+        )
     resolved["digest"] = engine_config_digest(resolved)
     return resolved
 

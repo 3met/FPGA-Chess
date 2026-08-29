@@ -74,6 +74,7 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "stalls.move_not_ready": 2,
         "algorithm.main_board_issues": 1,
         "algorithm.qsearch_board_issues": 1,
+        "algorithm.rfp_cutoffs": 3,
         "tt.lookups": 2,
         "tt.hits": 1,
         "tt.stores": 1,
@@ -272,6 +273,8 @@ class ReportTests(unittest.TestCase):
             ]
         )
         self.assertIn("Main-search move pushes", text)
+        self.assertIn("Reverse futility pruning cutoffs: 3", text)
+        self.assertEqual(report["algorithm"]["rfp_cutoffs"], 3)
         self.assertLess(text.index("Good noisy high"), text.index("Bad noisy low"))
 
     def test_move_generator_operation_table_is_dense_and_aligned(self):

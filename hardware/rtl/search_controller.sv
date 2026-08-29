@@ -26,6 +26,9 @@ module search_controller #(
     parameter int NULL_DEEP_DEPTH_THRESHOLD = 7,
     parameter int NULL_SHALLOW_REDUCTION = 2,
     parameter int NULL_DEEP_REDUCTION = 3,
+    parameter int RFP_BASE_MARGIN = 64,
+    parameter int RFP_MARGIN_PER_DEPTH = 128,
+    parameter int RFP_MAXIMUM_DEPTH = 5,
     parameter int MOVE_OVERHEAD_MS = 5,
     parameter int MINIMUM_SEARCH_MS = 5,
     parameter int INCREMENT_NUMERATOR = 3,
@@ -110,6 +113,10 @@ module search_controller #(
         if (NULL_SHALLOW_REDUCTION >= NULL_MINIMUM_DEPTH
                 || NULL_DEEP_REDUCTION >= NULL_DEEP_DEPTH_THRESHOLD)
             $fatal(1, "null-move reductions must leave a nonnegative child depth");
+        if (RFP_BASE_MARGIN < 0 || RFP_BASE_MARGIN > SEARCH_INF_VALUE
+                || RFP_MARGIN_PER_DEPTH < 0 || RFP_MARGIN_PER_DEPTH > SEARCH_INF_VALUE
+                || RFP_MAXIMUM_DEPTH < 1 || RFP_MAXIMUM_DEPTH > MAX_PLY_COUNT)
+            $fatal(1, "RFP parameters must fit the score range at a positive supported depth");
         if (INCREMENT_DENOMINATOR < 1 || REMAINING_TIME_DENOMINATOR < 1)
             $fatal(1, "time-management denominators must be positive");
     end
@@ -156,11 +163,14 @@ module search_controller #(
         logic has_tt_move;
         logic stand_pat_done;
         logic scout_search;
+        // Preserve the node's entry window independently of later alpha raises.
+        logic zero_window_node;
         // Cache beta == alpha + 1 so null eligibility does not add on dispatch.
         logic unit_window;
         logic count_move_on_return;
         logic null_attempted;
         logic entered_by_null;
+        logic rfp_checked;
         // Reversible NNUE delta retained in the normal per-ply search stack;
         // this replaces a full accumulator copy at every search depth.
         Position nnue_from;
@@ -334,6 +344,7 @@ module search_controller #(
     logic search_pvs_research[0:SEARCH_THREAD_COUNT-1];
     SearchDepth search_pending_child_depth[0:SEARCH_THREAD_COUNT-1];
     logic search_eval_is_stand_pat[0:SEARCH_THREAD_COUNT-1];
+    logic search_eval_is_rfp[0:SEARCH_THREAD_COUNT-1];
     logic terminal_result_valid_pipe;
     ThreadID terminal_result_thread_pipe;
     PlyIndex terminal_result_ply_pipe;
@@ -342,6 +353,7 @@ module search_controller #(
     // One-cycle semantic event used only by the external simulation profiler.
     logic profile_terminal_event;
     logic [1:0] profile_terminal_kind;
+    logic profile_rfp_cutoff_event;
     logic profile_beta_cutoff_event;
     ThreadID profile_beta_cutoff_thread;
     PlyIndex profile_beta_cutoff_ply;
@@ -1042,6 +1054,37 @@ module search_controller #(
         return EvalScore'(total);
     endfunction : add_nnue_correction
 
+    // Keep the RFP score comparison wide so a configured margin cannot wrap
+    // either operand near the edge of the signed evaluation representation.
+    function automatic logic rfp_prunes(
+        input EvalScore static_eval,
+        input EvalScore beta,
+        input SearchDepth depth
+    );
+        automatic logic signed [31:0] static_eval_wide =
+            $signed({{16{static_eval[15]}}, static_eval});
+        automatic logic signed [31:0] beta_wide =
+            $signed({{16{beta[15]}}, beta});
+        automatic logic signed [31:0] margin =
+            RFP_BASE_MARGIN + RFP_MARGIN_PER_DEPTH * int'(depth);
+        return static_eval_wide - margin >= beta_wide;
+    endfunction : rfp_prunes
+
+    // RFP applies only to positive-depth zero-window nodes with a finite beta.
+    function automatic logic rfp_node_eligible(
+        input SearchDepth depth,
+        input logic zero_window,
+        input logic in_check,
+        input EvalScore beta
+    );
+        return depth != SearchDepth'(0)
+            && int'(depth) <= RFP_MAXIMUM_DEPTH
+            && zero_window
+            && !in_check
+            && beta > -MATE_THRESHOLD
+            && beta < MATE_THRESHOLD;
+    endfunction : rfp_node_eligible
+
     // Grow the delta with a small constant Q3 multiply, which synthesizes to shifts and adds.
     function automatic AspirationDelta aspiration_next_delta(input AspirationDelta delta);
         automatic logic [31:0] scaled = delta * ASPIRATION_DELTA_MULTIPLIER_Q3;
@@ -1094,10 +1137,12 @@ module search_controller #(
         entry.has_tt_move = 1'b0;
         entry.stand_pat_done = 1'b0;
         entry.scout_search = 1'b0;
+        entry.zero_window_node = 1'b0;
         entry.unit_window = 1'b0;
         entry.count_move_on_return = 1'b0;
         entry.null_attempted = 1'b0;
         entry.entered_by_null = 1'b0;
+        entry.rfp_checked = 1'b0;
         entry.nnue_from = Position'(0);
         entry.nnue_to = Position'(0);
         entry.nnue_capture_pos = Position'(0);
@@ -1404,10 +1449,25 @@ module search_controller #(
             && halfmove_depth_sum < 8'(100 + int'(reduction));
     endfunction : search_thread_null_candidate
 
+    function automatic logic search_thread_rfp_ready(input int thread_index);
+        return search_thread_ready(thread_index)
+            && !search_thread_terminal_ready(thread_index)
+            && !search_thread_tt_lookup_ready(thread_index)
+            && search_stack_top[thread_index].tt_checked
+            && !search_stack_top[thread_index].rfp_checked
+            && rfp_node_eligible(
+                search_stack_top[thread_index].remaining_depth,
+                search_stack_top[thread_index].zero_window_node,
+                search_board_in_check[thread_index],
+                search_stack_top[thread_index].beta
+            );
+    endfunction : search_thread_rfp_ready
+
     function automatic logic search_thread_null_ready(input int thread_index);
         return search_thread_ready(thread_index)
             && !search_thread_terminal_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
+            && !search_thread_rfp_ready(thread_index)
             && search_stack_top[thread_index].tt_checked
             && !search_stack_top[thread_index].null_attempted
             && search_null_candidate[thread_index]
@@ -1419,10 +1479,11 @@ module search_controller #(
         return search_thread_ready(thread_index)
             && !search_thread_terminal_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
-            && !search_thread_null_ready(thread_index)
-            && ((search_in_qsearch(ThreadID'(thread_index))
+            && (search_thread_rfp_ready(thread_index)
+                || (!search_thread_null_ready(thread_index)
+                    && ((search_in_qsearch(ThreadID'(thread_index))
                     && !search_stack_top[thread_index].stand_pat_done)
-                || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1);
+                        || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1)));
     endfunction : search_thread_eval_ready
 
     function automatic logic search_thread_move_ready(input int thread_index);
@@ -2200,6 +2261,7 @@ module search_controller #(
 `ifdef FPGA_CHESS_PROFILE
             profile_terminal_event <= 1'b0;
             profile_terminal_kind <= 2'd0;
+            profile_rfp_cutoff_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
             profile_beta_cutoff_thread <= ThreadID'(0);
             profile_beta_cutoff_ply <= PlyIndex'(0);
@@ -2250,6 +2312,7 @@ module search_controller #(
                 search_return_was_null[tid] <= 1'b0;
                 search_pvs_research[tid] <= 1'b0;
                 search_eval_is_stand_pat[tid] <= 1'b0;
+                search_eval_is_rfp[tid] <= 1'b0;
                 nnue_plan_pending[tid] <= 1'b0;
                 nnue_plan_inflight[tid] <= 1'b0;
                 nnue_plan_kind[tid] <= NNUE_PLAN_REBUILD;
@@ -2295,6 +2358,7 @@ module search_controller #(
             terminal_result_valid_pipe <= 1'b0;
 `ifdef FPGA_CHESS_PROFILE
             profile_terminal_event <= 1'b0;
+            profile_rfp_cutoff_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
 `endif
             if (state != ST_SEARCH_RUN) begin
@@ -2571,6 +2635,7 @@ module search_controller #(
                                     search_return_was_null[search_thread_id] <= 1'b0;
                                     search_pvs_research[search_thread_id] <= 1'b0;
                                     search_eval_is_stand_pat[search_thread_id] <= 1'b0;
+                                    search_eval_is_rfp[search_thread_id] <= 1'b0;
                                     tt_age <= tt_age + TTAge'(1);
                                     if (req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME) begin
                                         search_budget_ms <= req.time_limit;
@@ -2895,6 +2960,7 @@ module search_controller #(
                         search_pvs_research[tid] <= 1'b0;
                         search_return_ponder_move[tid] <= NULL_MOVE;
                         search_eval_is_stand_pat[tid] <= 1'b0;
+                        search_eval_is_rfp[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
                         search_tt_validation_pending[tid] <= 1'b0;
                         search_tt_validation_passed[tid] <= 1'b0;
@@ -2905,6 +2971,9 @@ module search_controller #(
                         search_stack_top[tid].beta <= search_thread_root_beta[tid];
                         search_stack_top[tid].stand_pat_done <= active_board_in_check;
                         search_stack_top[tid].unit_window
+                            <= search_thread_root_beta[tid]
+                                == search_thread_root_alpha[tid] + EvalScore'(1);
+                        search_stack_top[tid].zero_window_node
                             <= search_thread_root_beta[tid]
                                 == search_thread_root_alpha[tid] + EvalScore'(1);
                         search_return_move[tid] <= NULL_MOVE;
@@ -3219,6 +3288,7 @@ module search_controller #(
                                 search_return_was_null[tid] <= 1'b0;
                                 search_pvs_research[tid] <= 1'b0;
                                 search_eval_is_stand_pat[tid] <= 1'b0;
+                                search_eval_is_rfp[tid] <= 1'b0;
                                 search_return_ponder_move[tid] <= NULL_MOVE;
                                 search_stack_top[tid] <= empty_search_stack_entry();
                                 search_tt_validation_pending[tid] <= 1'b0;
@@ -3239,6 +3309,12 @@ module search_controller #(
                                         search_thread_iteration_score[tid], next_aspiration_delta);
                                 search_stack_top[tid].stand_pat_done <= active_board_in_check;
                                 search_stack_top[tid].unit_window
+                                    <= aspiration_upper_bound(
+                                            search_thread_iteration_score[tid], next_aspiration_delta)
+                                        == aspiration_lower_bound(
+                                                search_thread_iteration_score[tid], next_aspiration_delta)
+                                            + EvalScore'(1);
+                                search_stack_top[tid].zero_window_node
                                     <= aspiration_upper_bound(
                                             search_thread_iteration_score[tid], next_aspiration_delta)
                                         == aspiration_lower_bound(
@@ -3459,12 +3535,15 @@ module search_controller #(
                                 search_stack_top[board_thread_id].stand_pat_done
                                     <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].scout_search <= 1'b1;
+                                search_stack_top[board_thread_id].zero_window_node <= 1'b1;
                                 search_stack_top[board_thread_id].unit_window <= 1'b1;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b1;
+                                search_stack_top[board_thread_id].rfp_checked <= 1'b0;
                                 search_stack_top[board_thread_id].nnue_delta_valid <= 1'b0;
                                 search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
+                                search_eval_is_rfp[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
                                 // Null moves preserve the thread's live
@@ -3630,12 +3709,15 @@ module search_controller #(
                                     search_stack_top[board_thread_id].orig_alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b1;
+                                    search_stack_top[board_thread_id].zero_window_node <= 1'b1;
                                     search_stack_top[board_thread_id].unit_window <= 1'b1;
                                 end else begin
                                     search_stack_top[board_thread_id].alpha <= -search_stack_top[board_thread_id].beta;
                                     search_stack_top[board_thread_id].orig_alpha <= -search_stack_top[board_thread_id].beta;
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b0;
+                                    search_stack_top[board_thread_id].zero_window_node
+                                        <= search_stack_top[board_thread_id].unit_window;
                                     search_stack_top[board_thread_id].unit_window
                                         <= search_stack_top[board_thread_id].unit_window;
                                 end
@@ -3658,9 +3740,11 @@ module search_controller #(
                                     <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b0;
+                                search_stack_top[board_thread_id].rfp_checked <= 1'b0;
                                 // A new logical node reuses stale address bits but starts with no failed quiets.
                                 search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
+                                search_eval_is_rfp[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_REPETITION_WAIT;
@@ -3771,6 +3855,8 @@ module search_controller #(
                                     search_pst_eval[eval_thread_id]),
                                 nnue_result);
                             nnue_state_valid[eval_thread_id] <= 1'b1;
+                            search_eval_is_stand_pat[eval_thread_id] <= 1'b0;
+                            search_eval_is_rfp[eval_thread_id] <= 1'b0;
 
                             if (search_eval_is_stand_pat[eval_thread_id]) begin
                                 search_stack_top[eval_thread_id].stand_pat_done <= 1'b1;
@@ -3782,6 +3868,35 @@ module search_controller #(
                                             == eval_score + EvalScore'(1);
                                 end
                                 if (eval_score >= search_stack_top[eval_thread_id].beta) begin
+                                    search_return_score[eval_thread_id] <= eval_score;
+                                    search_return_valid[eval_thread_id] <= 1'b1;
+                                    if (eval_ply == PlyIndex'(0)) begin
+                                        search_thread_phase[eval_thread_id] <= SEARCH_PHASE_DONE;
+                                        search_thread_iteration_score[eval_thread_id] <= eval_score;
+                                        search_thread_iteration_best_move[eval_thread_id] <= NULL_MOVE;
+                                        search_thread_iteration_ponder_move[eval_thread_id] <= NULL_MOVE;
+`ifndef SYNTHESIS
+                                        search_thread_completed_best_move[eval_thread_id] <= NULL_MOVE;
+`endif
+                                        if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                    end else begin
+                                        search_thread_phase[eval_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
+                                    end
+                                end else begin
+                                    search_thread_phase[eval_thread_id] <= SEARCH_PHASE_READY;
+                                end
+                            end else if (search_eval_is_rfp[eval_thread_id]) begin
+                                // A failed margin test resumes normal pruning and
+                                // move search without evaluating this node again.
+                                search_stack_top[eval_thread_id].rfp_checked <= 1'b1;
+                                if (rfp_prunes(
+                                        eval_score,
+                                        search_stack_top[eval_thread_id].beta,
+                                        search_stack_top[eval_thread_id].remaining_depth
+                                    )) begin
+`ifdef FPGA_CHESS_PROFILE
+                                    profile_rfp_cutoff_event <= 1'b1;
+`endif
                                     search_return_score[eval_thread_id] <= eval_score;
                                     search_return_valid[eval_thread_id] <= 1'b1;
                                     if (eval_ply == PlyIndex'(0)) begin
@@ -4145,6 +4260,8 @@ module search_controller #(
                             search_thread_phase[search_eval_issue_thread] <= SEARCH_PHASE_EVAL_WAIT;
                             search_eval_is_stand_pat[search_eval_issue_thread] <= search_in_qsearch(search_eval_issue_thread)
                                 && !search_stack_top[search_eval_issue_thread].stand_pat_done;
+                            search_eval_is_rfp[search_eval_issue_thread]
+                                <= search_thread_rfp_ready(search_eval_issue_thread);
                             search_dispatch.eval <= search_thread_after(search_eval_issue_thread);
                             nnue_build_busy <= 1'b1;
                             nnue_build_draining
@@ -4172,6 +4289,9 @@ module search_controller #(
                             search_thread_id <= search_move_issue_thread;
                             search_thread_phase[search_move_issue_thread] <= SEARCH_PHASE_MOVE_WAIT;
                             search_move_inflight[search_move_issue_thread] <= 1'b1;
+                            // RFP is an entry-time decision; a full window that
+                            // narrows after a child return must not enable it.
+                            search_stack_top[search_move_issue_thread].rfp_checked <= 1'b1;
                             if (search_stack_top[search_move_issue_thread].move_order_state == MOVE_ORDER_DIRECT
                                     && move_cmd == MOVE_GEN_GENERATE_NOISY) begin
                                 search_stack_top[search_move_issue_thread].move_order_state
@@ -4191,6 +4311,7 @@ module search_controller #(
                             search_thread_phase[search_quiet_issue_thread]
                                 <= SEARCH_PHASE_MOVE_WAIT;
                             search_move_inflight[search_quiet_issue_thread] <= 1'b1;
+                            search_stack_top[search_quiet_issue_thread].rfp_checked <= 1'b1;
                             search_dispatch.quiet
                                 <= search_thread_after(search_quiet_issue_thread);
                         end

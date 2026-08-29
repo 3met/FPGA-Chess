@@ -68,6 +68,7 @@ module tb_search_controller;
     bit tt_store_depth_correct = 1'b1;
     bit null_push_seen;
     bit null_reverse_seen;
+    bit rfp_eval_seen;
     bit nnue_delta_seen;
     bit nnue_rebuild_seen;
     bit nnue_pending_state_invalid = 1'b1;
@@ -1289,6 +1290,23 @@ module tb_search_controller;
             "LMR verifies a reduced beta cutoff at full depth");
         check(!dut.search_needs_research(1'b1, 1'b0, EvalScore'(20), EvalScore'(10), EvalScore'(20)),
             "ordinary PVS beta cutoff does not require full-depth recovery");
+        check(dut.rfp_node_eligible(5'd5, 1'b1, 1'b0, EvalScore'(0)),
+            "RFP includes finite zero-window nodes at its maximum depth");
+        check(!dut.rfp_node_eligible(5'd0, 1'b1, 1'b0, EvalScore'(0))
+                && !dut.rfp_node_eligible(5'd6, 1'b1, 1'b0, EvalScore'(0)),
+            "RFP excludes quiescence and nodes beyond its maximum depth");
+        check(!dut.rfp_node_eligible(5'd5, 1'b0, 1'b0, EvalScore'(0))
+                && !dut.rfp_node_eligible(5'd5, 1'b1, 1'b1, EvalScore'(0)),
+            "RFP excludes full-window and checked nodes");
+        check(!dut.rfp_node_eligible(5'd5, 1'b1, 1'b0, MATE_THRESHOLD)
+                && !dut.rfp_node_eligible(5'd5, 1'b1, 1'b0, -MATE_THRESHOLD),
+            "RFP excludes decisive beta bounds");
+        check(dut.rfp_prunes(EvalScore'(704), EvalScore'(0), 5'd5)
+                && !dut.rfp_prunes(EvalScore'(703), EvalScore'(0), 5'd5),
+            "RFP depth-five margin uses the configured 64 plus 128 per depth");
+        check(dut.rfp_prunes(EvalScore'(92), EvalScore'(-100), 5'd1)
+                && !dut.rfp_prunes(EvalScore'(91), EvalScore'(-100), 5'd1),
+            "RFP returns static evaluation exactly at the configured margin boundary");
         force dut.search_stack_top[0].remaining_depth = 5'd6;
         check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
             "null reduction is two plies below depth seven");
@@ -1323,6 +1341,7 @@ module tb_search_controller;
         run_search_depth(8'd2, "startpos search depth 2");
         check_search_stats("startpos search statistics");
         check(pvs_scout_seen, "startpos depth 2 used a PVS scout window");
+        check(rfp_eval_seen, "startpos depth 2 evaluated an eligible RFP node");
         check(pvs_research_seen, "startpos depth 2 re-searched a PVS scout fail-high");
         check(aspiration_window_seen, "startpos depth 2 used an aspiration window");
         kill_search_before_root_init("early search kill");
@@ -1677,6 +1696,11 @@ module tb_search_controller;
                 end
                 if (dut.search_pvs_research[idx]) begin
                     pvs_research_seen = 1'b1;
+                end
+                if (dut.search_eval_issue_valid
+                        && dut.search_eval_issue_thread == ThreadID'(idx)
+                        && dut.search_thread_rfp_ready(idx)) begin
+                    rfp_eval_seen = 1'b1;
                 end
                 if (root_stack_capture_pending[idx]) begin
                     root_stack_seen[idx] = 1'b1;

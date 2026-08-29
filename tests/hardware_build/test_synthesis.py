@@ -47,6 +47,10 @@ class EngineBuildConfigTests(unittest.TestCase):
                 f"ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3 = {resolved['search']['aspiration_delta_multiplier_q3']}",
                 generated_config,
             )
+            self.assertIn(
+                f"ENGINE_RFP_MAXIMUM_DEPTH = {resolved['search']['rfp_maximum_depth']}",
+                generated_config,
+            )
             qsf = project.with_suffix(".qsf").read_text(encoding="utf-8")
             self.assertIn("engine_build_config.svh", qsf)
             self.assertIn(f"FPGA_CHESS_THREAD_CAPACITY={resolved['threads']}", qsf)

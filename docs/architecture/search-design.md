@@ -8,11 +8,13 @@ Thread count, stack depth, search policy, and optional instrumentation are build
 
 ## Search Algorithm
 
-The default search combines iterative deepening, aspiration windows, principal variation search (PVS), null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
+The default search combines iterative deepening, aspiration windows, principal variation search (PVS), reverse futility pruning (RFP), null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
 
 Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A fail-low or fail-high multiplies the window delta by the configured fixed-point multiplier and repeats the same depth with the wider window centered on the fail-soft score that caused the failure. If a time or node budget expires during an incomplete or failed pass, the engine returns the primary thread's most recent fully completed iteration. A legal root move from a partial first iteration may be used when no completed result exists. The primary thread also retains the second move of its completed principal variation as a predicted opponent reply for UCI pondering; partial results omit that move unless it is paired with the selected root result.
 
 PVS searches the first legal move with the full window and later moves with a scout window, repeating a scout at full window when needed. LMR may first search eligible later moves at reduced depth; an alpha-raising reduced result is verified at full depth before it can affect the parent. The reduction policy is parameterized and computed without changing the search semantics.
+
+RFP evaluates eligible non-checking main-search nodes after the TT probe and before null-move pruning. At a zero-window node no deeper than the configured maximum, with a finite non-mate beta bound, it returns the fail-soft static evaluation when `static_eval - (base_margin + margin_per_depth * remaining_depth) >= beta`; the default maximum depth is 5 and the default margins are 64 plus 128 per remaining ply.
 
 Null-move pruning may search a reduced synthetic child at eligible non-root nodes that are not in check. Null children change only turn-dependent state, cannot follow another null move, and do not count as legal moves, update move ordering, enter repetition history, or become best moves.
 
