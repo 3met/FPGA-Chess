@@ -1,12 +1,20 @@
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from tools.hardware_build.manifest import load_manifest
 from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count
-from tools.hardware_build.synthesis import new_build_id, write_engine_build_config, write_quartus_project
+from tools.hardware_build.synthesis import (
+    new_build_id,
+    quartus_negative_slack,
+    synth_quartus,
+    write_engine_build_config,
+    write_quartus_project,
+)
 
 
 class EngineBuildConfigTests(unittest.TestCase):
@@ -77,6 +85,76 @@ class QuartusReportTests(unittest.TestCase):
         headers = ["Block Memory Bits", "Total RAM Blocks"]
 
         self.assertEqual(quartus_bram_count(["10,240", "1"], quartus_bram_columns(headers)), "1")
+
+
+class QuartusSynthesisTests(unittest.TestCase):
+    def test_negative_slack_includes_timing_context(self):
+        summary = (
+            "Type  : Slow 1100mV 85C Model Setup 'engine_clk'\n"
+            "Slack : -0.736\n"
+            "TNS   : -1.234\n"
+            "\n"
+            "Type  : Fast 1100mV 0C Model Hold 'engine_clk'\n"
+            "Slack : -0.418\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "fpga_chess.sta.summary").write_text(summary, encoding="utf-8")
+
+            self.assertEqual(
+                quartus_negative_slack(Path(temp_dir)),
+                [
+                    "Setup 'engine_clk': -0.736 ns (Slow 1100mV 85C)",
+                    "Hold 'engine_clk': -0.418 ns (Fast 1100mV 0C)",
+                ],
+            )
+
+    def test_negative_slack_prints_sta_as_failure_once(self):
+        target = {"tool": "quartus", "top": "fpga_chess"}
+        command_results = [(0, "", 1.0)] * 4
+        timing_failure = "Setup 'engine_clk': -0.736 ns (Slow 1100mV 85C)"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_root = Path(temp_dir)
+            project = build_root / "quartus-test" / "fpga_chess"
+            output = io.StringIO()
+            with (
+                mock.patch("tools.hardware_build.synthesis.BUILD_ROOT", build_root),
+                mock.patch("tools.hardware_build.synthesis.require_tool"),
+                mock.patch(
+                    "tools.hardware_build.synthesis.rel",
+                    side_effect=lambda path: path.as_posix(),
+                ),
+                mock.patch(
+                    "tools.hardware_build.synthesis.write_quartus_project",
+                    return_value=project,
+                ),
+                mock.patch(
+                    "tools.hardware_build.synthesis.run_command",
+                    side_effect=command_results,
+                ),
+                mock.patch(
+                    "tools.hardware_build.synthesis.quartus_negative_slack",
+                    return_value=[timing_failure],
+                ),
+                redirect_stdout(output),
+            ):
+                result = synth_quartus({}, "quartus-test", target, jobs=2)
+
+            printed = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertIn(
+                "[FAIL] quartus_sta (1.00s): timing constraints not met\n",
+                printed,
+            )
+            self.assertNotIn("[PASS] quartus_sta", printed)
+            self.assertEqual(printed.count("quartus_sta (1.00s)"), 1)
+            self.assertIn(f"  {timing_failure}\n", printed)
+
+            metadata = json.loads(
+                (build_root / "quartus-test" / "synthesis.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(metadata["stages"][-1]["status"], "fail")
 
 
 if __name__ == "__main__":

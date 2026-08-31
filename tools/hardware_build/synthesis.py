@@ -143,12 +143,28 @@ def write_engine_build_config(
 
 
 def quartus_negative_slack(build_dir: Path) -> list[str]:
-    """Return STA summary rows that violate a setup or hold requirement."""
+    """Return compact descriptions of failed STA timing requirements."""
     failures: list[str] = []
     for path in sorted(build_dir.glob("*.sta.summary")):
+        timing_type = ""
         for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if re.search(r"\bSlack\s*:\s*-", raw):
-                failures.append(f"{rel(path)}: {raw.strip()}")
+            type_match = re.match(r"\s*Type\s*:\s*(.+)", raw)
+            if type_match:
+                timing_type = type_match.group(1)
+                continue
+            slack_match = re.match(r"\s*Slack\s*:\s*(-[0-9.]+)", raw)
+            if not slack_match:
+                continue
+            slack = slack_match.group(1)
+            detail_match = re.match(
+                r"(.+?)\s+Model\s+(Setup|Hold|Recovery|Removal|Minimum Pulse Width)\s+'(.+)'$",
+                timing_type,
+            )
+            if detail_match:
+                corner, check, clock = detail_match.groups()
+                failures.append(f"{check} '{clock}': {slack} ns ({corner})")
+            else:
+                failures.append(f"{slack} ns slack")
     return failures
 
 
@@ -315,6 +331,10 @@ def synth_quartus(
             tee_stdout=stream_logs,
         )
         ok = code == 0 and not QUARTUS_ERROR_RE.search(output)
+        timing_failures = (
+            quartus_negative_slack(build_dir) if cmd[0] == "quartus_sta" and ok else []
+        )
+        ok = ok and not timing_failures
         metadata["stages"].append(
             {
                 "name": cmd[0],
@@ -325,21 +345,18 @@ def synth_quartus(
         )
         write_synth_metadata(build_dir, metadata)
         status = "PASS" if ok else "FAIL"
-        print(f"[{status}] {cmd[0]} ({elapsed:.2f}s)")
+        timing_reason = ": timing constraints not met" if timing_failures else ""
+        print(f"[{status}] {cmd[0]} ({elapsed:.2f}s){timing_reason}")
         print(f"  log: {rel(log)}")
         if not ok:
-            print_quartus_failure_excerpt(output)
+            if timing_failures:
+                for line in timing_failures:
+                    print(f"  {line}")
+            else:
+                print_quartus_failure_excerpt(output)
         failed = failed or not ok
         if not ok:
             break
-
-    timing_failures = quartus_negative_slack(build_dir) if not failed else []
-    if timing_failures:
-        failed = True
-        metadata["stages"][-1]["status"] = "fail"
-        print("[FAIL] quartus_sta reported negative slack")
-        for line in timing_failures:
-            print(f"  {line}")
 
     finish_synth_metadata(build_dir, metadata, failed)
     return 1 if failed else 0
