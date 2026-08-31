@@ -1290,6 +1290,21 @@ module tb_search_controller;
             "LMR verifies a reduced beta cutoff at full depth");
         check(!dut.search_needs_research(1'b1, 1'b0, EvalScore'(20), EvalScore'(10), EvalScore'(20)),
             "ordinary PVS beta cutoff does not require full-depth recovery");
+        check(!dut.partial_root_result_eligible(
+                5'd4, 2'd1, make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(40)),
+            "partial root result keeps a completed iteration after only its PV move");
+        check(dut.partial_root_result_eligible(
+                5'd4, 2'd2, make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(40)),
+            "partial root result accepts a fully searched challenger");
+        check(!dut.partial_root_result_eligible(
+                5'd4, 2'd2, make_move(Position'(12), Position'(28), PROMO_QUEEN), -MATE_THRESHOLD),
+            "partial root result does not promote an incomplete losing mate");
+        check(dut.partial_root_result_eligible(
+                5'd0, 2'd1, make_move(Position'(12), Position'(28), PROMO_QUEEN), -MATE_THRESHOLD),
+            "partial first iteration returns its first fully searched legal move");
+        check(!dut.partial_root_result_eligible(
+                5'd0, 2'd1, NULL_MOVE, EvalScore'(40)),
+            "partial root result rejects a null best move");
         check(dut.rfp_node_eligible(5'd5, 1'b1, 1'b0, EvalScore'(0)),
             "RFP includes finite zero-window nodes at its maximum depth");
         check(!dut.rfp_node_eligible(5'd0, 1'b1, 1'b0, EvalScore'(0))

@@ -104,7 +104,8 @@ module tb_tt_external_load_store;
         store_req_valid = 1;
         do @(posedge clk); while (!store_req_ready);
         store_req_valid = 0;
-        do @(posedge clk); while (dut.store_fifo_count != 0 || dut.store_write_pending
+        do @(posedge clk); while (dut.store_fifo_count != 0 || dut.store_stage_valid
+            || dut.store_write_pending
             || dut.state != dut.S_IDLE);
     endtask
     task automatic do_lookup(
@@ -187,7 +188,8 @@ module tb_tt_external_load_store;
         check(!mem_req_write, "lookup miss preempted deferred store write");
         do @(posedge clk); while (!lookup_resp_valid);
         check(lookup_resp.thread_id == ThreadID'(1), "preempting lookup retained thread tag");
-        do @(posedge clk); while (dut.store_write_pending || dut.state != dut.S_IDLE);
+        do @(posedge clk); while (dut.store_stage_valid
+            || dut.store_write_pending || dut.state != dut.S_IDLE);
 
         // Stores are accepted while the backend is occupied. Once the queue
         // fills, later publications are consumed and dropped without stalling.

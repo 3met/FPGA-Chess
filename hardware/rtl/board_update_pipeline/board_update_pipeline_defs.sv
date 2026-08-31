@@ -5,8 +5,9 @@ package board_update_pipeline_defs;
 
 	import chess_defs::*;
 
-    // Stage 0 captures the request and launches table reads, stage 1 aligns
-    // their synchronous outputs, and stage 2 registers the transformed board.
+    // Stage 0 captures the request, table plans, and special-move masks; stage
+    // 1 aligns synchronous outputs and checks king safety; stage 2 registers
+    // the transformed board and its check flags.
     localparam BOARD_UPDATE_PIPELINE_STAGE_CNT = 3;
 
     // Enum for all board update pipeline operations
@@ -59,7 +60,7 @@ package board_update_pipeline_defs;
         // Pipeline Internal Values
         MoveRecord move_record;
         Position mover_king_square;
-        logic mover_in_check;
+        Position side_king_square;
     } BoardUpdatePipelineCtx;
 
 endpackage

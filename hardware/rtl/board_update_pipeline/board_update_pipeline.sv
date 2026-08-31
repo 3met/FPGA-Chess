@@ -25,7 +25,8 @@ module board_update_pipeline #(
     output ZobristKey zobrist_key_out,
     output EvalScore pst_eval_out,
     output PieceCount piece_count_out,
-    output logic mover_in_check_out
+    output logic mover_in_check_out,
+    output logic side_in_check_out
 );
 
     typedef logic [8:0] PstAddr;
@@ -103,12 +104,11 @@ module board_update_pipeline #(
     BoardFile zobrist_old_ep_address, zobrist_new_ep_address;
     ZobristKey zobrist_old_ep_data, zobrist_new_ep_data;
     MoveEffects move_effects, move_effects_q;
-    MoveEffects check_move_effects_d, check_move_effects_q;
-    logic [63:0] check_empty_mask;
-    logic [63:0] check_mover_mask;
-    logic [63:0] check_rook_mask;
-    Tile check_mover_tile;
-    Color check_mover_color;
+    logic [63:0] check_empty_mask_d, check_empty_mask_q;
+    logic [63:0] check_mover_mask_d, check_mover_mask_q;
+    logic [63:0] check_rook_mask_d, check_rook_mask_q;
+    Tile check_mover_tile_d, check_mover_tile_q;
+    Color check_mover_color_d, check_mover_color_q;
 
     genvar port_pair;
     generate
@@ -235,13 +235,13 @@ module board_update_pipeline #(
         return (tile.piece_color == WHITE) ? score : -score;
     endfunction : signed_piece_score
 
-    // Overlay push masks decoded once from registered move effects instead of
-    // repeating position comparisons in every pawn, knight, and ray lookup.
+    // Apply registered special-move masks to the stage-0 board during both
+    // king-safety scans; decoding is kept out of the attack-scan timing path.
     function automatic Tile checked_tile(input FullBoard board, input Position pos);
         automatic Tile tile = board.tiles[pos];
-        if (check_empty_mask[pos]) tile = EMPTY_TILE;
-        if (check_mover_mask[pos]) tile = check_mover_tile;
-        if (check_rook_mask[pos]) tile = Tile'({check_mover_color, ROOK});
+        if (check_empty_mask_q[pos]) tile = EMPTY_TILE;
+        if (check_mover_mask_q[pos]) tile = check_mover_tile_q;
+        if (check_rook_mask_q[pos]) tile = Tile'({check_mover_color_q, ROOK});
         return tile;
     endfunction : checked_tile
 
@@ -293,14 +293,21 @@ module board_update_pipeline #(
     endfunction : board_square_attacked
 
     function automatic Position pushed_king_square(input FullBoard board, input Move move);
-        if (board.tiles[move.from_pos].piece_type == KING) begin
+        if (board.tiles[move.from_pos].piece_type == KING)
             return move.to_pos;
-        end
         return king_position(board, board.turn);
     endfunction : pushed_king_square
 
-    // Decode the compact post-push effects shared by board mutation and the
-    // stage-1 king-safety overlay.
+    function automatic Color result_turn(input BoardUpdatePipelineCtx in);
+        if (in.board_op == BOARD_PUSH_MOVE_OP || in.board_op == BOARD_COMMIT_MOVE_OP
+                || in.board_op == BOARD_PUSH_NULL_OP || in.board_op == BOARD_REVERSE_MOVE_OP)
+            return Color'(~in.board.turn);
+        if (in.board_op == BOARD_SET_TURN_OP)
+            return Color'(in.set_data[0]);
+        return in.board.turn;
+    endfunction : result_turn
+
+    // Decode compact post-push effects once for table planning and board mutation.
     function automatic MoveEffects decode_push_effects(input FullBoard board, input Move move);
         automatic MoveEffects effects = MoveEffects'('0);
         automatic Color moved_color;
@@ -450,7 +457,17 @@ module board_update_pipeline #(
         zobrist_key_out <= next_zobrist_key_out;
         pst_eval_out <= next_pst_eval_out;
         piece_count_out <= next_piece_count_out;
-        mover_in_check_out <= ctx_pipe[1].mover_in_check;
+        mover_in_check_out <= ctx_pipe[1].board_op == BOARD_PUSH_MOVE_OP
+            && board_square_attacked(
+                ctx_pipe[1].board,
+                ctx_pipe[1].mover_king_square,
+                Color'(~ctx_pipe[1].board.turn)
+            );
+        side_in_check_out <= board_square_attacked(
+            ctx_pipe[1].board,
+            ctx_pipe[1].side_king_square,
+            Color'(~result_turn(ctx_pipe[1]))
+        );
         zobrist_read_enable_q <= zobrist_read_plan.enable;
         zobrist_turn_toggle_q <= zobrist_turn_toggle;
         zobrist_castle_toggle_q <= zobrist_castle_toggle;
@@ -458,7 +475,11 @@ module board_update_pipeline #(
         zobrist_new_ep_valid_q <= zobrist_new_ep_valid;
         pst_read_enable_q <= pst_read_plan.enable;
         move_effects_q <= move_effects;
-        check_move_effects_q <= check_move_effects_d;
+        check_empty_mask_q <= check_empty_mask_d;
+        check_mover_mask_q <= check_mover_mask_d;
+        check_rook_mask_q <= check_rook_mask_d;
+        check_mover_tile_q <= check_mover_tile_d;
+        check_mover_color_q <= check_mover_color_d;
     end
 
     always_comb begin
@@ -472,15 +493,14 @@ module board_update_pipeline #(
         next_ctx_pipe[0].thread_id   = thread_id;
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
-        // Select the tracked post-move king square before the attack scan.
-        // The value is consumed only for a registered push operation. Decode
-        // it unconditionally so operation arbitration does not gate its data.
         next_ctx_pipe[0].mover_king_square = pushed_king_square(board_in, move_in);
-        next_ctx_pipe[0].mover_in_check = 1'b0;
-        check_move_effects_d = MoveEffects'('0);
-        if (board_op == BOARD_PUSH_MOVE_OP)
-            check_move_effects_d = decode_push_effects(board_in, move_in);
-
+        if (board_op == BOARD_PUSH_MOVE_OP || board_op == BOARD_COMMIT_MOVE_OP
+                || board_op == BOARD_PUSH_NULL_OP || board_op == BOARD_REVERSE_MOVE_OP)
+            next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(~board_in.turn)];
+        else if (board_op == BOARD_SET_TURN_OP)
+            next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(set_data[0])];
+        else
+            next_ctx_pipe[0].side_king_square = board_in.king_positions[board_in.turn];
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
 
@@ -488,28 +508,36 @@ module board_update_pipeline #(
 
     always_comb begin
         next_ctx_pipe[1] = ctx_pipe[0];
-        // Decode the post-move overlay from registered effects so thread
-        // arbitration terminates at compact stage-0 registers rather than at
-        // each bit of three one-hot masks.
-        check_empty_mask = 64'd0;
-        check_mover_mask = 64'd0;
-        check_rook_mask = 64'd0;
-        check_mover_tile = check_move_effects_q.placed_tile;
-        check_mover_color = check_move_effects_q.moving_tile.piece_color;
-        check_empty_mask[check_move_effects_q.from_pos] = 1'b1;
-        check_mover_mask[check_move_effects_q.to_pos] = 1'b1;
-        if (check_move_effects_q.is_ep)
-            check_empty_mask[check_move_effects_q.ep_capture_pos] = 1'b1;
-        if (check_move_effects_q.is_castle) begin
-            check_empty_mask[check_move_effects_q.rook_from] = 1'b1;
-            check_rook_mask[check_move_effects_q.rook_to] = 1'b1;
+    end
+
+    // Decode the captured request into registered overlay masks during the
+    // existing table-alignment stage. The following attack scan therefore has
+    // registered inputs without increasing end-to-end pipeline latency.
+    always_comb begin
+        automatic BoardUpdatePipelineCtx in = ctx_pipe[0];
+        automatic MoveEffects check_effects = MoveEffects'('0);
+
+        check_empty_mask_d = 64'd0;
+        check_mover_mask_d = 64'd0;
+        check_rook_mask_d = 64'd0;
+        check_mover_tile_d = EMPTY_TILE;
+        check_mover_color_d = in.board.turn;
+        if (in.board_op == BOARD_PUSH_MOVE_OP || in.board_op == BOARD_COMMIT_MOVE_OP) begin
+            check_effects = decode_push_effects(in.board, in.move);
+            check_empty_mask_d[check_effects.from_pos] = 1'b1;
+            check_mover_mask_d[check_effects.to_pos] = 1'b1;
+            check_mover_tile_d = check_effects.placed_tile;
+            check_mover_color_d = check_effects.moving_tile.piece_color;
+            if (check_effects.is_ep)
+                check_empty_mask_d[check_effects.ep_capture_pos] = 1'b1;
+            if (check_effects.is_castle) begin
+                check_empty_mask_d[check_effects.rook_from] = 1'b1;
+                check_rook_mask_d[check_effects.rook_to] = 1'b1;
+            end
+        end else if (in.board_op == BOARD_SET_TILE_OP) begin
+            check_mover_mask_d[in.move.to_pos] = 1'b1;
+            check_mover_tile_d = Tile'(in.set_data[3:0]);
         end
-        // King safety is evaluated in parallel with the synchronous table
-        // reads and carried to the stage-2 board result without adding a cycle.
-        next_ctx_pipe[1].mover_in_check = (ctx_pipe[0].board_op == BOARD_PUSH_MOVE_OP)
-            ? board_square_attacked(ctx_pipe[0].board, ctx_pipe[0].mover_king_square,
-                Color'(~ctx_pipe[0].board.turn))
-            : 1'b0;
     end
 
     // Form the incremental hash delta one stage before board mutation. The

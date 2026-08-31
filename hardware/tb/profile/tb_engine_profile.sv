@@ -1212,6 +1212,7 @@ module tb_engine_profile #(
         repeat (20000) begin
             @(posedge engine_clk);
             if (dut.controller.external_tt_gen.tt_load_store.store_fifo_count == 0
+                    && !dut.controller.external_tt_gen.tt_load_store.store_stage_valid
                     && !dut.controller.external_tt_gen.tt_load_store.store_write_pending
                     && dut.controller.external_tt_gen.tt_load_store.state == 0
                     && memory_bridge.cmd_empty && memory_bridge.write_empty

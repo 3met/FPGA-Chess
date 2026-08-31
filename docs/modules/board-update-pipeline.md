@@ -21,6 +21,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Output | `pst_eval_out` | Updated White-relative PST evaluation. |
 | Output | `piece_count_out` | Updated total number of occupied squares. |
 | Output | `mover_in_check_out` | For push operations, indicates that the resulting position attacks the king of the side that moved. |
+| Output | `side_in_check_out` | Indicates that the resulting position attacks the king of the side to move. |
 
 ## Operations
 
@@ -39,7 +40,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Pipeline
 
-The fixed three-stage pipeline decodes the operation and starts table reads, checks push-move king safety, then applies and registers the board and side-data updates.
+The fixed three-stage pipeline decodes the operation, starts table reads, and registers complete special-move overlay masks; aligns synchronous table results while checking both kings against the masked board; then registers the transformed board and aligned check flags. Registering the masks keeps en passant and castling decode out of the attack-scan timing paths, while the check flags keep attack scans out of the search controller's state-update muxes.
 
 ## Board Setup
 

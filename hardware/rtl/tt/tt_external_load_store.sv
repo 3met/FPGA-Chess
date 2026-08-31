@@ -96,13 +96,16 @@ module tt_external_load_store #(
     logic clear_pending;
     EntryIndex cache_request_index;
     EntryIndex lookup_request_index;
-    EntryIndex store_request_index;
     StoreFifoCount store_fifo_count;
     TTStoreRequest store_fifo_data;
     logic store_fifo_valid;
     logic store_fifo_push_ready;
     logic store_accept;
     logic store_pop;
+    logic store_stage_valid;
+    TTStoreRequest store_stage_req;
+    EntryIndex store_stage_index;
+    logic store_stage_issue;
     logic lookup_probe_valid;
     TTLookupRequest lookup_probe_req;
     EntryIndex lookup_probe_index;
@@ -207,12 +210,11 @@ module tt_external_load_store #(
     endtask
 
     always_comb begin
-        // Reduce both hashes before arbitration so lookup validity controls
-        // only a compact index mux rather than feeding the range multiplier.
+        // Lookup reduction remains combinational so blocking probes retain
+        // their latency. Best-effort stores are reduced into a staging register.
         lookup_request_index = entry_index(lookup_req.zobrist_key);
-        store_request_index = entry_index(store_fifo_data.zobrist_key);
         cache_request_index = lookup_req_valid
-            ? lookup_request_index : store_request_index;
+            ? lookup_request_index : store_stage_index;
         // One buffered probe is sufficient to serve cache hits while an
         // unrelated SDRAM transaction is active. Cache-fill/write cycles are
         // excluded so inferred single-port RAM read-during-write behavior is
@@ -224,10 +226,14 @@ module tt_external_load_store #(
         // stalling its search thread.
         store_req_ready = !clear && !clear_busy;
         store_accept = store_req_valid && store_req_ready;
-        store_pop = state == S_IDLE && !clear_pending && !lookup_req_valid
+        store_stage_issue = state == S_IDLE && store_stage_valid
+            && !clear && !clear_pending && !lookup_req_valid
+            && !lookup_probe_valid && !lookup_miss_valid && !store_write_pending;
+        store_pop = state == S_IDLE && !clear && !clear_pending && !lookup_req_valid
             && !lookup_probe_valid && !lookup_miss_valid && !store_write_pending
+            && !store_stage_valid
             && store_fifo_valid;
-        cache_read_enable = (lookup_req_valid && lookup_req_ready) || store_pop;
+        cache_read_enable = (lookup_req_valid && lookup_req_ready) || store_stage_issue;
         cache_read_index = CacheIndex'(cache_request_index);
         clear_busy = clear || clear_pending || state == S_CACHE_CLEAR
             || state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE;
@@ -267,14 +273,26 @@ module tt_external_load_store #(
             lookup_probe_valid <= 1'b0;
             lookup_miss_valid <= 1'b0;
             store_write_pending <= 1'b0;
+            store_stage_valid <= 1'b0;
         end else begin
             lookup_resp_valid <= 1'b0;
             cache_access <= 1'b0;
             cache_hit <= 1'b0;
             cache_access_is_store <= 1'b0;
             clear_prev <= clear;
-            if (clear && !clear_prev) clear_pending <= 1'b1;
+            if (clear && !clear_prev) begin
+                clear_pending <= 1'b1;
+                store_stage_valid <= 1'b0;
+            end
             if (cache_read_enable) cache_read_line <= cache[cache_read_index];
+
+            // Break the store FIFO BRAM-to-index-multiplier-to-cache BRAM path.
+            // Store draining is best-effort and never blocks a lookup.
+            if (store_pop) begin
+                store_stage_req <= store_fifo_data;
+                store_stage_index <= entry_index(store_fifo_data.zobrist_key);
+                store_stage_valid <= 1'b1;
+            end
 
             if (lookup_req_valid && lookup_req_ready) begin
                 lookup_probe_req <= lookup_req;
@@ -359,12 +377,11 @@ module tt_external_load_store #(
                         operation_store <= 1'b1;
                         store_write_pending <= 1'b0;
                         state <= S_WRITE_REQ;
-                    end else if (store_pop) begin
-                        EntryIndex idx;
-                        idx = cache_request_index;
-                        active_index <= idx;
-                        active_store <= store_fifo_data;
+                    end else if (store_stage_issue) begin
+                        active_index <= store_stage_index;
+                        active_store <= store_stage_req;
                         operation_store <= 1'b1;
+                        store_stage_valid <= 1'b0;
                         state <= S_CACHE_READ;
                     end
                 end

@@ -24,6 +24,7 @@ module tb_board_update_pipeline;
     EvalScore pst_eval_out;
     PieceCount piece_count_out;
     logic mover_in_check_out;
+    logic side_in_check_out;
 
     PstScore pst_values[0:(6 * 64)-1];
     ZobristKey zobrist_tile_values[0:ZOBRIST_TILE_ENTRY_CNT-1];
@@ -53,7 +54,8 @@ module tb_board_update_pipeline;
         .zobrist_key_out(zobrist_key_out),
         .pst_eval_out(pst_eval_out),
         .piece_count_out(piece_count_out),
-        .mover_in_check_out(mover_in_check_out)
+        .mover_in_check_out(mover_in_check_out),
+        .side_in_check_out(side_in_check_out)
     );
 
     task automatic do_clock(input int cnt = 1);

@@ -12,7 +12,7 @@ Search combines iterative deepening, aspiration windows, principal variation sea
 
 Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A fail-low or fail-high widens the window around the fail-soft score and repeats the depth.
 
-If a time or node budget expires during an incomplete pass, the engine returns the primary thread's most recent fully completed iteration. A legal root move from a partial first iteration may be used when no completed result exists. Completed results may include the second principal-variation move for UCI pondering.
+If a time or node budget expires during an incomplete pass, the active root child is discarded because its score is not complete. The primary thread searches the preceding iteration's principal-variation move first. With a completed iteration available, a partial pass may replace it only after at least two root children have fully resolved, including any PVS or LMR recovery search; incomplete losing-mate results are never promoted. A legal root move from a partial first iteration may be used when no completed result exists. Completed results may include the second principal-variation move for UCI pondering.
 
 PVS searches the first legal move with the full window and later moves with a scout window, repeating a scout at full window when needed. LMR may first search eligible later moves at reduced depth; an alpha-raising reduced result is verified at full depth before it can affect the parent. The reduction policy is parameterized and computed without changing the search semantics.
 

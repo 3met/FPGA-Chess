@@ -26,7 +26,7 @@ Lookup requests take priority over queued stores because a requesting thread can
 
 A store request contains the full key, completed search depth, score, bound type, best move, generation, and root-relative ply. Stores are best-effort: search correctness never depends on a publication reaching memory.
 
-The TT frontend accepts stores into a parameterized FIFO. A publication is dropped if that FIFO is full, allowing the search thread to continue without memory backpressure. Queued stores drain only when they do not delay a lookup.
+The TT frontend accepts stores into a parameterized FIFO. A publication is dropped if that FIFO is full, allowing the search thread to continue without memory backpressure. Queued stores drain only when they do not delay a lookup. A dequeued external-table store is staged with its reduced index before probing the cache, keeping the FIFO BRAM, range reducer, and cache BRAM out of one timing path without changing blocking lookup latency.
 
 ## Score and Bound Semantics
 

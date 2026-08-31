@@ -169,6 +169,7 @@ module search_controller #(
         logic tt_checked;
         logic has_tt_move;
         logic stand_pat_done;
+        logic node_in_check;
         logic scout_search;
         // Preserve the node's entry window independently of later alpha raises.
         logic zero_window_node;
@@ -264,6 +265,9 @@ module search_controller #(
     (* maxfan = 12, max_fanout = 12 *) Move search_best_move[0:SEARCH_THREAD_COUNT-1];
     Move search_ponder_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
+    // Saturating state distinguishes no child, only the previous PV, and a
+    // completed challenger; the exact root move count is unnecessary.
+    logic [1:0] search_root_completed_moves[0:SEARCH_THREAD_COUNT-1];
     NodeCountType search_nodes;
     NodeCountType search_thread_nodes[0:SEARCH_THREAD_COUNT-1];
     logic search_board_inflight[0:SEARCH_THREAD_COUNT-1];
@@ -632,10 +636,9 @@ module search_controller #(
         .zobrist_key_out(board_update_zobrist_out),
         .pst_eval_out(board_update_pst_out),
         .piece_count_out(board_update_piece_count_out),
-        .mover_in_check_out(board_update_mover_in_check)
+        .mover_in_check_out(board_update_mover_in_check),
+        .side_in_check_out(board_update_side_in_check)
     );
-
-    assign board_update_side_in_check = side_in_check(board_update_out);
 
     repetition_checker #(
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT), .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
@@ -930,10 +933,6 @@ module search_controller #(
             || op == BOARD_SET_HALFMOVE_CLOCK_OP;
     endfunction : is_setup_op
 
-    function automatic logic side_in_check(input FullBoard board);
-        return square_attacked(board, king_position(board, board.turn), Color'(~board.turn));
-    endfunction : side_in_check
-
     function automatic logic committed_move_is_irreversible(
         input FullBoard before_board,
         input FullBoard after_board,
@@ -1203,6 +1202,7 @@ module search_controller #(
         entry.tt_checked = 1'b0;
         entry.has_tt_move = 1'b0;
         entry.stand_pat_done = 1'b0;
+        entry.node_in_check = 1'b0;
         entry.scout_search = 1'b0;
         entry.zero_window_node = 1'b0;
         entry.unit_window = 1'b0;
@@ -1592,12 +1592,32 @@ module search_controller #(
     endfunction : root_hint_for_thread
 
     function automatic Move ordering_move_for_thread(input ThreadID thread);
+        // Keep the primary root transactional: the preceding iteration's PV
+        // must be searched before a shared-TT hint can introduce a challenger.
+        if (thread == ThreadID'(0) && search_ply[thread] == PlyIndex'(0)
+                && !search_in_qsearch(thread) && !is_null_move(search_completed_best_move))
+            return search_completed_best_move;
         if (search_stack_top[thread].has_tt_move)
             return search_stack_top[thread].tt_move;
         if (search_ply[thread] == PlyIndex'(0) && !search_in_qsearch(thread))
             return root_hint_for_thread(thread);
         return NULL_MOVE;
     endfunction : ordering_move_for_thread
+
+    // A stopped pass may publish a fully searched challenger, but never a lone
+    // first move or an incomplete losing-mate result from a deeper iteration.
+    function automatic logic partial_root_result_eligible(
+        input SearchDepth completed_depth,
+        input logic [1:0] completed_moves,
+        input Move best_move,
+        input EvalScore best_score
+    );
+        if (is_null_move(best_move) || completed_moves == 2'd0)
+            return 1'b0;
+        if (completed_depth == SearchDepth'(0))
+            return 1'b1;
+        return completed_moves >= 2'd2 && best_score > -MATE_THRESHOLD;
+    endfunction : partial_root_result_eligible
 
     function automatic logic move_state_uses_pop(input MoveOrderState move_state);
         return move_state == MOVE_ORDER_GOOD_NOISY
@@ -2340,6 +2360,7 @@ module search_controller #(
                 search_best_move[tid] <= NULL_MOVE;
                 search_ponder_move[tid] <= NULL_MOVE;
                 search_root_best_score[tid] <= -SEARCH_INF;
+                search_root_completed_moves[tid] <= 2'd0;
                 search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                 search_thread_nodes[tid] <= NodeCountType'(0);
                 search_thread_target_depth[tid] <= SearchDepth'(0);
@@ -2536,9 +2557,12 @@ module search_controller #(
                     kill_score = search_thread_iteration_score[0];
                     kill_completed_depth = search_thread_target_depth[0];
                 end
-                if (killing_search && !is_null_move(search_best_move[0])
-                        && (kill_completed_depth == SearchDepth'(0)
-                            || search_root_best_score[0] > kill_score)) begin
+                if (killing_search && search_thread_phase[0] != SEARCH_PHASE_DONE
+                        && partial_root_result_eligible(
+                            kill_completed_depth,
+                            search_root_completed_moves[0],
+                            search_best_move[0],
+                            search_root_best_score[0])) begin
                     kill_best_move = search_best_move[0];
                     kill_ponder_move = search_ponder_move[0];
                     kill_score = search_root_best_score[0];
@@ -2563,6 +2587,7 @@ module search_controller #(
                     search_tt_validation_pending[tid] <= 1'b0;
                     search_tt_validation_passed[tid] <= 1'b0;
                     search_tt_validation_forced[tid] <= 1'b0;
+                    search_root_completed_moves[tid] <= 2'd0;
                     search_return_was_scout[tid] <= 1'b0;
                     search_return_was_reduced[tid] <= 1'b0;
                     search_return_was_null[tid] <= 1'b0;
@@ -2717,6 +2742,7 @@ module search_controller #(
                                         search_best_move[tid] <= NULL_MOVE;
                                         search_ponder_move[tid] <= NULL_MOVE;
                                         search_root_best_score[tid] <= -SEARCH_INF;
+                                        search_root_completed_moves[tid] <= 2'd0;
                                         search_thread_nodes[tid] <= NodeCountType'(0);
                                         search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                                         search_thread_target_depth[tid]
@@ -3020,6 +3046,7 @@ module search_controller #(
                         search_best_move[tid] <= NULL_MOVE;
                         search_ponder_move[tid] <= NULL_MOVE;
                         search_root_best_score[tid] <= -SEARCH_INF;
+                        search_root_completed_moves[tid] <= 2'd0;
                         search_pending_move[tid] <= NULL_MOVE;
                         search_return_score[tid] <= EvalScore'(0);
                         search_return_valid[tid] <= 1'b0;
@@ -3039,6 +3066,7 @@ module search_controller #(
                         search_stack_top[tid].orig_alpha <= search_thread_root_alpha[tid];
                         search_stack_top[tid].beta <= search_thread_root_beta[tid];
                         search_stack_top[tid].stand_pat_done <= active_board_in_check;
+                        search_stack_top[tid].node_in_check <= active_board_in_check;
                         search_stack_top[tid].unit_window
                             <= search_thread_root_beta[tid]
                                 == search_thread_root_alpha[tid] + EvalScore'(1);
@@ -3349,6 +3377,7 @@ module search_controller #(
                                 search_best_move[tid] <= NULL_MOVE;
                                 search_ponder_move[tid] <= NULL_MOVE;
                                 search_root_best_score[tid] <= -SEARCH_INF;
+                                search_root_completed_moves[tid] <= 2'd0;
                                 search_pending_move[tid] <= NULL_MOVE;
                                 search_return_score[tid] <= EvalScore'(0);
                                 search_return_valid[tid] <= 1'b0;
@@ -3377,6 +3406,7 @@ module search_controller #(
                                     <= aspiration_upper_bound(
                                         search_thread_iteration_score[tid], next_aspiration_delta);
                                 search_stack_top[tid].stand_pat_done <= active_board_in_check;
+                                search_stack_top[tid].node_in_check <= active_board_in_check;
                                 search_stack_top[tid].unit_window
                                     <= aspiration_upper_bound(
                                             search_thread_iteration_score[tid], next_aspiration_delta)
@@ -3436,11 +3466,15 @@ module search_controller #(
                             stop_score = search_thread_iteration_score[0];
                             stop_completed_depth = search_thread_target_depth[0];
                         end
-                        // A returned root child from the deeper in-progress iteration
-                        // is usable even though that iteration's depth is not complete.
-                        if (!is_null_move(search_best_move[0])
-                                && (stop_completed_depth == SearchDepth'(0)
-                                    || search_root_best_score[0] > stop_score)) begin
+                        // A partial pass is transactional: the active child is
+                        // discarded, and a challenger needs a completed first move
+                        // ahead of it. Scores from different depths are not compared.
+                        if (search_thread_phase[0] != SEARCH_PHASE_DONE
+                                && partial_root_result_eligible(
+                                    stop_completed_depth,
+                                    search_root_completed_moves[0],
+                                    search_best_move[0],
+                                    search_root_best_score[0])) begin
                             stop_best_move = search_best_move[0];
                             stop_ponder_move = search_ponder_move[0];
                             stop_score = search_root_best_score[0];
@@ -3504,7 +3538,8 @@ module search_controller #(
                             search_board_inflight[board_thread_id] <= 1'b0;
                             if (reverse_complete) begin
                                 search_board[board_thread_id] <= board_update_out;
-                                search_board_in_check[board_thread_id] <= board_update_side_in_check;
+                                search_board_in_check[board_thread_id]
+                                    <= search_stack_parent_q[board_thread_id].node_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_piece_count[board_thread_id] <= board_update_piece_count_out;
@@ -3602,6 +3637,8 @@ module search_controller #(
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
                                 search_stack_top[board_thread_id].stand_pat_done
+                                    <= board_update_side_in_check;
+                                search_stack_top[board_thread_id].node_in_check
                                     <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].scout_search <= 1'b1;
                                 search_stack_top[board_thread_id].zero_window_node <= 1'b1;
@@ -3822,6 +3859,8 @@ module search_controller #(
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
                                 search_stack_top[board_thread_id].stand_pat_done
+                                    <= board_update_side_in_check;
+                                search_stack_top[board_thread_id].node_in_check
                                     <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b0;
@@ -4161,6 +4200,10 @@ module search_controller #(
                                         : search_stack_top[return_thread_id].remaining_depth - SearchDepth'(1);
                                 search_thread_phase[return_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
+                                if (return_ply == PlyIndex'(0)
+                                        && search_root_completed_moves[return_thread_id] < 2'd2)
+                                    search_root_completed_moves[return_thread_id]
+                                        <= search_root_completed_moves[return_thread_id] + 2'd1;
                                 if (!search_stack_top[return_thread_id].has_legal
                                         || parent_score > search_stack_top[return_thread_id].best_score) begin
                                     search_stack_top[return_thread_id].best_score <= parent_score;
