@@ -335,12 +335,25 @@ def load_puzzles(path: Path, count: int, seed: int, min_rating: float = 1000.0) 
 
 
 def solve_puzzle(engine: FPGAUCISession, puzzle: Puzzle, movetime_ms: int, timeout: float) -> bool:
+    import chess
+
     history = [puzzle.moves[0]]  # Lichess begins each solution with the opponent's move.
     for expected_index in range(1, len(puzzle.moves), 2):
         engine.send("position fen " + puzzle.fen + " moves " + " ".join(history))
         engine.send(f"go movetime {movetime_ms}")
         response = engine.wait_for(lambda line: line.startswith("bestmove "), timeout, "puzzle bestmove")
         move = _bestmove(response.lines)
+        board = chess.Board(puzzle.fen)
+        for history_move in history:
+            board.push_uci(history_move)
+        if move is None:
+            raise FPGAUCIError(f"engine returned an unparseable bestmove from FEN {board.fen()}")
+        try:
+            candidate = chess.Move.from_uci(move)
+        except ValueError:
+            candidate = chess.Move.null()
+        if candidate not in board.legal_moves:
+            raise FPGAUCIError(f"engine returned illegal move {move} from FEN {board.fen()}")
         if move != puzzle.moves[expected_index]:
             return False
         history.append(move)

@@ -28,8 +28,9 @@ from software.benchmarks.cli import (
     main,
     run_rate,
     run_sanity,
+    solve_puzzle,
 )
-from software.benchmarks.session import FPGAUCISession
+from software.benchmarks.session import FPGAUCISession, FPGAUCIError
 from software.engine.protocol import encode_fen
 
 
@@ -294,6 +295,31 @@ class RepetitionSanityTests(unittest.TestCase):
 
 
 class PuzzleAndRatingTests(unittest.TestCase):
+    def test_puzzle_illegal_move_reports_position_fen(self):
+        engine = MagicMock()
+        engine.wait_for.return_value.lines = ["bestmove e7e5"]
+        puzzle = Puzzle(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1",
+            ("e7e5", "e7e5"),
+            1200,
+        )
+
+        with self.assertRaisesRegex(
+            FPGAUCIError,
+            r"engine returned illegal move e7e5 from FEN "
+            r"rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 2",
+        ):
+            solve_puzzle(engine, puzzle, 100, 1.0)
+
+    def test_rate_cli_returns_error_for_illegal_engine_move(self):
+        error = FPGAUCIError("engine returned illegal move e7e5 from FEN test-fen")
+        stderr = io.StringIO()
+        with patch("software.benchmarks.cli.run_rate", side_effect=error), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(main(["rate"]), 2)
+
+        self.assertIn("illegal move e7e5 from FEN test-fen", stderr.getvalue())
+
     def test_rate_cli_forwards_an_explicit_port(self):
         with patch("software.benchmarks.cli.run_rate", return_value=0) as rate:
             self.assertEqual(main(["rate", "--port", "/dev/ttyUSB0"]), 0)
