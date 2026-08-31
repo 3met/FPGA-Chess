@@ -239,6 +239,27 @@ class TuningDataTests(unittest.TestCase):
 
 
 class TuningModelAndExportTests(unittest.TestCase):
+    @staticmethod
+    def make_engine_outputs(root: Path) -> dict[str, Path]:
+        """Create isolated sentinel files for every engine parameter output."""
+        paths = {
+            "pst": root / "pst.json",
+            "pst_hex": root / "pst.hex",
+            "material": root / "material.svh",
+            "nnue_feature": root / "nnue-feature.hex",
+            "nnue_output": root / "nnue-output.hex",
+            "nnue_output_bias": root / "nnue-output-bias.hex",
+            "nnue_bias": root / "nnue-bias.hex",
+        }
+        paths["pst"].write_text(json.dumps({
+            "material": {piece: 0 for piece in PIECE_ORDER},
+            "pst": {piece: [0] * 64 for piece in PIECE_ORDER},
+        }), encoding="utf-8")
+        for name, path in paths.items():
+            if name != "pst":
+                path.write_text(f"old {name}", encoding="utf-8")
+        return paths
+
     def test_nnue_piece_count_bucket_boundaries(self):
         counts = (2, 5, 6, 9, 10, 13, 14, 17, 18, 21, 22, 25, 26, 29, 30, 32)
         codes = torch.zeros((len(counts), 32), dtype=torch.int16)
@@ -522,13 +543,26 @@ class TuningModelAndExportTests(unittest.TestCase):
 
     def test_dry_run_does_not_change_engine_files(self):
         with tempfile.TemporaryDirectory() as directory:
-            run = Path(directory)
+            root = Path(directory)
+            run = root / "run"
+            run.mkdir()
             weights = engine_combined_cp().reshape(6, 64).tolist()
             atomic_json(run / "parameters.json", {"combined_pst": weights})
-            before = Path("hardware/rtl/chess_defs.sv").read_bytes()
-            with contextlib.redirect_stdout(io.StringIO()):
+            paths = self.make_engine_outputs(root)
+            before = {path: path.read_bytes() for path in paths.values()}
+            with (
+                mock.patch("tools.tuning.engine.PST_PATH", paths["pst"]),
+                mock.patch("tools.tuning.engine.GENERATED_PATHS", (paths["pst_hex"], paths["material"])),
+                mock.patch("tools.tuning.engine.NNUE_FEATURE_PATH", paths["nnue_feature"]),
+                mock.patch("tools.tuning.engine.NNUE_OUTPUT_PATH", paths["nnue_output"]),
+                mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_PATH", paths["nnue_output_bias"]),
+                mock.patch("tools.tuning.engine.NNUE_BIAS_PATH", paths["nnue_bias"]),
+                mock.patch("tools.tuning.engine.subprocess.run") as generate,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
                 commit_parameters(run, dry_run=True)
-            self.assertEqual(before, Path("hardware/rtl/chess_defs.sv").read_bytes())
+            self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
+            generate.assert_not_called()
 
     def test_failed_generation_rolls_back_canonical_parameters(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -536,28 +570,22 @@ class TuningModelAndExportTests(unittest.TestCase):
             run = root / "run"
             run.mkdir()
             atomic_json(run / "parameters.json", {"combined_pst": [[100.0] * 64 for _ in range(6)]})
-            pst_path = root / "pst.json"
-            hex_path = root / "pst.hex"
-            package_path = root / "pst.sv"
-            material_path = root / "material.svh"
-            pst_path.write_text(json.dumps({
-                "material": {piece: 0 for piece in PIECE_ORDER},
-                "pst": {piece: [0] * 64 for piece in PIECE_ORDER},
-            }), encoding="utf-8")
-            hex_path.write_text("old hex", encoding="utf-8")
-            package_path.write_text("old package", encoding="utf-8")
-            material_path.write_text("old material", encoding="utf-8")
-            before = {path: path.read_bytes() for path in (pst_path, hex_path, package_path, material_path)}
+            paths = self.make_engine_outputs(root)
+            before = {path: path.read_bytes() for path in paths.values()}
             failed = mock.Mock(returncode=1, stdout="generation failed")
             with (
-                mock.patch("tools.tuning.engine.PST_PATH", pst_path),
-                mock.patch("tools.tuning.engine.GENERATED_PATHS", (hex_path, package_path, material_path)),
+                mock.patch("tools.tuning.engine.PST_PATH", paths["pst"]),
+                mock.patch("tools.tuning.engine.GENERATED_PATHS", (paths["pst_hex"], paths["material"])),
+                mock.patch("tools.tuning.engine.NNUE_FEATURE_PATH", paths["nnue_feature"]),
+                mock.patch("tools.tuning.engine.NNUE_OUTPUT_PATH", paths["nnue_output"]),
+                mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_PATH", paths["nnue_output_bias"]),
+                mock.patch("tools.tuning.engine.NNUE_BIAS_PATH", paths["nnue_bias"]),
                 mock.patch("tools.tuning.engine.subprocess.run", return_value=failed),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 with self.assertRaises(RuntimeError):
                     commit_parameters(run)
-            self.assertEqual(before, {path: path.read_bytes() for path in before})
+            self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
 
 
 class TuningTrainingAndReportTests(unittest.TestCase):

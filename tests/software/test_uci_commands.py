@@ -41,6 +41,15 @@ class UCICommandParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError, "nodes must be nonnegative"):
             parse_go_command(["nodes", "-1"])
 
+    def test_unknown_tokens_are_ignored_and_infinite_waits_for_stop(self):
+        parsed = parse_go_command(["nonsense", "depth", "3"])
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
+        self.assertFalse(parsed.wait_for_stop)
+
+        parsed = parse_go_command(["infinite"])
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
+        self.assertTrue(parsed.wait_for_stop)
+
     def test_ponder_searches_to_max_depth_then_resumes_the_clock_limit(self):
         parsed = parse_go_command(["ponder", "wtime", "1000", "btime", "2000", "winc", "10"])
 

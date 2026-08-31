@@ -63,7 +63,7 @@ module tb_reset_control;
 
         pll_locked = 1'b1;
         wait_for_clocks_ready();
-        check(!pll_reset, "stable PLL lock releases downstream clocks");
+        check(clocks_ready && !pll_reset, "stable PLL lock releases downstream clocks");
 
         // Any synchronized loss fails closed and automatically restarts.
         pll_locked = 1'b0;

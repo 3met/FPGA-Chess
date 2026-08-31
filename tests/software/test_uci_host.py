@@ -9,7 +9,6 @@ from unittest import mock
 from software.engine.protocol import (
     AckResponse,
     BuildInfoResponse,
-    Command,
     DebugStatResponse,
     EndReason,
     EngineError,
@@ -110,19 +109,6 @@ class UCIHostSpecTests(unittest.TestCase):
         host._search_active = True
         lines = self.capture_lines(host, "isready")
         self.assertEqual(lines, ["readyok"])
-
-    def test_unknown_go_tokens_are_ignored(self):
-        parsed = self.make_host()._build_go_command(["nonsense", "depth", "3"])
-        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
-        self.assertFalse(parsed.is_perft)
-        self.assertFalse(parsed.wait_for_stop)
-        self.assertFalse(parsed.is_ponder)
-
-    def test_infinite_search_waits_for_stop(self):
-        parsed = self.make_host()._build_go_command(["infinite"])
-        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
-        self.assertFalse(parsed.is_perft)
-        self.assertTrue(parsed.wait_for_stop)
 
     def test_eval_score_uci_representation(self):
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(128), ("cp", 100))

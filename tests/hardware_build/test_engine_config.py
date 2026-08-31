@@ -97,7 +97,7 @@ class EngineConfigTests(unittest.TestCase):
             )
             with mock.patch("tools.hardware_build.engine_config.repo_path", side_effect=lambda value: engine_path if value == str(engine_path) else Path(value).resolve()), \
                     mock.patch("tools.hardware_build.engine_config.rel", side_effect=lambda value: str(value)):
-                with self.assertRaises(BuildError):
+                with self.assertRaisesRegex(BuildError, "threads must be an integer of at least 1"):
                     load_engine_config(str(engine_path))
 
     def test_history_reward_must_fit_rtl_arithmetic(self):

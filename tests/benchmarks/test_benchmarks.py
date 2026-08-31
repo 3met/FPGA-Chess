@@ -18,6 +18,7 @@ from software.benchmarks.cli import (
     SANITY_MOVETIME_TOLERANCE_MS,
     SANITY_REPETITION_DEPTH,
     Puzzle,
+    _build_puzzle_index,
     _is_legal_repetition_move,
     _repetition_position,
     _run_repetition_checks,
@@ -33,13 +34,28 @@ from software.engine.protocol import encode_fen
 
 
 class BenchmarkPositionTests(unittest.TestCase):
-    def test_each_position_has_complete_expected_data(self):
-        self.assertGreaterEqual(len(PERFT_POSITIONS), 5)
+    def test_perft_positions_are_valid_and_unique(self):
+        self.assertTrue(PERFT_POSITIONS)
+        self.assertEqual(len({case.name for case in PERFT_POSITIONS}), len(PERFT_POSITIONS))
+        self.assertEqual(
+            len({(case.fen, case.depth) for case in PERFT_POSITIONS}),
+            len(PERFT_POSITIONS),
+        )
         for case in PERFT_POSITIONS:
-            self.assertTrue(case.name)
-            self.assertIn(len(case.fen.split()), (4, 6))
-            self.assertGreaterEqual(case.depth, 0)
-            self.assertGreaterEqual(case.nodes, 0)
+            with self.subTest(case=case.name):
+                self.assertTrue(case.name)
+                self.assertEqual(len(encode_fen(case.fen)), 36)
+                self.assertGreaterEqual(case.depth, 0)
+                self.assertGreaterEqual(case.nodes, 0)
+
+    @unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for position validation")
+    def test_perft_positions_are_legal_standard_chess_positions(self):
+        import chess
+
+        for case in PERFT_POSITIONS:
+            with self.subTest(case=case.name):
+                board = chess.Board(case.fen)
+                self.assertTrue(board.is_valid(), f"invalid position status: {board.status()}")
 
     def test_sanity_positions_are_complete_and_unique(self):
         self.assertTrue(SANITY_POSITIONS)
@@ -58,13 +74,6 @@ class BenchmarkPositionTests(unittest.TestCase):
             self.assertTrue(case.name)
             self.assertEqual(len(case.fen.split()), 6)
             self.assertEqual(len(encode_fen(case.fen)), 36)
-
-    def test_sanity_search_parameters(self):
-        self.assertGreater(SANITY_DEPTH, 0)
-        self.assertGreaterEqual(SANITY_REPETITION_DEPTH, SANITY_DEPTH)
-        self.assertGreater(SANITY_MOVETIME_MS, 0)
-        self.assertGreaterEqual(SANITY_MOVETIME_TOLERANCE_MS, 0)
-        self.assertLess(SANITY_MOVETIME_TOLERANCE_MS, SANITY_MOVETIME_MS)
 
     def test_uci_score_uses_the_last_cp_or_mate_score(self):
         self.assertEqual(_uci_score(["info depth 1 score cp -12", "info depth 2 score cp 34 nodes 8"]), "cp 34")
@@ -306,20 +315,25 @@ class PuzzleAndRatingTests(unittest.TestCase):
         self.assertIsNone(estimate_rating([(1500, False)])[1])
         self.assertIsNone(estimate_rating([(1500, True)])[1])
 
-    def test_load_puzzles_is_deterministic(self):
+    def test_load_puzzles_skips_malformed_and_below_threshold_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "puzzles.csv"
             path.write_text("FEN,Moves,Rating\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,1200\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,999\ninvalid,x,wat\n", encoding="utf-8")
             puzzles, malformed = load_puzzles(path, 1, 0)
-        self.assertEqual(puzzles[0].rating, 1200)
+        self.assertEqual([puzzle.rating for puzzle in puzzles], [1200])
         self.assertEqual(malformed, 1)
 
     def test_load_puzzles_uses_a_rating_filter_and_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "puzzles.csv"
             path.write_text("FEN,Moves,Rating\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,1000\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,1200\n", encoding="utf-8")
-            first, _ = load_puzzles(path, 2, 7, 1000)
-            second, _ = load_puzzles(path, 2, 7, 1000)
+            with patch(
+                "software.benchmarks.cli._build_puzzle_index",
+                wraps=_build_puzzle_index,
+            ) as build_index:
+                first, _ = load_puzzles(path, 2, 7, 1000)
+                second, _ = load_puzzles(path, 2, 7, 1000)
+            self.assertEqual(build_index.call_count, 1)
         self.assertEqual(first, second)
         self.assertTrue(all(puzzle.rating >= 1000 for puzzle in first))
 

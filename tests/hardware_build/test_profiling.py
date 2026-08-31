@@ -199,7 +199,8 @@ class MetricRecordTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
-    def test_build_and_format_report(self):
+    def build_sample_report(self) -> dict:
+        """Build one internally consistent report shared by focused assertions."""
         configuration = {
             "fen": "8/8/8/8/8/8/8/K6k w - - 0 1",
             "threads": 1,
@@ -216,7 +217,11 @@ class ReportTests(unittest.TestCase):
             "end_reason": 1,
             "error": 0,
         }
-        report = build_profile_report(configuration, sample_metrics(), result_values, 0.5)
+        return build_profile_report(configuration, sample_metrics(), result_values, 0.5)
+
+    def test_report_calculates_timing_depth_and_tt_metrics(self):
+        report = self.build_sample_report()
+
         self.assertEqual(report["timing"]["cycles_per_node"], 2)
         self.assertEqual(report["timing"]["simulated_search_seconds"], 0.1)
         self.assertEqual(report["timing"]["search_cycles_per_wall_second"], 20)
@@ -226,7 +231,10 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["depth_breakdown"][1]["node_growth_vs_previous_depth"], 4)
         self.assertEqual(report["depth_breakdown"][0]["status"], "complete")
         self.assertEqual(report["depth_breakdown"][1]["status"], "partial")
-        text = format_profile_report(report)
+
+    def test_report_formats_timing_and_thread_lifecycle(self):
+        text = format_profile_report(self.build_sample_report())
+
         self.assertIn("FPGA Chess Engine Runtime Profile", text)
         self.assertIn("command/position setup=2 cycles", text)
         self.assertIn("Simulated FPGA search time: 100.00 ms", text)
@@ -243,6 +251,11 @@ class ReportTests(unittest.TestCase):
         self.assertIn("10 (100.0%)", text)
         self.assertNotRegex(text, r"\(\s+\d+\.\d+%")
         self.assertNotIn("runnable breakdown", text)
+
+    def test_report_formats_component_activity(self):
+        report = self.build_sample_report()
+        text = format_profile_report(report)
+
         self.assertIn("Searched move ranks", text)
         self.assertIn("Legal candidates", text)
         self.assertIn("Cutoff share", text)
@@ -253,6 +266,11 @@ class ReportTests(unittest.TestCase):
         self.assertIn("updates: 5 accepted", text)
         self.assertIn("update busy=5 cycles", text)
         self.assertEqual(report["components"]["nnue_evaluator"]["evaluations"], 1)
+
+    def test_report_formats_move_generator_and_pruning_metrics(self):
+        report = self.build_sample_report()
+        text = format_profile_report(report)
+
         self.assertIn("Move generator operations", text)
         self.assertIn("Direct validation", text)
         self.assertIn("Move generation work", text)

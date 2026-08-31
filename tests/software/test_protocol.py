@@ -42,6 +42,18 @@ class ProtocolEncodingTests(unittest.TestCase):
         self.assertEqual(payload[34], 0x01)
         self.assertEqual(payload[35], 12)
 
+    def test_malformed_fen_fields_are_rejected_before_transmission(self):
+        cases = (
+            ("8/8/8/8/8/8/8/8 x - - 0 1", "turn"),
+            ("8/8/8/8/8/8/8/8 w KK - 0 1", "castling rights"),
+            ("8/8/8/8/8/8/8/8 w - e4 0 1", "en passant square"),
+            ("8/8/8/8/8/8/8/8 w - - 128 1", "Halfmove clock"),
+        )
+        for fen, message in cases:
+            with self.subTest(fen=fen):
+                with self.assertRaisesRegex(ProtocolError, message):
+                    encode_fen(fen)
+
     def test_move_encoding_matches_rtl_layout(self):
         self.assertEqual(cmd_make_move("e2e4"), bytes.fromhex("02700c"))
         self.assertEqual(encode_move(parse_uci_move("e7e8n")), bytes.fromhex("f134"))

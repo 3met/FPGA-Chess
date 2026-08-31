@@ -132,7 +132,8 @@ module tb_rx_decode;
 
         send_bad_stop(8'h44);
         wait (error);
-        check(error, "framing error latches");
+        repeat (8) @(posedge clk);
+        check(error, "framing error remains latched until BREAK");
 
         clear_remote_reset_seen();
         uart_rx = 1'b0;
@@ -156,13 +157,13 @@ module tb_rx_decode;
         send_uart_byte(8'h06);
         send_uart_byte(8'h07);
         wait (error);
-        check(error, "RX overflow latches error");
         pop_byte(8'h00);
         pop_byte(8'h01);
         pop_byte(8'h02);
         pop_byte(8'h03);
         repeat (8) @(posedge clk);
-        check(!rx_stream_valid, "RX overflow preserves only the accepted FIFO prefix");
+        check(error && !rx_stream_valid,
+            "RX overflow remains latched and preserves only the accepted FIFO prefix");
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);

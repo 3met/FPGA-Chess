@@ -103,8 +103,15 @@ def run_modelsim_top(
     fail_count = parse_fail_count(transcript)
     pass_count = parse_pass_count(transcript)
     has_completion_counts = pass_count is not None and fail_count is not None
+    has_passing_checks = pass_count is not None and pass_count > 0
     timed_out = code == 124
-    ok = code == 0 and not has_sim_errors(transcript) and has_completion_counts and fail_count == 0
+    ok = (
+        code == 0
+        and not has_sim_errors(transcript)
+        and has_completion_counts
+        and has_passing_checks
+        and fail_count == 0
+    )
     return {
         "name": name,
         "ok": ok,
@@ -112,7 +119,10 @@ def run_modelsim_top(
         "log": run_log if run_log.exists() else run_dir / "vsim.stdout.log",
         "message": "passed" if ok else (
             f"timed out after {timeout_seconds:.0f}s" if timed_out
-            else ("missing completion counts" if not has_completion_counts else "failed")
+            else (
+                "missing completion counts" if not has_completion_counts
+                else ("no passing checks" if not has_passing_checks else "failed")
+            )
         ),
         "pass_count": pass_count,
         "fail_count": fail_count,

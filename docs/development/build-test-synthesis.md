@@ -52,6 +52,6 @@ Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks th
 
 To add an RTL test, add or reuse the smallest complete source set, register the testbench and top module in the manifest, and run it by name. Python tests belong under the matching subsystem directory in `tests/`.
 
-Testbenches should use deterministic directed scenarios tied to a documented module contract, drive synchronous inputs away from the DUT sampling edge, and keep setup traffic distinct from behavioral assertions. Repeated observations of one invariant should produce one summarized result, while protocol waits must remain covered by a bench-level timeout. Every registered RTL bench prints `Pass Count` and `Fail Count` because the test runner requires both completion markers.
+Testbenches should use deterministic directed scenarios tied to a documented module contract, drive synchronous inputs away from the DUT sampling edge, and keep setup traffic distinct from behavioral assertions. Repeated observations of one invariant should produce one summarized result, while protocol waits must remain covered by a bench-level timeout. Every registered RTL bench prints a positive `Pass Count` and a zero `Fail Count` because the test runner requires both completion markers and rejects benches with no passing checks.
 
 To add a board target, define its source set, top module, constraints, device, and vendor settings in the manifest. Keep vendor-specific IP in target source sets or behind stable wrappers so the portable RTL remains usable by Intel/Altera and Xilinx flows.

@@ -81,7 +81,7 @@ class SerialPortDetectionTests(unittest.TestCase):
 
         self.assertEqual(selected, "/dev/ttyUSB0")
         self.assertEqual(listing.call_count, 2)
-        sleep.assert_called_once()
+        sleep.assert_called_once_with(0.0)
 
 
 class SerialBreakTests(unittest.TestCase):
