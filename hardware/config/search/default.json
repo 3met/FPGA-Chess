@@ -20,6 +20,11 @@
     "margin_per_depth": 128,
     "maximum_depth": 5
   },
+  "futility": {
+    "base_margin": 192,
+    "margin_per_depth": 192,
+    "maximum_depth": 3
+  },
   "qsearch_delta_pruning": {
     "margin": 384
   },

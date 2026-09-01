@@ -1322,6 +1322,33 @@ module tb_search_controller;
         check(dut.rfp_prunes(EvalScore'(92), EvalScore'(-100), 5'd1)
                 && !dut.rfp_prunes(EvalScore'(91), EvalScore'(-100), 5'd1),
             "RFP returns static evaluation exactly at the configured margin boundary");
+        check(dut.futility_prunes(EvalScore'(-768), EvalScore'(0), 5'd3)
+                && !dut.futility_prunes(EvalScore'(-767), EvalScore'(0), 5'd3),
+            "ordinary futility includes the exact 150cp plus 150cp-per-depth boundary");
+        check(dut.futility_move_eligible(
+                PlyIndex'(1), 5'd3, 1'b0, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0),
+            "ordinary futility includes a later quiet at its maximum predicted depth");
+        check(!dut.futility_move_eligible(
+                PlyIndex'(1), 5'd4, 1'b0, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0)
+                && !dut.futility_move_eligible(
+                    PlyIndex'(0), 5'd3, 1'b0, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0),
+            "ordinary futility uses predicted depth and excludes root moves");
+        check(!dut.futility_move_eligible(
+                PlyIndex'(1), 5'd3, 1'b1, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0)
+                && !dut.futility_move_eligible(
+                    PlyIndex'(1), 5'd3, 1'b0, 1'b1, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0)
+                && !dut.futility_move_eligible(
+                    PlyIndex'(1), 5'd3, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, 1'b1, 1'b0),
+            "ordinary futility excludes checked nodes, checking moves, and noisy moves");
+        check(!dut.futility_move_eligible(
+                PlyIndex'(1), 5'd3, 1'b0, 1'b0, 1'b1, 1'b1, 1'b0, 1'b1, 1'b0)
+                && !dut.futility_move_eligible(
+                    PlyIndex'(1), 5'd3, 1'b0, 1'b0, 1'b1, 1'b0, 1'b1, 1'b1, 1'b0)
+                && !dut.futility_move_eligible(
+                    PlyIndex'(1), 5'd3, 1'b0, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0)
+                && !dut.futility_move_eligible(
+                    PlyIndex'(1), 5'd3, 1'b0, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, 1'b1),
+            "ordinary futility excludes promotions, direct moves, first lines, and re-searches");
         check(dut.qdelta_prunes(
                 EvalScore'(-128), EvalScore'(384), PAWN,
                 1'b0, 1'b0, 1'b0, 1'b1, 1'b0),

@@ -75,6 +75,7 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "algorithm.main_board_issues": 1,
         "algorithm.qsearch_board_issues": 1,
         "algorithm.rfp_cutoffs": 3,
+        "algorithm.futility_pruned_moves": 2,
         "algorithm.qdelta_pruned_moves": 4,
         "tt.lookups": 2,
         "tt.hits": 1,
@@ -294,6 +295,7 @@ class ReportTests(unittest.TestCase):
         )
         self.assertIn("Main-search move pushes", text)
         self.assertIn("Reverse futility pruning cutoffs: 3", text)
+        self.assertIn("Ordinary futility-pruned moves: 2", text)
         self.assertEqual(report["algorithm"]["rfp_cutoffs"], 3)
         self.assertLess(text.index("Good noisy high"), text.index("Bad noisy low"))
 

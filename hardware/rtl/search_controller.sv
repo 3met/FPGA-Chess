@@ -29,6 +29,10 @@ module search_controller #(
     parameter int RFP_BASE_MARGIN = 64,
     parameter int RFP_MARGIN_PER_DEPTH = 128,
     parameter int RFP_MAXIMUM_DEPTH = 5,
+    // Scores use 1/128-pawn units, so 192 is a 150-centipawn margin.
+    parameter int FUTILITY_BASE_MARGIN = 192,
+    parameter int FUTILITY_MARGIN_PER_DEPTH = 192,
+    parameter int FUTILITY_MAXIMUM_DEPTH = 3,
     // Scores use 1/128-pawn units, so 384 is a 300-centipawn margin.
     parameter int QDELTA_MARGIN = 384,
     parameter int MOVE_OVERHEAD_MS = 5,
@@ -119,6 +123,12 @@ module search_controller #(
                 || RFP_MARGIN_PER_DEPTH < 0 || RFP_MARGIN_PER_DEPTH > SEARCH_INF_VALUE
                 || RFP_MAXIMUM_DEPTH < 1 || RFP_MAXIMUM_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "RFP parameters must fit the score range at a positive supported depth");
+        if (FUTILITY_BASE_MARGIN < 0 || FUTILITY_BASE_MARGIN > SEARCH_INF_VALUE
+                || FUTILITY_MARGIN_PER_DEPTH < 0
+                || FUTILITY_MARGIN_PER_DEPTH > SEARCH_INF_VALUE
+                || FUTILITY_MAXIMUM_DEPTH < 1
+                || FUTILITY_MAXIMUM_DEPTH >= SEARCH_STACK_DEPTH)
+            $fatal(1, "futility parameters must fit the score range and supported child depth");
         if (QDELTA_MARGIN < 0 || QDELTA_MARGIN > SEARCH_INF_VALUE)
             $fatal(1, "QDELTA_MARGIN must fit the positive score range");
         if (INCREMENT_DENOMINATOR < 1 || REMAINING_TIME_DENOMINATOR < 1)
@@ -169,6 +179,7 @@ module search_controller #(
         logic tt_checked;
         logic has_tt_move;
         logic stand_pat_done;
+        logic static_eval_valid;
         logic node_in_check;
         logic scout_search;
         // Preserve the node's entry window independently of later alpha raises.
@@ -356,6 +367,8 @@ module search_controller #(
     SearchDepth search_pending_child_depth[0:SEARCH_THREAD_COUNT-1];
     logic search_eval_is_stand_pat[0:SEARCH_THREAD_COUNT-1];
     logic search_eval_is_rfp[0:SEARCH_THREAD_COUNT-1];
+    logic search_eval_is_futility[0:SEARCH_THREAD_COUNT-1];
+    logic search_futility_eval_pending[0:SEARCH_THREAD_COUNT-1];
     logic terminal_result_valid_pipe;
     ThreadID terminal_result_thread_pipe;
     PlyIndex terminal_result_ply_pipe;
@@ -365,6 +378,7 @@ module search_controller #(
     logic profile_terminal_event;
     logic [1:0] profile_terminal_kind;
     logic profile_rfp_cutoff_event;
+    logic profile_futility_prune_event;
     logic profile_qdelta_prune_event;
     logic profile_beta_cutoff_event;
     ThreadID profile_beta_cutoff_thread;
@@ -1092,6 +1106,45 @@ module search_controller #(
             && beta < MATE_THRESHOLD;
     endfunction : rfp_node_eligible
 
+    // Ordinary-node futility uses the depth that the move would actually
+    // receive after LMR, rather than the parent's raw remaining depth.
+    function automatic logic futility_move_eligible(
+        input PlyIndex ply,
+        input SearchDepth predicted_depth,
+        input logic in_check,
+        input logic gives_check,
+        input logic quiet,
+        input logic promotion,
+        input logic direct_move,
+        input logic has_searched_move,
+        input logic is_research
+    );
+        return ply != PlyIndex'(0)
+            && int'(predicted_depth) <= FUTILITY_MAXIMUM_DEPTH
+            && !in_check
+            && !gives_check
+            && quiet
+            && !promotion
+            && !direct_move
+            && has_searched_move
+            && !is_research;
+    endfunction : futility_move_eligible
+
+    // Widen both scores before adding the configured depth-scaled margin.
+    function automatic logic futility_prunes(
+        input EvalScore static_eval,
+        input EvalScore alpha,
+        input SearchDepth predicted_depth
+    );
+        automatic logic signed [31:0] static_eval_wide =
+            $signed({{16{static_eval[15]}}, static_eval});
+        automatic logic signed [31:0] alpha_wide =
+            $signed({{16{alpha[15]}}, alpha});
+        automatic logic signed [31:0] margin = FUTILITY_BASE_MARGIN
+            + FUTILITY_MARGIN_PER_DEPTH * int'(predicted_depth);
+        return static_eval_wide + margin <= alpha_wide;
+    endfunction : futility_prunes
+
     // Prune a non-checking qsearch capture whose optimistic material gain
     // cannot raise alpha. Callers separately restrict this to qsearch nodes.
     function automatic logic qdelta_prunes(
@@ -1202,6 +1255,7 @@ module search_controller #(
         entry.tt_checked = 1'b0;
         entry.has_tt_move = 1'b0;
         entry.stand_pat_done = 1'b0;
+        entry.static_eval_valid = 1'b0;
         entry.node_in_check = 1'b0;
         entry.scout_search = 1'b0;
         entry.zero_window_node = 1'b0;
@@ -1548,8 +1602,9 @@ module search_controller #(
             && !search_thread_tt_lookup_ready(thread_index)
             && (search_thread_rfp_ready(thread_index)
                 || (!search_thread_null_ready(thread_index)
-                    && ((search_in_qsearch(ThreadID'(thread_index))
-                    && !search_stack_top[thread_index].stand_pat_done)
+                    && (search_futility_eval_pending[thread_index]
+                        || (search_in_qsearch(ThreadID'(thread_index))
+                            && !search_stack_top[thread_index].stand_pat_done)
                         || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1)));
     endfunction : search_thread_eval_ready
 
@@ -1625,6 +1680,12 @@ module search_controller #(
             || move_state == MOVE_ORDER_BAD_NOISY;
     endfunction : move_state_uses_pop
 
+    function automatic logic is_promotion_move(input FullBoard board, input Move move);
+        automatic Tile source_tile = board.tiles[move.from_pos];
+        return source_tile.piece_type == PAWN
+            && (move.to_pos[5:3] == BoardRank'(0) || move.to_pos[5:3] == BoardRank'(7));
+    endfunction : is_promotion_move
+
     // History applies only to ordinary non-captures and castling. Promotions
     // and the empty-destination pawn diagonal used by en passant are noisy.
     function automatic logic is_quiet_move(input FullBoard board, input Move move);
@@ -1635,8 +1696,7 @@ module search_controller #(
 
         source_tile = board.tiles[move.from_pos];
         destination_tile = board.tiles[move.to_pos];
-        pawn_promotion = source_tile.piece_type == PAWN
-            && (move.to_pos[5:3] == BoardRank'(0) || move.to_pos[5:3] == BoardRank'(7));
+        pawn_promotion = is_promotion_move(board, move);
         pawn_diagonal = source_tile.piece_type == PAWN
             && move.from_pos[2:0] != move.to_pos[2:0];
         return destination_tile.piece_type == NULL_PIECE && !pawn_promotion && !pawn_diagonal;
@@ -2349,6 +2409,7 @@ module search_controller #(
             profile_terminal_event <= 1'b0;
             profile_terminal_kind <= 2'd0;
             profile_rfp_cutoff_event <= 1'b0;
+            profile_futility_prune_event <= 1'b0;
             profile_qdelta_prune_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
             profile_beta_cutoff_thread <= ThreadID'(0);
@@ -2402,6 +2463,8 @@ module search_controller #(
                 search_pvs_research[tid] <= 1'b0;
                 search_eval_is_stand_pat[tid] <= 1'b0;
                 search_eval_is_rfp[tid] <= 1'b0;
+                search_eval_is_futility[tid] <= 1'b0;
+                search_futility_eval_pending[tid] <= 1'b0;
                 nnue_plan_pending[tid] <= 1'b0;
                 nnue_plan_inflight[tid] <= 1'b0;
                 nnue_plan_kind[tid] <= NNUE_PLAN_REBUILD;
@@ -2448,6 +2511,7 @@ module search_controller #(
 `ifdef FPGA_CHESS_PROFILE
             profile_terminal_event <= 1'b0;
             profile_rfp_cutoff_event <= 1'b0;
+            profile_futility_prune_event <= 1'b0;
             profile_qdelta_prune_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
 `endif
@@ -2730,6 +2794,8 @@ module search_controller #(
                                     search_pvs_research[search_thread_id] <= 1'b0;
                                     search_eval_is_stand_pat[search_thread_id] <= 1'b0;
                                     search_eval_is_rfp[search_thread_id] <= 1'b0;
+                                    search_eval_is_futility[search_thread_id] <= 1'b0;
+                                    search_futility_eval_pending[search_thread_id] <= 1'b0;
                                     tt_age <= tt_age + TTAge'(1);
                                     if (req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME) begin
                                         search_budget_ms <= req.time_limit;
@@ -3057,6 +3123,8 @@ module search_controller #(
                         search_return_ponder_move[tid] <= NULL_MOVE;
                         search_eval_is_stand_pat[tid] <= 1'b0;
                         search_eval_is_rfp[tid] <= 1'b0;
+                        search_eval_is_futility[tid] <= 1'b0;
+                        search_futility_eval_pending[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
                         search_tt_validation_pending[tid] <= 1'b0;
                         search_tt_validation_passed[tid] <= 1'b0;
@@ -3387,6 +3455,8 @@ module search_controller #(
                                 search_pvs_research[tid] <= 1'b0;
                                 search_eval_is_stand_pat[tid] <= 1'b0;
                                 search_eval_is_rfp[tid] <= 1'b0;
+                                search_eval_is_futility[tid] <= 1'b0;
+                                search_futility_eval_pending[tid] <= 1'b0;
                                 search_return_ponder_move[tid] <= NULL_MOVE;
                                 search_stack_top[tid] <= empty_search_stack_entry();
                                 search_tt_validation_pending[tid] <= 1'b0;
@@ -3525,12 +3595,30 @@ module search_controller #(
                             automatic PlyIndex child_ply;
                             automatic logic reverse_complete;
                             automatic logic null_push_complete;
+                            automatic logic futility_eligible;
 
                             board_thread_id = search_board_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1];
                             reverse_complete = search_board_op_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1] == BOARD_REVERSE_MOVE_OP;
                             null_push_complete = search_board_op_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1] == BOARD_PUSH_NULL_OP;
                             board_ply = search_board_ply_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1];
                             child_ply = board_ply + PlyIndex'(1);
+                            futility_eligible = futility_move_eligible(
+                                search_ply[board_thread_id],
+                                search_pending_child_depth[board_thread_id],
+                                search_board_in_check[board_thread_id],
+                                board_update_side_in_check,
+                                is_quiet_move(
+                                    search_board[board_thread_id],
+                                    search_pending_move[board_thread_id]),
+                                is_promotion_move(
+                                    search_board[board_thread_id],
+                                    search_pending_move[board_thread_id]),
+                                search_stack_top[board_thread_id].has_tt_move
+                                    && search_pending_move[board_thread_id]
+                                        == search_stack_top[board_thread_id].tt_move,
+                                search_stack_top[board_thread_id].has_legal,
+                                search_pvs_research[board_thread_id]
+                            );
 `ifndef SYNTHESIS
                             search_board_result_thread_id <= board_thread_id;
                             search_board_result_valid <= 1'b1;
@@ -3638,6 +3726,7 @@ module search_controller #(
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
                                 search_stack_top[board_thread_id].stand_pat_done
                                     <= board_update_side_in_check;
+                                search_stack_top[board_thread_id].static_eval_valid <= 1'b0;
                                 search_stack_top[board_thread_id].node_in_check
                                     <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].scout_search <= 1'b1;
@@ -3650,6 +3739,8 @@ module search_controller #(
                                 search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_eval_is_rfp[board_thread_id] <= 1'b0;
+                                search_eval_is_futility[board_thread_id] <= 1'b0;
+                                search_futility_eval_pending[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
                                 // Null moves preserve the thread's live
@@ -3711,6 +3802,27 @@ module search_controller #(
 `endif
                                 // The speculative pipeline is stateless, so a
                                 // pruned legal move needs no board reversal.
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                            end else if (futility_eligible
+                                    && !search_stack_top[board_thread_id].static_eval_valid) begin
+                                // Retain this already-proved legal candidate and
+                                // evaluate the unchanged parent before retrying it.
+                                search_futility_eval_pending[board_thread_id] <= 1'b1;
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                            end else if (futility_eligible && futility_prunes(
+                                    search_stack_top[board_thread_id].static_eval,
+                                    search_stack_top[board_thread_id].alpha,
+                                    search_pending_child_depth[board_thread_id]
+                                )) begin
+`ifdef FPGA_CHESS_PROFILE
+                                profile_futility_prune_event <= 1'b1;
+`endif
+                                // Count a pruned legal move for subsequent LMR
+                                // ordinals without allowing it to establish the
+                                // node's first searched legal line.
+                                if (search_stack_top[board_thread_id].legal_move_count != 8'hff)
+                                    search_stack_top[board_thread_id].legal_move_count
+                                        <= search_stack_top[board_thread_id].legal_move_count + 8'd1;
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else begin
                                 automatic Tile delta_mover =
@@ -3860,6 +3972,7 @@ module search_controller #(
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
                                 search_stack_top[board_thread_id].stand_pat_done
                                     <= board_update_side_in_check;
+                                search_stack_top[board_thread_id].static_eval_valid <= 1'b0;
                                 search_stack_top[board_thread_id].node_in_check
                                     <= board_update_side_in_check;
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
@@ -3869,6 +3982,8 @@ module search_controller #(
                                 search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_eval_is_rfp[board_thread_id] <= 1'b0;
+                                search_eval_is_futility[board_thread_id] <= 1'b0;
+                                search_futility_eval_pending[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_REPETITION_WAIT;
@@ -3981,11 +4096,13 @@ module search_controller #(
                             nnue_state_valid[eval_thread_id] <= 1'b1;
                             search_eval_is_stand_pat[eval_thread_id] <= 1'b0;
                             search_eval_is_rfp[eval_thread_id] <= 1'b0;
+                            search_eval_is_futility[eval_thread_id] <= 1'b0;
 
                             if (search_eval_is_stand_pat[eval_thread_id]) begin
                                 search_stack_top[eval_thread_id].stand_pat_done <= 1'b1;
                                 search_stack_top[eval_thread_id].best_score <= eval_score;
                                 search_stack_top[eval_thread_id].static_eval <= eval_score;
+                                search_stack_top[eval_thread_id].static_eval_valid <= 1'b1;
                                 if (eval_score > search_stack_top[eval_thread_id].alpha) begin
                                     search_stack_top[eval_thread_id].alpha <= eval_score;
                                     search_stack_top[eval_thread_id].unit_window
@@ -4014,6 +4131,8 @@ module search_controller #(
                                 // A failed margin test resumes normal pruning and
                                 // move search without evaluating this node again.
                                 search_stack_top[eval_thread_id].rfp_checked <= 1'b1;
+                                search_stack_top[eval_thread_id].static_eval <= eval_score;
+                                search_stack_top[eval_thread_id].static_eval_valid <= 1'b1;
                                 if (rfp_prunes(
                                         eval_score,
                                         search_stack_top[eval_thread_id].beta,
@@ -4039,6 +4158,14 @@ module search_controller #(
                                 end else begin
                                     search_thread_phase[eval_thread_id] <= SEARCH_PHASE_READY;
                                 end
+                            end else if (search_eval_is_futility[eval_thread_id]) begin
+                                // Retry the retained legal candidate after its
+                                // parent receives the one static evaluation this
+                                // node may need for all later quiets.
+                                search_stack_top[eval_thread_id].static_eval <= eval_score;
+                                search_stack_top[eval_thread_id].static_eval_valid <= 1'b1;
+                                search_futility_eval_pending[eval_thread_id] <= 1'b0;
+                                search_thread_phase[eval_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
                                 search_return_score[eval_thread_id] <= eval_score;
                                 search_return_valid[eval_thread_id] <= 1'b1;
@@ -4391,6 +4518,8 @@ module search_controller #(
                                 && !search_stack_top[search_eval_issue_thread].stand_pat_done;
                             search_eval_is_rfp[search_eval_issue_thread]
                                 <= search_thread_rfp_ready(search_eval_issue_thread);
+                            search_eval_is_futility[search_eval_issue_thread]
+                                <= search_futility_eval_pending[search_eval_issue_thread];
                             search_dispatch.eval <= search_thread_after(search_eval_issue_thread);
                             nnue_build_busy <= 1'b1;
                             nnue_build_draining

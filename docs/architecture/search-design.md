@@ -8,13 +8,15 @@ Thread count, stack depth, search policy, and optional instrumentation are build
 
 ## Search Algorithm
 
-Search combines iterative deepening, aspiration windows, principal variation search (PVS), reverse futility pruning (RFP), null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
+Search combines iterative deepening, aspiration windows, principal variation search (PVS), reverse and ordinary futility pruning, null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
 
 Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A fail-low or fail-high widens the window around the fail-soft score and repeats the depth.
 
 If a time or node budget expires during an incomplete pass, the active root child is discarded because its score is not complete. The primary thread searches the preceding iteration's principal-variation move first. With a completed iteration available, a partial pass may replace it only after at least two root children have fully resolved, including any PVS or LMR recovery search; incomplete losing-mate results are never promoted. A legal root move from a partial first iteration may be used when no completed result exists. Completed results may include the second principal-variation move for UCI pondering.
 
 PVS searches the first legal move with the full window and later moves with a scout window, repeating a scout at full window when needed. LMR may first search eligible later moves at reduced depth; an alpha-raising reduced result is verified at full depth before it can affect the parent. The reduction policy is parameterized and computed without changing the search semantics.
+
+Ordinary futility pruning applies only to non-checking, non-root main-search nodes after one legal move has completed. It may skip a quiet non-promotion that is neither the direct ordering move nor a checking move when the static evaluation plus the configured margin cannot raise alpha. The margin and maximum depth use the move's predicted child depth after LMR; the default policy is 150 centipawns plus 150 centipawns per predicted ply through depth three. A node obtains and retains a static evaluation lazily when its first otherwise-eligible quiet reaches this test. Pruned legal moves still advance the legal-move ordinal used by later LMR decisions.
 
 RFP evaluates eligible non-checking main-search nodes after the TT probe and before null-move pruning. At a shallow zero-window node with a finite non-mate beta bound, it returns the fail-soft static evaluation when the configured depth-scaled margin proves a beta cutoff.
 

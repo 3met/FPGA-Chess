@@ -60,6 +60,10 @@ class EngineBuildConfigTests(unittest.TestCase):
                 generated_config,
             )
             self.assertIn(
+                f"ENGINE_FUTILITY_MAXIMUM_DEPTH = {resolved['search']['futility_maximum_depth']}",
+                generated_config,
+            )
+            self.assertIn(
                 f"ENGINE_QDELTA_MARGIN = {resolved['search']['qdelta_margin']}",
                 generated_config,
             )

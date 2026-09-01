@@ -42,6 +42,9 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
         "RFP_BASE_MARGIN": search["rfp_base_margin"],
         "RFP_MARGIN_PER_DEPTH": search["rfp_margin_per_depth"],
         "RFP_MAXIMUM_DEPTH": search["rfp_maximum_depth"],
+        "FUTILITY_BASE_MARGIN": search["futility_base_margin"],
+        "FUTILITY_MARGIN_PER_DEPTH": search["futility_margin_per_depth"],
+        "FUTILITY_MAXIMUM_DEPTH": search["futility_maximum_depth"],
         "QDELTA_MARGIN": search["qdelta_margin"],
         "MOVE_OVERHEAD_MS": search["move_overhead_ms"],
         "MINIMUM_SEARCH_MS": search["minimum_search_ms"],
@@ -143,7 +146,7 @@ def _validate_search(search: dict, path: Path) -> dict:
     _require_keys(
         search,
         {
-            "aspiration", "lmr", "null_move", "rfp", "qsearch_delta_pruning",
+            "aspiration", "lmr", "null_move", "rfp", "futility", "qsearch_delta_pruning",
             "time_management", "history", "transposition_table",
         },
         context,
@@ -152,6 +155,7 @@ def _validate_search(search: dict, path: Path) -> dict:
     lmr = _object(search, "lmr", context)
     null_move = _object(search, "null_move", context)
     rfp = _object(search, "rfp", context)
+    futility = _object(search, "futility", context)
     qdelta = _object(search, "qsearch_delta_pruning", context)
     timing = _object(search, "time_management", context)
     history = _object(search, "history", context)
@@ -167,6 +171,11 @@ def _validate_search(search: dict, path: Path) -> dict:
         rfp,
         {"base_margin", "margin_per_depth", "maximum_depth"},
         f"{context}.rfp",
+    )
+    _require_keys(
+        futility,
+        {"base_margin", "margin_per_depth", "maximum_depth"},
+        f"{context}.futility",
     )
     _require_keys(qdelta, {"margin"}, f"{context}.qsearch_delta_pruning")
     _require_keys(
@@ -235,6 +244,15 @@ def _validate_search(search: dict, path: Path) -> dict:
         "rfp_base_margin": _integer(rfp, "base_margin", f"{context}.rfp", 0, 32767),
         "rfp_margin_per_depth": _integer(rfp, "margin_per_depth", f"{context}.rfp", 0, 32767),
         "rfp_maximum_depth": _integer(rfp, "maximum_depth", f"{context}.rfp", 1),
+        "futility_base_margin": _integer(
+            futility, "base_margin", f"{context}.futility", 0, 32767
+        ),
+        "futility_margin_per_depth": _integer(
+            futility, "margin_per_depth", f"{context}.futility", 0, 32767
+        ),
+        "futility_maximum_depth": _integer(
+            futility, "maximum_depth", f"{context}.futility", 1
+        ),
         "qdelta_margin": _integer(
             qdelta, "margin", f"{context}.qsearch_delta_pruning", 0, 32767
         ),
@@ -287,6 +305,10 @@ def load_engine_config(value: str) -> dict:
     if search["rfp_maximum_depth"] > resolved["stack_depth"]:
         raise BuildError(
             f"{rel(engine_path)} RFP maximum depth must not exceed the engine stack depth"
+        )
+    if search["futility_maximum_depth"] >= resolved["stack_depth"]:
+        raise BuildError(
+            f"{rel(engine_path)} futility maximum predicted depth must be smaller than the engine stack depth"
         )
     resolved["digest"] = engine_config_digest(resolved)
     return resolved

@@ -58,7 +58,7 @@ A main-search node follows this logical order:
 1. Check terminal draw state and probe the TT.
 2. Try eligible RFP and null-move pruning operations, then direct ordering moves.
 3. Generate and search noisy moves.
-4. Generate and search quiet moves.
+4. Generate quiet moves and futility-prune eligible late quiets before committing their children.
 5. Search deferred unfavorable captures.
 6. Return checkmate, stalemate, or the completed alpha/beta result.
 

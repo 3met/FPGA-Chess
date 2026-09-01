@@ -46,6 +46,9 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(config["search"]["rfp_base_margin"], search["rfp"]["base_margin"])
         self.assertEqual(config["search"]["rfp_margin_per_depth"], search["rfp"]["margin_per_depth"])
         self.assertEqual(config["search"]["rfp_maximum_depth"], search["rfp"]["maximum_depth"])
+        self.assertEqual(config["search"]["futility_base_margin"], search["futility"]["base_margin"])
+        self.assertEqual(config["search"]["futility_margin_per_depth"], search["futility"]["margin_per_depth"])
+        self.assertEqual(config["search"]["futility_maximum_depth"], search["futility"]["maximum_depth"])
         self.assertEqual(
             config["search"]["qdelta_margin"],
             search["qsearch_delta_pruning"]["margin"],
@@ -54,6 +57,9 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(rtl_parameters["RFP_BASE_MARGIN"], search["rfp"]["base_margin"])
         self.assertEqual(rtl_parameters["RFP_MARGIN_PER_DEPTH"], search["rfp"]["margin_per_depth"])
         self.assertEqual(rtl_parameters["RFP_MAXIMUM_DEPTH"], search["rfp"]["maximum_depth"])
+        self.assertEqual(rtl_parameters["FUTILITY_BASE_MARGIN"], search["futility"]["base_margin"])
+        self.assertEqual(rtl_parameters["FUTILITY_MARGIN_PER_DEPTH"], search["futility"]["margin_per_depth"])
+        self.assertEqual(rtl_parameters["FUTILITY_MAXIMUM_DEPTH"], search["futility"]["maximum_depth"])
         self.assertEqual(
             rtl_parameters["QDELTA_MARGIN"],
             search["qsearch_delta_pruning"]["margin"],
@@ -128,10 +134,25 @@ class EngineConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "between 0 and 32767"):
             self.load_temporary_config({"qsearch_delta_pruning": {"margin": 32768}})
 
+    def test_futility_margins_must_fit_the_evaluation_range(self):
+        with self.assertRaisesRegex(BuildError, "between 0 and 32767"):
+            self.load_temporary_config({"futility": {"base_margin": 32768}})
+
+    def test_futility_maximum_depth_must_be_positive(self):
+        with self.assertRaisesRegex(BuildError, "at least 1"):
+            self.load_temporary_config({"futility": {"maximum_depth": 0}})
+
     def test_rfp_maximum_depth_must_fit_the_engine_stack(self):
         with self.assertRaisesRegex(BuildError, "must not exceed the engine stack depth"):
             self.load_temporary_config(
                 {"rfp": {"maximum_depth": 5}},
+                {"engine": {"stack_depth": 4}},
+            )
+
+    def test_futility_maximum_depth_must_fit_the_engine_stack(self):
+        with self.assertRaisesRegex(BuildError, "must be smaller than the engine stack depth"):
+            self.load_temporary_config(
+                {"rfp": {"maximum_depth": 4}, "futility": {"maximum_depth": 4}},
                 {"engine": {"stack_depth": 4}},
             )
 

@@ -29,6 +29,9 @@ module tb_engine_profile #(
     parameter int RFP_BASE_MARGIN = 64,
     parameter int RFP_MARGIN_PER_DEPTH = 128,
     parameter int RFP_MAXIMUM_DEPTH = 5,
+    parameter int FUTILITY_BASE_MARGIN = 192,
+    parameter int FUTILITY_MARGIN_PER_DEPTH = 192,
+    parameter int FUTILITY_MAXIMUM_DEPTH = 3,
     parameter int QDELTA_MARGIN = 384,
     parameter int MOVE_OVERHEAD_MS = 5,
     parameter int MINIMUM_SEARCH_MS = 5,
@@ -151,6 +154,9 @@ module tb_engine_profile #(
         .RFP_BASE_MARGIN(RFP_BASE_MARGIN),
         .RFP_MARGIN_PER_DEPTH(RFP_MARGIN_PER_DEPTH),
         .RFP_MAXIMUM_DEPTH(RFP_MAXIMUM_DEPTH),
+        .FUTILITY_BASE_MARGIN(FUTILITY_BASE_MARGIN),
+        .FUTILITY_MARGIN_PER_DEPTH(FUTILITY_MARGIN_PER_DEPTH),
+        .FUTILITY_MAXIMUM_DEPTH(FUTILITY_MAXIMUM_DEPTH),
         .QDELTA_MARGIN(QDELTA_MARGIN),
         .MOVE_OVERHEAD_MS(MOVE_OVERHEAD_MS), .MINIMUM_SEARCH_MS(MINIMUM_SEARCH_MS),
         .INCREMENT_NUMERATOR(INCREMENT_NUMERATOR), .INCREMENT_DENOMINATOR(INCREMENT_DENOMINATOR),
@@ -306,7 +312,7 @@ module tb_engine_profile #(
     longint unsigned tt_cache_bypass_hits;
     longint unsigned tt_store_write_preemptions;
     longint unsigned pvs_scouts, pvs_researches, lmr_reduced_issues, rfp_cutoffs;
-    longint unsigned qdelta_pruned_moves;
+    longint unsigned futility_pruned_moves, qdelta_pruned_moves;
     longint unsigned terminal_checkmates, terminal_stalemates;
     longint unsigned terminal_main_exhausted, terminal_qsearch_exhausted;
     longint unsigned repetition_draws, fifty_move_draws;
@@ -823,6 +829,8 @@ module tb_engine_profile #(
             end
             if (dut.controller.profile_rfp_cutoff_event)
                 rfp_cutoffs <= rfp_cutoffs + 1;
+            if (dut.controller.profile_futility_prune_event)
+                futility_pruned_moves <= futility_pruned_moves + 1;
             if (dut.controller.profile_qdelta_prune_event)
                 qdelta_pruned_moves <= qdelta_pruned_moves + 1;
             if (dut.controller.profile_terminal_event) begin
@@ -1040,6 +1048,7 @@ module tb_engine_profile #(
         emit("algorithm.pvs_researches", pvs_researches);
         emit("algorithm.lmr_reduced_issues", lmr_reduced_issues);
         emit("algorithm.rfp_cutoffs", rfp_cutoffs);
+        emit("algorithm.futility_pruned_moves", futility_pruned_moves);
         emit("algorithm.qdelta_pruned_moves", qdelta_pruned_moves);
         emit("algorithm.terminal_checkmates", terminal_checkmates);
         emit("algorithm.terminal_stalemates", terminal_stalemates);
@@ -1135,6 +1144,7 @@ module tb_engine_profile #(
         repetition_requests = 0;
         repetition_responses = 0;
         rfp_cutoffs = 0;
+        futility_pruned_moves = 0;
         qdelta_pruned_moves = 0;
         for (int operation = 0; operation < MOVE_OPERATION_COUNT; operation++) begin
             move_operation_count[operation] = 0;
