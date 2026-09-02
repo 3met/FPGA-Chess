@@ -850,17 +850,36 @@ module tb_search_controller;
     task automatic kill_active_search(input string label);
         automatic EngineControllerRequest request = zero_request();
         automatic EngineControllerRequest kill_request = zero_request();
+        automatic Move partial_best_move;
+        automatic Move partial_ponder_move;
+        automatic EvalScore partial_score;
+        automatic logic [7:0] cached_depth;
         automatic logic nnue_metadata_clear = 1'b1;
         automatic int completion_wait_cycles = 0;
 
         request.operation = ENGINE_CTRL_SEARCH_DEPTH;
         request.depth_limit = 8'd4;
         pulse_request(request, {label, " start"});
-        while (dut.search_completed_depth == 0 && completion_wait_cycles < 200_000) begin
+        // Interrupt after a deeper iteration has an exact resolved root
+        // candidate. Its move and score may be published without claiming that
+        // the deeper iteration itself completed.
+        while (!(dut.search_completed_depth != 0
+                && dut.search_thread_phase[0] != dut.SEARCH_PHASE_DONE
+                && dut.search_root_has_completed_move[0]
+                && dut.search_root_best_exact[0])
+                && completion_wait_cycles < 200_000) begin
             do_clock(1);
             completion_wait_cycles += 1;
         end
         check(dut.search_completed_depth != 0, {label, " completed an iteration before kill"});
+        check(dut.search_root_has_completed_move[0],
+            {label, " resolved a root child in the interrupted deeper iteration"});
+        check(dut.search_root_best_exact[0],
+            {label, " partial deeper root candidate is exact"});
+        partial_best_move = dut.search_best_move[0];
+        partial_ponder_move = dut.search_ponder_move[0];
+        partial_score = dut.search_root_best_score[0];
+        cached_depth = dut.search_completed_depth;
 
         kill_request.operation = ENGINE_CTRL_KILL;
         req = kill_request;
@@ -873,8 +892,14 @@ module tb_search_controller;
         wait_response(label);
         check(!resp.error, {label, " kill no error"});
         check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
-        check(!is_null_move(resp.best_move), {label, " kill preserves completed best move"});
-        check(resp.completed_depth != 0, {label, " kill preserves completed depth"});
+        check(resp.best_move == partial_best_move, {label, " kill publishes exact partial best move"});
+        check(resp.ponder_move.from_pos == partial_ponder_move.from_pos
+                && resp.ponder_move.to_pos == partial_ponder_move.to_pos
+                && (is_null_move(partial_ponder_move)
+                    || resp.ponder_move.promo_piece == partial_ponder_move.promo_piece),
+            {label, " kill publishes exact partial ponder move"});
+        check(resp.score == partial_score, {label, " kill publishes exact partial score"});
+        check(resp.completed_depth == cached_depth, {label, " kill keeps the atomic completed depth"});
         check(dut.nnue_update_idle && dut.nnue_eval_ready,
             {label, " flushes queued NNUE work"});
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
@@ -1290,21 +1315,43 @@ module tb_search_controller;
             "LMR verifies a reduced beta cutoff at full depth");
         check(!dut.search_needs_research(1'b1, 1'b0, EvalScore'(20), EvalScore'(10), EvalScore'(20)),
             "ordinary PVS beta cutoff does not require full-depth recovery");
-        check(!dut.partial_root_result_eligible(
-                5'd4, 2'd1, make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(40)),
-            "partial root result keeps a completed iteration after only its PV move");
         check(dut.partial_root_result_eligible(
-                5'd4, 2'd2, make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(40)),
-            "partial root result accepts a fully searched challenger");
+                5'd4, EvalScore'(40), 1'b1, 1'b1,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(60)),
+            "partial deeper iteration accepts an exact resolved root candidate");
         check(!dut.partial_root_result_eligible(
-                5'd4, 2'd2, make_move(Position'(12), Position'(28), PROMO_QUEEN), -MATE_THRESHOLD),
-            "partial root result does not promote an incomplete losing mate");
+                5'd4, EvalScore'(40), 1'b1, 1'b0,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(60)),
+            "partial deeper iteration rejects an aspiration bound");
+        check(!dut.partial_root_result_eligible(
+                5'd4, EvalScore'(40), 1'b1, 1'b1,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN), -MATE_THRESHOLD),
+            "partial deeper iteration rejects an aborted losing mate");
+        check(!dut.partial_root_result_eligible(
+                5'd4, MATE_THRESHOLD + EvalScore'(10), 1'b1, 1'b1,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN),
+                MATE_THRESHOLD + EvalScore'(5)),
+            "partial deeper iteration does not weaken a completed winning mate");
         check(dut.partial_root_result_eligible(
-                5'd0, 2'd1, make_move(Position'(12), Position'(28), PROMO_QUEEN), -MATE_THRESHOLD),
+                5'd4, MATE_THRESHOLD + EvalScore'(10), 1'b1, 1'b1,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN),
+                MATE_THRESHOLD + EvalScore'(20)),
+            "partial deeper iteration may improve a completed winning mate");
+        check(!dut.partial_root_result_eligible(
+                5'd4, -MATE_THRESHOLD, 1'b1, 1'b1,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(60)),
+            "partial deeper iteration retains a completed loss without a proven win");
+        check(dut.partial_root_result_eligible(
+                5'd0, EvalScore'(0), 1'b1, 1'b0,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN), -MATE_THRESHOLD),
             "partial first iteration returns its first fully searched legal move");
         check(!dut.partial_root_result_eligible(
-                5'd0, 2'd1, NULL_MOVE, EvalScore'(40)),
-            "partial root result rejects a null best move");
+                5'd0, EvalScore'(0), 1'b0, 1'b1,
+                make_move(Position'(12), Position'(28), PROMO_QUEEN), EvalScore'(60)),
+            "partial first iteration requires a fully searched root child");
+        check(!dut.partial_root_result_eligible(
+                5'd0, EvalScore'(0), 1'b1, 1'b1, NULL_MOVE, EvalScore'(60)),
+            "partial first iteration rejects a null best move");
         check(dut.rfp_node_eligible(5'd5, 1'b1, 1'b0, EvalScore'(0)),
             "RFP includes finite zero-window nodes at its maximum depth");
         check(!dut.rfp_node_eligible(5'd0, 1'b1, 1'b0, EvalScore'(0))

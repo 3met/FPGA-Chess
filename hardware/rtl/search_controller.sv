@@ -276,9 +276,13 @@ module search_controller #(
     (* maxfan = 12, max_fanout = 12 *) Move search_best_move[0:SEARCH_THREAD_COUNT-1];
     Move search_ponder_move[0:SEARCH_THREAD_COUNT-1];
     EvalScore search_root_best_score[0:SEARCH_THREAD_COUNT-1];
-    // Saturating state distinguishes no child, only the previous PV, and a
-    // completed challenger; the exact root move count is unnecessary.
-    logic [1:0] search_root_completed_moves[0:SEARCH_THREAD_COUNT-1];
+    // A completed root child provides a legal fallback if the first iteration
+    // is interrupted before it can produce an atomic completed result.
+    logic search_root_has_completed_move[0:SEARCH_THREAD_COUNT-1];
+    // Root candidates are folded only after PVS/LMR recovery, so one bit is
+    // enough to retain whether the current best lies strictly inside the
+    // iteration's aspiration window rather than being only a score bound.
+    logic search_root_best_exact[0:SEARCH_THREAD_COUNT-1];
     NodeCountType search_nodes;
     NodeCountType search_thread_nodes[0:SEARCH_THREAD_COUNT-1];
     logic search_board_inflight[0:SEARCH_THREAD_COUNT-1];
@@ -1659,19 +1663,28 @@ module search_controller #(
         return NULL_MOVE;
     endfunction : ordering_move_for_thread
 
-    // A stopped pass may publish a fully searched challenger, but never a lone
-    // first move or an incomplete losing-mate result from a deeper iteration.
+    // A stopped first iteration may return any resolved legal move. Later
+    // iterations may publish only exact root candidates; losing-mate bounds and
+    // weakened completed mates roll back to the preceding iteration.
     function automatic logic partial_root_result_eligible(
         input SearchDepth completed_depth,
-        input logic [1:0] completed_moves,
+        input EvalScore completed_score,
+        input logic has_completed_move,
+        input logic best_exact,
         input Move best_move,
         input EvalScore best_score
     );
-        if (is_null_move(best_move) || completed_moves == 2'd0)
+        if (!has_completed_move || is_null_move(best_move))
             return 1'b0;
         if (completed_depth == SearchDepth'(0))
             return 1'b1;
-        return completed_moves >= 2'd2 && best_score > -MATE_THRESHOLD;
+        if (!best_exact || best_score <= -MATE_THRESHOLD)
+            return 1'b0;
+        if (completed_score >= MATE_THRESHOLD)
+            return best_score >= completed_score;
+        if (completed_score <= -MATE_THRESHOLD)
+            return best_score >= MATE_THRESHOLD;
+        return 1'b1;
     endfunction : partial_root_result_eligible
 
     function automatic logic move_state_uses_pop(input MoveOrderState move_state);
@@ -2421,7 +2434,8 @@ module search_controller #(
                 search_best_move[tid] <= NULL_MOVE;
                 search_ponder_move[tid] <= NULL_MOVE;
                 search_root_best_score[tid] <= -SEARCH_INF;
-                search_root_completed_moves[tid] <= 2'd0;
+                search_root_has_completed_move[tid] <= 1'b0;
+                search_root_best_exact[tid] <= 1'b0;
                 search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                 search_thread_nodes[tid] <= NodeCountType'(0);
                 search_thread_target_depth[tid] <= SearchDepth'(0);
@@ -2624,7 +2638,9 @@ module search_controller #(
                 if (killing_search && search_thread_phase[0] != SEARCH_PHASE_DONE
                         && partial_root_result_eligible(
                             kill_completed_depth,
-                            search_root_completed_moves[0],
+                            search_completed_score,
+                            search_root_has_completed_move[0],
+                            search_root_best_exact[0],
                             search_best_move[0],
                             search_root_best_score[0])) begin
                     kill_best_move = search_best_move[0];
@@ -2651,7 +2667,8 @@ module search_controller #(
                     search_tt_validation_pending[tid] <= 1'b0;
                     search_tt_validation_passed[tid] <= 1'b0;
                     search_tt_validation_forced[tid] <= 1'b0;
-                    search_root_completed_moves[tid] <= 2'd0;
+                    search_root_has_completed_move[tid] <= 1'b0;
+                    search_root_best_exact[tid] <= 1'b0;
                     search_return_was_scout[tid] <= 1'b0;
                     search_return_was_reduced[tid] <= 1'b0;
                     search_return_was_null[tid] <= 1'b0;
@@ -2808,7 +2825,8 @@ module search_controller #(
                                         search_best_move[tid] <= NULL_MOVE;
                                         search_ponder_move[tid] <= NULL_MOVE;
                                         search_root_best_score[tid] <= -SEARCH_INF;
-                                        search_root_completed_moves[tid] <= 2'd0;
+                                        search_root_has_completed_move[tid] <= 1'b0;
+                                        search_root_best_exact[tid] <= 1'b0;
                                         search_thread_nodes[tid] <= NodeCountType'(0);
                                         search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                                         search_thread_target_depth[tid]
@@ -3112,7 +3130,8 @@ module search_controller #(
                         search_best_move[tid] <= NULL_MOVE;
                         search_ponder_move[tid] <= NULL_MOVE;
                         search_root_best_score[tid] <= -SEARCH_INF;
-                        search_root_completed_moves[tid] <= 2'd0;
+                        search_root_has_completed_move[tid] <= 1'b0;
+                        search_root_best_exact[tid] <= 1'b0;
                         search_pending_move[tid] <= NULL_MOVE;
                         search_return_score[tid] <= EvalScore'(0);
                         search_return_valid[tid] <= 1'b0;
@@ -3445,7 +3464,8 @@ module search_controller #(
                                 search_best_move[tid] <= NULL_MOVE;
                                 search_ponder_move[tid] <= NULL_MOVE;
                                 search_root_best_score[tid] <= -SEARCH_INF;
-                                search_root_completed_moves[tid] <= 2'd0;
+                                search_root_has_completed_move[tid] <= 1'b0;
+                                search_root_best_exact[tid] <= 1'b0;
                                 search_pending_move[tid] <= NULL_MOVE;
                                 search_return_score[tid] <= EvalScore'(0);
                                 search_return_valid[tid] <= 1'b0;
@@ -3536,13 +3556,15 @@ module search_controller #(
                             stop_score = search_thread_iteration_score[0];
                             stop_completed_depth = search_thread_target_depth[0];
                         end
-                        // A partial pass is transactional: the active child is
-                        // discarded, and a challenger needs a completed first move
-                        // ahead of it. Scores from different depths are not compared.
+                        // A resolved exact candidate from an incomplete deeper
+                        // pass may replace the completed PV. Aspiration bounds,
+                        // active children, and weakened mates roll back instead.
                         if (search_thread_phase[0] != SEARCH_PHASE_DONE
                                 && partial_root_result_eligible(
                                     stop_completed_depth,
-                                    search_root_completed_moves[0],
+                                    search_completed_score,
+                                    search_root_has_completed_move[0],
+                                    search_root_best_exact[0],
                                     search_best_move[0],
                                     search_root_best_score[0])) begin
                             stop_best_move = search_best_move[0];
@@ -4327,10 +4349,8 @@ module search_controller #(
                                         : search_stack_top[return_thread_id].remaining_depth - SearchDepth'(1);
                                 search_thread_phase[return_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
-                                if (return_ply == PlyIndex'(0)
-                                        && search_root_completed_moves[return_thread_id] < 2'd2)
-                                    search_root_completed_moves[return_thread_id]
-                                        <= search_root_completed_moves[return_thread_id] + 2'd1;
+                                if (return_ply == PlyIndex'(0))
+                                    search_root_has_completed_move[return_thread_id] <= 1'b1;
                                 if (!search_stack_top[return_thread_id].has_legal
                                         || parent_score > search_stack_top[return_thread_id].best_score) begin
                                     search_stack_top[return_thread_id].best_score <= parent_score;
@@ -4340,6 +4360,12 @@ module search_controller #(
                                         search_ponder_move[return_thread_id]
                                             <= search_return_ponder_move[return_thread_id];
                                         search_root_best_score[return_thread_id] <= parent_score;
+                                        search_root_best_exact[return_thread_id]
+                                            <= tt_bound_for_score(
+                                                parent_score,
+                                                search_stack_top[return_thread_id].orig_alpha,
+                                                search_stack_top[return_thread_id].beta
+                                            ) == TT_BOUND_EXACT;
                                     end
                                 end
                                 search_stack_top[return_thread_id].has_legal <= 1'b1;

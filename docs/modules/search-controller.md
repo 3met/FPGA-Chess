@@ -34,7 +34,7 @@ The active board is canonical controller state between commands. Direct-board op
 
 Each search thread owns its current board and incremental state, alpha/beta window, iterative-deepening state, node count, lifecycle phase, and block-RAM search stack. Stack records hold enough state to reverse a child and resume its parent instead of storing a complete board at every ply. Each node records actual remaining depth because reductions and quiescence entry make it independent of ply.
 
-The primary thread owns the reported move, score, and completed depth. It searches the preceding completed principal-variation move first and separately counts root children whose complete logical searches have returned. This lets an interrupted iteration discard its active child while retaining a fully resolved challenger without comparing scores from different depths. Helpers cooperate only through the TT and never delay or overwrite the primary result. Threads retry aspiration failures or begin new iterations independently.
+The primary thread owns the last atomic completed-iteration move, score, principal-variation prefix, and depth. For the active iteration it separately records whether any root child's complete logical search has returned and whether the best such result is exact inside the aspiration window. These two bits permit safe interrupted-iteration selection without a root-move table or per-node bookkeeping. Helpers cooperate only through the TT and never delay or overwrite the primary result. Threads retry aspiration failures or begin new iterations independently.
 
 ## Shared-Pipeline Scheduling
 
@@ -70,9 +70,9 @@ Quiescence omits quiet generation and both bad-noisy buckets except for legal ev
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. The primary thread searches the preceding principal-variation move first. If a deeper pass is interrupted after only that child, the controller keeps the completed iteration; after at least one fully resolved challenger, it may publish the deeper pass's best fully searched root child. An active PVS or LMR recovery search is never counted, and an incomplete losing-mate result never replaces a completed result. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
+Depth, node, and time limits are checked at safe search boundaries. If a deeper pass is interrupted, an exact best root candidate whose complete logical search returned may replace the preceding move and score without advancing the reported completed depth. An active PVS or LMR recovery search is never counted, aspiration bounds and aborted losing mates roll back, and a previously completed mate is retained unless the partial candidate proves an equal or stronger winning mate. When no iteration has completed, any fully resolved root child may provide a legal fallback. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
 
-Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation. A killed search applies the same transactional partial-root policy before snapshotting the cached result and retiring.
+Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation. A killed search applies the same exact-partial-or-completed-fallback policy before snapshotting the result and retiring.
 
 Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
 
