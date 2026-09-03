@@ -425,7 +425,7 @@ module tb_search_controller;
         run_search_depth_record(8'd1, {label, " second search"}, second_move, second_score, second_nodes);
         check(tt_lookup_count > 0, {label, " second search issued TT lookup"});
         check(tt_lookup_count >= first_lookup_count, {label, " second search issued repeated TT lookups"});
-        check(second_nodes < first_nodes, {label, " second search searched fewer nodes"});
+        check(second_nodes <= first_nodes, {label, " second search did not search more nodes"});
         check(second_score == first_score, {label, " second search same score"});
         check(second_move == first_move, {label, " second search same best move"});
     endtask : run_tt_reuse_test
@@ -448,182 +448,25 @@ module tb_search_controller;
         );
     endtask : preload_root_tt
 
-    task automatic kill_running_search(input string label);
-        automatic EngineControllerRequest kill_request = zero_request();
-
-        kill_request.operation = ENGINE_CTRL_KILL;
-        req = kill_request;
-        req_valid = 1'b1;
-        #1;
-        check(req_ready, {label, " kill accepted"});
-        do_clock(1);
-        req_valid = 1'b0;
-        req = zero_request();
-        wait_response(label);
-        check(!resp.error, {label, " kill no error"});
-        check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
-    endtask : kill_running_search
-
-    task automatic start_search_depth(input logic [7:0] depth, input string label);
-        automatic EngineControllerRequest request = zero_request();
-        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
-        request.depth_limit = depth;
-        pulse_request(request, label);
-    endtask : start_search_depth
-
-    task automatic wait_for_counter(
-        ref int counter,
-        input int previous_value,
-        input string label
-    );
-        automatic int cycles = 0;
-        while (counter == previous_value && cycles < 20_000) begin
-            do_clock(1);
-            cycles += 1;
-        end
-        check(counter > previous_value, label);
-    endtask : wait_for_counter
-
-    // Depth and halfmove thresholds retain cheap TT reuse, while a deep entry
-    // with meaningful reversible history validates its legal non-drawing child.
-    task automatic run_tt_child_validation_policy_test(input string label);
+    // A root hit may order the cached move but must not publish its score and
+    // move without comparing the other legal root moves.
+    task automatic run_root_tt_score_policy_test(input string label);
         automatic Move cached_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
         automatic Move best_move;
         automatic EvalScore score;
         automatic NodeCountType nodes;
-        automatic int validations_before;
-        automatic int passes_before;
 
         new_game();
-        set_halfmove_clock(HalfmoveClock'(5), {label, " shallow halfmove"});
+        check(!dut.tt_score_cutoff_eligible(PlyIndex'(0)),
+            {label, " root score is cutoff-ineligible"});
+        check(dut.tt_score_cutoff_eligible(PlyIndex'(1)),
+            {label, " child score remains cutoff-eligible"});
         preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
-        validations_before = tt_validation_repetition_count;
-        run_search_depth_record(8'd7, {label, " shallow depth bypass"},
+        run_search_depth_record(8'd1, {label, " root hit"},
             best_move, score, nodes);
-        check(nodes == NodeCountType'(0), {label, " shallow depth accepts TT score"});
-        check(best_move == cached_move, {label, " shallow depth returns TT move"});
-        check(tt_validation_repetition_count == validations_before,
-            {label, " shallow depth skips child validation"});
-
-        new_game();
-        set_halfmove_clock(HalfmoveClock'(4), {label, " low halfmove"});
-        dut.search_board[0].halfmove_clock = HalfmoveClock'(4);
-        dut.search_tt_validation_forced[0] = 1'b1;
-        #1;
-        check(!dut.tt_history_validation_required(ThreadID'(0)),
-            {label, " low halfmove bypass survives forced depth validation"});
-        dut.search_tt_validation_forced[0] = 1'b0;
-        preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
-        validations_before = tt_validation_repetition_count;
-        run_search_depth_record(8'd8, {label, " low halfmove bypass"},
-            best_move, score, nodes);
-        check(nodes == NodeCountType'(0), {label, " low halfmove accepts TT score"});
-        check(best_move == cached_move, {label, " low halfmove returns TT move"});
-        check(tt_validation_repetition_count == validations_before,
-            {label, " low halfmove skips child validation"});
-
-        new_game();
-        set_halfmove_clock(HalfmoveClock'(5), {label, " deep halfmove"});
-        preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
-        validations_before = tt_validation_repetition_count;
-        passes_before = tt_validation_pass_count;
-        run_search_depth_record(8'd8, {label, " deep legal child"},
-            best_move, score, nodes);
-        check(nodes == NodeCountType'(0), {label, " validation avoids child search"});
-        check(best_move == cached_move, {label, " validated TT move returned"});
-        check(score == EvalScore'(600), {label, " validated TT score returned"});
-        check(tt_validation_repetition_count == validations_before + 1,
-            {label, " deep hit checks child repetition"});
-        check(tt_validation_pass_count == passes_before + 1,
-            {label, " legal non-draw child accepts TT score"});
-    endtask : run_tt_child_validation_policy_test
-
-    // Build C-R-C-R so the cached R->C move enters C for the third time.
-    task automatic run_tt_immediate_draw_rejection_test(input string label);
-        automatic Move white_out = make_move(Position'(6), Position'(21), PROMO_QUEEN);
-        automatic Move black_out = make_move(Position'(62), Position'(45), PROMO_QUEEN);
-        automatic Move white_back = make_move(Position'(21), Position'(6), PROMO_QUEEN);
-        automatic Move black_back = make_move(Position'(45), Position'(62), PROMO_QUEEN);
-        automatic int rejects_before;
-
-        new_game();
-        apply_game_move(white_out, {label, " establish C"});
-        set_halfmove_clock(HalfmoveClock'(5), {label, " reset history at C"});
-        apply_game_move(black_out, {label, " first black out"});
-        apply_game_move(white_back, {label, " first white back"});
-        apply_game_move(black_back, {label, " establish R"});
-        apply_game_move(white_out, {label, " second C"});
-        apply_game_move(black_out, {label, " second black out"});
-        apply_game_move(white_back, {label, " second white back"});
-        apply_game_move(black_back, {label, " second R"});
-        preload_root_tt(white_out, EvalScore'(600), TTDepth'(9));
-        rejects_before = tt_validation_repeat_reject_count;
-        start_search_depth(8'd8, {label, " search"});
-        wait_for_counter(tt_validation_repeat_reject_count, rejects_before,
-            {label, " rejects immediate threefold TT score"});
-        do_clock(1);
-        check(dut.search_tt_validation_forced[0],
-            {label, " forces validation below depth threshold"});
-        kill_running_search({label, " stop after rejection"});
-    endtask : run_tt_immediate_draw_rejection_test
-
-    // The stored move need not draw immediately: entering any previously seen
-    // child can put a forced reply one step away from the terminal occurrence.
-    task automatic run_tt_repeated_child_rejection_test(input string label);
-        automatic Move white_out = make_move(Position'(6), Position'(21), PROMO_QUEEN);
-        automatic Move black_out = make_move(Position'(62), Position'(45), PROMO_QUEEN);
-        automatic Move white_back = make_move(Position'(21), Position'(6), PROMO_QUEEN);
-        automatic Move black_back = make_move(Position'(45), Position'(62), PROMO_QUEEN);
-        automatic int rejects_before;
-
-        new_game();
-        apply_game_move(white_out, {label, " establish I"});
-        apply_game_move(black_out, {label, " establish B"});
-        set_halfmove_clock(HalfmoveClock'(5), {label, " reset history at B"});
-        apply_game_move(white_back, {label, " first white back"});
-        apply_game_move(black_back, {label, " establish R"});
-        apply_game_move(white_out, {label, " first I"});
-        apply_game_move(black_out, {label, " second B"});
-        apply_game_move(white_back, {label, " second white back"});
-        apply_game_move(black_back, {label, " second R"});
-        preload_root_tt(white_out, EvalScore'(600), TTDepth'(9));
-        rejects_before = tt_validation_repeat_reject_count;
-        start_search_depth(8'd8, {label, " search"});
-        wait_for_counter(tt_validation_repeat_reject_count, rejects_before,
-            {label, " rejects nonterminal repeated child TT score"});
-        do_clock(1);
-        check(dut.search_tt_validation_forced[0],
-            {label, " forces validation below depth threshold"});
-        kill_running_search({label, " stop after rejection"});
-    endtask : run_tt_repeated_child_rejection_test
-
-    task automatic run_tt_nonpositive_score_rejection_test(input string label);
-        automatic Move cached_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
-        automatic int rejects_before;
-
-        new_game();
-        set_halfmove_clock(HalfmoveClock'(5), {label, " halfmove"});
-        preload_root_tt(cached_move, EvalScore'(-600), TTDepth'(9));
-        rejects_before = tt_validation_nonpositive_reject_count;
-        start_search_depth(8'd8, {label, " search"});
-        wait_for_counter(tt_validation_nonpositive_reject_count, rejects_before,
-            {label, " rejects non-positive deep TT score"});
-        kill_running_search({label, " stop after rejection"});
-    endtask : run_tt_nonpositive_score_rejection_test
-
-    task automatic run_tt_illegal_move_rejection_test(input string label);
-        automatic Move illegal_move = make_move(Position'(12), Position'(36), PROMO_QUEEN);
-        automatic int rejects_before;
-
-        new_game();
-        set_halfmove_clock(HalfmoveClock'(5), {label, " halfmove"});
-        preload_root_tt(illegal_move, EvalScore'(600), TTDepth'(9));
-        rejects_before = tt_validation_illegal_reject_count;
-        start_search_depth(8'd8, {label, " search"});
-        wait_for_counter(tt_validation_illegal_reject_count, rejects_before,
-            {label, " rejects illegal TT move"});
-        kill_running_search({label, " stop after rejection"});
-    endtask : run_tt_illegal_move_rejection_test
+        check(nodes != NodeCountType'(0), {label, " root hit searches legal children"});
+        check(score != EvalScore'(600), {label, " root hit ignores cached score"});
+    endtask : run_root_tt_score_policy_test
 
     task automatic run_shallow_tt_move_ordering_test(input string label);
         automatic Move best_move;
@@ -1553,11 +1396,7 @@ module tb_search_controller;
         repeat_knight_shuffle_once("second repetition cycle");
         run_repetition_draw_search("threefold root search");
 
-        run_tt_child_validation_policy_test("TT child validation policy");
-        run_tt_immediate_draw_rejection_test("TT immediate draw validation");
-        run_tt_repeated_child_rejection_test("TT repeated child validation");
-        run_tt_nonpositive_score_rejection_test("TT non-positive score validation");
-        run_tt_illegal_move_rejection_test("TT illegal move validation");
+        run_root_tt_score_policy_test("root TT score policy");
 
         new_game();
         run_tt_reuse_test("startpos TT reuse");

@@ -64,7 +64,7 @@ A main-search node follows this logical order:
 
 Move generation is pseudo-legal. The controller speculatively applies each candidate and rejects it if the moving side remains in check. A legal child is recorded in repetition history and prepares its NNUE state before TT lookup, evaluation, or deeper search. On return, the controller reverses the board and accumulator changes and folds the child score into the saved parent.
 
-History-sensitive TT scores are validated according to [transposition-table.md](transposition-table.md). A rejected score may still supply a legal ordering move. Null children bypass ordinary legality, repetition, legal-node counting, best-move selection, and move-history updates.
+History-sensitive TT scores are validated according to [transposition-table.md](transposition-table.md). A rejected score may still supply a legal ordering move. Root TT scores never cause a cutoff; only their moves are retained for ordering before the controller searches and compares legal root children. Null children bypass ordinary legality, repetition, legal-node counting, best-move selection, and move-history updates.
 
 Quiescence omits quiet generation and both bad-noisy buckets except for legal evasions while in check. Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
 

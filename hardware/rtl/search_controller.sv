@@ -1719,6 +1719,12 @@ module search_controller #(
         return TTDepth'(search_stack_top[thread].remaining_depth);
     endfunction : search_remaining_depth
 
+    // Root TT hits are ordering hints only. A fresh root search must compare
+    // legal moves rather than publishing a cached score/move pair directly.
+    function automatic logic tt_score_cutoff_eligible(input PlyIndex ply);
+        return ply != PlyIndex'(0);
+    endfunction : tt_score_cutoff_eligible
+
     // Repetition history can affect a TT score only after enough reversible
     // moves have accumulated; forced validation extends the depth check only.
     function automatic logic tt_history_validation_required(input ThreadID thread);
@@ -4209,6 +4215,7 @@ module search_controller #(
                         if (search_tt_consume_valid) begin
                             automatic EvalScore tt_alpha_after;
                             automatic logic tt_cutoff;
+                            automatic logic tt_cutoff_eligible;
                             automatic logic tt_score_usable;
                             automatic logic tt_validation_required;
                             automatic ThreadID lookup_thread_id;
@@ -4222,7 +4229,9 @@ module search_controller #(
                             tt_cutoff = 1'b0;
                             tt_score_usable = lookup_resp.hit
                                 && lookup_resp.depth >= search_remaining_depth(lookup_thread_id);
-                            tt_validation_required = tt_score_usable
+                            tt_cutoff_eligible = tt_score_usable
+                                && tt_score_cutoff_eligible(lookup_ply);
+                            tt_validation_required = tt_cutoff_eligible
                                 && tt_history_validation_required(lookup_thread_id)
                                 && !search_tt_validation_passed[lookup_thread_id];
                             search_thread_id <= lookup_thread_id;
@@ -4236,7 +4245,7 @@ module search_controller #(
                                 search_stack_top[lookup_thread_id].tt_move <= lookup_resp.best_move;
                                 search_stack_top[lookup_thread_id].has_tt_move <= !is_null_move(lookup_resp.best_move);
                             end
-                            if (tt_score_usable && (!tt_validation_required
+                            if (tt_cutoff_eligible && (!tt_validation_required
                                     || (search_tt_validation_passed[lookup_thread_id]
                                         && lookup_resp.score > DRAW_EVAL_SCORE))) begin
                                 if (lookup_resp.bound_type == TT_BOUND_EXACT) begin

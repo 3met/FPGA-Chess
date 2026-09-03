@@ -16,7 +16,7 @@ A lookup request contains:
 
 Every accepted lookup produces one tagged response. A response reports whether the indexed entry is valid for the requested key and generation, together with its score, bound type, searched depth, and best move.
 
-A matching entry may provide a move-ordering hint even when its depth or bound is insufficient for a cutoff. The search controller validates that move through the normal board-update legality path.
+A matching entry may provide a move-ordering hint even when its depth or bound is insufficient for a cutoff. At the root, every matching entry is used only for move ordering: a new search compares legal root moves and never publishes a cached score/move pair directly. The search controller validates ordering moves through the normal board-update legality path.
 
 Repetition history is not part of the Zobrist key, so the controller conservatively validates cutoffs that may have become history-dependent. A rejected score may still provide a legal move-ordering hint. The policy is described in [search-design.md](../architecture/search-design.md).
 
