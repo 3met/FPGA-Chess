@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from tools.hardware_build.manifest import load_manifest
-from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count
+from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count, short_quartus_node, wrap_timing_node
 from tools.hardware_build.synthesis import (
     new_build_id,
     quartus_negative_slack,
@@ -78,6 +78,19 @@ class EngineBuildConfigTests(unittest.TestCase):
 
 
 class QuartusReportTests(unittest.TestCase):
+    def test_timing_nodes_are_compacted_and_wrapped_at_hierarchy_boundaries(self):
+        node = "engine:engine|search_controller:controller|move_generator:move_generator|move_generator_pipeline:noisy_pipeline|destination_mask[5]"
+
+        self.assertEqual(
+            short_quartus_node(node),
+            "engine/controller/move_generator/noisy_pipeline/destination_mask[5]",
+        )
+        lines = wrap_timing_node(f"{node}|very_long_intermediate_hierarchy_level", "      from: ", "            ")
+
+        self.assertEqual(lines[0], "      from: engine/controller/move_generator/noisy_pipeline/destination_mask[5]")
+        self.assertEqual(lines[1], "            very_long_intermediate_hierarchy_level")
+        self.assertTrue(all(len(line) <= 88 for line in lines))
+
     def test_bram_columns_are_device_family_independent(self):
         headers = ["Block Memory Bits", "M10K blocks", "M20Ks", "DSP Blocks"]
         indices = quartus_bram_columns(headers)

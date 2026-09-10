@@ -9,6 +9,50 @@ from .common import BUILD_ROOT, BuildError, QUARTUS_ERROR_RE, quote_tcl_path, re
 from .manifest import load_manifest
 from .report_common import format_duration, print_table, print_unavailable, report_lines
 
+
+TIMING_PATH_LINE_WIDTH = 88
+
+
+def short_quartus_node(node: str) -> str:
+    """Remove redundant module names from a Quartus hierarchy node."""
+    parts: list[str] = []
+    for part in node.split("|"):
+        module, separator, instance = part.partition(":")
+        parts.append(instance if separator else module)
+    return "/".join(parts)
+
+
+def wrap_timing_node(node: str, first_prefix: str, continuation_prefix: str) -> list[str]:
+    """Wrap a hierarchy only between levels so endpoint names stay readable."""
+    width = TIMING_PATH_LINE_WIDTH - len(first_prefix)
+    lines: list[str] = []
+    current = ""
+    for part in short_quartus_node(node).split("/"):
+        candidate = f"{current}/{part}" if current else part
+        if current and len(candidate) > width:
+            lines.append(current)
+            current = part
+            width = TIMING_PATH_LINE_WIDTH - len(continuation_prefix)
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return [f"{first_prefix}{lines[0]}", *[f"{continuation_prefix}{line}" for line in lines[1:]]]
+
+
+def print_timing_paths(rows: list[list[str]], indices: dict[str, int]) -> None:
+    """Print concise timing-path cards without unbounded table columns."""
+    print("\nPath summary:")
+    print("  #   Slack (ns)  Delay (ns)  Req (ns)  Skew (ns)")
+    for number, row in enumerate(rows, start=1):
+        print(
+            f"  {number:>2}  {row[indices['Slack']]:>10}  "
+            f"{row[indices['Data Delay']]:>10}  {row[indices['Relationship']]:>8}  "
+            f"{row[indices['Clock Skew']]:>9}"
+        )
+        print(*wrap_timing_node(row[indices["From Node"]], "      from: ", "            "), sep="\n")
+        print(*wrap_timing_node(row[indices["To Node"]], "        to: ", "            "), sep="\n")
+
 def parse_quartus_summary(lines: list[str]) -> list[list[str]]:
     resources: list[list[str]] = []
     wanted = (
@@ -376,16 +420,7 @@ def command_timing_paths(args: argparse.Namespace) -> int:
     print(f"\n{heading}")
     if rows:
         indices = {header: index for index, header in enumerate(headers)}
-        columns = [
-            ("Slack (ns)", "Slack"),
-            ("From node", "From Node"),
-            ("To node", "To Node"),
-            ("Required (ns)", "Relationship"),
-            ("Skew (ns)", "Clock Skew"),
-            ("Delay (ns)", "Data Delay"),
-        ]
-        compact_rows = [[row[indices[source]] for _, source in columns] for row in rows]
-        print_table("Path summary", [display for display, _ in columns], compact_rows)
+        print_timing_paths(rows, indices)
     elif report == tightest_report:
         print("  No setup paths were reported.")
     print(f"\n  Report: {rel(report)}")
