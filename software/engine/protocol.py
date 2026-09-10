@@ -11,10 +11,20 @@ from enum import IntEnum
 from typing import Callable
 
 
-BAUD_RATE = 2_000_000
-FULL_BOARD_BYTES = 36
-TIME_MAX_MS = (1 << 24) - 1
-NODE_COUNT_MAX = (1 << 40) - 1
+# These host constants mirror the named RTL constants shown in each comment.
+# Keep the assertions here so changes which exceed their wire representation fail loudly.
+BAUD_RATE = 2_000_000  # hardware/rtl/de1_soc.sv BAUD_RATE
+MAX_SEARCH_DEPTH = 31  # 5-bit search depth used by hardware/rtl/search_controller.sv
+MATE_THRESHOLD = 0x4000  # hardware/rtl/tt/tt_defs.sv MATE_THRESHOLD
+MATE_SCORE = 0x4100  # hardware/rtl/tt/tt_defs.sv MATE_SCORE
+FULL_BOARD_BYTES = 36  # hardware/rtl/engine_command_layer.sv Set Board payload
+TIME_MAX_MS = (1 << 24) - 1  # chess_defs::TimeType
+NODE_COUNT_MAX = (1 << 40) - 1  # chess_defs::NodeCountType
+
+assert MAX_SEARCH_DEPTH < (1 << 5)
+assert 0 < MATE_THRESHOLD < MATE_SCORE < (1 << 15)
+assert TIME_MAX_MS.bit_length() == 24
+assert NODE_COUNT_MAX.bit_length() == 40
 
 STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -377,8 +387,8 @@ def cmd_new_game() -> bytes:
 
 
 def cmd_search_depth(depth: int) -> bytes:
-    if not 0 <= depth <= 31:
-        raise ProtocolError("Search depth must be between 0 and 31")
+    if not 0 <= depth <= MAX_SEARCH_DEPTH:
+        raise ProtocolError(f"Search depth must be between 0 and {MAX_SEARCH_DEPTH}")
     return command(Command.SEARCH_DEPTH, bytes([depth]))
 
 
@@ -398,8 +408,8 @@ def cmd_search_nodes(nodes: int) -> bytes:
 
 
 def cmd_perft(depth: int) -> bytes:
-    if not 0 <= depth <= 31:
-        raise ProtocolError("Perft depth must be between 0 and 31")
+    if not 0 <= depth <= MAX_SEARCH_DEPTH:
+        raise ProtocolError(f"Perft depth must be between 0 and {MAX_SEARCH_DEPTH}")
     return command(Command.PERFT, bytes([depth]))
 
 

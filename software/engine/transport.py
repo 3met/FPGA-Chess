@@ -236,7 +236,6 @@ class SerialByteTransport:
             raise TypeError("SerialByteTransport.write expects bytes")
         with self._write_lock:
             written = self._serial.write(data)
-            self._serial.flush()
         if written != len(data):
             raise SerialTimeoutError(f"Only wrote {written}/{len(data)} bytes")
 

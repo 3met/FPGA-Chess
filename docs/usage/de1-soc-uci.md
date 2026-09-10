@@ -51,9 +51,11 @@ The port may instead be set through `FPGA_CHESS_PORT`. When neither an argument 
 
 ## Connection Behavior
 
-Each connection resets the protocol with UART BREAK, waits for board initialization, verifies clean status, and starts a new game. The UCI handshake reports synthesized engine settings as fixed options.
+The `uci` handshake is hardware-independent and advertises only the `Ponder` runtime option. The first `isready` establishes the serial connection, resets the protocol with UART BREAK, waits for board initialization, verifies clean status, and starts a new game. Physical connection settings remain host arguments: use `--port`, `FPGA_CHESS_PORT`, and `--baud` rather than UCI options.
 
 The host advertises the standard UCI `Ponder` option. `go ponder` searches the speculative position to the hardware depth ceiling without consuming the normal clock budget, and `ponderhit` restarts the saved search limit on the same transposition-table-warmed position.
+
+Immutable synthesized properties are available through `debug build`. To measure serial command turnaround, use `debug latency` for 100 status transactions or `debug latency <count>` for 100–1000 transactions; the host reports minimum, median, and p95 round-trip latency.
 
 The UART byte protocol, reset sequence, and error behavior are specified in [Host-FPGA Protocol](../protocols/host-fpga-protocol.md).
 

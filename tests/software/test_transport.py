@@ -1,4 +1,5 @@
 import os
+import threading
 import unittest
 from unittest import mock
 
@@ -107,6 +108,20 @@ class SerialBreakTests(unittest.TestCase):
             transport.send_break(0.0)
 
         serial_port.send_break.assert_called_once_with(20 / 2_000_000)
+
+
+class SerialWriteTests(unittest.TestCase):
+    def test_write_does_not_flush_the_serial_transmit_queue(self):
+        serial_port = mock.Mock()
+        serial_port.write.return_value = 2
+        transport = object.__new__(SerialByteTransport)
+        transport._serial = serial_port
+        transport._write_lock = threading.Lock()
+
+        transport.write(b"ab")
+
+        serial_port.write.assert_called_once_with(b"ab")
+        serial_port.flush.assert_not_called()
 
 
 if __name__ == "__main__":

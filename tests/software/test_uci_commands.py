@@ -5,8 +5,8 @@ from software.engine.uci_commands import parse_go_command, parse_position_args, 
 
 
 class UCICommandParsingTests(unittest.TestCase):
-    def test_command_split_preserves_leading_token_compatibility(self):
-        self.assertEqual(split_command_line("prefix DEBUG on"), ("debug", ["on"]))
+    def test_command_split_uses_only_the_leading_token_as_the_command(self):
+        self.assertEqual(split_command_line("prefix DEBUG on"), ("prefix", ["DEBUG", "on"]))
         self.assertEqual(split_command_line("nonsense"), ("nonsense", []))
         self.assertIsNone(split_command_line("  "))
 
@@ -40,6 +40,14 @@ class UCICommandParsingTests(unittest.TestCase):
             parse_go_command(["depth", "32"])
         with self.assertRaisesRegex(ProtocolError, "nodes must be nonnegative"):
             parse_go_command(["nodes", "-1"])
+
+    def test_go_parsing_rejects_recognized_fields_without_values(self):
+        with self.assertRaisesRegex(ProtocolError, "go depth requires a value"):
+            parse_go_command(["depth"])
+        with self.assertRaisesRegex(ProtocolError, "go wtime requires a value"):
+            parse_go_command(["wtime", "btime", "1000"])
+        with self.assertRaisesRegex(ProtocolError, "go searchmoves requires at least one move"):
+            parse_go_command(["searchmoves", "depth", "3"])
 
     def test_unknown_tokens_are_ignored_and_infinite_waits_for_stop(self):
         parsed = parse_go_command(["nonsense", "depth", "3"])

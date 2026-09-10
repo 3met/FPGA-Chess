@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from software.engine.protocol import (
+    MAX_SEARCH_DEPTH,
     STARTPOS_FEN,
     ProtocolError,
     cmd_perft,
@@ -15,7 +16,6 @@ from software.engine.protocol import (
 )
 
 
-MAX_SEARCH_DEPTH = 31
 DEFAULT_SEARCH_DEPTH = MAX_SEARCH_DEPTH
 
 KNOWN_COMMANDS = frozenset({
@@ -63,17 +63,11 @@ class ParsedGoCommand:
 
 
 def split_command_line(line: str) -> tuple[str, list[str]] | None:
-    """Find the first supported UCI command in an input line."""
+    """Split a command line without interpreting later tokens as commands."""
     tokens = line.strip().split()
     if not tokens:
         return None
-    command_index = next(
-        (index for index, token in enumerate(tokens) if token.lower() in KNOWN_COMMANDS),
-        None,
-    )
-    if command_index is None:
-        return tokens[0], []
-    return tokens[command_index].lower(), tokens[command_index + 1 :]
+    return tokens[0].lower(), tokens[1:]
 
 
 def parse_position_args(args: list[str]) -> tuple[str, list[str]]:
@@ -136,6 +130,8 @@ def _go_values(args: list[str]) -> dict[str, str]:
             while index < len(args) and args[index].lower() not in GO_VALUE_KEYS:
                 moves.append(args[index])
                 index += 1
+            if not moves:
+                raise ProtocolError("go searchmoves requires at least one move")
             values[key] = " ".join(moves)
             continue
         if key in {"ponder", "infinite"}:
@@ -143,9 +139,8 @@ def _go_values(args: list[str]) -> dict[str, str]:
             index += 1
             continue
         if key in GO_VALUE_KEYS:
-            if index + 1 >= len(args):
-                index += 1
-                continue
+            if index + 1 >= len(args) or args[index + 1].lower() in GO_VALUE_KEYS:
+                raise ProtocolError(f"go {key} requires a value")
             values[key] = args[index + 1]
             index += 2
             continue
