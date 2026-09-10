@@ -5,7 +5,6 @@
 /*_stacktrace.vstf
 
 # Local datasets
-/puzzles/
 /training-data/
 
 # Python environments and bytecode

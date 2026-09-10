@@ -1,18 +1,10 @@
-"""FPGA UCI sanity checks, perft regressions, and puzzle benchmarks."""
+"""FPGA UCI sanity checks and perft regressions."""
 
 from __future__ import annotations
 
 import argparse
-import csv
-import math
-import os
-import random
 import re
-import struct
 import sys
-import time
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, Sequence
 
 from software.benchmarks.positions import (
@@ -34,17 +26,6 @@ SANITY_DEPTH = 6
 SANITY_REPETITION_DEPTH = 8
 SANITY_MOVETIME_MS = 250
 SANITY_MOVETIME_TOLERANCE_MS = 5
-PUZZLE_INDEX_MAGIC = b"FPCPZIDX"
-PUZZLE_INDEX_HEADER = struct.Struct("<8sQQdQQ")
-
-
-@dataclass(frozen=True)
-class Puzzle:
-    fen: str
-    moves: tuple[str, ...]
-    rating: float
-
-
 def _node_count(lines: Iterable[str]) -> int | None:
     result = None
     for line in lines:
@@ -246,184 +227,6 @@ def run_perft(startup_timeout: float, search_timeout: float, verbose: bool, port
     return 1 if failures else 0
 
 
-def _puzzle_index_path(path: Path, min_rating: float) -> Path:
-    """Keep the generated index beside the ignored external puzzle CSV."""
-    return path.with_name(f"{path.name}.rating-{min_rating:g}.idx")
-
-
-def _parse_puzzle(row: dict[str, str]) -> Puzzle:
-    """Validate the subset of Lichess fields the benchmark needs."""
-    moves = tuple(row["Moves"].split())
-    if len(moves) < 2 or not all(MOVE_RE.fullmatch(move) and move != "0000" for move in moves):
-        raise ValueError
-    return Puzzle(row["FEN"], moves, float(row["Rating"]))
-
-
-def _load_puzzle_index(index_path: Path, source_stat: os.stat_result, min_rating: float) -> tuple[list[int], int] | None:
-    """Return a current offset index, rejecting stale or incomplete cache files."""
-    try:
-        with index_path.open("rb") as handle:
-            header = handle.read(PUZZLE_INDEX_HEADER.size)
-            magic, mtime_ns, size, cached_min_rating, malformed, count = PUZZLE_INDEX_HEADER.unpack(header)
-            if (magic != PUZZLE_INDEX_MAGIC or mtime_ns != source_stat.st_mtime_ns or size != source_stat.st_size or cached_min_rating != min_rating):
-                return None
-            offsets: list[int] = []
-            remaining = count
-            while remaining:
-                chunk_count = min(remaining, 65536)
-                data = handle.read(chunk_count * 8)
-                if len(data) != chunk_count * 8:
-                    return None
-                offsets.extend(struct.unpack(f"<{chunk_count}Q", data))
-                remaining -= chunk_count
-            if handle.read(1):
-                return None
-        return offsets, malformed
-    except (OSError, struct.error):
-        return None
-
-
-def _build_puzzle_index(path: Path, index_path: Path, min_rating: float) -> tuple[list[int], int]:
-    """Scan the CSV once and cache byte offsets for valid, eligible puzzles."""
-    offsets: list[int] = []
-    malformed = 0
-    with path.open("rb") as handle:
-        header = next(csv.reader([handle.readline().decode("utf-8")]))
-        for offset in iter(handle.tell, None):
-            line = handle.readline()
-            if not line:
-                break
-            try:
-                values = next(csv.reader([line.decode("utf-8")]))
-                puzzle = _parse_puzzle(dict(zip(header, values)))
-                if puzzle.rating >= min_rating:
-                    offsets.append(offset)
-            except (UnicodeDecodeError, csv.Error, KeyError, TypeError, ValueError):
-                malformed += 1
-
-    source_stat = path.stat()
-    temporary_path = index_path.with_suffix(index_path.suffix + ".tmp")
-    try:
-        with temporary_path.open("wb") as handle:
-            handle.write(PUZZLE_INDEX_HEADER.pack(PUZZLE_INDEX_MAGIC, source_stat.st_mtime_ns, source_stat.st_size, min_rating, malformed, len(offsets)))
-            for start in range(0, len(offsets), 65536):
-                chunk = offsets[start:start + 65536]
-                handle.write(struct.pack(f"<{len(chunk)}Q", *chunk))
-        os.replace(temporary_path, index_path)
-    except OSError:
-        temporary_path.unlink(missing_ok=True)
-    return offsets, malformed
-
-
-def load_puzzles(path: Path, count: int, seed: int, min_rating: float = 1000.0) -> tuple[list[Puzzle], int]:
-    """Load a deterministic random sample without reparsing a large CSV on later runs."""
-    source_stat = path.stat()
-    index_path = _puzzle_index_path(path, min_rating)
-    indexed = _load_puzzle_index(index_path, source_stat, min_rating)
-    offsets, malformed = indexed if indexed is not None else _build_puzzle_index(path, index_path, min_rating)
-    if len(offsets) < count:
-        raise ValueError(f"only {len(offsets)} valid puzzles rated at least {min_rating:g} available; requested {count}")
-
-    puzzles: list[Puzzle] = []
-    with path.open("rb") as handle:
-        header = next(csv.reader([handle.readline().decode("utf-8")]))
-        for offset in random.Random(seed).sample(offsets, count):
-            handle.seek(offset)
-            values = next(csv.reader([handle.readline().decode("utf-8")]))
-            puzzles.append(_parse_puzzle(dict(zip(header, values))))
-    return puzzles, malformed
-
-
-def solve_puzzle(engine: FPGAUCISession, puzzle: Puzzle, movetime_ms: int, timeout: float) -> bool:
-    import chess
-
-    history = [puzzle.moves[0]]  # Lichess begins each solution with the opponent's move.
-    for expected_index in range(1, len(puzzle.moves), 2):
-        engine.send("position fen " + puzzle.fen + " moves " + " ".join(history))
-        engine.send(f"go movetime {movetime_ms}")
-        response = engine.wait_for(lambda line: line.startswith("bestmove "), timeout, "puzzle bestmove")
-        move = _bestmove(response.lines)
-        board = chess.Board(puzzle.fen)
-        for history_move in history:
-            board.push_uci(history_move)
-        if move is None:
-            raise FPGAUCIError(f"engine returned an unparseable bestmove from FEN {board.fen()}")
-        try:
-            candidate = chess.Move.from_uci(move)
-        except ValueError:
-            candidate = chess.Move.null()
-        if candidate not in board.legal_moves:
-            raise FPGAUCIError(f"engine returned illegal move {move} from FEN {board.fen()}")
-        if move != puzzle.moves[expected_index]:
-            return False
-        history.append(move)
-        if expected_index + 1 < len(puzzle.moves):
-            history.append(puzzle.moves[expected_index + 1])
-    return True
-
-
-def estimate_rating(results: Sequence[tuple[float, bool]]) -> tuple[float, float | None]:
-    """Fit a logistic Elo rating; uncertainty is unavailable at an all-win/loss boundary."""
-    wins = sum(solved for _, solved in results)
-    if wins == 0:
-        return 0.0, None
-    if wins == len(results):
-        return 4000.0, None
-    lo, hi = -1000.0, 5000.0
-    for _ in range(80):
-        rating = (lo + hi) / 2
-        score = sum(solved - 1 / (1 + 10 ** ((puzzle - rating) / 400)) for puzzle, solved in results)
-        if score > 0:
-            lo = rating
-        else:
-            hi = rating
-    rating = (lo + hi) / 2
-    information = sum((math.log(10) / 400) ** 2 * (1 / (1 + 10 ** ((p - rating) / 400))) * (1 - 1 / (1 + 10 ** ((p - rating) / 400))) for p, _ in results)
-    return rating, 1.96 / math.sqrt(information)
-
-
-def _rating_text(results: Sequence[tuple[float, bool]]) -> str:
-    """Format the current Elo estimate and its 95% confidence interval."""
-    rating, interval = estimate_rating(results)
-    uncertainty = "unbounded (all solved/failed)" if interval is None else f"±{interval:.1f} (95% CI)"
-    return f"{rating:.1f} {uncertainty}"
-
-
-def run_rate(puzzles_path: Path, count: int, seed: int, movetime_ms: int, min_rating: float, startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
-    load_started = time.monotonic()
-    puzzles, malformed = load_puzzles(puzzles_path, count, seed, min_rating)
-    load_seconds = time.monotonic() - load_started
-    if malformed:
-        print(f"warning: skipped {malformed} malformed puzzle rows", file=sys.stderr)
-    results: list[tuple[float, bool]] = []
-    started = time.monotonic()
-    with FPGAUCISession(port=port, verbose=verbose) as engine:
-        engine.initialize(startup_timeout)
-        for index, puzzle in enumerate(puzzles, 1):
-            # Puzzles are independent positions: do not carry timing-sensitive
-            # TT or quiet-history state from one solution into the next.
-            engine.new_game(startup_timeout)
-            solved = solve_puzzle(engine, puzzle, movetime_ms, search_timeout)
-            results.append((puzzle.rating, solved))
-            if index % 100 == 0:
-                print(
-                    f"progress: {index}/{count}; score {sum(result for _, result in results)}/{index}; "
-                    f"rating {_rating_text(results)}; elapsed={time.monotonic() - started:.1f}s"
-                )
-    solved = sum(result for _, result in results)
-    buckets: dict[int, list[bool]] = {}
-    for puzzle_rating, result in results:
-        buckets.setdefault(int(puzzle_rating // 200 * 200), []).append(result)
-    bucket_text = ", ".join(f"{bucket}-{bucket + 199}: {sum(values)}/{len(values)}" for bucket, values in sorted(buckets.items()))
-    print(
-        f"rating: {_rating_text(results)}; score {solved}/{count}; "
-        f"ratings={min(p.rating for p in puzzles):.0f}-{max(p.rating for p in puzzles):.0f}; "
-        f"minimum-rating={min_rating:g}; seed={seed}; movetime={movetime_ms}ms; load={load_seconds:.1f}s; elapsed={time.monotonic() - started:.1f}s"
-    )
-    print(f"rating buckets: {bucket_text}")
-    return 0
-
-
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--port", help="Serial port, for example COM5 or /dev/ttyUSB0. Defaults to FPGA_CHESS_PORT or USB UART auto-detection.")
     parser.add_argument("--startup-timeout", type=float, default=10.0)
@@ -444,14 +247,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     perft.add_argument("--list", action="store_true", help="Print named FEN/depth/node cases without contacting the FPGA.")
     _add_common(perft)
 
-    rate = sub.add_parser("rate")
-    rate.add_argument("--puzzles", type=Path, default=Path("puzzles/lichess_db_puzzle.csv"))
-    rate.add_argument("--count", type=int, default=100)
-    rate.add_argument("--seed", type=int, default=0)
-    rate.add_argument("--movetime-ms", type=int, default=100)
-    rate.add_argument("--min-rating", type=float, default=1000.0)
-    _add_common(rate)
-
     all_suite = sub.add_parser("all")
     all_suite.add_argument("--depth", type=int, default=SANITY_DEPTH)
     _add_common(all_suite)
@@ -466,9 +261,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"{case.name}: FEN={case.fen}; depth={case.depth}; nodes={case.nodes}")
                 return 0
             return run_perft(args.startup_timeout, args.search_timeout, args.verbose, args.port)
-        if args.suite == "rate":
-            if args.count <= 0 or args.movetime_ms <= 0 or args.min_rating < 0 or not math.isfinite(args.min_rating): parser.error("count and movetime-ms must be positive, and min-rating must be a finite non-negative value")
-            return run_rate(args.puzzles, args.count, args.seed, args.movetime_ms, args.min_rating, args.startup_timeout, args.search_timeout, args.verbose, args.port)
         sanity_status = run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose, args.port)
         perft_status = run_perft(args.startup_timeout, args.search_timeout, args.verbose, args.port)
         return 1 if sanity_status or perft_status else 0

@@ -1,9 +1,7 @@
 import contextlib
 import importlib.util
 import io
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from software.benchmarks.positions import (
@@ -17,20 +15,13 @@ from software.benchmarks.cli import (
     SANITY_MOVETIME_MS,
     SANITY_MOVETIME_TOLERANCE_MS,
     SANITY_REPETITION_DEPTH,
-    Puzzle,
-    _build_puzzle_index,
     _is_legal_repetition_move,
     _repetition_position,
     _run_repetition_checks,
     _uci_score,
-    estimate_rating,
-    load_puzzles,
     main,
-    run_rate,
     run_sanity,
-    solve_puzzle,
 )
-from software.benchmarks.session import FPGAUCISession, FPGAUCIError
 from software.engine.protocol import encode_fen
 
 
@@ -292,145 +283,6 @@ class RepetitionSanityTests(unittest.TestCase):
         self.assertEqual(failures[0][0], case)
         self.assertIn(f"final={case.draw_move} score=cp 0 nodes=100", failures[0][1])
         self.assertIn("expected to avoid drawing move", failures[0][1])
-
-
-class PuzzleAndRatingTests(unittest.TestCase):
-    def test_puzzle_illegal_move_reports_position_fen(self):
-        engine = MagicMock()
-        engine.wait_for.return_value.lines = ["bestmove e7e5"]
-        puzzle = Puzzle(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1",
-            ("e7e5", "e7e5"),
-            1200,
-        )
-
-        with self.assertRaisesRegex(
-            FPGAUCIError,
-            r"engine returned illegal move e7e5 from FEN "
-            r"rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 2",
-        ):
-            solve_puzzle(engine, puzzle, 100, 1.0)
-
-    def test_rate_cli_returns_error_for_illegal_engine_move(self):
-        error = FPGAUCIError("engine returned illegal move e7e5 from FEN test-fen")
-        stderr = io.StringIO()
-        with patch("software.benchmarks.cli.run_rate", side_effect=error), \
-                contextlib.redirect_stderr(stderr):
-            self.assertEqual(main(["rate"]), 2)
-
-        self.assertIn("illegal move e7e5 from FEN test-fen", stderr.getvalue())
-
-    def test_rate_cli_forwards_an_explicit_port(self):
-        with patch("software.benchmarks.cli.run_rate", return_value=0) as rate:
-            self.assertEqual(main(["rate", "--port", "/dev/ttyUSB0"]), 0)
-
-        rate.assert_called_once_with(
-            Path("puzzles/lichess_db_puzzle.csv"), 100, 0, 100, 1000.0,
-            10.0, 120.0, False, "/dev/ttyUSB0",
-        )
-
-    def test_session_passes_an_explicit_port_to_the_uci_host(self):
-        session = FPGAUCISession(port="COM42")
-
-        self.assertEqual(session.command[-2:], ["--port", "COM42"])
-
-    def test_logistic_rating_and_boundaries(self):
-        rating, interval = estimate_rating([(1200, False), (1800, True), (2200, True)])
-        self.assertGreater(rating, 1800)
-        self.assertIsNotNone(interval)
-        self.assertIsNone(estimate_rating([(1500, False)])[1])
-        self.assertIsNone(estimate_rating([(1500, True)])[1])
-
-    def test_load_puzzles_skips_malformed_and_below_threshold_rows(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "puzzles.csv"
-            path.write_text("FEN,Moves,Rating\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,1200\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,999\ninvalid,x,wat\n", encoding="utf-8")
-            puzzles, malformed = load_puzzles(path, 1, 0)
-        self.assertEqual([puzzle.rating for puzzle in puzzles], [1200])
-        self.assertEqual(malformed, 1)
-
-    def test_load_puzzles_uses_a_rating_filter_and_cache(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "puzzles.csv"
-            path.write_text("FEN,Moves,Rating\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,1000\n8/8/8/8/8/8/8/K6k w - - 0 1,a1a2 h1h2,1200\n", encoding="utf-8")
-            with patch(
-                "software.benchmarks.cli._build_puzzle_index",
-                wraps=_build_puzzle_index,
-            ) as build_index:
-                first, _ = load_puzzles(path, 2, 7, 1000)
-                second, _ = load_puzzles(path, 2, 7, 1000)
-            self.assertEqual(build_index.call_count, 1)
-        self.assertEqual(first, second)
-        self.assertTrue(all(puzzle.rating >= 1000 for puzzle in first))
-
-    def test_rate_resets_the_game_before_each_puzzle(self):
-        puzzles = [
-            Puzzle("8/8/8/8/8/8/8/K6k w - - 0 1", ("a1a2", "h1h2"), 1200),
-            Puzzle("8/8/8/8/8/8/8/K6k w - - 0 1", ("a1a2", "h1h2"), 1400),
-        ]
-
-        class Engine:
-            instances: list["Engine"] = []
-
-            def __init__(self, **kwargs):
-                self.initialize_calls = 0
-                self.new_game_calls = 0
-                self.port = kwargs.get("port")
-                Engine.instances.append(self)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def initialize(self, _timeout):
-                self.initialize_calls += 1
-
-            def new_game(self, _timeout):
-                self.new_game_calls += 1
-
-        with patch("software.benchmarks.cli.load_puzzles", return_value=(puzzles, 0)), \
-                patch("software.benchmarks.cli.FPGAUCISession", Engine), \
-                patch("software.benchmarks.cli.solve_puzzle", return_value=True), \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_rate(Path("unused.csv"), 2, 0, 50, 1000, 1.0, 1.0, False, "/dev/ttyUSB0"), 0)
-
-        self.assertEqual(Engine.instances[0].initialize_calls, 1)
-        self.assertEqual(Engine.instances[0].new_game_calls, len(puzzles))
-        self.assertEqual(Engine.instances[0].port, "/dev/ttyUSB0")
-
-    def test_rate_reports_progress_every_100_puzzles(self):
-        puzzles = [Puzzle("8/8/8/8/8/8/8/K6k w - - 0 1", ("a1a2", "h1h2"), 1200) for _ in range(101)]
-
-        class Engine:
-            def __init__(self, **_kwargs):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def initialize(self, _timeout):
-                pass
-
-            def new_game(self, _timeout):
-                pass
-
-        output = io.StringIO()
-        with patch("software.benchmarks.cli.load_puzzles", return_value=(puzzles, 0)), \
-                patch("software.benchmarks.cli.FPGAUCISession", Engine), \
-                patch("software.benchmarks.cli.solve_puzzle", return_value=True), \
-                contextlib.redirect_stdout(output):
-            self.assertEqual(run_rate(Path("unused.csv"), 101, 0, 50, 1000, 1.0, 1.0, False), 0)
-
-        lines = output.getvalue().splitlines()
-        progress = [line for line in lines if line.startswith("progress:")]
-        self.assertEqual(len(progress), 1)
-        self.assertRegex(progress[0], r"^progress: 100/101; score 100/100; rating 4000\.0 unbounded \(all solved/failed\); elapsed=\d+\.\ds$")
-        self.assertFalse(any(line.startswith(("PASS", "FAIL")) for line in lines))
 
 
 if __name__ == "__main__":

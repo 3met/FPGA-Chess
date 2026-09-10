@@ -14,7 +14,7 @@ The complete board target is the Intel/Altera DE1-SoC, where the FPGA-side SDR S
 | `hardware/build/manifest.json` | Source sets, tests, generated data, and synthesis targets. |
 | `hardware/data/` | Generated Zobrist and evaluation data. |
 | `software/engine/` | UCI host, protocol encoding, FEN handling, and serial transport. |
-| `software/benchmarks/` | Live-engine integration checks and puzzle benchmarking. |
+| `software/benchmarks/` | Live-engine integration checks. |
 | `tests/` | Python tests grouped by software subsystem. |
 | `tools/hardware_build/` | Build, simulation, profiling, synthesis, and programming CLI. |
 | `tools/tuning/` | Evaluation training and parameter export. |
