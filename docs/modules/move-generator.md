@@ -22,11 +22,11 @@ An attempted direct move is suppressed from later generation only after successf
 
 ## Generation
 
-Generation is destination-centric. Each class lane selects relevant destination squares, then builds the ray and knight context from the registered destination before emitting explicit candidates. Empty or unproductive destinations are skipped without producing a move. Promotions emit all four legal choices.
+Generation is destination-centric. Each class lane selects relevant destination squares, captures the ray and knight context from a registered scan address, then derives an exact source mask from those registered tiles. Source expansion constructs moves from that mask without repeating geometry checks. The next destination address is prefetched during source preparation, allowing its context to replace the current context as the final source enters writeback; board lookup and source eligibility remain in separate timing stages without a second context bank. Empty or unproductive destinations are skipped without producing a move. Promotions emit all four legal choices.
 
 Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 
-The pop frontend selects the highest non-empty eligible bucket and returns one tagged move. Search may forward the result directly to board update. Popping consumes the candidate even if later king-safety validation rejects it.
+The pop frontend selects the highest non-empty eligible bucket, registers its address and tags, then reads RAM and returns one tagged move with two-cycle latency. It accepts consecutive requests, including requests that switch lanes; readiness depends only on initialization and flush, not bucket selection. Callers issuing overlapping pops from the same node must reserve distinct bucket slots before the earlier responses return. Search may forward the result directly to board update. Popping consumes the candidate even if later king-safety validation rejects it.
 
 ## Ordering
 

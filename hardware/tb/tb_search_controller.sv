@@ -6,10 +6,11 @@ import engine_defs::*;
 import nnue_defs::*;
 import tt_defs::*;
 
-module tb_search_controller;
+module tb_search_controller #(
+    parameter int THREAD_COUNT = 1
+);
 
-    // Acceptance testing intentionally uses the DE1 one-thread configuration.
-    localparam int THREAD_COUNT = 1;
+    // Run the same acceptance checks with serial and concurrent dispatch.
     localparam int SEARCH_STACK_DEPTH = 24;
 
     logic clk;
@@ -52,7 +53,7 @@ module tb_search_controller;
     bit return_pending_dispatch_seen;
     bit move_followup_seen;
     bit tt_response_consume_seen;
-    bit tt_response_direct_consume_seen;
+    bit tt_response_buffered_consume_seen;
     bit multi_move_inflight_seen;
     bit pipeline_overlap_seen;
     bit pvs_scout_seen;
@@ -501,7 +502,7 @@ module tb_search_controller;
         return_pending_dispatch_seen = 1'b0;
         move_followup_seen = 1'b0;
         tt_response_consume_seen = 1'b0;
-        tt_response_direct_consume_seen = 1'b0;
+        tt_response_buffered_consume_seen = 1'b0;
         multi_move_inflight_seen = 1'b0;
         pipeline_overlap_seen = 1'b0;
         for (int idx = 0; idx < THREAD_COUNT; idx++) begin
@@ -552,8 +553,8 @@ module tb_search_controller;
         check(thread_tt_lookup_inflight_seen[0], {label, " tracked TT lookup in-flight on primary thread"});
         check(thread_tt_lookup_cursor_seen[0], {label, " advanced TT lookup dispatch cursor on primary thread"});
         check(tt_response_consume_seen, {label, " consumed TT response in run scheduler"});
-        check(tt_response_direct_consume_seen,
-            {label, " consumed an uncontended TT response without a pending cycle"});
+        check(tt_response_buffered_consume_seen,
+            {label, " consumed a registered TT response"});
         check(thread_tt_response_cursor_seen[0], {label, " advanced TT response cursor"});
         check(all_threads_root_active_seen, {label, " initialized all threads active before root scheduling"});
         check(search_dispatch_state_seen, {label, " used concurrent search run state"});
@@ -1091,6 +1092,8 @@ module tb_search_controller;
         wait_response(label);
         check(!resp.error, {label, " no error"});
         check(resp.nodes_count >= NodeCountType'(1000), {label, " reached node limit"});
+        check(resp.nodes_count <= NodeCountType'(1001),
+            {label, " registered budget check allows at most one extra committed node"});
         check(resp.completed_depth >= 8'd1, {label, " reports a completed iteration"});
         check(resp.end_reason == ENGINE_END_NODE_LIMIT, {label, " end reason"});
         check(aspiration_window_seen, {label, " used an aspiration window"});
@@ -1756,8 +1759,8 @@ module tb_search_controller;
             end
             if (dut.state == dut.ST_SEARCH_RUN && dut.search_tt_consume_valid) begin
                 tt_response_consume_seen = 1'b1;
-                if (dut.search_tt_consume_direct)
-                    tt_response_direct_consume_seen = 1'b1;
+                if (dut.search_tt_response_pending[dut.search_tt_consume_thread])
+                    tt_response_buffered_consume_seen = 1'b1;
                 thread_tt_response_cursor_seen[int'(dut.search_tt_consume_thread)] = 1'b1;
             end
             if (dut.state == dut.ST_SEARCH_RUN && dut.move_followup_accepted)
@@ -1977,3 +1980,8 @@ module tb_search_controller;
     end
 
 endmodule : tb_search_controller
+
+// Exercise response arbitration and shared pipelines with a helper thread.
+module tb_search_controller_multithread;
+    tb_search_controller #(.THREAD_COUNT(2)) bench();
+endmodule : tb_search_controller_multithread

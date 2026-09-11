@@ -195,6 +195,11 @@
       "source_set": "search-controller",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller"
+    },
+    "search-controller-multithread": {
+      "source_set": "search-controller",
+      "testbench": "hardware/tb/tb_search_controller.sv",
+      "top": "tb_search_controller_multithread"
     }
   },
   "generated_data": {

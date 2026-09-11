@@ -49,7 +49,11 @@ The controller schedules work across:
 
 A thread has at most one in-flight request in each subsystem. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
+TT responses are buffered per thread before score and window classification. The board-history and depth condition for TT validation is captured when the lookup is issued and retained through response replay, keeping those comparisons out of response dispatch. The selected thread's board and depth remain unchanged during this validation.
+
 Before search, NNUE builds a valid root accumulator for every thread. Legal child preparation joins NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator. Reset, New Game, Kill, and search restart invalidate tags and pending returns so late responses cannot mutate a later operation.
+
+Parent-only futility and quiescence delta checks are registered during speculative board update, aligned with its routing tags. Child commitment combines those results with the returned king-safety and check flags, so move decoding and pruning arithmetic do not share its state-update path.
 
 ## Node Lifecycle
 
@@ -73,6 +77,8 @@ Quiescence omits quiet generation and both bad-noisy buckets except for legal ev
 Depth, node, and time limits are checked at safe search boundaries. If a deeper pass is interrupted, an exact best root candidate whose complete logical search returned may replace the preceding move and score without advancing the reported completed depth. An active PVS or LMR recovery search is never counted, aspiration bounds and aborted losing mates roll back, and a previously completed mate is retained unless the partial candidate proves an equal or stronger winning mate. When no iteration has completed, any fully resolved root child may provide a legal fallback. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
 
 Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation. A killed search applies the same exact-partial-or-completed-fallback policy before snapshotting the result and retiring.
+
+Node and time budget comparisons are registered before stopping the scheduler. A reached budget is observed one clock later; node-limited search can therefore commit at most one additional node beyond its requested count.
 
 Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
 

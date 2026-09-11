@@ -149,7 +149,9 @@ module move_generator #(
     end
 
     assign init_busy = noisy_init_busy || quiet_init_busy;
-    assign pop_ready = pop_use_quiet ? quiet_pop_ready : noisy_pop_ready;
+    // Both lanes accept one pop each cycle. Readiness depends only on their
+    // lifecycle state, never on bucket tops or the selected search thread.
+    assign pop_ready = noisy_pop_ready && quiet_pop_ready;
     assign history_update_ready = quiet_history_update_ready;
 
     assign pop_resp_valid = noisy_pop_resp_valid || quiet_pop_resp_valid;
@@ -207,7 +209,7 @@ module move_generator #(
         .cmd_resp_ply(noisy_resp_ply), .cmd_resp_direct_valid(noisy_resp_direct_valid),
         .cmd_resp_direct_move(noisy_resp_direct_move),
         .cmd_resp_bucket_tops(noisy_resp_bucket_tops),
-        .pop_valid(pop_valid && !pop_use_quiet), .pop_ready(noisy_pop_ready),
+        .pop_valid(pop_valid && pop_ready && !pop_use_quiet), .pop_ready(noisy_pop_ready),
         .pop_thread, .pop_ply, .pop_eligible(pop_eligible & NOISY_BUCKET_MASK),
         .pop_current_tops, .pop_lower_tops,
         .pop_resp_valid(noisy_pop_resp_valid), .pop_resp_thread(noisy_pop_resp_thread),
@@ -254,7 +256,7 @@ module move_generator #(
         .cmd_resp_ply(quiet_resp_ply), .cmd_resp_direct_valid(),
         .cmd_resp_direct_move(),
         .cmd_resp_bucket_tops(quiet_resp_bucket_tops),
-        .pop_valid(pop_valid && pop_use_quiet), .pop_ready(quiet_pop_ready),
+        .pop_valid(pop_valid && pop_ready && pop_use_quiet), .pop_ready(quiet_pop_ready),
         .pop_thread, .pop_ply, .pop_eligible(pop_eligible & QUIET_BUCKET_MASK),
         .pop_current_tops, .pop_lower_tops,
         .pop_resp_valid(quiet_pop_resp_valid), .pop_resp_thread(quiet_pop_resp_thread),

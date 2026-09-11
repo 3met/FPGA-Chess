@@ -276,7 +276,9 @@ module tb_move_generator;
         pop_valid = 1'b1;
         tick();
         pop_valid = 1'b0;
-        check(pop_resp_valid, "pop response has synchronous valid");
+        check(!pop_resp_valid, "pop selection precedes the RAM response");
+        tick();
+        check(pop_resp_valid, "pop response has two-cycle synchronous valid");
         found = pop_resp_found;
         move = pop_resp_move;
         bucket = pop_resp_bucket;
@@ -308,6 +310,139 @@ module tb_move_generator;
             count++;
         end
         check(1'b0, "bucket collection terminated");
+    endtask
+
+    // Model bucket reservations ahead of the two-cycle response so requests
+    // remain consecutive even when reading the same thread and switching lanes.
+    task automatic collect_streaming(inout MoveBucketTops tops,
+        output logic [16383:0] seen);
+        automatic bit duplicate_seen = 1'b0;
+        automatic MoveBucketIndex expected_bucket[512];
+        automatic MoveBucketTop expected_top[512];
+        automatic int request_count = 0;
+        automatic int response_count = 0;
+        automatic bit sent_empty = 1'b0;
+        seen = '0;
+        pop_eligible = ALL_BUCKET_MASK;
+        pop_lower_tops = '0;
+        for (int iteration = 0; iteration < 512; iteration++) begin
+            automatic bit found = 1'b0;
+            pop_valid = !sent_empty;
+            pop_current_tops = tops;
+            if (pop_valid) begin
+                check(pop_ready, "streaming pop accepts every cycle");
+                for (int bucket = 7; bucket >= 0; bucket--) begin
+                    if (!found && tops[bucket] != MoveBucketTop'(0)) begin
+                        found = 1'b1;
+                        tops[bucket] -= MoveBucketTop'(1);
+                        expected_bucket[request_count] = MoveBucketIndex'(bucket);
+                        expected_top[request_count] = tops[bucket];
+                    end
+                end
+                sent_empty = !found;
+                request_count++;
+            end
+            tick();
+            if (iteration == 0) begin
+                check(!pop_resp_valid, "stream starts with a selection cycle");
+            end else begin
+                check(pop_resp_valid && pop_resp_thread == pop_thread
+                    && pop_resp_ply == pop_ply, "streaming response preserves routing tags");
+                if (sent_empty && response_count == request_count - 1) begin
+                    check(!pop_resp_found, "final streaming response reports exhaustion");
+                    pop_valid = 1'b0;
+                    tick();
+                    check(!pop_resp_valid && !duplicate_seen,
+                        "streaming pops drain without duplicates or extra responses");
+                    return;
+                end
+                check(pop_resp_found && pop_resp_bucket == expected_bucket[response_count]
+                    && pop_resp_new_top == expected_top[response_count],
+                    "streaming response matches its reserved bucket slot");
+                duplicate_seen |= seen[14'(pop_resp_move)];
+                seen[14'(pop_resp_move)] = 1'b1;
+                response_count++;
+            end
+        end
+        check(1'b0, "streaming collection terminated");
+        pop_valid = 1'b0;
+    endtask
+
+    // Independent source-centric oracle: walk board coordinates rather than
+    // reusing the DUT's destination rays, masks, or shift helpers.
+    function automatic logic reference_move(input FullBoard board, input int src, input int dst);
+        automatic Tile piece = board.tiles[src];
+        automatic Tile victim = board.tiles[dst];
+        automatic int dr = dst / 8 - src / 8;
+        automatic int df = dst % 8 - src % 8;
+        automatic int ar = dr < 0 ? -dr : dr;
+        automatic int af = df < 0 ? -df : df;
+        automatic int forward_rank = board.turn == WHITE ? 1 : -1;
+        automatic int step_rank = dr == 0 ? 0 : dr > 0 ? 1 : -1;
+        automatic int step_file = df == 0 ? 0 : df > 0 ? 1 : -1;
+        automatic int distance = ar > af ? ar : af;
+        automatic bit geometry;
+        if (src == dst || piece.piece_type == NULL_PIECE
+                || piece.piece_color != board.turn || victim.piece_type == KING
+                || (victim.piece_type != NULL_PIECE && victim.piece_color == board.turn))
+            return 1'b0;
+        case (piece.piece_type)
+            PAWN: begin
+                if (df == 0 && victim.piece_type == NULL_PIECE)
+                    return dr == forward_rank
+                        || (dr == 2 * forward_rank
+                            && src / 8 == (board.turn == WHITE ? 1 : 6)
+                            && board.tiles[src + 8 * forward_rank].piece_type == NULL_PIECE);
+                return ar == 1 && af == 1 && dr == forward_rank
+                    && (victim.piece_type != NULL_PIECE
+                        || (board.has_ep && dst % 8 == int'(board.ep_file)
+                            && dst / 8 == (board.turn == WHITE ? 5 : 2)));
+            end
+            KNIGHT: return (ar == 1 && af == 2) || (ar == 2 && af == 1);
+            KING: return ar <= 1 && af <= 1;
+            BISHOP: geometry = ar == af;
+            ROOK: geometry = ar == 0 || af == 0;
+            QUEEN: geometry = ar == af || ar == 0 || af == 0;
+            default: return 1'b0;
+        endcase
+        if (!geometry) return 1'b0;
+        for (int step = 1; step < distance; step++)
+            if (board.tiles[(src / 8 + step * step_rank) * 8
+                    + src % 8 + step * step_file].piece_type != NULL_PIECE)
+                return 1'b0;
+        return 1'b1;
+    endfunction
+
+    // Compare complete move sets, including all promotion encodings and class
+    // separation. These fixtures have no castling rights (tested separately).
+    task automatic check_reference_sets(input FullBoard board);
+        automatic MoveBucketTops tops;
+        automatic logic direct_valid;
+        automatic Move direct_move;
+        automatic logic [16383:0] expected;
+        automatic logic [16383:0] seen;
+        automatic int count;
+        for (int phase = 0; phase < 2; phase++) begin
+            expected = '0;
+            for (int src = 0; src < 64; src++) begin
+                for (int dst = 0; dst < 64; dst++) begin
+                    if (reference_move(board, src, dst)) begin
+                        automatic bit promotion = board.tiles[src].piece_type == PAWN
+                            && (dst / 8 == 0 || dst / 8 == 7);
+                        automatic bit capture = board.tiles[dst].piece_type != NULL_PIECE
+                            || (board.tiles[src].piece_type == PAWN && src % 8 != dst % 8);
+                        if ((phase == 0) == (promotion || capture))
+                            for (int promo = 0; promo < (promotion ? 4 : 1); promo++)
+                                expected[14'(make_move(Position'(src), Position'(dst), PromoType'(promo)))] = 1'b1;
+                    end
+                end
+            end
+            tops = '0;
+            run_command(phase == 0 ? MOVE_GEN_GENERATE_NOISY : MOVE_GEN_GENERATE_QUIET,
+                board, 1'b0, NULL_MOVE, tops, direct_valid, direct_move, tops);
+            collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), count, seen);
+            check(seen === expected, $sformatf("reference move set color=%0d phase=%0d", board.turn, phase));
+        end
     endtask
 
     task automatic history_update(input Move move, input logic [5:0] depth);
@@ -639,6 +774,86 @@ module tb_move_generator;
         collect(ALL_BUCKET_MASK, child_tops, parent_tops, count, seen);
         check(count != 0 && child_tops == parent_tops,
             "sibling reuses released descendant slots");
+
+        // Exercise blocked and open rays, board edges, knight wraparound,
+        // double pushes, en passant, and capture/quiet promotions in both colors.
+        for (int fixture = 0; fixture < 3; fixture++) begin
+            if (fixture == 0) begin
+                start_board(board);
+                board.castling_rights = CastlingRights'(0);
+            end else begin
+                empty_board(board);
+                board.tiles[4] = WHITE_KING;
+                board.tiles[60] = BLACK_KING;
+                board.tiles[0] = WHITE_ROOK;
+                board.tiles[7] = WHITE_KNIGHT;
+                board.tiles[18] = WHITE_BISHOP;
+                board.tiles[27] = WHITE_QUEEN;
+                board.tiles[12] = WHITE_PAWN;
+                board.tiles[20] = BLACK_PAWN;
+                board.tiles[35] = BLACK_BISHOP;
+                board.tiles[39] = BLACK_ROOK;
+                board.tiles[50] = BLACK_KNIGHT;
+                if (fixture == 2) begin
+                    board.tiles[48] = WHITE_PAWN;
+                    board.tiles[57] = BLACK_ROOK;
+                    board.tiles[37] = WHITE_PAWN;
+                    board.tiles[38] = BLACK_PAWN;
+                    board.has_ep = 1'b1;
+                    board.ep_file = BoardFile'(6);
+                end
+            end
+            check_reference_sets(board);
+            begin
+                automatic FullBoard mirrored = board;
+                for (int pos = 0; pos < 64; pos++) begin
+                    mirrored.tiles[pos ^ 56] = board.tiles[pos];
+                    if (board.tiles[pos].piece_type != NULL_PIECE)
+                        mirrored.tiles[pos ^ 56].piece_color = Color'(!board.tiles[pos].piece_color);
+                end
+                mirrored.turn = BLACK;
+                check_reference_sets(mirrored);
+            end
+        end
+
+        // Mix both lanes, then compare a continuous pop stream with ordinary
+        // single-request draining of the same generated candidates.
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[60] = BLACK_KING;
+        board.tiles[10] = WHITE_KNIGHT;
+        board.tiles[27] = BLACK_PAWN;
+        board.tiles[0] = BLACK_PAWN;
+        tops = '0;
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+        begin
+            automatic logic [16383:0] streaming_seen;
+            run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+                tops, direct_valid, direct_move, tops);
+            run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
+                tops, direct_valid, direct_move, tops);
+            collect_streaming(tops, streaming_seen);
+            check(streaming_seen === seen && tops == MoveBucketTops'(0),
+                "continuous cross-lane pops preserve the complete move set");
+        end
+        // Cancel an accepted request between selection and the RAM access.
+        pop_current_tops = tops;
+        pop_valid = 1'b1;
+        tick();
+        pop_valid = 1'b0;
+        check(!pop_resp_valid, "accepted pop is still in selection stage");
+        flush = 1'b1;
+        #1;
+        check(!pop_ready, "flush prevents accepting a discarded pop");
+        tick();
+        check(!pop_resp_valid, "flush cancels the pending RAM access");
+        flush = 1'b0;
+        tick();
+        check(!pop_resp_valid, "flushed pop produces no late response");
 
         check(!overflow_sticky, "normal tests do not overflow buckets");
         check(stat_candidate_count != 0 && stat_destination_count != 0

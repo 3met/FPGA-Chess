@@ -104,6 +104,8 @@ module search_controller #(
 
 `ifndef SYNTHESIS
     initial begin
+        if (SEARCH_BOARD_TAG_PIPE_LEN < 2)
+            $fatal(1, "search pruning classification requires two board pipeline stages");
         if (SEARCH_THREAD_COUNT < 1 || SEARCH_THREAD_COUNT > THREAD_COUNT)
             $fatal(1, "SEARCH_THREAD_COUNT must fit the global ThreadID width");
         if (SEARCH_STACK_DEPTH < 1 || SEARCH_STACK_DEPTH > MAX_PLY_COUNT)
@@ -295,6 +297,7 @@ module search_controller #(
     logic search_tt_validation_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_validation_passed[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_validation_forced[0:SEARCH_THREAD_COUNT-1];
+    logic search_tt_history_required[0:SEARCH_THREAD_COUNT-1];
     TTLookupResponse search_tt_response[0:SEARCH_THREAD_COUNT-1];
     ThreadID search_board_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
     BoardOp search_board_op_tag_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
@@ -302,6 +305,8 @@ module search_controller #(
     ThreadID search_move_tag_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
     logic search_move_in_check_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
     logic search_board_tag_valid_pipe[0:SEARCH_BOARD_TAG_PIPE_LEN-1];
+    logic search_node_stop_q, search_time_stop_q;
+    logic parent_futility_eligible_q, parent_futility_prunes_q, parent_qdelta_prunes_q;
     logic search_move_tag_valid_pipe[0:SEARCH_MOVE_TAG_PIPE_LEN-1];
 `ifndef SYNTHESIS
     ThreadID search_board_result_thread_id;
@@ -559,7 +564,6 @@ module search_controller #(
     logic search_tt_lookup_issue_valid;
     logic search_tt_store_issue_valid;
     logic search_tt_consume_valid;
-    logic search_tt_consume_direct;
     logic search_null_issue_valid;
     logic search_board_issue_is_null;
     ThreadID search_board_issue_thread;
@@ -1284,14 +1288,7 @@ module search_controller #(
     endfunction : empty_search_stack_entry
 
     function automatic logic search_stop_requested();
-        if (active_req.operation == ENGINE_CTRL_SEARCH_NODES && search_nodes >= active_req.node_limit) begin
-            return 1'b1;
-        end
-        if ((active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
-                && elapsed_ms >= search_budget_ms) begin
-            return 1'b1;
-        end
-        return 1'b0;
+        return search_node_stop_q || search_time_stop_q;
     endfunction : search_stop_requested
 
     function automatic logic search_in_qsearch(input ThreadID thread);
@@ -1755,6 +1752,51 @@ module search_controller #(
         return 8'(SEARCH_STACK_DEPTH - 1);
     endfunction : requested_search_depth
 
+    // Budget comparators have their own register boundary instead of gating
+    // every search-state update. A reached budget is observed one clock later.
+    always_ff @(posedge clk) begin
+        if (!rst_n || state != ST_SEARCH_RUN) begin
+            search_node_stop_q <= 1'b0;
+            search_time_stop_q <= 1'b0;
+        end else begin
+            search_node_stop_q <= active_req.operation == ENGINE_CTRL_SEARCH_NODES
+                && search_nodes >= active_req.node_limit;
+            search_time_stop_q <= (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
+                    || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
+                && elapsed_ms >= search_budget_ms;
+        end
+    end
+
+    // Classify the unchanged parent one stage before the board result arrives.
+    // Only the child's check flag remains to be applied at commitment, keeping
+    // move decoding and margin arithmetic off the child-state write path.
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            parent_futility_eligible_q <= 1'b0;
+            parent_futility_prunes_q <= 1'b0;
+            parent_qdelta_prunes_q <= 1'b0;
+        end else if (state == ST_SEARCH_RUN
+                && search_board_tag_valid_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 2]) begin
+            automatic ThreadID thread_id =
+                search_board_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 2];
+            parent_futility_eligible_q <= futility_move_eligible(
+                search_ply[thread_id], search_pending_child_depth[thread_id],
+                search_board_in_check[thread_id], 1'b0,
+                is_quiet_move(search_board[thread_id], search_pending_move[thread_id]),
+                is_promotion_move(search_board[thread_id], search_pending_move[thread_id]),
+                search_stack_top[thread_id].has_tt_move
+                    && search_pending_move[thread_id] == search_stack_top[thread_id].tt_move,
+                search_stack_top[thread_id].has_legal, search_pvs_research[thread_id]);
+            parent_futility_prunes_q <= futility_prunes(
+                search_stack_top[thread_id].static_eval,
+                search_stack_top[thread_id].alpha, search_pending_child_depth[thread_id]);
+            parent_qdelta_prunes_q <= search_in_qsearch(thread_id) && qdelta_move_prunes(
+                search_board[thread_id], search_stack_top[thread_id].move,
+                search_pending_move[thread_id], search_stack_top[thread_id].static_eval,
+                search_stack_top[thread_id].alpha, search_board_in_check[thread_id], 1'b0);
+        end
+    end
+
     always_comb begin
         setup_req_comb = new_game_setup_request(new_setup_index);
         search_store_mask = '0;
@@ -1804,24 +1846,13 @@ module search_controller #(
             search_terminal_no_move_mask[idx] = search_terminal_mask[idx]
                 && search_stack_top[idx].move_order_state == MOVE_ORDER_DONE;
         end
-        // A newly returned lookup normally has no older response competing for
-        // the consume path. Handle it at this edge instead of first parking it
-        // for a scheduler cycle; retained validation responses still use the
-        // existing buffered replay path.
-        search_tt_consume_direct = state == ST_SEARCH_RUN
-            && !(|search_tt_response_mask)
-            && tt_lookup_resp_valid
-            && search_tt_lookup_inflight[tt_lookup_resp.thread_id]
-            && search_thread_phase[tt_lookup_resp.thread_id] == SEARCH_PHASE_TT_WAIT;
-        search_tt_consume_valid = state == ST_SEARCH_RUN
-            && (search_tt_consume_direct || |search_tt_response_mask);
-        search_tt_consume_thread = search_tt_consume_direct
-            ? tt_lookup_resp.thread_id
-            : search_select_thread(
-                search_tt_response_mask, search_dispatch.tt_response);
-        search_tt_consume_response = search_tt_consume_direct
-            ? tt_lookup_resp
-            : search_tt_response[search_tt_consume_thread];
+        // Always consume a registered response. Keeping backend response
+        // routing separate from score/window decisions breaks the bypass path
+        // through TT classification into the board and move schedulers.
+        search_tt_consume_valid = state == ST_SEARCH_RUN && |search_tt_response_mask;
+        search_tt_consume_thread = search_select_thread(
+            search_tt_response_mask, search_dispatch.tt_response);
+        search_tt_consume_response = search_tt_response[search_tt_consume_thread];
         move_board_bypass_valid = state == ST_SEARCH_RUN
             && ((move_pop_resp_valid && move_pop_resp_found)
                 || (move_cmd_resp_valid && move_cmd_resp_direct_valid));
@@ -2467,6 +2498,7 @@ module search_controller #(
                 search_tt_validation_pending[tid] <= 1'b0;
                 search_tt_validation_passed[tid] <= 1'b0;
                 search_tt_validation_forced[tid] <= 1'b0;
+                search_tt_history_required[tid] <= 1'b0;
                 search_tt_response[tid] <= TTLookupResponse'('0);
                 search_pending_move[tid] <= NULL_MOVE;
                 search_board[tid] <= FullBoard'('0);
@@ -2567,8 +2599,7 @@ module search_controller #(
                     && search_tt_lookup_inflight[tt_lookup_resp.thread_id]
                     && search_thread_phase[tt_lookup_resp.thread_id] == SEARCH_PHASE_TT_WAIT) begin
                 search_tt_response[tt_lookup_resp.thread_id] <= tt_lookup_resp;
-                search_tt_response_pending[tt_lookup_resp.thread_id]
-                    <= !search_tt_consume_direct;
+                search_tt_response_pending[tt_lookup_resp.thread_id] <= 1'b1;
                 search_tt_lookup_inflight[tt_lookup_resp.thread_id] <= 1'b0;
             end
 
@@ -3584,7 +3615,7 @@ module search_controller #(
                         resp_reg.score <= stop_score;
                         resp_reg.nodes_count <= search_nodes;
                         resp_reg.completed_depth <= stop_completed_depth;
-                        resp_reg.end_reason <= (active_req.operation == ENGINE_CTRL_SEARCH_NODES && search_nodes >= active_req.node_limit)
+                        resp_reg.end_reason <= search_node_stop_q
                             ? ENGINE_END_NODE_LIMIT
                             : ENGINE_END_TIME_LIMIT;
                         state <= ST_FLUSH_RESPOND;
@@ -3630,23 +3661,34 @@ module search_controller #(
                             null_push_complete = search_board_op_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1] == BOARD_PUSH_NULL_OP;
                             board_ply = search_board_ply_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 1];
                             child_ply = board_ply + PlyIndex'(1);
-                            futility_eligible = futility_move_eligible(
-                                search_ply[board_thread_id],
-                                search_pending_child_depth[board_thread_id],
-                                search_board_in_check[board_thread_id],
-                                board_update_side_in_check,
-                                is_quiet_move(
-                                    search_board[board_thread_id],
-                                    search_pending_move[board_thread_id]),
-                                is_promotion_move(
-                                    search_board[board_thread_id],
-                                    search_pending_move[board_thread_id]),
-                                search_stack_top[board_thread_id].has_tt_move
-                                    && search_pending_move[board_thread_id]
-                                        == search_stack_top[board_thread_id].tt_move,
-                                search_stack_top[board_thread_id].has_legal,
-                                search_pvs_research[board_thread_id]
-                            );
+                            futility_eligible = parent_futility_eligible_q
+                                && !board_update_side_in_check;
+`ifndef SYNTHESIS
+                            // Catch stale or misrouted parent classifications
+                            // across interleaved threads, retries, and flushes.
+                            if (!reverse_complete && !null_push_complete) begin
+                                assert (futility_eligible === futility_move_eligible(
+                                    search_ply[board_thread_id], search_pending_child_depth[board_thread_id],
+                                    search_board_in_check[board_thread_id], board_update_side_in_check,
+                                    is_quiet_move(search_board[board_thread_id], search_pending_move[board_thread_id]),
+                                    is_promotion_move(search_board[board_thread_id], search_pending_move[board_thread_id]),
+                                    search_stack_top[board_thread_id].has_tt_move
+                                        && search_pending_move[board_thread_id] == search_stack_top[board_thread_id].tt_move,
+                                    search_stack_top[board_thread_id].has_legal, search_pvs_research[board_thread_id]))
+                                    else $fatal(1, "futility classification lost board-result alignment");
+                                assert (parent_futility_prunes_q === futility_prunes(
+                                    search_stack_top[board_thread_id].static_eval,
+                                    search_stack_top[board_thread_id].alpha, search_pending_child_depth[board_thread_id]))
+                                    else $fatal(1, "futility score lost board-result alignment");
+                                assert ((parent_qdelta_prunes_q && !board_update_side_in_check)
+                                    === (search_in_qsearch(board_thread_id) && qdelta_move_prunes(
+                                        search_board[board_thread_id], search_stack_top[board_thread_id].move,
+                                        search_pending_move[board_thread_id], search_stack_top[board_thread_id].static_eval,
+                                        search_stack_top[board_thread_id].alpha, search_board_in_check[board_thread_id],
+                                        board_update_side_in_check)))
+                                    else $fatal(1, "qdelta classification lost board-result alignment");
+                            end
+`endif
 `ifndef SYNTHESIS
                             search_board_result_thread_id <= board_thread_id;
                             search_board_result_valid <= 1'b1;
@@ -3815,16 +3857,8 @@ module search_controller #(
                                 // speculative result; its history entry will be
                                 // overwritten by the next candidate at this ply.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
-                            end else if (search_in_qsearch(board_thread_id)
-                                    && qdelta_move_prunes(
-                                        search_board[board_thread_id],
-                                        search_stack_top[board_thread_id].move,
-                                        search_pending_move[board_thread_id],
-                                        search_stack_top[board_thread_id].static_eval,
-                                        search_stack_top[board_thread_id].alpha,
-                                        search_board_in_check[board_thread_id],
-                                        board_update_side_in_check
-                                    )) begin
+                            end else if (parent_qdelta_prunes_q
+                                    && !board_update_side_in_check) begin
 `ifdef FPGA_CHESS_PROFILE
                                 profile_qdelta_prune_event <= 1'b1;
 `endif
@@ -3837,11 +3871,7 @@ module search_controller #(
                                 // evaluate the unchanged parent before retrying it.
                                 search_futility_eval_pending[board_thread_id] <= 1'b1;
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
-                            end else if (futility_eligible && futility_prunes(
-                                    search_stack_top[board_thread_id].static_eval,
-                                    search_stack_top[board_thread_id].alpha,
-                                    search_pending_child_depth[board_thread_id]
-                                )) begin
+                            end else if (futility_eligible && parent_futility_prunes_q) begin
 `ifdef FPGA_CHESS_PROFILE
                                 profile_futility_prune_event <= 1'b1;
 `endif
@@ -4213,7 +4243,6 @@ module search_controller #(
                         end
 
                         if (search_tt_consume_valid) begin
-                            automatic EvalScore tt_alpha_after;
                             automatic logic tt_cutoff;
                             automatic logic tt_cutoff_eligible;
                             automatic logic tt_score_usable;
@@ -4225,14 +4254,13 @@ module search_controller #(
                             lookup_thread_id = search_tt_consume_thread;
                             lookup_resp = search_tt_consume_response;
                             lookup_ply = search_ply[lookup_thread_id];
-                            tt_alpha_after = search_stack_top[lookup_thread_id].alpha;
                             tt_cutoff = 1'b0;
                             tt_score_usable = lookup_resp.hit
                                 && lookup_resp.depth >= search_remaining_depth(lookup_thread_id);
                             tt_cutoff_eligible = tt_score_usable
                                 && tt_score_cutoff_eligible(lookup_ply);
                             tt_validation_required = tt_cutoff_eligible
-                                && tt_history_validation_required(lookup_thread_id)
+                                && search_tt_history_required[lookup_thread_id]
                                 && !search_tt_validation_passed[lookup_thread_id];
                             search_thread_id <= lookup_thread_id;
                             search_dispatch.tt_response <= search_thread_after(lookup_thread_id);
@@ -4254,13 +4282,17 @@ module search_controller #(
                                     tt_cutoff = 1'b1;
                                 end else if (lookup_resp.bound_type == TT_BOUND_LOWER) begin
                                     if (lookup_resp.score > search_stack_top[lookup_thread_id].alpha) begin
-                                        tt_alpha_after = lookup_resp.score;
                                         search_stack_top[lookup_thread_id].alpha <= lookup_resp.score;
                                         search_stack_top[lookup_thread_id].unit_window
                                             <= search_stack_top[lookup_thread_id].beta
                                                 == lookup_resp.score + EvalScore'(1);
                                     end
-                                    if (tt_alpha_after >= search_stack_top[lookup_thread_id].beta) begin
+                                    // max(alpha, score) >= beta, expressed as
+                                    // parallel comparisons instead of a mux
+                                    // followed by another score comparator.
+                                    if (lookup_resp.score >= search_stack_top[lookup_thread_id].beta
+                                            || search_stack_top[lookup_thread_id].alpha
+                                                >= search_stack_top[lookup_thread_id].beta) begin
                                         search_return_score[lookup_thread_id] <= lookup_resp.score;
                                         search_return_valid[lookup_thread_id] <= 1'b1;
                                         tt_cutoff = 1'b1;
@@ -4282,6 +4314,9 @@ module search_controller #(
                                 search_pending_move[lookup_thread_id] <= lookup_resp.best_move;
                             end
 `ifndef SYNTHESIS
+                            assert (search_tt_history_required[lookup_thread_id]
+                                    == tt_history_validation_required(lookup_thread_id))
+                                else $fatal(1, "TT history eligibility changed during response validation");
                             if (tt_cutoff
                                     && tt_history_validation_required(lookup_thread_id)) begin
                                 assert (search_tt_validation_passed[lookup_thread_id])
@@ -4540,6 +4575,10 @@ module search_controller #(
                             search_thread_id <= search_tt_lookup_issue_thread;
                             search_null_candidate[search_tt_lookup_issue_thread]
                                 <= search_thread_null_candidate(search_tt_lookup_issue_thread);
+                            // Board history and depth remain fixed while this
+                            // probe and any retained-response validation run.
+                            search_tt_history_required[search_tt_lookup_issue_thread]
+                                <= tt_history_validation_required(search_tt_lookup_issue_thread);
                             search_stack_top[search_tt_lookup_issue_thread].tt_checked <= 1'b1;
                             search_thread_phase[search_tt_lookup_issue_thread] <= SEARCH_PHASE_TT_WAIT;
                             search_tt_lookup_inflight[search_tt_lookup_issue_thread] <= 1'b1;

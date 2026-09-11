@@ -96,7 +96,7 @@ module move_generator_lane #(
         GEN_SELECT_DEST,
         GEN_EXPAND_SOURCE,
         GEN_BUILD_CONTEXT,
-        GEN_HISTORY_WAIT,
+        GEN_PREPARE_SOURCE,
         GEN_CASTLE,
         GEN_FINISH
     } GeneratorState;
@@ -157,6 +157,8 @@ module move_generator_lane #(
     Move job_suppress_move;
     MoveBucketTops job_tops;
     logic [63:0] destination_mask;
+    Position scan_destination;
+    logic next_destination_valid;
     Position context_destination;
     Tile context_destination_tile;
     RayRecord context_ray[8];
@@ -164,7 +166,6 @@ module move_generator_lane #(
     logic [15:0] source_mask;
     logic [3:0] source_select_index;
     Position selected_destination;
-    Tile selected_destination_tile;
     RayRecord selected_context_ray[8];
     Tile selected_context_knight[8];
     logic [15:0] selected_source_mask;
@@ -176,15 +177,12 @@ module move_generator_lane #(
     logic castle_index;
 
     Move candidate_move;
-    Tile candidate_attacker;
     Tile candidate_victim;
     logic candidate_is_capture;
     logic candidate_is_ep;
     logic candidate_is_promotion;
     logic candidate_is_castle;
-    logic candidate_is_knight;
     logic candidate_see_good;
-    Direction candidate_lane;
     logic [1:0] candidate_promo_counter;
     logic candidate_valid;
     logic candidate_slot_ready;
@@ -210,6 +208,12 @@ module move_generator_lane #(
     MoveBucketTop bucket_rd_top;
     Move bucket_q[MOVE_BUCKET_COUNT];
 
+    logic pop_read_pending;
+    logic pop_read_found;
+    ThreadID pop_read_thread;
+    PlyIndex pop_read_ply;
+    MoveBucketIndex pop_read_bucket;
+    MoveBucketTop pop_read_top;
     logic pop_pending;
     logic pop_found_q;
     ThreadID pop_thread_q;
@@ -671,13 +675,16 @@ module move_generator_lane #(
     endfunction
 
     function automatic logic [3:0] first_source(input logic [15:0] mask);
-        for (int index = 0; index < 16; index++)
-            if (mask[index]) return 4'(index);
-        return 4'd0;
+        // Encode each half independently before selecting the winning half.
+        automatic logic high_half = !(|mask[7:0]);
+        automatic logic [2:0] low_index = first_set_lane(mask[7:0]);
+        automatic logic [2:0] high_index = first_set_lane(mask[15:8]);
+        return mask == 16'd0 ? 4'd0
+            : {high_half, high_half ? high_index : low_index};
     endfunction
 
-    // Build a cheap exact-or-conservative eligibility mask once per
-    // destination so the shared expander never serially visits empty lanes.
+    // Build an exact eligibility mask once per destination; the expander
+    // can then trust each selected lane without repeating geometry checks.
     function automatic logic potential_ray_source(
         input FullBoard board,
         input Position destination,
@@ -749,22 +756,21 @@ module move_generator_lane #(
     // priority encoder and board scan occupy separate timing stages.
     always_comb begin
         selected_destination = first_destination(destination_mask);
-        selected_destination_tile = job_board.tiles[selected_destination];
         selected_source_mask = 16'd0;
         for (int dir = 0; dir < 8; dir++) begin
             selected_context_ray[dir] =
-                nearest_ray(job_board, context_destination, Direction'(dir));
+                nearest_ray(job_board, scan_destination, Direction'(dir));
             selected_context_knight[dir] =
-                is_knight_shift_on_board(context_destination, KnightDirection'(dir))
+                is_knight_shift_on_board(scan_destination, KnightDirection'(dir))
                     ? job_board.tiles[
-                        shift_knight_position(context_destination, KnightDirection'(dir))
+                        shift_knight_position(scan_destination, KnightDirection'(dir))
                     ] : EMPTY_TILE;
             selected_source_mask[dir] = potential_ray_source(
                 job_board, context_destination, context_destination_tile,
-                Direction'(dir), selected_context_ray[dir]
+                Direction'(dir), context_ray[dir]
             );
             selected_source_mask[dir + 8] = potential_knight_source(
-                job_board, context_destination_tile, selected_context_knight[dir]
+                job_board, context_destination_tile, context_knight[dir]
             );
         end
     end
@@ -772,7 +778,7 @@ module move_generator_lane #(
     // These combinational events keep optional counters and simulation
     // profiling exact when a registered destination is analyzed.
     always_comb begin
-        destination_examined_event = state == GEN_BUILD_CONTEXT;
+        destination_examined_event = state == GEN_PREPARE_SOURCE;
         destination_with_source_event =
             destination_examined_event && selected_source_mask != 16'd0;
 `ifdef FPGA_CHESS_PROFILE
@@ -798,95 +804,32 @@ module move_generator_lane #(
             && same_move(castle_candidate_move, job_suppress_move);
     end
 
-    // Expand one of the active context's eight ray or eight knight sources.
+    // The registered mask is exact for the selected destination and class.
+    // Expansion only constructs the move; it does not repeat piece geometry.
     always_comb begin
-        automatic Tile source;
-        automatic Move move;
-        automatic logic ep_move;
-        automatic logic geometry_ok;
-        source_valid = 1'b0;
-        source_move = NULL_MOVE;
-        source_attacker = EMPTY_TILE;
+        source_is_knight = source_select_index[3];
+        source_lane = Direction'(source_select_index[2:0]);
+        source_attacker = source_is_knight
+            ? context_knight[source_select_index[2:0]]
+            : context_ray[source_select_index[2:0]].tile;
+        source_move.to_pos = context_destination;
+        source_move.promo_piece = PROMO_QUEEN;
+        source_move.from_pos = source_is_knight
+            ? shift_knight_position(context_destination, KnightDirection'(source_lane))
+            : shift_position(context_destination, source_lane,
+                context_ray[source_select_index[2:0]].distance + 3'd1);
         source_victim = context_destination_tile;
-        source_is_capture = 1'b0;
-        source_is_ep = 1'b0;
-        source_is_promotion = 1'b0;
-        source_is_knight = 1'b0;
-        source_lane = Direction'(0);
-        move.to_pos = context_destination;
-        move.promo_piece = PROMO_QUEEN;
-        if (source_select_index < 4'd8) begin
-            source = context_ray[source_select_index].tile;
-            move.from_pos = shift_position(context_destination, Direction'(source_select_index),
-                3'(context_ray[source_select_index].distance + 3'd1));
-            ep_move = source.piece_type == PAWN && job_board.has_ep
-                && context_destination_tile.piece_type == NULL_PIECE
-                && get_file(context_destination) == job_board.ep_file
-                && ((job_board.turn == WHITE && get_rank(move.from_pos) == BoardRank'(4)
-                        && get_rank(context_destination) == BoardRank'(5))
-                    || (job_board.turn == BLACK && get_rank(move.from_pos) == BoardRank'(3)
-                        && get_rank(context_destination) == BoardRank'(2)));
-            geometry_ok = 1'b0;
-            case (source.piece_type)
-                PAWN: begin
-                    if (job_board.turn == WHITE) begin
-                        if (Direction'(source_select_index) == SOUTH
-                                && context_destination_tile.piece_type == NULL_PIECE)
-                            geometry_ok = context_ray[source_select_index].distance == 0
-                                || (context_ray[source_select_index].distance == 1
-                                    && get_rank(context_destination) == BoardRank'(3));
-                        else geometry_ok = context_ray[source_select_index].distance == 0
-                            && (Direction'(source_select_index) == SOUTH_WEST
-                                || Direction'(source_select_index) == SOUTH_EAST)
-                            && ((context_destination_tile.piece_type != NULL_PIECE
-                                && context_destination_tile.piece_color == BLACK) || ep_move);
-                    end else begin
-                        if (Direction'(source_select_index) == NORTH
-                                && context_destination_tile.piece_type == NULL_PIECE)
-                            geometry_ok = context_ray[source_select_index].distance == 0
-                                || (context_ray[source_select_index].distance == 1
-                                    && get_rank(context_destination) == BoardRank'(4));
-                        else geometry_ok = context_ray[source_select_index].distance == 0
-                            && (Direction'(source_select_index) == NORTH_WEST
-                                || Direction'(source_select_index) == NORTH_EAST)
-                            && ((context_destination_tile.piece_type != NULL_PIECE
-                                && context_destination_tile.piece_color == WHITE) || ep_move);
-                    end
-                end
-                BISHOP: geometry_ok = is_diagonal_direction(Direction'(source_select_index));
-                ROOK: geometry_ok = is_cardinal_direction(Direction'(source_select_index));
-                QUEEN: geometry_ok = 1'b1;
-                KING: geometry_ok = context_ray[source_select_index].distance == 0;
-                default: geometry_ok = 1'b0;
-            endcase
-            if (source.piece_type != NULL_PIECE && source.piece_color == job_board.turn
-                    && geometry_ok) begin
-                source_attacker = source;
-                source_move = move;
-                source_is_ep = ep_move;
-                source_is_capture = ep_move || context_destination_tile.piece_type != NULL_PIECE;
-                source_is_promotion = source.piece_type == PAWN
-                    && (get_rank(context_destination) == BoardRank'(0)
-                        || get_rank(context_destination) == BoardRank'(7));
-                source_lane = Direction'(source_select_index);
-                source_valid = (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
-                    ? source_is_capture || source_is_promotion
-                    : !source_is_capture && !source_is_promotion;
-            end
-        end else begin
-            automatic int knight_index = int'(source_select_index) - 8;
-            source = context_knight[knight_index];
-            if (source.piece_type == KNIGHT && source.piece_color == job_board.turn) begin
-                move.from_pos = shift_knight_position(context_destination, KnightDirection'(knight_index));
-                source_attacker = source;
-                source_move = move;
-                source_is_capture = context_destination_tile.piece_type != NULL_PIECE;
-                source_is_knight = 1'b1;
-                source_lane = Direction'(knight_index);
-                source_valid = (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
-                    ? source_is_capture : !source_is_capture;
-            end
-        end
+        source_is_ep = GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
+            && source_attacker.piece_type == PAWN
+            && context_destination_tile.piece_type == NULL_PIECE
+            && (get_rank(context_destination) == BoardRank'(2)
+                || get_rank(context_destination) == BoardRank'(5));
+        source_is_capture = source_is_ep
+            || context_destination_tile.piece_type != NULL_PIECE;
+        source_is_promotion = source_attacker.piece_type == PAWN
+            && (get_rank(context_destination) == BoardRank'(0)
+                || get_rank(context_destination) == BoardRank'(7));
+        source_valid = source_mask[source_select_index];
     end
 
     always_comb begin
@@ -914,7 +857,9 @@ module move_generator_lane #(
         && (cmd == GENERATION_COMMAND
             || (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
                 && cmd == MOVE_GEN_VALIDATE_DIRECT));
-    assign pop_ready = !init_busy && !pop_pending;
+    // The RAM and response tag registers advance together every clock;
+    // an outstanding response does not prevent accepting the next read.
+    assign pop_ready = !init_busy && !flush;
     assign pop_resp_valid = pop_pending;
     assign pop_resp_thread = pop_thread_q;
     assign pop_resp_ply = pop_ply_q;
@@ -932,10 +877,12 @@ module move_generator_lane #(
         bucket_wr_thread = job_thread;
         bucket_wr_select = MoveBucketIndex'(0);
         bucket_wr_top = job_tops[0];
-        bucket_rd_thread = pop_thread;
-        bucket_rd_top = pop_select_new_top;
-        if (pop_valid && pop_ready && pop_select_found)
-            bucket_rd_en[pop_select_bucket] = 1'b1;
+        // Read from the registered selection, independently of the next
+        // request's thread arbitration and bucket comparisons.
+        bucket_rd_thread = pop_read_thread;
+        bucket_rd_top = pop_read_top;
+        if (pop_read_pending && pop_read_found && !flush)
+            bucket_rd_en[pop_read_bucket] = 1'b1;
 
         generator_history_read_early = state == GEN_EXPAND_SOURCE
             && candidate_slot_ready
@@ -1014,6 +961,7 @@ module move_generator_lane #(
         if (!rst_n) begin
             state <= GEN_IDLE;
             pop_pending <= 1'b0;
+            pop_read_pending <= 1'b0;
             candidate_valid <= 1'b0;
             source_select_index <= 4'd0;
             cmd_resp_valid <= 1'b0;
@@ -1038,13 +986,23 @@ module move_generator_lane #(
             end
         end else begin
             cmd_resp_valid <= 1'b0;
-            pop_pending <= pop_valid && pop_ready;
+            // Selection and RAM access are separate stages. Both stages
+            // advance each cycle, preserving full streaming throughput.
+            pop_read_pending <= pop_valid && pop_ready;
+            pop_pending <= pop_read_pending;
             if (pop_valid && pop_ready) begin
-                pop_found_q <= pop_select_found;
-                pop_thread_q <= pop_thread;
-                pop_ply_q <= pop_ply;
-                pop_bucket_q <= pop_select_bucket;
-                pop_new_top_q <= pop_select_new_top;
+                pop_read_found <= pop_select_found;
+                pop_read_thread <= pop_thread;
+                pop_read_ply <= pop_ply;
+                pop_read_bucket <= pop_select_bucket;
+                pop_read_top <= pop_select_new_top;
+            end
+            if (pop_read_pending) begin
+                pop_found_q <= pop_read_found;
+                pop_thread_q <= pop_read_thread;
+                pop_ply_q <= pop_read_ply;
+                pop_bucket_q <= pop_read_bucket;
+                pop_new_top_q <= pop_read_top;
             end
 
             if (clear) begin
@@ -1055,6 +1013,7 @@ module move_generator_lane #(
             if (flush) begin
                 state <= GEN_IDLE;
                 pop_pending <= 1'b0;
+                pop_read_pending <= 1'b0;
                 candidate_valid <= 1'b0;
             end else begin
                 if (state != GEN_IDLE && ENABLE_STATS)
@@ -1136,8 +1095,7 @@ module move_generator_lane #(
                     GEN_SELECT_DEST: begin
                         if (destination_mask != 64'd0) begin
                             destination_mask[selected_destination] <= 1'b0;
-                            context_destination <= selected_destination;
-                            context_destination_tile <= selected_destination_tile;
+                            scan_destination <= selected_destination;
                             state <= GEN_BUILD_CONTEXT;
                         end else if (candidate_finishes_write) begin
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
@@ -1189,13 +1147,11 @@ module move_generator_lane #(
                             source_select_index <= first_source(remaining_mask);
                             if (source_valid) begin
                                 candidate_move <= source_move;
-                                candidate_attacker <= source_attacker;
                                 candidate_victim <= source_victim;
                                 candidate_is_capture <= source_is_capture;
                                 candidate_is_ep <= source_is_ep;
                                 candidate_is_promotion <= source_is_promotion;
                                 candidate_is_castle <= 1'b0;
-                                candidate_is_knight <= source_is_knight;
                                 candidate_see_good <= see_nonnegative(
                                     source_attacker,
                                     source_victim,
@@ -1203,7 +1159,6 @@ module move_generator_lane #(
                                     source_is_knight,
                                     source_lane
                                 );
-                                candidate_lane <= source_lane;
                                 candidate_promo_counter <= source_is_promotion ? 2'd3 : 2'd0;
                                 if (source_is_promotion)
                                     candidate_move.promo_piece <= PROMO_BISHOP;
@@ -1220,14 +1175,17 @@ module move_generator_lane #(
                                             <= stat_history_lookup_count + 40'd1;
                                 end
                             end
-                            if (remaining_mask == 16'd0 && destination_mask != 64'd0) begin
-                                // Select the next destination while the final
-                                // current source enters writeback, then build
-                                // its board context in the following cycle.
-                                destination_mask[selected_destination] <= 1'b0;
-                                context_destination <= selected_destination;
-                                context_destination_tile <= selected_destination_tile;
-                                state <= GEN_BUILD_CONTEXT;
+                            if (remaining_mask == 16'd0 && next_destination_valid) begin
+                                // The next square was registered during source
+                                // preparation. Capture its context while the
+                                // final current source enters writeback.
+                                for (int dir = 0; dir < 8; dir++) begin
+                                    context_ray[dir] <= selected_context_ray[dir];
+                                    context_knight[dir] <= selected_context_knight[dir];
+                                end
+                                context_destination <= scan_destination;
+                                context_destination_tile <= job_board.tiles[scan_destination];
+                                state <= GEN_PREPARE_SOURCE;
                             end else begin
                                 state <= remaining_mask == 16'd0
                                     ? GEN_SELECT_DEST : GEN_EXPAND_SOURCE;
@@ -1240,19 +1198,34 @@ module move_generator_lane #(
                             context_ray[dir] <= selected_context_ray[dir];
                             context_knight[dir] <= selected_context_knight[dir];
                         end
+                        context_destination <= scan_destination;
+                        context_destination_tile <= job_board.tiles[scan_destination];
+                        state <= GEN_PREPARE_SOURCE;
+                    end
+
+                    // Eligibility and priority encoding use only registered
+                    // tiles, keeping them off the dynamic board-read path.
+                    GEN_PREPARE_SOURCE: begin
                         if (selected_source_mask != 16'd0) begin
+                            // Prefetch only the address: board scanning runs in
+                            // parallel with expansion and reuses the context
+                            // registers once the last source has consumed them.
+                            next_destination_valid <= destination_mask != 64'd0;
+                            if (destination_mask != 64'd0) begin
+                                destination_mask[selected_destination] <= 1'b0;
+                                scan_destination <= selected_destination;
+                            end
                             source_mask <= selected_source_mask;
                             source_select_index <= first_source(selected_source_mask);
                             state <= GEN_EXPAND_SOURCE;
+                        end else if (destination_mask != 64'd0) begin
+                            // Skip the selection bubble for empty destinations.
+                            destination_mask[selected_destination] <= 1'b0;
+                            scan_destination <= selected_destination;
+                            state <= GEN_BUILD_CONTEXT;
                         end else begin
                             state <= GEN_SELECT_DEST;
                         end
-                    end
-
-                    GEN_HISTORY_WAIT: begin
-                        // Retained encoding for stable profiling; new commands
-                        // never enter this state.
-                        state <= GEN_SELECT_DEST;
                     end
 
                     GEN_CASTLE: begin
@@ -1260,15 +1233,12 @@ module move_generator_lane #(
                             state <= GEN_CASTLE;
                         end else if (castle_candidate_pseudo_legal) begin
                             candidate_move <= castle_candidate_move;
-                            candidate_attacker <= Tile'({job_board.turn, KING});
                             candidate_victim <= EMPTY_TILE;
                             candidate_is_capture <= 1'b0;
                             candidate_is_ep <= 1'b0;
                             candidate_is_promotion <= 1'b0;
                             candidate_is_castle <= 1'b1;
-                            candidate_is_knight <= 1'b0;
                             candidate_see_good <= 1'b1;
-                            candidate_lane <= Direction'(0);
                             if (ENABLE_STATS) stat_candidate_count <= stat_candidate_count + 40'd1;
                             if (castle_candidate_suppressed) begin
                                 candidate_valid <= 1'b0;
