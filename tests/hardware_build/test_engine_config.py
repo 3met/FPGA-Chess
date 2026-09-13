@@ -54,6 +54,8 @@ class EngineConfigTests(unittest.TestCase):
             search["qsearch_delta_pruning"]["margin"],
         )
         rtl_parameters = engine_rtl_parameter_values(config)
+        self.assertEqual(rtl_parameters["HISTORY_ENTRY_COUNT"], 8192)
+        self.assertEqual(rtl_parameters["HISTORY_ENTRY_BITS"], 8)
         self.assertEqual(rtl_parameters["RFP_BASE_MARGIN"], search["rfp"]["base_margin"])
         self.assertEqual(rtl_parameters["RFP_MARGIN_PER_DEPTH"], search["rfp"]["margin_per_depth"])
         self.assertEqual(rtl_parameters["RFP_MAXIMUM_DEPTH"], search["rfp"]["maximum_depth"])
@@ -87,6 +89,7 @@ class EngineConfigTests(unittest.TestCase):
                     "search_config": str(search_path),
                     "engine": {"threads": 17, "stack_depth": 65, "clock_frequency_hz": 1},
                     "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
+                    "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
                     "instrumentation": {"search_statistics": False},
                 }),
                 encoding="utf-8",
@@ -106,6 +109,7 @@ class EngineConfigTests(unittest.TestCase):
                     "search_config": "hardware/config/search/default.json",
                     "engine": {"threads": 0, "stack_depth": 1, "clock_frequency_hz": 1},
                     "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
+                    "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
                     "instrumentation": {"search_statistics": False},
                 }),
                 encoding="utf-8",
@@ -115,9 +119,22 @@ class EngineConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(BuildError, "threads must be an integer of at least 1"):
                     load_engine_config(str(engine_path))
 
-    def test_history_reward_must_fit_rtl_arithmetic(self):
-        with self.assertRaisesRegex(BuildError, "between 1 and 127"):
+    def test_history_reward_must_fit_configured_entry_width(self):
+        with self.assertRaisesRegex(BuildError, "fit the configured history entry width"):
             self.load_temporary_config({"history": {"maximum_reward": 128}})
+
+    def test_history_entry_count_must_be_a_power_of_two(self):
+        with self.assertRaisesRegex(BuildError, "must be a power of two"):
+            self.load_temporary_config(engine_updates={
+                "history_heuristic": {"entry_count": 8191}
+            })
+
+    def test_history_policy_must_fit_entry_width(self):
+        with self.assertRaisesRegex(BuildError, "castling_bonus must fit"):
+            self.load_temporary_config(
+                {"history": {"maximum_reward": 15, "castling_bonus": 16}},
+                {"history_heuristic": {"entry_bits": 5}},
+            )
 
     def test_aspiration_multiplier_must_grow_the_delta(self):
         with self.assertRaisesRegex(BuildError, "must be greater than one"):

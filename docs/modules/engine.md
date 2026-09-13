@@ -20,7 +20,7 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status of the selected TT memory backend. |
 | Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral TT memory command, write-data, read-data, and completion channels. |
 
-Parameters configure the engine clock, thread count, stack depth, search policy, move-history policy, TT backend, build metadata, and optional statistics. Engine and search profiles supply these values through the board wrapper without adding target-specific logic to the portable core.
+Parameters configure the engine clock, thread count, stack depth, search policy, move-history policy and storage geometry, TT backend, build metadata, and optional statistics. Engine profiles own hardware-resource settings such as the quiet-history entry count and bit width, while search profiles own history rewards, maluses, and ordering thresholds; the build validates that the policy fits the selected signed entry width. Profiles supply these values through the board wrapper without adding target-specific logic to the portable core.
 
 ## Commands
 

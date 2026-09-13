@@ -51,13 +51,15 @@ module search_controller #(
     parameter int NEXT_DEPTH_NUMERATOR = 3,
     parameter int NEXT_DEPTH_DENOMINATOR = 5,
     parameter int SINGLE_LEGAL_MOVE_MS = 10,
-    parameter int HISTORY_REWARD_PER_DEPTH = 4,
-    parameter int HISTORY_MAXIMUM_REWARD = 63,
+    parameter int HISTORY_ENTRY_COUNT = 8192,
+    parameter int HISTORY_ENTRY_BITS = 8,
+    parameter int HISTORY_REWARD_PER_DEPTH = 2,
+    parameter int HISTORY_MAXIMUM_REWARD = 31,
     parameter int HISTORY_MALUS_DIVISOR = 2,
-    parameter int QUIET_THRESHOLD_1 = 16,
-    parameter int QUIET_THRESHOLD_2 = 64,
-    parameter int QUIET_THRESHOLD_3 = 128,
-    parameter int CASTLING_HISTORY_BONUS = 16,
+    parameter int QUIET_THRESHOLD_1 = 8,
+    parameter int QUIET_THRESHOLD_2 = 32,
+    parameter int QUIET_THRESHOLD_3 = 64,
+    parameter int CASTLING_HISTORY_BONUS = 8,
     parameter int TT_VALIDATE_MINIMUM_DEPTH = 8,
     parameter int TT_VALIDATE_BYPASS_HALFMOVES = 4,
     parameter int TT_STALE_DEPTH_TOLERANCE = 4,
@@ -483,6 +485,7 @@ module search_controller #(
     MoveBucketTop move_pop_resp_new_top;
     logic move_history_update_valid;
     logic move_history_update_ready;
+    ThreadID move_history_update_thread;
     Color move_history_update_color;
     Position move_history_update_from;
     Position move_history_update_to;
@@ -729,6 +732,8 @@ module search_controller #(
 
     move_generator #(
         .THREAD_COUNT(SEARCH_THREAD_COUNT),
+        .HISTORY_ENTRY_COUNT(HISTORY_ENTRY_COUNT),
+        .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
         .HISTORY_MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
         .HISTORY_MALUS_DIVISOR(HISTORY_MALUS_DIVISOR),
@@ -773,6 +778,7 @@ module search_controller #(
         .pop_resp_move(move_pop_resp_move), .pop_resp_bucket(move_pop_resp_bucket),
         .pop_resp_new_top(move_pop_resp_new_top),
         .history_update_valid(move_history_update_valid), .history_update_ready(move_history_update_ready),
+        .history_update_thread(move_history_update_thread),
         .history_update_color(move_history_update_color), .history_update_from(move_history_update_from),
         .history_update_to(move_history_update_to), .history_update_depth(move_history_update_depth),
         .history_update_failed0(move_history_update_failed0),
@@ -2256,6 +2262,7 @@ module search_controller #(
             default: begin end
         endcase
         move_history_update_valid = 1'b0;
+        move_history_update_thread = ThreadID'(0);
         move_history_update_color = WHITE;
         move_history_update_from = Position'(0);
         move_history_update_to = Position'(0);
@@ -2267,6 +2274,7 @@ module search_controller #(
         for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++) begin
             if (!move_history_update_valid && history_update_pending[idx]) begin
                 move_history_update_valid = 1'b1;
+                move_history_update_thread = ThreadID'(idx);
                 move_history_update_color = history_update_pending_color[idx];
                 move_history_update_from = history_update_pending_from[idx];
                 move_history_update_to = history_update_pending_to[idx];

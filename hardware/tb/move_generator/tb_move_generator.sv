@@ -47,6 +47,7 @@ module tb_move_generator;
     MoveBucketTop pop_resp_new_top;
     logic history_update_valid;
     logic history_update_ready;
+    ThreadID history_update_thread;
     Color history_update_color;
     Position history_update_from;
     Position history_update_to;
@@ -111,6 +112,7 @@ module tb_move_generator;
         .pop_resp_valid, .pop_resp_thread, .pop_resp_ply, .pop_resp_found,
         .pop_resp_move, .pop_resp_bucket, .pop_resp_new_top,
         .history_update_valid, .history_update_ready,
+        .history_update_thread,
         .history_update_color, .history_update_from, .history_update_to,
         .history_update_depth,
         .history_update_failed0, .history_update_failed1, .history_update_failed2,
@@ -211,6 +213,7 @@ module tb_move_generator;
         pop_current_tops = '0;
         pop_lower_tops = '0;
         history_update_valid = 1'b0;
+        history_update_thread = ThreadID'(0);
         history_update_color = WHITE;
         history_update_from = Position'(0);
         history_update_to = Position'(0);
@@ -455,7 +458,7 @@ module tb_move_generator;
         history_update_valid = 1'b1;
         tick();
         history_update_valid = 1'b0;
-        while (!history_update_ready) tick();
+        while (dut.quiet_history.state != 0) tick();
     endtask
 
     task automatic history_update_with_failures(
@@ -478,7 +481,7 @@ module tb_move_generator;
         history_update_valid = 1'b1;
         tick();
         history_update_valid = 1'b0;
-        while (!history_update_ready) tick();
+        while (dut.quiet_history.state != 0) tick();
     endtask
 
     task automatic launch_history_update_with_failures(
@@ -489,7 +492,7 @@ module tb_move_generator;
         input logic [1:0] failed_count,
         input logic [5:0] depth
     );
-        while (!history_update_ready) tick();
+        while (dut.quiet_history.state != 0) tick();
         history_update_color = WHITE;
         history_update_from = winner.from_pos;
         history_update_to = winner.to_pos;
@@ -716,23 +719,55 @@ module tb_move_generator;
         check(found && same_move(popped, target) && popped_bucket == QUIET_HIGH_BUCKET,
             "positive history update raises quiet move bucket");
         repeat (8) history_update(target, 6'd63);
-        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
-                {target.from_pos, target.to_pos}])
-                == 9'sd238,
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    target.from_pos, target.to_pos)]) == 8'sd119,
             "history gravity reduces bonuses as history approaches its limit");
         failed0 = make_move(Position'(1), Position'(16));
         failed1 = make_move(Position'(1), Position'(11));
         failed2 = make_move(Position'(4), Position'(5));
         history_update_with_failures(target, failed0, failed1, failed2, 2'd3, 6'd4);
-        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
-                {failed0.from_pos, failed0.to_pos}]) == -9'sd8,
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    failed0.from_pos, failed0.to_pos)]) == -8'sd4,
             "failed quiet zero history receives half-strength malus");
-        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
-                {failed1.from_pos, failed1.to_pos}]) == -9'sd8,
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    failed1.from_pos, failed1.to_pos)]) == -8'sd4,
             "second failed quiet receives a malus");
-        check($signed(dut.quiet_lane.gen_quiet_history.quiet_history.history_table.gen_color[0].history_ram.mem[
-                {failed2.from_pos, failed2.to_pos}]) == -9'sd8,
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    failed2.from_pos, failed2.to_pos)]) == -8'sd4,
             "third failed quiet receives a malus");
+
+        history_update_thread = ThreadID'(1);
+        history_update(target, 6'd1);
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(1), WHITE,
+                    target.from_pos, target.to_pos)]) == 8'sd2,
+            "thread participates in the combined history hash");
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    target.from_pos, target.to_pos)]) == 8'sd120,
+            "thread-local update leaves the other hashed entry unchanged");
+
+        // A second update presented while the private update pipeline is busy
+        // is acknowledged and dropped rather than backpressuring search.
+        history_update_thread = ThreadID'(0);
+        launch_history_update_with_failures(
+            make_move(Position'(2), Position'(10)),
+            NULL_MOVE, NULL_MOVE, NULL_MOVE, 2'd0, 6'd1
+        );
+        history_update_from = Position'(3);
+        history_update_to = Position'(11);
+        history_update_valid = 1'b1;
+        tick();
+        history_update_valid = 1'b0;
+        while (dut.quiet_history.state != 0) tick();
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    Position'(3), Position'(11))]) == 8'sd0,
+            "busy history pipeline drops a new update without backpressure");
 
         // Pins are deliberately left to board update: the sideways rook move
         // must remain in the pseudo-legal stream even though it exposes e1.

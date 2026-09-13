@@ -17,13 +17,11 @@ module move_generator_lane #(
     parameter MoveGenCommand GENERATION_COMMAND = MOVE_GEN_GENERATE_NOISY,
     parameter MoveBucketMask OWNED_BUCKETS =
         GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK,
-    parameter int HISTORY_REWARD_PER_DEPTH = 4,
-    parameter int HISTORY_MAXIMUM_REWARD = 63,
-    parameter int HISTORY_MALUS_DIVISOR = 2,
-    parameter int QUIET_THRESHOLD_1 = 16,
-    parameter int QUIET_THRESHOLD_2 = 64,
-    parameter int QUIET_THRESHOLD_3 = 128,
-    parameter int CASTLING_HISTORY_BONUS = 16,
+    parameter int HISTORY_ENTRY_BITS = 8,
+    parameter int QUIET_THRESHOLD_1 = 8,
+    parameter int QUIET_THRESHOLD_2 = 32,
+    parameter int QUIET_THRESHOLD_3 = 64,
+    parameter int CASTLING_HISTORY_BONUS = 8,
     parameter bit ASSERT_ON_OVERFLOW = 1'b1,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -65,16 +63,12 @@ module move_generator_lane #(
     output MoveBucketIndex pop_resp_bucket,
     output MoveBucketTop pop_resp_new_top,
 
-    input logic history_update_valid,
-    output logic history_update_ready,
-    input Color history_update_color,
-    input Position history_update_from,
-    input Position history_update_to,
-    input PlyIndex history_update_depth,
-    input logic [11:0] history_update_failed0,
-    input logic [11:0] history_update_failed1,
-    input logic [11:0] history_update_failed2,
-    input logic [1:0] history_update_failed_count,
+    output logic history_lookup_valid,
+    output ThreadID history_lookup_thread,
+    output Color history_lookup_color,
+    output Position history_lookup_from,
+    output Position history_lookup_to,
+    input logic signed [HISTORY_ENTRY_BITS-1:0] history_lookup_value,
 
     output logic overflow_sticky,
     output ThreadID overflow_thread,
@@ -137,6 +131,9 @@ module move_generator_lane #(
         if (!(QUIET_THRESHOLD_1 < QUIET_THRESHOLD_2
                 && QUIET_THRESHOLD_2 < QUIET_THRESHOLD_3))
             $fatal(1, "quiet history thresholds must be strictly increasing");
+        if (CASTLING_HISTORY_BONUS < 0
+                || CASTLING_HISTORY_BONUS > (2 ** (HISTORY_ENTRY_BITS - 1) - 1))
+            $fatal(1, "castling history bonus must fit the configured entry width");
         if (GENERATION_COMMAND != MOVE_GEN_GENERATE_NOISY
                 && GENERATION_COMMAND != MOVE_GEN_GENERATE_QUIET)
             $fatal(1, "move-generator lane must be noisy or quiet");
@@ -224,7 +221,6 @@ module move_generator_lane #(
     MoveBucketIndex pop_select_bucket;
     MoveBucketTop pop_select_new_top;
 
-    logic signed [8:0] history_score;
     logic generator_history_read;
     logic generator_history_read_early;
     logic generator_history_read_castle;
@@ -651,7 +647,9 @@ module move_generator_lane #(
             ? BAD_NOISY_HIGH_BUCKET : BAD_NOISY_LOW_BUCKET;
     endfunction
 
-    function automatic MoveBucketIndex quiet_bucket(input logic signed [10:0] score);
+    function automatic MoveBucketIndex quiet_bucket(
+        input logic signed [HISTORY_ENTRY_BITS:0] score
+    );
         if (score >= QUIET_THRESHOLD_3) return QUIET_HIGHEST_BUCKET;
         if (score >= QUIET_THRESHOLD_2) return QUIET_HIGH_BUCKET;
         if (score >= QUIET_THRESHOLD_1) return QUIET_MEDIUM_BUCKET;
@@ -847,6 +845,7 @@ module move_generator_lane #(
     end
 
     assign path_ready = state == GEN_IDLE && !init_busy;
+    assign init_busy = 1'b0;
     // A normal candidate is consumed every cycle; promotion variants retain
     // the slot until all four encodings have been written.
     assign candidate_slot_ready = !candidate_valid
@@ -893,6 +892,14 @@ module move_generator_lane #(
             && !castle_candidate_suppressed;
         generator_history_read =
             generator_history_read_early || generator_history_read_castle;
+        history_lookup_valid = GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
+            && generator_history_read;
+        history_lookup_thread = job_thread;
+        history_lookup_color = job_board.turn;
+        history_lookup_from = generator_history_read_castle
+            ? castle_candidate_move.from_pos : source_move.from_pos;
+        history_lookup_to = generator_history_read_castle
+            ? castle_candidate_move.to_pos : source_move.to_pos;
 
         if (candidate_valid && (candidate_is_capture || candidate_is_promotion)) begin
             bucket_wr_select = noisy_bucket();
@@ -900,8 +907,8 @@ module move_generator_lane #(
             if (job_tops[bucket_wr_select] < bucket_capacity(bucket_wr_select))
                 bucket_wr_en[bucket_wr_select] = 1'b1;
         end else if (candidate_valid) begin
-            automatic logic signed [10:0] score;
-            score = $signed(history_score);
+            automatic logic signed [HISTORY_ENTRY_BITS:0] score;
+            score = $signed(history_lookup_value);
             if (candidate_is_castle) score += CASTLING_HISTORY_BONUS;
             bucket_wr_select = quiet_bucket(score);
             bucket_wr_top = job_tops[bucket_wr_select];
@@ -909,37 +916,6 @@ module move_generator_lane #(
                 bucket_wr_en[bucket_wr_select] = 1'b1;
         end
     end
-
-    generate
-        if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET) begin : gen_quiet_history
-            // Quiet ordering and background updates share one dual-color table.
-            move_generator_quiet_history #(
-                .REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
-                .MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
-                .MALUS_DIVISOR(HISTORY_MALUS_DIVISOR)
-            ) quiet_history (
-                .clk, .rst_n, .clear, .init_busy,
-                .lookup_valid(generator_history_read),
-                .lookup_color(job_board.turn),
-                .lookup_address(generator_history_read_castle
-                    ? {castle_candidate_move.from_pos, castle_candidate_move.to_pos}
-                    : {source_move.from_pos, source_move.to_pos}),
-                .lookup_value(history_score),
-                .update_valid(history_update_valid), .update_ready(history_update_ready),
-                .update_color(history_update_color),
-                .update_from(history_update_from), .update_to(history_update_to),
-                .update_depth(history_update_depth),
-                .update_failed0(history_update_failed0),
-                .update_failed1(history_update_failed1),
-                .update_failed2(history_update_failed2),
-                .update_failed_count(history_update_failed_count)
-            );
-        end else begin : gen_no_history
-            assign init_busy = 1'b0;
-            assign history_update_ready = 1'b0;
-            assign history_score = '0;
-        end
-    endgenerate
 
     // Move storage is a separate resource so lane control does not own RAM layout.
     move_generator_bucket_store #(

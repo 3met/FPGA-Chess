@@ -9,6 +9,10 @@
     "tag_bits": 32,
     "cache_index_bits": 11
   },
+  "history_heuristic": {
+    "entry_count": 8192,
+    "entry_bits": 8
+  },
   "instrumentation": {
     "search_statistics": false
   }

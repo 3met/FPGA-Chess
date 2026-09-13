@@ -29,6 +29,8 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
         "SEARCH_STACK_DEPTH": config["stack_depth"],
         "TT_TAG_BITS": config["tt_tag_bits"],
         "TT_CACHE_INDEX_BITS": config["tt_cache_index_bits"],
+        "HISTORY_ENTRY_COUNT": config["history_entry_count"],
+        "HISTORY_ENTRY_BITS": config["history_entry_bits"],
         "ENABLE_SEARCH_STATS": int(config["search_statistics"]),
         "ASPIRATION_STARTING_DELTA": search["aspiration_starting_delta"],
         "ASPIRATION_DELTA_MULTIPLIER_Q3": search["aspiration_delta_multiplier_q3"],
@@ -300,7 +302,7 @@ def _validate_search(search: dict, path: Path) -> dict:
         "next_depth_fraction": _fraction(timing, "next_depth_fraction", f"{context}.time_management"),
         "single_legal_move_ms": _integer(timing, "single_legal_move_ms", f"{context}.time_management"),
         "history_reward_per_depth": _integer(history, "reward_per_depth", f"{context}.history", 1),
-        "history_maximum_reward": _integer(history, "maximum_reward", f"{context}.history", 1, 127),
+        "history_maximum_reward": _integer(history, "maximum_reward", f"{context}.history", 1),
         "history_malus_divisor": _integer(history, "malus_divisor", f"{context}.history", 1),
         "quiet_bucket_thresholds": thresholds,
         "castling_history_bonus": _integer(history, "castling_bonus", f"{context}.history"),
@@ -316,7 +318,7 @@ def load_engine_config(value: str) -> dict:
     engine_profile = _load_object(engine_path, "engine configuration")
     _require_keys(
         engine_profile,
-        {"search_config", "engine", "transposition_table", "instrumentation"},
+        {"search_config", "engine", "transposition_table", "history_heuristic", "instrumentation"},
         rel(engine_path),
     )
     search_value = engine_profile.get("search_config")
@@ -326,9 +328,11 @@ def load_engine_config(value: str) -> dict:
     search = _validate_search(_load_object(search_path, "search configuration"), search_path)
     engine = _object(engine_profile, "engine", rel(engine_path))
     tt = _object(engine_profile, "transposition_table", rel(engine_path))
+    history = _object(engine_profile, "history_heuristic", rel(engine_path))
     instrumentation = _object(engine_profile, "instrumentation", rel(engine_path))
     _require_keys(engine, {"threads", "stack_depth", "clock_frequency_hz"}, f"{rel(engine_path)}.engine")
     _require_keys(tt, {"tag_bits", "cache_index_bits"}, f"{rel(engine_path)}.transposition_table")
+    _require_keys(history, {"entry_count", "entry_bits"}, f"{rel(engine_path)}.history_heuristic")
     _require_keys(instrumentation, {"search_statistics"}, f"{rel(engine_path)}.instrumentation")
     resolved = {
         "engine_config": rel(engine_path),
@@ -338,6 +342,8 @@ def load_engine_config(value: str) -> dict:
         "clock_frequency_hz": _integer(engine, "clock_frequency_hz", f"{rel(engine_path)}.engine", 1),
         "tt_tag_bits": _integer(tt, "tag_bits", f"{rel(engine_path)}.transposition_table", 1, 63),
         "tt_cache_index_bits": _integer(tt, "cache_index_bits", f"{rel(engine_path)}.transposition_table", 1),
+        "history_entry_count": _integer(history, "entry_count", f"{rel(engine_path)}.history_heuristic", 2),
+        "history_entry_bits": _integer(history, "entry_bits", f"{rel(engine_path)}.history_heuristic", 2),
         "search_statistics": _boolean(instrumentation, "search_statistics", f"{rel(engine_path)}.instrumentation"),
         "search": search,
     }
@@ -348,6 +354,22 @@ def load_engine_config(value: str) -> dict:
     if search["futility_maximum_depth"] >= resolved["stack_depth"]:
         raise BuildError(
             f"{rel(engine_path)} futility maximum predicted depth must be smaller than the engine stack depth"
+        )
+    if resolved["history_entry_count"] & (resolved["history_entry_count"] - 1):
+        raise BuildError(f"{rel(engine_path)}.history_heuristic.entry_count must be a power of two")
+    history_maximum = (1 << (resolved["history_entry_bits"] - 1)) - 1
+    if search["history_maximum_reward"] > history_maximum:
+        raise BuildError(
+            f"{rel(search_path)}.history.maximum_reward must fit the configured history entry width"
+        )
+    if search["castling_history_bonus"] > history_maximum:
+        raise BuildError(
+            f"{rel(search_path)}.history.castling_bonus must fit the configured history entry width"
+        )
+    if any(value < -history_maximum - 1 or value > history_maximum
+            for value in search["quiet_bucket_thresholds"]):
+        raise BuildError(
+            f"{rel(search_path)}.history.quiet_bucket_thresholds must fit the configured history entry width"
         )
     resolved["digest"] = engine_config_digest(resolved)
     return resolved

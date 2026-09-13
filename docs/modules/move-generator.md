@@ -4,7 +4,7 @@
 
 ## RTL Organization
 
-The top level coordinates independent noisy/direct and quiet lanes and selects moves by global bucket priority. Shared lane logic performs destination selection, source expansion, validation, and candidate storage; separate storage and quiet-history modules own their RAM interfaces.
+The top level coordinates independent noisy/direct and quiet lanes and selects moves by global bucket priority. Shared lane logic performs destination selection, source expansion, validation, and candidate storage; separate storage and quiet-history modules own their RAM interfaces. Quiet-history updates run in their own pipeline rather than in the quiet generation lane.
 
 ## Commands
 
@@ -43,7 +43,9 @@ Candidates are divided into eight global-priority buckets:
 | 1 | Unfavorable captures of rooks or queens. |
 | 0 | Other unfavorable captures. |
 
-Capture classification uses a bounded visible static-exchange approximation. Quiet ordering uses a signed history table indexed by color, origin, and destination. Beta cutoffs update the successful quiet and a small number of earlier failed quiets with depth-scaled gravity updates. History maintenance is best-effort and never blocks search.
+Capture classification uses a bounded visible static-exchange approximation. Quiet ordering uses one signed history RAM indexed by a wiring-only XOR-fold hash of `{thread, color, origin, destination}`; collisions are intentionally untagged. The engine profile configures the power-of-two entry count and signed entry width, with 8,192 eight-bit entries by default. Beta cutoffs update the successful quiet and a small number of earlier failed quiets with depth-scaled gravity updates whose limit and arithmetic widths derive from the entry width.
+
+History lookups have unconditional priority over the update pipeline's read port. Incoming updates are best-effort: an update presented while the pipeline is occupied is dropped, an update read waits behind lookups, and a write colliding with a lookup is dropped so generation never stalls or observes ambiguous read-during-write data.
 
 Only the encoded `Move` is stored. Ordering within a bucket is deterministic LIFO; fixed destination selection gives a reproducible preference among otherwise equal moves but never overrides bucket priority.
 
