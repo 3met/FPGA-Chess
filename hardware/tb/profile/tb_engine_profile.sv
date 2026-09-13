@@ -68,12 +68,12 @@ module tb_engine_profile #(
     // controller edge places reads 7.5 ns into the SDRAM's 10 ns data cycle.
     localparam int MEMORY_READ_LAG_NS = 5;
     localparam int ENGINE_STATE_COUNT = 8;
-    localparam int CONTROLLER_STATE_COUNT = 22;
+    localparam int CONTROLLER_STATE_COUNT = 28;
     localparam int THREAD_PHASE_COUNT = 11;
     // Profiler-local copies of the stable state encodings avoid hierarchical
     // enum-item references, which trigger a Verilator width-analysis bug.
-    localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 18;
-    localparam int CONTROLLER_STATE_SEARCH_RUN = 19;
+    localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 24;
+    localparam int CONTROLLER_STATE_SEARCH_RUN = 25;
     localparam int THREAD_PHASE_IDLE = 0;
     localparam int THREAD_PHASE_READY = 1;
     localparam int THREAD_PHASE_EVAL_WAIT = 3;
@@ -300,9 +300,10 @@ module tb_engine_profile #(
     longint unsigned move_operation_cycles[0:MOVE_OPERATION_COUNT-1];
     longint unsigned move_operation_max_cycles[0:MOVE_OPERATION_COUNT-1];
     longint unsigned move_operation_aborted[0:MOVE_OPERATION_COUNT-1];
-    longint unsigned move_command_start_cycle[0:SEARCH_THREAD_COUNT-1], move_pop_start_cycle;
+    longint unsigned move_command_start_cycle[0:SEARCH_THREAD_COUNT-1];
+    longint unsigned move_pop_start_cycle[0:SEARCH_THREAD_COUNT-1];
     logic move_command_active[0:SEARCH_THREAD_COUNT-1];
-    logic move_pop_active;
+    logic move_pop_active[0:SEARCH_THREAD_COUNT-1];
     logic [1:0] move_command_operation[0:SEARCH_THREAD_COUNT-1];
     longint unsigned noisy_destinations_examined, quiet_destinations_examined;
     longint unsigned noisy_destinations_with_sources, quiet_destinations_with_sources;
@@ -662,21 +663,23 @@ module tb_engine_profile #(
             // Bucket pops are pipelined and may accept a new request on the
             // same edge that the previous response is consumed.
             if (dut.controller.move_pop_resp_valid) begin
+                automatic int tid = int'(dut.controller.move_pop_resp_thread);
                 automatic longint unsigned operation_cycles =
-                    search_cycles - move_pop_start_cycle;
-                if (!move_pop_active)
+                    search_cycles - move_pop_start_cycle[tid];
+                if (!move_pop_active[tid])
                     $fatal(1, "move bucket response without a profiled request");
                 record_move_operation(
                     MOVE_OPERATION_BUCKET_POP, operation_cycles, 1'b0
                 );
-                move_pop_active = 1'b0;
+                move_pop_active[tid] = 1'b0;
             end
             if (dut.controller.move_pop_valid && dut.controller.move_pop_ready) begin
-                if (move_pop_active)
-                    $fatal(1, "move bucket pipeline accepted more than one outstanding request");
+                automatic int tid = int'(dut.controller.move_pop_thread);
+                if (move_pop_active[tid])
+                    $fatal(1, "thread accepted more than one outstanding move bucket request");
                 move_pops <= move_pops + 1;
-                move_pop_active = 1'b1;
-                move_pop_start_cycle = search_cycles;
+                move_pop_active[tid] = 1'b1;
+                move_pop_start_cycle[tid] = search_cycles;
             end
 
             // Destination/source events are classified by the active
@@ -866,14 +869,15 @@ module tb_engine_profile #(
                     );
                     move_command_active[tid] = 1'b0;
                 end
-            if (move_pop_active) begin
-                record_move_operation(
-                    MOVE_OPERATION_BUCKET_POP,
-                    search_cycles - move_pop_start_cycle,
-                    1'b1
-                );
-                move_pop_active = 1'b0;
-            end
+            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                if (move_pop_active[tid]) begin
+                    record_move_operation(
+                        MOVE_OPERATION_BUCKET_POP,
+                        search_cycles - move_pop_start_cycle[tid],
+                        1'b1
+                    );
+                    move_pop_active[tid] = 1'b0;
+                end
             search_result <= dut.controller_resp;
             result_seen <= 1'b1;
             profile_active <= 1'b0;
@@ -1113,11 +1117,12 @@ module tb_engine_profile #(
         tt_store_fifo_high_water = 0;
         tt_cache_bypass_hits = 0;
         tt_store_write_preemptions = 0;
-        move_pop_active = 1'b0;
         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
             move_command_active[tid] = 1'b0;
             move_command_operation[tid] = '0;
             move_command_start_cycle[tid] = 0;
+            move_pop_active[tid] = 1'b0;
+            move_pop_start_cycle[tid] = 0;
             thread_ready_nnue_init[tid] = 0;
             thread_ready_dispatch[tid] = 0;
             thread_ready_arbitration[tid] = 0;
@@ -1131,7 +1136,6 @@ module tb_engine_profile #(
             thread_repetition_overlap_wait[tid] = 0;
             thread_repetition_checker_wait[tid] = 0;
         end
-        move_pop_start_cycle = 0;
         noisy_destinations_examined = 0;
         quiet_destinations_examined = 0;
         noisy_destinations_with_sources = 0;
