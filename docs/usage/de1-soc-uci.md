@@ -51,7 +51,7 @@ The port may instead be set through `FPGA_CHESS_PORT`. When neither an argument 
 
 ## Connection Behavior
 
-The `uci` handshake is hardware-independent and advertises only the `Ponder` runtime option. The first `isready` establishes the serial connection, resets the protocol with UART BREAK, waits for board initialization, verifies clean status, and starts a new game. Physical connection settings remain host arguments: use `--port`, `FPGA_CHESS_PORT`, and `--baud` rather than UCI options.
+The `uci` handshake is hardware-independent and advertises the `Ponder` and `Move Overhead` runtime options. `Move Overhead` defaults to 10 ms and is subtracted from fixed `movetime` and normal clock deadlines. The first `isready` establishes the serial connection, resets the protocol with UART BREAK, waits for board initialization, verifies clean status, and starts a new game. Physical connection settings remain host arguments: use `--port`, `FPGA_CHESS_PORT`, and `--baud` rather than UCI options.
 
 The host advertises the standard UCI `Ponder` option. `go ponder` searches the speculative position to the hardware depth ceiling without consuming the normal clock budget, and `ponderhit` restarts the saved search limit on the same transposition-table-warmed position.
 

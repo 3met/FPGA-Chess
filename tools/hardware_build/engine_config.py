@@ -22,7 +22,8 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
     search = config["search"]
     thresholds = search["quiet_bucket_thresholds"]
     increment = search["increment_fraction"]
-    remaining = search["remaining_time_fraction"]
+    hard_time = search["hard_time_fraction"]
+    next_depth = search["next_depth_fraction"]
     return {
         "SEARCH_THREAD_COUNT": config["threads"],
         "SEARCH_STACK_DEPTH": config["stack_depth"],
@@ -46,12 +47,21 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
         "FUTILITY_MARGIN_PER_DEPTH": search["futility_margin_per_depth"],
         "FUTILITY_MAXIMUM_DEPTH": search["futility_maximum_depth"],
         "QDELTA_MARGIN": search["qdelta_margin"],
-        "MOVE_OVERHEAD_MS": search["move_overhead_ms"],
-        "MINIMUM_SEARCH_MS": search["minimum_search_ms"],
+        "MOVES_TO_GO_BUFFER": search["moves_to_go_buffer"],
+        "DEFAULT_MOVES_DIVISOR": search["default_moves_divisor"],
         "INCREMENT_NUMERATOR": increment[0],
         "INCREMENT_DENOMINATOR": increment[1],
-        "REMAINING_TIME_NUMERATOR": remaining[0],
-        "REMAINING_TIME_DENOMINATOR": remaining[1],
+        "HARD_BASE_MULTIPLIER": search["hard_base_multiplier"],
+        "HARD_TIME_NUMERATOR": hard_time[0],
+        "HARD_TIME_DENOMINATOR": hard_time[1],
+        "SOFT_FACTOR_DEFAULT": search["soft_factor_default"],
+        "SOFT_FACTOR_MINIMUM": search["soft_factor_minimum"],
+        "SOFT_FACTOR_MAXIMUM": search["soft_factor_maximum"],
+        "STABLE_DEPTH_THRESHOLD": search["stable_depth_threshold"],
+        "SCORE_DROP_THRESHOLD": search["score_drop_evalscore"],
+        "NEXT_DEPTH_NUMERATOR": next_depth[0],
+        "NEXT_DEPTH_DENOMINATOR": next_depth[1],
+        "SINGLE_LEGAL_MOVE_MS": search["single_legal_move_ms"],
         "HISTORY_REWARD_PER_DEPTH": search["history_reward_per_depth"],
         "HISTORY_MAXIMUM_REWARD": search["history_maximum_reward"],
         "HISTORY_MALUS_DIVISOR": search["history_malus_divisor"],
@@ -180,7 +190,12 @@ def _validate_search(search: dict, path: Path) -> dict:
     _require_keys(qdelta, {"margin"}, f"{context}.qsearch_delta_pruning")
     _require_keys(
         timing,
-        {"move_overhead_ms", "minimum_search_ms", "increment_fraction", "remaining_time_fraction"},
+        {
+            "moves_to_go_buffer", "default_moves_divisor", "increment_fraction",
+            "hard_base_multiplier", "hard_time_fraction", "soft_factor_default",
+            "soft_factor_minimum", "soft_factor_maximum", "stable_depth_threshold",
+            "score_drop_evalscore", "next_depth_fraction", "single_legal_move_ms",
+        },
         f"{context}.time_management",
     )
     _require_keys(
@@ -219,6 +234,20 @@ def _validate_search(search: dict, path: Path) -> dict:
     if aspiration_multiplier_q3 > 64:
         raise BuildError(f"{context}.aspiration.delta_multiplier must not exceed eight")
 
+    soft_factor_default = _integer(
+        timing, "soft_factor_default", f"{context}.time_management", 1
+    )
+    soft_factor_minimum = _integer(
+        timing, "soft_factor_minimum", f"{context}.time_management", 1
+    )
+    soft_factor_maximum = _integer(
+        timing, "soft_factor_maximum", f"{context}.time_management", 1
+    )
+    if not soft_factor_minimum <= soft_factor_default <= soft_factor_maximum:
+        raise BuildError(
+            f"{context}.time_management soft factors must satisfy minimum <= default <= maximum"
+        )
+
     null_minimum_depth = _integer(null_move, "minimum_depth", f"{context}.null_move", 1)
     null_deep_depth_threshold = _integer(null_move, "deep_depth_threshold", f"{context}.null_move", 1)
     null_shallow_reduction = _integer(null_move, "shallow_reduction", f"{context}.null_move", 1)
@@ -256,10 +285,20 @@ def _validate_search(search: dict, path: Path) -> dict:
         "qdelta_margin": _integer(
             qdelta, "margin", f"{context}.qsearch_delta_pruning", 0, 32767
         ),
-        "move_overhead_ms": _integer(timing, "move_overhead_ms", f"{context}.time_management"),
-        "minimum_search_ms": _integer(timing, "minimum_search_ms", f"{context}.time_management"),
+        "moves_to_go_buffer": _integer(timing, "moves_to_go_buffer", f"{context}.time_management"),
+        "default_moves_divisor": _integer(timing, "default_moves_divisor", f"{context}.time_management", 1),
         "increment_fraction": _fraction(timing, "increment_fraction", f"{context}.time_management"),
-        "remaining_time_fraction": _fraction(timing, "remaining_time_fraction", f"{context}.time_management"),
+        "hard_base_multiplier": _integer(timing, "hard_base_multiplier", f"{context}.time_management", 1),
+        "hard_time_fraction": _fraction(timing, "hard_time_fraction", f"{context}.time_management"),
+        "soft_factor_default": soft_factor_default,
+        "soft_factor_minimum": soft_factor_minimum,
+        "soft_factor_maximum": soft_factor_maximum,
+        "stable_depth_threshold": _integer(timing, "stable_depth_threshold", f"{context}.time_management", 1),
+        "score_drop_evalscore": _integer(
+            timing, "score_drop_evalscore", f"{context}.time_management", 0, 32767
+        ),
+        "next_depth_fraction": _fraction(timing, "next_depth_fraction", f"{context}.time_management"),
+        "single_legal_move_ms": _integer(timing, "single_legal_move_ms", f"{context}.time_management"),
         "history_reward_per_depth": _integer(history, "reward_per_depth", f"{context}.history", 1),
         "history_maximum_reward": _integer(history, "maximum_reward", f"{context}.history", 1, 127),
         "history_malus_divisor": _integer(history, "malus_divisor", f"{context}.history", 1),

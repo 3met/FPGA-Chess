@@ -17,6 +17,7 @@ from software.engine.protocol import (
 
 
 DEFAULT_SEARCH_DEPTH = MAX_SEARCH_DEPTH
+DEFAULT_MOVE_OVERHEAD_MS = 10
 
 KNOWN_COMMANDS = frozenset({
     "uci",
@@ -148,7 +149,10 @@ def _go_values(args: list[str]) -> dict[str, str]:
     return values
 
 
-def parse_go_command(args: list[str]) -> ParsedGoCommand:
+def parse_go_command(
+    args: list[str],
+    move_overhead_ms: int = DEFAULT_MOVE_OVERHEAD_MS,
+) -> ParsedGoCommand:
     """Parse UCI go arguments and encode the supported FPGA operation."""
     values = _go_values(args)
     is_ponder = "ponder" in values
@@ -156,8 +160,8 @@ def parse_go_command(args: list[str]) -> ParsedGoCommand:
     warnings = []
     if "searchmoves" in values:
         warnings.append("searchmoves is ignored by this FPGA protocol")
-    if "mate" in values or "movestogo" in values:
-        warnings.append("mate/movestogo constraints are ignored")
+    if "mate" in values:
+        warnings.append("mate constraints are ignored")
 
     if "perft" in values:
         command = cmd_perft(parse_depth(values["perft"], "perft"))
@@ -165,7 +169,10 @@ def parse_go_command(args: list[str]) -> ParsedGoCommand:
     if "depth" in values:
         command = cmd_search_depth(parse_depth(values["depth"], "depth"))
     elif "movetime" in values:
-        command = cmd_search_fixed_time(parse_time(values["movetime"], "movetime"))
+        command = cmd_search_fixed_time(
+            parse_time(values["movetime"], "movetime"),
+            move_overhead_ms,
+        )
     elif "nodes" in values:
         command = cmd_search_nodes(parse_nodes(values["nodes"]))
     elif "wtime" in values and "btime" in values:
@@ -174,6 +181,8 @@ def parse_go_command(args: list[str]) -> ParsedGoCommand:
             parse_time(values["btime"], "btime"),
             parse_time(values.get("winc", "0"), "winc"),
             parse_time(values.get("binc", "0"), "binc"),
+            parse_time(values.get("movestogo", "0"), "movestogo"),
+            move_overhead_ms,
         )
     else:
         command = cmd_search_depth(DEFAULT_SEARCH_DEPTH)

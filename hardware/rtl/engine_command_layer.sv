@@ -122,8 +122,8 @@ module engine_command_layer #(
             ENGINE_CMD_SET_BOARD:         return 6'd36;
             ENGINE_CMD_MAKE_MOVE:         return 6'd2;
             ENGINE_CMD_SEARCH_DEPTH:      return 6'd1;
-            ENGINE_CMD_SEARCH_FIXED_TIME: return 6'd3;
-            ENGINE_CMD_SEARCH_ON_CLOCK:   return 6'd12;
+            ENGINE_CMD_SEARCH_FIXED_TIME: return 6'd6;
+            ENGINE_CMD_SEARCH_ON_CLOCK:   return 6'd17;
             ENGINE_CMD_SEARCH_NODES:      return 6'd5;
             ENGINE_CMD_PERFT:             return 6'd1;
             ENGINE_CMD_GET_DEBUG_STAT:    return 6'd1;
@@ -485,6 +485,7 @@ module engine_command_layer #(
                     active_operation <= ENGINE_CMD_SEARCH_FIXED_TIME;
                     req.operation = ENGINE_CTRL_SEARCH_FIXED_TIME;
                     req.time_limit = decode_time(0);
+                    req.move_overhead = decode_time(3);
                     issue_single_request(req, RESP_SEARCH, 1'b1, 1'b0);
                 end
 
@@ -495,6 +496,8 @@ module engine_command_layer #(
                     req.btime = decode_time(3);
                     req.winc = decode_time(6);
                     req.binc = decode_time(9);
+                    req.moves_to_go = {payload[13], payload[12]};
+                    req.move_overhead = decode_time(14);
                     issue_single_request(req, RESP_SEARCH, 1'b1, 1'b0);
                 end
 

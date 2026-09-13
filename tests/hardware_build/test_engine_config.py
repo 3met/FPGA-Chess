@@ -64,7 +64,16 @@ class EngineConfigTests(unittest.TestCase):
             rtl_parameters["QDELTA_MARGIN"],
             search["qsearch_delta_pruning"]["margin"],
         )
+        timing = search["time_management"]
+        self.assertEqual(rtl_parameters["MOVES_TO_GO_BUFFER"], timing["moves_to_go_buffer"])
+        self.assertEqual(rtl_parameters["DEFAULT_MOVES_DIVISOR"], timing["default_moves_divisor"])
+        self.assertEqual(rtl_parameters["SCORE_DROP_THRESHOLD"], timing["score_drop_evalscore"])
+        self.assertEqual(rtl_parameters["SINGLE_LEGAL_MOVE_MS"], timing["single_legal_move_ms"])
         self.assertEqual(len(config["digest"]), 64)
+
+    def test_soft_factor_range_must_contain_default(self):
+        with self.assertRaisesRegex(BuildError, "minimum <= default <= maximum"):
+            self.load_temporary_config({"time_management": {"soft_factor_minimum": 5}})
 
     def test_structural_values_have_no_policy_ceiling(self):
         with tempfile.TemporaryDirectory() as temp_dir:

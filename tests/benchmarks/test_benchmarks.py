@@ -153,7 +153,7 @@ class SanitySuiteTests(unittest.TestCase):
         def search(_engine, fen, go, timeout):
             calls.append((fen, go, timeout))
             events.append(("search", fen, go, timeout))
-            return 100 + len(calls), "e2e4", 0.250
+            return 100 + len(calls), "e2e4", 0.240
 
         with patch("software.benchmarks.cli.FPGAUCISession", return_value=engine), \
                 patch("software.benchmarks.cli._search", side_effect=search), \
@@ -189,7 +189,7 @@ class SanitySuiteTests(unittest.TestCase):
         engine = MagicMock()
         engine.__enter__.return_value = engine
         results = [
-            (100 + case_index, "e2e4", 0.256 if case_index == 0 else 0.250)
+            (100 + case_index, "e2e4", 0.246 if case_index == 0 else 0.240)
             for case_index in range(len(SANITY_POSITIONS))
         ]
         output = io.StringIO()
@@ -201,7 +201,7 @@ class SanitySuiteTests(unittest.TestCase):
             status = run_sanity(SANITY_DEPTH, 10.0, 120.0, False)
 
         self.assertEqual(status, 1)
-        self.assertIn("FAIL movetime open-game: 256.0 ms (expected 250 +/- 5 ms)", output.getvalue())
+        self.assertIn("FAIL movetime open-game: 246.0 ms (expected 240 +/- 5 ms)", output.getvalue())
         self.assertIn("movetime 15/16 passed", output.getvalue())
 
 

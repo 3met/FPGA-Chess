@@ -11,6 +11,8 @@ from software.engine.protocol import (
     cmd_make_move,
     cmd_get_build_info,
     cmd_get_debug_stat,
+    cmd_search_fixed_time,
+    cmd_search_on_clock,
     decode_response,
     encode_fen,
     encode_move,
@@ -62,6 +64,13 @@ class ProtocolEncodingTests(unittest.TestCase):
 
     def test_time_is_24_bit_little_endian(self):
         self.assertEqual(encode_time_ms(0x010203), bytes.fromhex("030201"))
+
+    def test_timed_search_commands_include_default_overhead(self):
+        self.assertEqual(cmd_search_fixed_time(250), bytes.fromhex("11fa00000a0000"))
+        self.assertEqual(
+            cmd_search_on_clock(1000, 2000, 10, 20, 30),
+            bytes.fromhex("12e80300d007000a00001400001e000a0000"),
+        )
 
     def test_search_response_decoding(self):
         response = decode_response(bytes.fromhex("82700cf0ff050403020105019034"))

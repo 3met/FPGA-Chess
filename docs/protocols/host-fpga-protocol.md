@@ -37,8 +37,8 @@ Kill stops an active search and produces one Status response after the controlle
 | `0x02` | Make move | `Move`, 2 bytes | Ack/status response. |
 | `0x04` | New game | None | Ack/status response. |
 | `0x10` | Search depth | Depth, 1 byte | Search result when complete. |
-| `0x11` | Search fixed time | `TimeType`, 3 bytes | Search result when complete. |
-| `0x12` | Search on clock | `wtime`, `btime`, `winc`, `binc`; four `TimeType` values, 12 bytes total | Search result when complete. |
+| `0x11` | Search fixed time | `movetime`, `move_overhead`; two `TimeType` values, 6 bytes total | Search result when complete. |
+| `0x12` | Search on clock | `wtime`, `btime`, `winc`, `binc`, unsigned 16-bit `movestogo`, and `move_overhead`; 17 bytes total | Search result when complete. |
 | `0x13` | Search nodes | `NodeCountType`, 5 bytes | Search result when complete. |
 | `0x14` | Perft | Depth, 1 byte | Perft result when complete. |
 | `0x1f` | Kill | None | Status response after search is stopped. |

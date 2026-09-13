@@ -21,7 +21,7 @@ class UCICommandParsingTests(unittest.TestCase):
         )
 
     def test_go_parsing_encodes_supported_limit_and_reports_ignored_constraints(self):
-        parsed = parse_go_command(["searchmoves", "e2e4", "depth", "3", "movestogo", "20"])
+        parsed = parse_go_command(["searchmoves", "e2e4", "depth", "3"])
         self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
         self.assertFalse(parsed.is_perft)
         self.assertFalse(parsed.wait_for_stop)
@@ -31,9 +31,22 @@ class UCICommandParsingTests(unittest.TestCase):
             parsed.warnings,
             (
                 "searchmoves is ignored by this FPGA protocol",
-                "mate/movestogo constraints are ignored",
             ),
         )
+
+    def test_clock_fields_and_move_overhead_are_encoded(self):
+        parsed = parse_go_command(
+            ["wtime", "1000", "btime", "2000", "winc", "10", "binc", "20", "movestogo", "30"],
+            move_overhead_ms=15,
+        )
+        self.assertEqual(
+            parsed.command,
+            bytes.fromhex("12e80300d007000a00001400001e000f0000"),
+        )
+
+    def test_movetime_carries_move_overhead(self):
+        parsed = parse_go_command(["movetime", "250"], move_overhead_ms=10)
+        self.assertEqual(parsed.command, bytes.fromhex("11fa00000a0000"))
 
     def test_go_parsing_keeps_original_range_validation(self):
         with self.assertRaisesRegex(ProtocolError, "depth must be between 0 and 31"):
@@ -66,7 +79,7 @@ class UCICommandParsingTests(unittest.TestCase):
         self.assertFalse(parsed.wait_for_stop)
         self.assertEqual(
             parsed.resume_command,
-            bytes.fromhex("12e80300d007000a0000000000"),
+            bytes.fromhex("12e80300d007000a000000000000000a0000"),
         )
 
 

@@ -35,12 +35,22 @@ module search_controller #(
     parameter int FUTILITY_MAXIMUM_DEPTH = 3,
     // Scores use 1/128-pawn units, so 384 is a 300-centipawn margin.
     parameter int QDELTA_MARGIN = 384,
-    parameter int MOVE_OVERHEAD_MS = 5,
-    parameter int MINIMUM_SEARCH_MS = 5,
-    parameter int INCREMENT_NUMERATOR = 3,
-    parameter int INCREMENT_DENOMINATOR = 4,
-    parameter int REMAINING_TIME_NUMERATOR = 1,
-    parameter int REMAINING_TIME_DENOMINATOR = 32,
+    parameter int MOVES_TO_GO_BUFFER = 2,
+    parameter int DEFAULT_MOVES_DIVISOR = 20,
+    parameter int INCREMENT_NUMERATOR = 4,
+    parameter int INCREMENT_DENOMINATOR = 5,
+    parameter int HARD_BASE_MULTIPLIER = 4,
+    parameter int HARD_TIME_NUMERATOR = 4,
+    parameter int HARD_TIME_DENOMINATOR = 5,
+    parameter int SOFT_FACTOR_DEFAULT = 4,
+    parameter int SOFT_FACTOR_MINIMUM = 2,
+    parameter int SOFT_FACTOR_MAXIMUM = 8,
+    parameter int STABLE_DEPTH_THRESHOLD = 3,
+    // Scores use 1/128-pawn units, so 64 is a 50-centipawn drop.
+    parameter int SCORE_DROP_THRESHOLD = 64,
+    parameter int NEXT_DEPTH_NUMERATOR = 3,
+    parameter int NEXT_DEPTH_DENOMINATOR = 5,
+    parameter int SINGLE_LEGAL_MOVE_MS = 10,
     parameter int HISTORY_REWARD_PER_DEPTH = 4,
     parameter int HISTORY_MAXIMUM_REWARD = 63,
     parameter int HISTORY_MALUS_DIVISOR = 2,
@@ -93,6 +103,8 @@ module search_controller #(
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_INF_VALUE = 32767;
+    localparam int MAX_ASPIRATION_THREAD_OFFSET = (SEARCH_THREAD_COUNT < 8)
+        ? SEARCH_THREAD_COUNT - 1 : 7;
     localparam int NULL_MIN_BETA_VALUE = -16640 + MAX_PLY_COUNT;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam EvalScore NULL_MIN_BETA = EvalScore'(NULL_MIN_BETA_VALUE);
@@ -110,8 +122,9 @@ module search_controller #(
             $fatal(1, "SEARCH_THREAD_COUNT must fit the global ThreadID width");
         if (SEARCH_STACK_DEPTH < 1 || SEARCH_STACK_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "SEARCH_STACK_DEPTH must fit the global PlyIndex width");
-        if (ASPIRATION_STARTING_DELTA < 1 || ASPIRATION_STARTING_DELTA > SEARCH_INF_VALUE)
-            $fatal(1, "ASPIRATION_STARTING_DELTA must fit the positive score range");
+        if (ASPIRATION_STARTING_DELTA < 1
+                || ASPIRATION_STARTING_DELTA > SEARCH_INF_VALUE - MAX_ASPIRATION_THREAD_OFFSET)
+            $fatal(1, "ASPIRATION_STARTING_DELTA plus the thread offset must fit the positive score range");
         if (ASPIRATION_DELTA_MULTIPLIER_Q3 <= 8 || ASPIRATION_DELTA_MULTIPLIER_Q3 > 64)
             $fatal(1, "ASPIRATION_DELTA_MULTIPLIER_Q3 must represent a value in (1, 8]");
         if (LMR_MINIMUM_DEPTH < 1 || LMR_MINIMUM_MOVE_NUMBER < 1)
@@ -133,7 +146,8 @@ module search_controller #(
             $fatal(1, "futility parameters must fit the score range and supported child depth");
         if (QDELTA_MARGIN < 0 || QDELTA_MARGIN > SEARCH_INF_VALUE)
             $fatal(1, "QDELTA_MARGIN must fit the positive score range");
-        if (INCREMENT_DENOMINATOR < 1 || REMAINING_TIME_DENOMINATOR < 1)
+        if (INCREMENT_DENOMINATOR < 1 || HARD_TIME_DENOMINATOR < 1
+                || NEXT_DEPTH_DENOMINATOR < 1 || DEFAULT_MOVES_DIVISOR < 1)
             $fatal(1, "time-management denominators must be positive");
     end
 `endif
@@ -143,9 +157,9 @@ module search_controller #(
     typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
     typedef logic [SEARCH_STACK_ADDR_BITS-1:0] SearchStackRamAddr;
     typedef logic [SEARCH_DEPTH_BITS-1:0] SearchDepth;
+    typedef logic [TIME_BITS+1:0] SearchTimeBase;
     typedef logic [14:0] AspirationDelta;
     typedef logic [SEARCH_THREAD_COUNT-1:0] SearchThreadMask;
-    localparam AspirationDelta ASPIRATION_INITIAL_DELTA = AspirationDelta'(ASPIRATION_STARTING_DELTA);
     typedef struct packed {
         ThreadID main;
         ThreadID board;
@@ -224,6 +238,12 @@ module search_controller #(
         ST_PERFT_PUSH_WAIT,
         ST_PERFT_REVERSE_ISSUE,
         ST_PERFT_REVERSE_WAIT,
+        ST_SEARCH_TIME_SETUP,
+        ST_SEARCH_TIME_BASE_START,
+        ST_SEARCH_TIME_BASE_WAIT,
+        ST_SEARCH_TIME_INCREMENT_WAIT,
+        ST_SEARCH_TIME_HARD_START,
+        ST_SEARCH_TIME_HARD_WAIT,
         ST_REPETITION_INIT,
         ST_REPETITION_ROOT_WAIT,
         ST_SEARCH_ITER_START,
@@ -244,7 +264,11 @@ module search_controller #(
         SEARCH_PHASE_REPETITION_WAIT,
         SEARCH_PHASE_STORE_PUBLISH,
         SEARCH_PHASE_TERMINAL_WAIT,
-        SEARCH_PHASE_DONE
+        SEARCH_PHASE_DONE,
+        SEARCH_PHASE_TIME_SCALE,
+        SEARCH_PHASE_TIME_THRESHOLD,
+        SEARCH_PHASE_TIME_THRESHOLD_WAIT,
+        SEARCH_PHASE_TIME_CHECK
     } SearchThreadPhase;
 
     // Chain the next move-order operation directly from a response when the
@@ -555,7 +579,30 @@ module search_controller #(
     logic timer_rst;
     logic timer_run;
     TimeType elapsed_ms;
-    TimeType search_budget_ms;
+    SearchTimeBase search_base_ms;
+    TimeType search_soft_ms;
+    TimeType search_next_depth_ms;
+    TimeType search_hard_ms;
+    logic time_div_start;
+    logic time_div_cancel;
+    logic [31:0] time_div_numerator;
+    logic [31:0] time_div_denominator;
+    logic time_div_busy;
+    logic time_div_done;
+    logic [31:0] time_div_quotient;
+    TimeType time_clock_usable;
+    TimeType time_clock_increment;
+    logic [16:0] time_clock_divisor;
+    logic [31:0] time_clock_share;
+    logic [31:0] time_base_candidate;
+    logic [3:0] pending_soft_factor;
+    logic pending_single_legal_move;
+    Move previous_depth_best_move;
+    logic [7:0] best_move_stable_depths;
+    EvalScore previous_depth_score;
+    NodeCountType total_root_nodes;
+    NodeCountType current_best_move_root_nodes;
+    NodeCountType current_root_move_start_nodes;
     EngineControllerRequest setup_req_comb;
     logic search_board_issue_valid;
     logic search_move_issue_valid;
@@ -846,6 +893,10 @@ module search_controller #(
                                     && search_thread_phase[tid] <= SEARCH_PHASE_DONE) begin
                                 stat_phase_cycles[tid][search_thread_phase[tid] - SEARCH_PHASE_READY]
                                     <= stat_phase_cycles[tid][search_thread_phase[tid] - SEARCH_PHASE_READY] + 40'd1;
+                            end else if (search_thread_phase[tid] >= SEARCH_PHASE_TIME_SCALE
+                                    && search_thread_phase[tid] <= SEARCH_PHASE_TIME_CHECK) begin
+                                stat_phase_cycles[tid][SEARCH_PHASE_DONE - SEARCH_PHASE_READY]
+                                    <= stat_phase_cycles[tid][SEARCH_PHASE_DONE - SEARCH_PHASE_READY] + 40'd1;
                             end
                         end
                     end
@@ -914,6 +965,28 @@ module search_controller #(
         .rst(timer_rst),
         .run(timer_run),
         .time_ms(elapsed_ms)
+    );
+
+    assign time_div_cancel = state != ST_SEARCH_TIME_SETUP
+        && state != ST_SEARCH_TIME_BASE_START
+        && state != ST_SEARCH_TIME_BASE_WAIT
+        && state != ST_SEARCH_TIME_INCREMENT_WAIT
+        && state != ST_SEARCH_TIME_HARD_START
+        && state != ST_SEARCH_TIME_HARD_WAIT
+        && state != ST_SEARCH_RUN;
+
+    unsigned_iterative_divider #(
+        .WIDTH(32)
+    ) time_divider (
+        .clk(clk),
+        .rst_n(rst_n),
+        .cancel(time_div_cancel),
+        .start(time_div_start),
+        .numerator(time_div_numerator),
+        .denominator(time_div_denominator),
+        .busy(time_div_busy),
+        .done(time_div_done),
+        .quotient(time_div_quotient)
     );
 
     nnue_evaluator #(
@@ -1037,33 +1110,101 @@ module search_controller #(
         return setup_req;
     endfunction : new_game_setup_request
 
-    function automatic TimeType clock_budget(input EngineControllerRequest request);
+    function automatic TimeType usable_clock_time(input EngineControllerRequest request);
         automatic TimeType stm_time;
-        automatic TimeType stm_inc;
-        automatic TimeType usable;
-        automatic logic [TIME_BITS+1:0] increment_scaled;
-        automatic logic [TIME_BITS+1:0] budget_sum;
-        automatic logic [TIME_BITS:0] budget;
 
         stm_time = (active_board.turn == WHITE) ? request.wtime : request.btime;
+        return (stm_time > request.move_overhead)
+            ? (stm_time - request.move_overhead) : TimeType'(0);
+    endfunction : usable_clock_time
+
+    function automatic SearchTimeBase clock_base(input EngineControllerRequest request);
+        automatic TimeType stm_inc;
+        automatic TimeType usable;
+        automatic logic [16:0] divisor;
+        automatic logic [31:0] base;
+
         stm_inc = (active_board.turn == WHITE) ? request.winc : request.binc;
-        usable = (stm_time > TimeType'(MOVE_OVERHEAD_MS))
-            ? (stm_time - TimeType'(MOVE_OVERHEAD_MS)) : TimeType'(0);
-        // Spend the documented target share of both the increment and remaining
-        // clock so increment games do not consistently finish with excess time.
-        increment_scaled = ({2'b00, stm_inc} * INCREMENT_NUMERATOR) / INCREMENT_DENOMINATOR;
-        budget_sum = increment_scaled
-            + (({2'b00, usable} * REMAINING_TIME_NUMERATOR) / REMAINING_TIME_DENOMINATOR);
-        budget = budget_sum[TIME_BITS:0];
-        if (budget > {1'b0, usable}) begin
-            return usable;
-        end
-        if (budget != '0 && budget < TimeType'(MINIMUM_SEARCH_MS)) begin
-            return (usable < TimeType'(MINIMUM_SEARCH_MS))
-                ? usable : TimeType'(MINIMUM_SEARCH_MS);
-        end
-        return TimeType'(budget);
-    endfunction : clock_budget
+        usable = usable_clock_time(request);
+        divisor = request.moves_to_go != 16'd0
+            ? {1'b0, request.moves_to_go} + 17'(MOVES_TO_GO_BUFFER)
+            : 17'(DEFAULT_MOVES_DIVISOR);
+        base = (usable / divisor)
+            + ((stm_inc * INCREMENT_NUMERATOR) / INCREMENT_DENOMINATOR);
+        return SearchTimeBase'(base);
+    endfunction : clock_base
+
+    function automatic TimeType clock_hard(
+        input EngineControllerRequest request,
+        input SearchTimeBase base
+    );
+        automatic logic [31:0] from_base;
+        automatic logic [31:0] from_clock;
+
+        from_base = base * HARD_BASE_MULTIPLIER;
+        from_clock = (usable_clock_time(request) * HARD_TIME_NUMERATOR) / HARD_TIME_DENOMINATOR;
+        return TimeType'((from_base < from_clock) ? from_base : from_clock);
+    endfunction : clock_hard
+
+    function automatic TimeType fixed_time_budget(input EngineControllerRequest request);
+        return (request.time_limit > request.move_overhead)
+            ? request.time_limit - request.move_overhead : TimeType'(0);
+    endfunction : fixed_time_budget
+
+    // Select the adaptive scale separately from the budget arithmetic so root
+    // node counters never feed the next iteration's board-register enables.
+    function automatic logic [3:0] adaptive_soft_factor(
+        input Move best_move,
+        input EvalScore score,
+        input logic [7:0] stable_depths,
+        input NodeCountType root_nodes,
+        input NodeCountType best_nodes
+    );
+        automatic integer factor;
+        automatic logic [40:0] twice_best;
+        automatic logic [41:0] four_best;
+        automatic logic [41:0] three_total;
+        automatic logic signed [16:0] score_wide;
+        automatic logic signed [16:0] previous_wide;
+
+        factor = SOFT_FACTOR_DEFAULT;
+        twice_best = {1'b0, best_nodes} * 2;
+        four_best = {2'b00, best_nodes} * 4;
+        three_total = {2'b00, root_nodes} * 3;
+        if (twice_best < {1'b0, root_nodes})
+            factor = factor + 1;
+        else if (four_best > three_total)
+            factor = factor - 1;
+        if (best_move != previous_depth_best_move)
+            factor = factor + 1;
+        else if (stable_depths >= STABLE_DEPTH_THRESHOLD)
+            factor = factor - 1;
+        score_wide = {score[15], score};
+        previous_wide = {previous_depth_score[15], previous_depth_score};
+        if (search_completed_depth != SearchDepth'(0)
+                && score_wide < previous_wide - SCORE_DROP_THRESHOLD)
+            factor = factor + 2;
+        if (factor < SOFT_FACTOR_MINIMUM)
+            factor = SOFT_FACTOR_MINIMUM;
+        else if (factor > SOFT_FACTOR_MAXIMUM)
+            factor = SOFT_FACTOR_MAXIMUM;
+        return 4'(factor);
+    endfunction : adaptive_soft_factor
+
+    // Scale by the registered small factor in its own iteration-boundary stage.
+    function automatic TimeType scaled_soft_budget(
+        input logic [3:0] factor,
+        input logic exactly_one_move
+    );
+        automatic logic [31:0] scaled;
+        automatic TimeType result;
+
+        scaled = (search_base_ms * factor) / SOFT_FACTOR_DEFAULT;
+        result = (scaled > search_hard_ms) ? search_hard_ms : TimeType'(scaled);
+        if (exactly_one_move && result > TimeType'(SINGLE_LEGAL_MOVE_MS))
+            result = TimeType'(SINGLE_LEGAL_MOVE_MS);
+        return result;
+    endfunction : scaled_soft_budget
 
     function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
@@ -1211,7 +1352,12 @@ module search_controller #(
         );
     endfunction : qdelta_move_prunes
 
-    // Grow the delta with a small constant Q3 multiply, which synthesizes to shifts and adds.
+    // Stagger the initial windows across threads to diversify Lazy SMP searches.
+    function automatic AspirationDelta aspiration_initial_delta(input int unsigned thread_id);
+        return AspirationDelta'(ASPIRATION_STARTING_DELTA + (thread_id % 8));
+    endfunction : aspiration_initial_delta
+
+    // Grow each thread's current delta with a small constant Q3 multiply.
     function automatic AspirationDelta aspiration_next_delta(input AspirationDelta delta);
         automatic logic [31:0] scaled = delta * ASPIRATION_DELTA_MULTIPLIER_Q3;
         automatic logic [31:0] rounded = (scaled + 32'd4) >> 3;
@@ -1684,6 +1830,68 @@ module search_controller #(
         return 1'b1;
     endfunction : partial_root_result_eligible
 
+    // Reinitialize one independent search context between completed passes.
+    task automatic restart_search_thread(
+        input int unsigned thread_index,
+        input logic retry_same_depth,
+        input AspirationDelta next_delta
+    );
+        search_thread_phase[thread_index] <= SEARCH_PHASE_READY;
+        search_board[thread_index] <= active_board;
+        search_board_in_check[thread_index] <= active_board_in_check;
+        search_zobrist_key[thread_index] <= active_zobrist_key;
+        search_pst_eval[thread_index] <= active_pst_eval;
+        search_piece_count[thread_index] <= active_piece_count;
+        search_ply[thread_index] <= PlyIndex'(0);
+        search_best_move[thread_index] <= NULL_MOVE;
+        search_ponder_move[thread_index] <= NULL_MOVE;
+        search_root_best_score[thread_index] <= -SEARCH_INF;
+        search_root_has_completed_move[thread_index] <= 1'b0;
+        search_root_best_exact[thread_index] <= 1'b0;
+        search_pending_move[thread_index] <= NULL_MOVE;
+        search_return_score[thread_index] <= EvalScore'(0);
+        search_return_valid[thread_index] <= 1'b0;
+        search_return_was_scout[thread_index] <= 1'b0;
+        search_return_was_reduced[thread_index] <= 1'b0;
+        search_return_was_null[thread_index] <= 1'b0;
+        search_pvs_research[thread_index] <= 1'b0;
+        search_eval_is_stand_pat[thread_index] <= 1'b0;
+        search_eval_is_rfp[thread_index] <= 1'b0;
+        search_eval_is_futility[thread_index] <= 1'b0;
+        search_futility_eval_pending[thread_index] <= 1'b0;
+        search_return_ponder_move[thread_index] <= NULL_MOVE;
+        if (thread_index == 0) begin
+            total_root_nodes <= NodeCountType'(0);
+            current_best_move_root_nodes <= NodeCountType'(0);
+            current_root_move_start_nodes <= NodeCountType'(0);
+        end
+        search_stack_top[thread_index] <= empty_search_stack_entry();
+        search_tt_validation_pending[thread_index] <= 1'b0;
+        search_tt_validation_passed[thread_index] <= 1'b0;
+        search_tt_validation_forced[thread_index] <= 1'b0;
+        search_stack_top[thread_index].remaining_depth
+            <= retry_same_depth
+                ? search_thread_target_depth[thread_index]
+                : search_thread_target_depth[thread_index] + SearchDepth'(1);
+        search_stack_top[thread_index].alpha
+            <= aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta);
+        search_stack_top[thread_index].orig_alpha
+            <= aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta);
+        search_stack_top[thread_index].beta
+            <= aspiration_upper_bound(search_thread_iteration_score[thread_index], next_delta);
+        search_stack_top[thread_index].stand_pat_done <= active_board_in_check;
+        search_stack_top[thread_index].node_in_check <= active_board_in_check;
+        search_stack_top[thread_index].unit_window
+            <= aspiration_upper_bound(search_thread_iteration_score[thread_index], next_delta)
+                == aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta)
+                    + EvalScore'(1);
+        search_stack_top[thread_index].zero_window_node
+            <= aspiration_upper_bound(search_thread_iteration_score[thread_index], next_delta)
+                == aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta)
+                    + EvalScore'(1);
+        search_return_move[thread_index] <= NULL_MOVE;
+    endtask : restart_search_thread
+
     function automatic logic move_state_uses_pop(input MoveOrderState move_state);
         return move_state == MOVE_ORDER_GOOD_NOISY
             || move_state == MOVE_ORDER_QUIET
@@ -1763,7 +1971,7 @@ module search_controller #(
                 && search_nodes >= active_req.node_limit;
             search_time_stop_q <= (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
                     || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
-                && elapsed_ms >= search_budget_ms;
+                && elapsed_ms >= search_hard_ms;
         end
     end
 
@@ -2427,7 +2635,26 @@ module search_controller #(
             search_eval_result_valid <= 1'b0;
 `endif
             search_active_thread_count <= ThreadCount'(0);
-            search_budget_ms <= TimeType'(0);
+            search_base_ms <= SearchTimeBase'(0);
+            search_soft_ms <= TimeType'(0);
+            search_next_depth_ms <= TimeType'(0);
+            search_hard_ms <= TimeType'(0);
+            time_div_start <= 1'b0;
+            time_div_numerator <= 32'd0;
+            time_div_denominator <= 32'd1;
+            time_clock_usable <= TimeType'(0);
+            time_clock_increment <= TimeType'(0);
+            time_clock_divisor <= 17'd1;
+            time_clock_share <= 32'd0;
+            time_base_candidate <= 32'd0;
+            pending_soft_factor <= 4'(SOFT_FACTOR_DEFAULT);
+            pending_single_legal_move <= 1'b0;
+            previous_depth_best_move <= NULL_MOVE;
+            best_move_stable_depths <= 8'd0;
+            previous_depth_score <= EvalScore'(0);
+            total_root_nodes <= NodeCountType'(0);
+            current_best_move_root_nodes <= NodeCountType'(0);
+            current_root_move_start_nodes <= NodeCountType'(0);
             tt_age <= TTAge'(0);
             terminal_result_valid_pipe <= 1'b0;
             terminal_result_thread_pipe <= ThreadID'(0);
@@ -2478,7 +2705,7 @@ module search_controller #(
                 search_thread_target_depth[tid] <= SearchDepth'(0);
                 search_thread_root_alpha[tid] <= -SEARCH_INF;
                 search_thread_root_beta[tid] <= SEARCH_INF;
-                search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
+                search_thread_aspiration_delta[tid] <= aspiration_initial_delta(tid);
                 search_thread_aspiration_active[tid] <= 1'b0;
                 search_thread_iteration_best_move[tid] <= NULL_MOVE;
                 search_thread_iteration_ponder_move[tid] <= NULL_MOVE;
@@ -2551,6 +2778,7 @@ module search_controller #(
             end
         end else begin
             resp_valid <= 1'b0;
+            time_div_start <= 1'b0;
             repetition_init_start <= 1'b0;
             repetition_history_reset <= 1'b0;
             repetition_history_write <= 1'b0;
@@ -2851,13 +3079,14 @@ module search_controller #(
                                     search_eval_is_futility[search_thread_id] <= 1'b0;
                                     search_futility_eval_pending[search_thread_id] <= 1'b0;
                                     tt_age <= tt_age + TTAge'(1);
-                                    if (req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME) begin
-                                        search_budget_ms <= req.time_limit;
-                                    end else if (req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK) begin
-                                        search_budget_ms <= clock_budget(req);
-                                    end else begin
-                                        search_budget_ms <= TimeType'('1);
-                                    end
+                                    pending_soft_factor <= 4'(SOFT_FACTOR_DEFAULT);
+                                    pending_single_legal_move <= 1'b0;
+                                    previous_depth_best_move <= NULL_MOVE;
+                                    best_move_stable_depths <= 8'd0;
+                                    previous_depth_score <= EvalScore'(0);
+                                    total_root_nodes <= NodeCountType'(0);
+                                    current_best_move_root_nodes <= NodeCountType'(0);
+                                    current_root_move_start_nodes <= NodeCountType'(0);
                                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                                         search_best_move[tid] <= NULL_MOVE;
                                         search_ponder_move[tid] <= NULL_MOVE;
@@ -2871,7 +3100,7 @@ module search_controller #(
                                                 ? SearchDepth'(0) : SearchDepth'(1);
                                         search_thread_root_alpha[tid] <= -SEARCH_INF;
                                         search_thread_root_beta[tid] <= SEARCH_INF;
-                                        search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
+                                        search_thread_aspiration_delta[tid] <= aspiration_initial_delta(tid);
                                         search_thread_aspiration_active[tid] <= 1'b0;
                                         search_thread_iteration_best_move[tid] <= NULL_MOVE;
                                         search_thread_iteration_ponder_move[tid] <= NULL_MOVE;
@@ -2911,8 +3140,9 @@ module search_controller #(
                                         search_move_in_check_pipe[idx] <= 1'b0;
                                     end
                                     repetition_epoch <= repetition_epoch + 1'b1;
-                                    repetition_init_start <= 1'b1;
-                                    state <= ST_REPETITION_INIT;
+                                    // Time arithmetic starts from the registered request so the
+                                    // command handshake cannot feed the timing-register muxes.
+                                    state <= ST_SEARCH_TIME_SETUP;
                                 end
                             end
 
@@ -3123,6 +3353,80 @@ module search_controller #(
                     end
                 end
 
+                // Clock allocation is serialized because it runs once per search and
+                // a combinational variable divider cannot meet the engine clock.
+                ST_SEARCH_TIME_SETUP: begin
+                    if (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME) begin
+                        search_base_ms <= SearchTimeBase'(fixed_time_budget(active_req));
+                        search_soft_ms <= fixed_time_budget(active_req);
+                        search_next_depth_ms <= fixed_time_budget(active_req);
+                        search_hard_ms <= fixed_time_budget(active_req);
+                        repetition_init_start <= 1'b1;
+                        state <= ST_REPETITION_INIT;
+                    end else if (active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK) begin
+                        time_clock_usable <= usable_clock_time(active_req);
+                        time_clock_increment <= (active_board.turn == WHITE)
+                            ? active_req.winc : active_req.binc;
+                        time_clock_divisor <= active_req.moves_to_go != 16'd0
+                            ? {1'b0, active_req.moves_to_go} + 17'(MOVES_TO_GO_BUFFER)
+                            : 17'(DEFAULT_MOVES_DIVISOR);
+                        state <= ST_SEARCH_TIME_BASE_START;
+                    end else begin
+                        search_base_ms <= SearchTimeBase'('1);
+                        search_soft_ms <= TimeType'('1);
+                        search_next_depth_ms <= TimeType'('1);
+                        search_hard_ms <= TimeType'('1);
+                        repetition_init_start <= 1'b1;
+                        state <= ST_REPETITION_INIT;
+                    end
+                end
+
+                ST_SEARCH_TIME_BASE_START: begin
+                    time_div_numerator <= 32'(time_clock_usable);
+                    time_div_denominator <= 32'(time_clock_divisor);
+                    time_div_start <= 1'b1;
+                    state <= ST_SEARCH_TIME_BASE_WAIT;
+                end
+
+                ST_SEARCH_TIME_BASE_WAIT: begin
+                    if (time_div_done) begin
+                        time_clock_share <= time_div_quotient;
+                        time_div_numerator
+                            <= 32'(time_clock_increment) * INCREMENT_NUMERATOR;
+                        time_div_denominator <= 32'(INCREMENT_DENOMINATOR);
+                        time_div_start <= 1'b1;
+                        state <= ST_SEARCH_TIME_INCREMENT_WAIT;
+                    end
+                end
+
+                ST_SEARCH_TIME_INCREMENT_WAIT: begin
+                    if (time_div_done) begin
+                        time_base_candidate <= time_clock_share + time_div_quotient;
+                        state <= ST_SEARCH_TIME_HARD_START;
+                    end
+                end
+
+                ST_SEARCH_TIME_HARD_START: begin
+                    search_base_ms <= SearchTimeBase'(time_base_candidate);
+                    search_soft_ms <= TimeType'(time_base_candidate);
+                    search_next_depth_ms <= TimeType'(0);
+                    time_div_numerator <= 32'(time_clock_usable) * HARD_TIME_NUMERATOR;
+                    time_div_denominator <= 32'(HARD_TIME_DENOMINATOR);
+                    time_div_start <= 1'b1;
+                    state <= ST_SEARCH_TIME_HARD_WAIT;
+                end
+
+                ST_SEARCH_TIME_HARD_WAIT: begin
+                    if (time_div_done) begin
+                        search_hard_ms <= ((time_base_candidate * HARD_BASE_MULTIPLIER)
+                                < time_div_quotient)
+                            ? TimeType'(time_base_candidate * HARD_BASE_MULTIPLIER)
+                            : TimeType'(time_div_quotient);
+                        repetition_init_start <= 1'b1;
+                        state <= ST_REPETITION_INIT;
+                    end
+                end
+
                 ST_REPETITION_INIT: begin
                     if (repetition_init_failed) begin
                         resp_reg <= EngineControllerResponse'('0);
@@ -3199,6 +3503,9 @@ module search_controller #(
                                 == search_thread_root_alpha[tid] + EvalScore'(1);
                         search_return_move[tid] <= NULL_MOVE;
                     end
+                    total_root_nodes <= NodeCountType'(0);
+                    current_best_move_root_nodes <= NodeCountType'(0);
+                    current_root_move_start_nodes <= NodeCountType'(0);
                     search_thread_id <= ThreadID'(0);
                     search_dispatch <= '0;
                     search_active_thread_count <= ThreadCount'(SEARCH_THREAD_COUNT);
@@ -3433,6 +3740,46 @@ module search_controller #(
                         assert (move_cmd_resp_thread != move_quiet_resp_thread)
                             else $fatal(1, "simultaneous move responses targeted one thread");
 
+                    // Clock-search iteration decisions are deliberately staged.
+                    // Only registered timing values may control root-state reloads.
+                    if (search_thread_phase[0] == SEARCH_PHASE_TIME_SCALE) begin
+                        search_soft_ms <= scaled_soft_budget(
+                            pending_soft_factor, pending_single_legal_move);
+                        search_thread_phase[0] <= SEARCH_PHASE_TIME_THRESHOLD;
+                    end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_THRESHOLD) begin
+                        time_div_numerator <= 32'(search_soft_ms) * NEXT_DEPTH_NUMERATOR;
+                        time_div_denominator <= 32'(NEXT_DEPTH_DENOMINATOR);
+                        time_div_start <= 1'b1;
+                        search_thread_phase[0] <= SEARCH_PHASE_TIME_THRESHOLD_WAIT;
+                    end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_THRESHOLD_WAIT) begin
+                        if (time_div_done) begin
+                            search_next_depth_ms <= TimeType'(time_div_quotient);
+                            search_thread_phase[0] <= SEARCH_PHASE_TIME_CHECK;
+                        end
+                    end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_CHECK) begin
+                        if (elapsed_ms >= search_next_depth_ms) begin
+                            resp_reg <= EngineControllerResponse'('0);
+                            resp_reg.best_move <= search_completed_best_move;
+                            resp_reg.ponder_move <= search_completed_ponder_move;
+                            resp_reg.score <= search_completed_score;
+                            resp_reg.nodes_count <= search_nodes;
+                            resp_reg.completed_depth <= search_completed_depth;
+                            resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
+                            state <= ST_FLUSH_RESPOND;
+                        end else begin
+                            search_thread_target_depth[0]
+                                <= search_thread_target_depth[0] + SearchDepth'(1);
+                            search_thread_root_alpha[0] <= aspiration_lower_bound(
+                                search_thread_iteration_score[0], aspiration_initial_delta(0));
+                            search_thread_root_beta[0] <= aspiration_upper_bound(
+                                search_thread_iteration_score[0], aspiration_initial_delta(0));
+                            search_thread_aspiration_delta[0] <= aspiration_initial_delta(0);
+                            search_thread_aspiration_active[0] <= 1'b1;
+                            restart_search_thread(0, 1'b0, aspiration_initial_delta(0));
+                            active_count_next += ThreadCount'(1);
+                        end
+                    end
+
                     // Each Lazy SMP context owns its iterative-deepening loop.
                     // A completed helper immediately retries a failed aspiration
                     // pass or starts its next depth without waiting for peers.
@@ -3441,6 +3788,8 @@ module search_controller #(
                             automatic logic aspiration_failed;
                             automatic logic primary_thread;
                             automatic logic depth_finished;
+                            automatic logic [7:0] completed_stable_depths;
+                            automatic logic [3:0] completed_soft_factor;
                             automatic AspirationDelta next_aspiration_delta;
 
                             aspiration_failed = search_thread_aspiration_active[tid]
@@ -3448,9 +3797,23 @@ module search_controller #(
                                     || search_thread_iteration_score[tid] >= search_thread_root_beta[tid]);
                             primary_thread = tid == 0;
                             depth_finished = search_thread_target_depth[tid] >= search_max_depth;
+                            completed_stable_depths = best_move_stable_depths;
+                            completed_soft_factor = pending_soft_factor;
+                            if (primary_thread && !aspiration_failed) begin
+                                completed_stable_depths = (search_thread_iteration_best_move[tid]
+                                        == previous_depth_best_move)
+                                    ? best_move_stable_depths + 8'd1 : 8'd1;
+                                completed_soft_factor = adaptive_soft_factor(
+                                    search_thread_iteration_best_move[tid],
+                                    search_thread_iteration_score[tid],
+                                    completed_stable_depths,
+                                    total_root_nodes,
+                                    current_best_move_root_nodes
+                                );
+                            end
                             next_aspiration_delta = aspiration_failed
                                 ? aspiration_next_delta(search_thread_aspiration_delta[tid])
-                                : ASPIRATION_INITIAL_DELTA;
+                                : aspiration_initial_delta(tid);
 
                             if (aspiration_failed) begin
                                 // Retry the same depth with a wider window centered on
@@ -3469,14 +3832,23 @@ module search_controller #(
                                     search_completed_best_move <= search_thread_iteration_best_move[tid];
                                     search_completed_ponder_move <= search_thread_iteration_ponder_move[tid];
                                     search_completed_score <= search_thread_iteration_score[tid];
+                                    previous_depth_best_move <= search_thread_iteration_best_move[tid];
+                                    best_move_stable_depths <= completed_stable_depths;
+                                    previous_depth_score <= search_thread_iteration_score[tid];
+                                    pending_soft_factor <= completed_soft_factor;
+                                    pending_single_legal_move
+                                        <= search_stack_top[tid].legal_move_count == 8'd1;
                                 end
-                                if (!depth_finished) begin
+                                if (!depth_finished && primary_thread
+                                        && active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK) begin
+                                    search_thread_phase[tid] <= SEARCH_PHASE_TIME_SCALE;
+                                end else if (!depth_finished) begin
                                     search_thread_target_depth[tid] <= search_thread_target_depth[tid] + SearchDepth'(1);
                                     search_thread_root_alpha[tid]
-                                        <= aspiration_lower_bound(search_thread_iteration_score[tid], ASPIRATION_INITIAL_DELTA);
+                                        <= aspiration_lower_bound(search_thread_iteration_score[tid], aspiration_initial_delta(tid));
                                     search_thread_root_beta[tid]
-                                        <= aspiration_upper_bound(search_thread_iteration_score[tid], ASPIRATION_INITIAL_DELTA);
-                                    search_thread_aspiration_delta[tid] <= ASPIRATION_INITIAL_DELTA;
+                                        <= aspiration_upper_bound(search_thread_iteration_score[tid], aspiration_initial_delta(tid));
+                                    search_thread_aspiration_delta[tid] <= aspiration_initial_delta(tid);
                                     search_thread_aspiration_active[tid] <= 1'b1;
                                 end
                             end
@@ -3490,63 +3862,10 @@ module search_controller #(
                                 resp_reg.completed_depth <= search_thread_target_depth[tid];
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
                                 state <= ST_FLUSH_RESPOND;
-                            end else if (!depth_finished || aspiration_failed) begin
-                                search_thread_phase[tid] <= SEARCH_PHASE_READY;
-                                search_board[tid] <= active_board;
-                                search_board_in_check[tid] <= active_board_in_check;
-                                search_zobrist_key[tid] <= active_zobrist_key;
-                                search_pst_eval[tid] <= active_pst_eval;
-                                search_piece_count[tid] <= active_piece_count;
-                                search_ply[tid] <= PlyIndex'(0);
-                                search_best_move[tid] <= NULL_MOVE;
-                                search_ponder_move[tid] <= NULL_MOVE;
-                                search_root_best_score[tid] <= -SEARCH_INF;
-                                search_root_has_completed_move[tid] <= 1'b0;
-                                search_root_best_exact[tid] <= 1'b0;
-                                search_pending_move[tid] <= NULL_MOVE;
-                                search_return_score[tid] <= EvalScore'(0);
-                                search_return_valid[tid] <= 1'b0;
-                                search_return_was_scout[tid] <= 1'b0;
-                                search_return_was_reduced[tid] <= 1'b0;
-                                search_return_was_null[tid] <= 1'b0;
-                                search_pvs_research[tid] <= 1'b0;
-                                search_eval_is_stand_pat[tid] <= 1'b0;
-                                search_eval_is_rfp[tid] <= 1'b0;
-                                search_eval_is_futility[tid] <= 1'b0;
-                                search_futility_eval_pending[tid] <= 1'b0;
-                                search_return_ponder_move[tid] <= NULL_MOVE;
-                                search_stack_top[tid] <= empty_search_stack_entry();
-                                search_tt_validation_pending[tid] <= 1'b0;
-                                search_tt_validation_passed[tid] <= 1'b0;
-                                search_tt_validation_forced[tid] <= 1'b0;
-                                search_stack_top[tid].remaining_depth
-                                    <= aspiration_failed
-                                        ? search_thread_target_depth[tid]
-                                        : search_thread_target_depth[tid] + SearchDepth'(1);
-                                search_stack_top[tid].alpha
-                                    <= aspiration_lower_bound(
-                                        search_thread_iteration_score[tid], next_aspiration_delta);
-                                search_stack_top[tid].orig_alpha
-                                    <= aspiration_lower_bound(
-                                        search_thread_iteration_score[tid], next_aspiration_delta);
-                                search_stack_top[tid].beta
-                                    <= aspiration_upper_bound(
-                                        search_thread_iteration_score[tid], next_aspiration_delta);
-                                search_stack_top[tid].stand_pat_done <= active_board_in_check;
-                                search_stack_top[tid].node_in_check <= active_board_in_check;
-                                search_stack_top[tid].unit_window
-                                    <= aspiration_upper_bound(
-                                            search_thread_iteration_score[tid], next_aspiration_delta)
-                                        == aspiration_lower_bound(
-                                                search_thread_iteration_score[tid], next_aspiration_delta)
-                                            + EvalScore'(1);
-                                search_stack_top[tid].zero_window_node
-                                    <= aspiration_upper_bound(
-                                            search_thread_iteration_score[tid], next_aspiration_delta)
-                                        == aspiration_lower_bound(
-                                                search_thread_iteration_score[tid], next_aspiration_delta)
-                                            + EvalScore'(1);
-                                search_return_move[tid] <= NULL_MOVE;
+                            end else if ((!depth_finished || aspiration_failed)
+                                    && !(primary_thread && !aspiration_failed
+                                        && active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)) begin
+                                restart_search_thread(tid, aspiration_failed, next_aspiration_delta);
                                 active_count_next += ThreadCount'(1);
                             end
                         end
@@ -3596,7 +3915,9 @@ module search_controller #(
                         // A resolved exact candidate from an incomplete deeper
                         // pass may replace the completed PV. Aspiration bounds,
                         // active children, and weakened mates roll back instead.
-                        if (search_thread_phase[0] != SEARCH_PHASE_DONE
+                        if (active_req.operation != ENGINE_CTRL_SEARCH_FIXED_TIME
+                                && active_req.operation != ENGINE_CTRL_SEARCH_ON_CLOCK
+                                && search_thread_phase[0] != SEARCH_PHASE_DONE
                                 && partial_root_result_eligible(
                                     stop_completed_depth,
                                     search_completed_score,
@@ -3921,6 +4242,14 @@ module search_controller #(
                                 // TT cutoffs, draws, and terminal children count too.
                                 nodes_next += NodeCountType'(1);
                                 search_thread_nodes[board_thread_id] <= search_thread_nodes[board_thread_id] + NodeCountType'(1);
+                                if (board_thread_id == ThreadID'(0)) begin
+                                    total_root_nodes <= total_root_nodes + NodeCountType'(1);
+                                end
+                                if (board_thread_id == ThreadID'(0)
+                                        && board_ply == PlyIndex'(0)
+                                        && !search_pvs_research[board_thread_id]) begin
+                                    current_root_move_start_nodes <= total_root_nodes;
+                                end
                                 search_board[board_thread_id] <= board_update_out;
                                 search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
@@ -4410,6 +4739,11 @@ module search_controller #(
                                                 search_stack_top[return_thread_id].orig_alpha,
                                                 search_stack_top[return_thread_id].beta
                                             ) == TT_BOUND_EXACT;
+                                        if (return_thread_id == ThreadID'(0)) begin
+                                            current_best_move_root_nodes
+                                                <= total_root_nodes
+                                                    - current_root_move_start_nodes;
+                                        end
                                     end
                                 end
                                 search_stack_top[return_thread_id].has_legal <= 1'b1;

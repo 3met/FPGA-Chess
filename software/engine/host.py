@@ -48,6 +48,7 @@ from software.engine.transport import (
     list_serial_ports,
 )
 from software.engine.uci_commands import (
+    DEFAULT_MOVE_OVERHEAD_MS,
     KNOWN_COMMANDS,
     ParsedGoCommand,
     parse_go_command,
@@ -238,6 +239,7 @@ class FPGAUCIHost:
         self._synced_base_fen: str | None = None
         self._synced_moves: tuple[str, ...] = ()
         self.ponder_enabled = False
+        self.move_overhead_ms = DEFAULT_MOVE_OVERHEAD_MS
         self.debug = False
         self._stdout_lock = threading.Lock()
         self._search_lock = threading.Lock()
@@ -389,6 +391,7 @@ class FPGAUCIHost:
         self.emit("id name FPGA Chess")
         self.emit("id author Emet Behrendt")
         self.emit("option name Ponder type check default false")
+        self.emit(f"option name Move Overhead type spin default {DEFAULT_MOVE_OVERHEAD_MS} min 0 max 16777215")
         self.emit("uciok")
 
     def _handle_help(self) -> None:
@@ -437,6 +440,14 @@ class FPGAUCIHost:
             if value.lower() not in {"true", "false"}:
                 raise HostError("Ponder must be true or false")
             self.ponder_enabled = value.lower() == "true"
+        elif name == "move overhead":
+            try:
+                move_overhead_ms = int(value)
+            except ValueError as exc:
+                raise HostError("Move Overhead must be an integer") from exc
+            if not 0 <= move_overhead_ms <= 0xFFFFFF:
+                raise HostError("Move Overhead must be between 0 and 16777215")
+            self.move_overhead_ms = move_overhead_ms
         elif self.debug:
             self.emit(f"info string unknown option ignored: {name}")
 
@@ -692,7 +703,7 @@ class FPGAUCIHost:
         thread.start()
 
     def _build_go_command(self, args: list[str]) -> ParsedGoCommand:
-        parsed = parse_go_command(args)
+        parsed = parse_go_command(args, self.move_overhead_ms)
         if self.debug:
             for warning in parsed.warnings:
                 self.emit(f"info string {warning}")

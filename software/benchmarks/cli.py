@@ -14,6 +14,7 @@ from software.benchmarks.positions import (
     RepetitionCase,
 )
 from software.benchmarks.session import FPGAUCISession, FPGAUCIError
+from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS
 
 NODES_RE = re.compile(r"\bnodes\s+(\d+)\b")
 SCORE_RE = re.compile(r"\bscore\s+(cp|mate)\s+(-?\d+)\b")
@@ -25,6 +26,7 @@ FAST_PERFT = PERFT_POSITIONS
 SANITY_DEPTH = 6
 SANITY_REPETITION_DEPTH = 8
 SANITY_MOVETIME_MS = 250
+SANITY_EXPECTED_SEARCH_MS = SANITY_MOVETIME_MS - DEFAULT_MOVE_OVERHEAD_MS
 SANITY_MOVETIME_TOLERANCE_MS = 5
 def _node_count(lines: Iterable[str]) -> int | None:
     result = None
@@ -176,10 +178,10 @@ def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbos
             engine.new_game(startup_timeout)
             _, _, elapsed_seconds = _search(engine, case.fen, f"go movetime {SANITY_MOVETIME_MS}", search_timeout)
             elapsed_ms = elapsed_seconds * 1000
-            if abs(elapsed_ms - SANITY_MOVETIME_MS) > SANITY_MOVETIME_TOLERANCE_MS:
+            if abs(elapsed_ms - SANITY_EXPECTED_SEARCH_MS) > SANITY_MOVETIME_TOLERANCE_MS:
                 timing_failures.append(
                     f"{case.name}: {elapsed_ms:.1f} ms "
-                    f"(expected {SANITY_MOVETIME_MS} +/- {SANITY_MOVETIME_TOLERANCE_MS} ms)"
+                    f"(expected {SANITY_EXPECTED_SEARCH_MS} +/- {SANITY_MOVETIME_TOLERANCE_MS} ms)"
                 )
         repetition_failures = _run_repetition_checks(
             engine,

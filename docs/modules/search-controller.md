@@ -36,6 +36,8 @@ Each search thread owns its current board and incremental state, alpha/beta wind
 
 The primary thread owns the last atomic completed-iteration move, score, principal-variation prefix, and depth. For the active iteration it separately records whether any root child's complete logical search has returned and whether the best such result is exact inside the aspiration window. These two bits permit safe interrupted-iteration selection without a root-move table or per-node bookkeeping. Helpers cooperate only through the TT and never delay or overwrite the primary result. Threads retry aspiration failures or begin new iterations independently.
 
+After a completed primary clock-search iteration, adaptive stopping crosses registered phase boundaries: root-node statistics select the small scale factor, the factor scales and clamps the soft budget, and an iterative control-plane divider produces the next-depth threshold before the final comparison. Initial normal-clock allocation uses the same divider for the variable and constant ratios. Only registered soft and threshold values control stopping or root-state reloads, so request handshakes and wide node-share or budget arithmetic do not feed board-register enables. Helper contexts continue running while the threshold division completes, and the shared hard deadline remains active.
+
 ## Shared-Pipeline Scheduling
 
 The controller schedules work across:
@@ -74,7 +76,7 @@ Quiescence omits quiet generation and both bad-noisy buckets except for legal ev
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. If a deeper pass is interrupted, an exact best root candidate whose complete logical search returned may replace the preceding move and score without advancing the reported completed depth. An active PVS or LMR recovery search is never counted, aspiration bounds and aborted losing mates roll back, and a previously completed mate is retained unless the partial candidate proves an equal or stronger winning mate. When no iteration has completed, any fully resolved root child may provide a legal fallback. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
+Depth, node, and time limits are checked at safe search boundaries. Hard time limits return the last completed primary iteration. For node limits and explicit kills, an exact best root candidate whose complete logical search returned may replace the preceding move and score without advancing the reported completed depth. An active PVS or LMR recovery search is never counted, aspiration bounds and aborted losing mates roll back, and a previously completed mate is retained unless the partial candidate proves an equal or stronger winning mate. When no iteration has completed, any fully resolved root child may provide a legal fallback for those non-time stops. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
 
 Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation. A killed search applies the same exact-partial-or-completed-fallback policy before snapshotting the result and retiring.
 

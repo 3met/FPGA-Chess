@@ -29,10 +29,18 @@
     "margin": 384
   },
   "time_management": {
-    "move_overhead_ms": 5,
-    "minimum_search_ms": 5,
-    "increment_fraction": [3, 4],
-    "remaining_time_fraction": [1, 32]
+    "moves_to_go_buffer": 2,
+    "default_moves_divisor": 20,
+    "increment_fraction": [4, 5],
+    "hard_base_multiplier": 4,
+    "hard_time_fraction": [4, 5],
+    "soft_factor_default": 4,
+    "soft_factor_minimum": 2,
+    "soft_factor_maximum": 8,
+    "stable_depth_threshold": 3,
+    "score_drop_evalscore": 64,
+    "next_depth_fraction": [3, 5],
+    "single_legal_move_ms": 10
   },
   "history": {
     "reward_per_depth": 4,

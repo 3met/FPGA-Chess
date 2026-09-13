@@ -309,6 +309,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
                 "id name FPGA Chess",
                 "id author Emet Behrendt",
                 "option name Ponder type check default false",
+                "option name Move Overhead type spin default 10 min 0 max 16777215",
                 "uciok",
             ],
         )
@@ -326,6 +327,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
             "id name FPGA Chess",
             "id author Emet Behrendt",
             "option name Ponder type check default false",
+            "option name Move Overhead type spin default 10 min 0 max 16777215",
             "uciok",
         ])
 
@@ -335,9 +337,12 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         host.build_info = BuildInfoResponse(0x0123456789ABCDEF, 3, 40_000_000, 24)
         host.debug = False
         host.ponder_enabled = False
+        host.move_overhead_ms = 10
 
         host._handle_setoption(["name", "Ponder", "value", "true"])
         self.assertTrue(host.ponder_enabled)
+        host._handle_setoption(["name", "Move", "Overhead", "value", "25"])
+        self.assertEqual(host.move_overhead_ms, 25)
         host._handle_setoption(["name", "Threads", "value", "4"])
         host.client.request.assert_not_called()
 

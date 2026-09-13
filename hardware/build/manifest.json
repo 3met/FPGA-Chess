@@ -74,6 +74,7 @@
       "@repetition-checker",
       "hardware/rtl/engine_defs.sv",
       "hardware/rtl/timer.sv",
+      "hardware/rtl/unsigned_iterative_divider.sv",
       "hardware/rtl/search_controller.sv"
     ],
     "engine-rtl": [
