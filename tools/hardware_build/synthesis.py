@@ -2,9 +2,9 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import re
-import secrets
 import shutil
 from pathlib import Path
 
@@ -111,12 +111,38 @@ def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: flo
     return destination / "pll_ip.qip"
 
 
-def new_build_id() -> int:
-    """Return a fresh nonzero 64-bit identifier for one synthesis invocation."""
-    build_id = 0
-    while build_id == 0:
-        build_id = secrets.randbits(64)
-    return build_id
+def deterministic_build_id(manifest: dict, target: dict) -> int:
+    """Fingerprint the resolved target and every repository input used by Quartus."""
+    digest = hashlib.sha256()
+    resolved_target = dict(target)
+    engine_config = engine_config_for_target(target)
+    if engine_config is not None:
+        resolved_target["resolved_engine_config"] = engine_config
+    digest.update(json.dumps(resolved_target, sort_keys=True, separators=(",", ":")).encode())
+
+    inputs = set(expand_source_set(manifest, target["source_set"]))
+    inputs.update(
+        repo_path(output)
+        for item in manifest.get("generated_data", {}).values()
+        for output in item["outputs"]
+    )
+    for key in ("sdc", "qsf_template"):
+        if key in target:
+            inputs.add(repo_path(target[key]))
+    inputs.update(repo_path(path) for path in target.get("qip_files", []))
+    if "clock_generator" in target:
+        template = repo_path(target["clock_generator"]["template"])
+        inputs.update(path for path in template.rglob("*") if path.is_file())
+
+    ensure_existing(inputs)
+    repo_root = REPO_ROOT.resolve()
+    stable_paths = {path: path.resolve().relative_to(repo_root).as_posix() for path in inputs}
+    for path in sorted(inputs, key=stable_paths.get):
+        digest.update(stable_paths[path].encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return int.from_bytes(digest.digest()[:8], "big") or 1
 
 
 def write_engine_build_config(
@@ -128,7 +154,7 @@ def write_engine_build_config(
     """Generate constant engine metadata for the exact synthesized image."""
     config = build_dir / "engine_build_config.svh"
     lines = [
-        "// Generated for this synthesis invocation; do not edit.\n"
+        "// Generated for this synthesis configuration; do not edit.\n"
         f"localparam logic [63:0] FPGA_BUILD_ID = 64'h{build_id:016x};\n"
         f"localparam int ENGINE_CLOCK_FREQ = {engine_clock_values(engine_clock_mhz)[1]:_};\n"
     ]
@@ -166,6 +192,25 @@ def quartus_negative_slack(build_dir: Path) -> list[str]:
             else:
                 failures.append(f"{slack} ns slack")
     return failures
+
+
+def quartus_smart_commands(action: str, commands: list[list[str]]) -> list[list[str]]:
+    """Select the earliest invalid Quartus stage and all required downstream stages."""
+    if action == "DONE":
+        return []
+    if action in {"SOURCE", "MLS"}:
+        first_tool = "quartus_map"
+    elif action.startswith("FIT"):
+        first_tool = "quartus_fit"
+    elif action in {"DAT", "TAN"}:
+        return [command for command in commands if command[0] == "quartus_sta"]
+    elif action == "ASM":
+        return [command for command in commands if command[0] == "quartus_asm"]
+    else:
+        # DRC, EDA, and unknown actions are not standalone stages in this flow.
+        first_tool = "quartus_map"
+    first_index = next(index for index, command in enumerate(commands) if command[0] == first_tool)
+    return commands[first_index:]
 
 
 def write_quartus_project(
@@ -213,6 +258,7 @@ def write_quartus_project(
         f'set_global_assignment -name DEVICE {target["device"]}',
         f'set_global_assignment -name TOP_LEVEL_ENTITY {target["top"]}',
         f"set_global_assignment -name NUM_PARALLEL_PROCESSORS {parallel_processors}",
+        "set_global_assignment -name SMART_RECOMPILE ON",
         f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(REPO_ROOT)}"',
         f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(build_dir)}"',
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
@@ -228,6 +274,19 @@ def write_quartus_project(
         ])
     if "seed" in target:
         lines.append(f"set_global_assignment -name SEED {target['seed']}")
+    if target.get("map_effort") == "fast":
+        lines.append("set_global_assignment -name SYNTHESIS_EFFORT FAST")
+    if "map_optimization" in target:
+        lines.append(
+            f"set_global_assignment -name OPTIMIZATION_TECHNIQUE {target['map_optimization'].upper()}"
+        )
+    if "fit_effort" in target:
+        fitter_effort = {
+            "standard": "STANDARD FIT",
+            "fast": "FAST FIT",
+            "auto": "AUTO FIT",
+        }[target["fit_effort"]]
+        lines.append(f'set_global_assignment -name FITTER_EFFORT "{fitter_effort}"')
     if target.get("fit_timing_optimization", False):
         # Physical retiming redistributes existing registers for placement
         # while preserving the RTL's cycle-level behavior.
@@ -288,14 +347,15 @@ def synth_quartus(
         raise BuildError("--jobs must be at least 1")
     require_tool("quartus_map")
     require_tool("quartus_fit")
-    require_tool("quartus_asm")
     require_tool("quartus_sta")
+    require_tool("quartus_asm")
+    require_tool("quartus_sh")
     build_dir = BUILD_ROOT / target_name
     if clean:
         clean_dir(build_dir)
     else:
         build_dir.mkdir(parents=True, exist_ok=True)
-    build_id = new_build_id()
+    build_id = deterministic_build_id(manifest, target)
     project = write_quartus_project(manifest, target, build_dir, parallel_processors, build_id)
     metadata = begin_synth_metadata(build_dir, target_name, target)
     resolved_engine_config = engine_config_for_target(target)
@@ -315,9 +375,44 @@ def synth_quartus(
     commands = [
         ["quartus_map", project_name, parallel_arg, *map_args],
         ["quartus_fit", project_name, parallel_arg, *fit_args],
-        ["quartus_asm", project_name],
         ["quartus_sta", project_name, parallel_arg],
+        ["quartus_asm", project_name],
     ]
+    smart_command = ["quartus_sh", "--determine_smart_action", project_name]
+    smart_log = build_dir / "quartus_smart.log"
+    print(f"Running {' '.join(smart_command)}...")
+    smart_code, smart_output, smart_elapsed = run_command(
+        smart_command,
+        build_dir,
+        smart_log,
+        live_log=True,
+        tee_stdout=stream_logs,
+    )
+    smart_match = re.search(r"\bSMART_ACTION\s*=\s*([A-Z0-9_]+)", smart_output)
+    smart_ok = smart_code == 0 and not QUARTUS_ERROR_RE.search(smart_output) and smart_match is not None
+    metadata["stages"].append(
+        {
+            "name": "quartus_smart",
+            "status": "pass" if smart_ok else "fail",
+            "return_code": smart_code,
+            "elapsed_seconds": round(smart_elapsed, 2),
+        }
+    )
+    if not smart_ok:
+        print(f"[FAIL] quartus_smart ({smart_elapsed:.2f}s)")
+        print(f"  log: {rel(smart_log)}")
+        print_quartus_failure_excerpt(smart_output)
+        finish_synth_metadata(build_dir, metadata, True)
+        return 1
+    smart_action = smart_match.group(1)
+    metadata["smart_action"] = smart_action
+    write_synth_metadata(build_dir, metadata)
+    print(f"[PASS] quartus_smart ({smart_elapsed:.2f}s): {smart_action}")
+    print(f"  log: {rel(smart_log)}")
+    commands = quartus_smart_commands(smart_action, commands)
+    if not commands:
+        print("Quartus outputs are up to date; no compilation stages are needed.")
+
     failed = False
     print(f"Quartus parallel processors: {parallel_processors}")
     for cmd in commands:

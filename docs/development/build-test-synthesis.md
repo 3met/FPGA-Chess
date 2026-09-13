@@ -42,7 +42,7 @@ Synthesis and runtime profiling resolve profiles through the same path so they u
 
 Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`. `check --tuning` includes the optional tuning tests when `requirements-tuning.txt` is installed.
 
-Synthesis verifies generated data before invoking the vendor flow. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Results and timing metadata are stored beside the vendor reports for `synth-report`.
+Synthesis verifies generated data before invoking the vendor flow. Quartus targets use Smart Recompile to determine the earliest invalid stage, preserve valid upstream results, and skip compilation entirely when all outputs are current; `--clean` intentionally discards that state and forces a full build. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Results and timing metadata are stored beside the vendor reports for `synth-report`.
 
 The DE1-SoC profile runs the engine at 75 MHz with one search thread and a 32-ply stack. Synthesis generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from the profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
 

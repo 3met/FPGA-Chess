@@ -9,8 +9,9 @@ from unittest import mock
 from tools.hardware_build.manifest import load_manifest
 from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count, short_quartus_node, wrap_timing_node
 from tools.hardware_build.synthesis import (
-    new_build_id,
+    deterministic_build_id,
     quartus_negative_slack,
+    quartus_smart_commands,
     synth_quartus,
     write_engine_build_config,
     write_quartus_project,
@@ -18,10 +19,15 @@ from tools.hardware_build.synthesis import (
 
 
 class EngineBuildConfigTests(unittest.TestCase):
-    def test_build_id_is_nonzero_and_retries_zero(self):
-        with mock.patch("tools.hardware_build.synthesis.secrets.randbits", side_effect=[0, 0x1234]) as randbits:
-            self.assertEqual(new_build_id(), 0x1234)
-        self.assertEqual(randbits.call_args_list, [mock.call(64), mock.call(64)])
+    def test_build_id_is_deterministic_and_tracks_target_configuration(self):
+        manifest = load_manifest()
+        target = manifest["synthesis_targets"]["quartus-de1-soc"]
+
+        first = deterministic_build_id(manifest, target)
+        self.assertEqual(deterministic_build_id(manifest, target), first)
+        self.assertNotEqual(first, 0)
+        changed_target = dict(target, seed=target["seed"] + 1)
+        self.assertNotEqual(deterministic_build_id(manifest, changed_target), first)
 
     def test_config_contains_exact_build_id_and_clock_frequency(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -29,7 +35,7 @@ class EngineBuildConfigTests(unittest.TestCase):
             self.assertEqual(config.name, "engine_build_config.svh")
             self.assertEqual(
                 config.read_text(encoding="utf-8"),
-                "// Generated for this synthesis invocation; do not edit.\n"
+                "// Generated for this synthesis configuration; do not edit.\n"
                 "localparam logic [63:0] FPGA_BUILD_ID = 64'h0123456789abcdef;\n"
                 "localparam int ENGINE_CLOCK_FREQ = 40_000_000;\n",
             )
@@ -69,6 +75,9 @@ class EngineBuildConfigTests(unittest.TestCase):
             )
             qsf = project.with_suffix(".qsf").read_text(encoding="utf-8")
             self.assertIn("engine_build_config.svh", qsf)
+            self.assertIn("set_global_assignment -name SMART_RECOMPILE ON", qsf)
+            self.assertIn("set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED", qsf)
+            self.assertIn('set_global_assignment -name FITTER_EFFORT "STANDARD FIT"', qsf)
             self.assertIn(f"FPGA_CHESS_THREAD_CAPACITY={resolved['threads']}", qsf)
             self.assertIn(f"FPGA_CHESS_SEARCH_STACK_CAPACITY={resolved['stack_depth']}", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_COMBO_LOGIC ON", qsf)
@@ -105,6 +114,15 @@ class QuartusReportTests(unittest.TestCase):
 
 
 class QuartusSynthesisTests(unittest.TestCase):
+    def test_smart_action_selects_only_required_stages(self):
+        commands = [[name] for name in ("quartus_map", "quartus_fit", "quartus_sta", "quartus_asm")]
+
+        self.assertEqual(quartus_smart_commands("DONE", commands), [])
+        self.assertEqual(quartus_smart_commands("SOURCE", commands), commands)
+        self.assertEqual(quartus_smart_commands("FIT_ASM", commands), commands[1:])
+        self.assertEqual(quartus_smart_commands("TAN", commands), commands[2:3])
+        self.assertEqual(quartus_smart_commands("ASM", commands), commands[3:])
+
     def test_negative_slack_includes_timing_context(self):
         summary = (
             "Type  : Slow 1100mV 85C Model Setup 'engine_clk'\n"
@@ -127,7 +145,7 @@ class QuartusSynthesisTests(unittest.TestCase):
 
     def test_negative_slack_prints_sta_as_failure_once(self):
         target = {"tool": "quartus", "top": "fpga_chess"}
-        command_results = [(0, "", 1.0)] * 4
+        command_results = [(0, "Info: SMART_ACTION = SOURCE\n", 0.5)] + [(0, "", 1.0)] * 3
         timing_failure = "Setup 'engine_clk': -0.736 ns (Slow 1100mV 85C)"
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -137,6 +155,10 @@ class QuartusSynthesisTests(unittest.TestCase):
             with (
                 mock.patch("tools.hardware_build.synthesis.BUILD_ROOT", build_root),
                 mock.patch("tools.hardware_build.synthesis.require_tool"),
+                mock.patch(
+                    "tools.hardware_build.synthesis.deterministic_build_id",
+                    return_value=0x1234,
+                ),
                 mock.patch(
                     "tools.hardware_build.synthesis.rel",
                     side_effect=lambda path: path.as_posix(),
@@ -148,7 +170,7 @@ class QuartusSynthesisTests(unittest.TestCase):
                 mock.patch(
                     "tools.hardware_build.synthesis.run_command",
                     side_effect=command_results,
-                ),
+                ) as run_command,
                 mock.patch(
                     "tools.hardware_build.synthesis.quartus_negative_slack",
                     return_value=[timing_failure],
@@ -165,13 +187,42 @@ class QuartusSynthesisTests(unittest.TestCase):
             )
             self.assertNotIn("[PASS] quartus_sta", printed)
             self.assertEqual(printed.count("quartus_sta (1.00s)"), 1)
+            self.assertNotIn("quartus_asm", printed)
             self.assertIn(f"  {timing_failure}\n", printed)
+            self.assertEqual(
+                [call.args[0][0] for call in run_command.call_args_list],
+                ["quartus_sh", "quartus_map", "quartus_fit", "quartus_sta"],
+            )
 
             metadata = json.loads(
                 (build_root / "quartus-test" / "synthesis.json").read_text(encoding="utf-8")
             )
             self.assertEqual(metadata["status"], "failed")
             self.assertEqual(metadata["stages"][-1]["status"], "fail")
+
+    def test_done_smart_action_skips_all_compilation_stages(self):
+        target = {"tool": "quartus", "top": "fpga_chess"}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_root = Path(temp_dir)
+            project = build_root / "quartus-test" / "fpga_chess"
+            with (
+                mock.patch("tools.hardware_build.synthesis.BUILD_ROOT", build_root),
+                mock.patch("tools.hardware_build.synthesis.require_tool"),
+                mock.patch("tools.hardware_build.synthesis.deterministic_build_id", return_value=0x1234),
+                mock.patch("tools.hardware_build.synthesis.rel", side_effect=lambda path: path.as_posix()),
+                mock.patch("tools.hardware_build.synthesis.write_quartus_project", return_value=project),
+                mock.patch(
+                    "tools.hardware_build.synthesis.run_command",
+                    return_value=(0, "Info: SMART_ACTION = DONE\n", 0.5),
+                ) as run_command,
+            ):
+                result = synth_quartus({}, "quartus-test", target, jobs=2)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(run_command.call_count, 1)
+            metadata = json.loads((project.parent / "synthesis.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["smart_action"], "DONE")
+            self.assertEqual(metadata["status"], "complete")
 
 
 if __name__ == "__main__":

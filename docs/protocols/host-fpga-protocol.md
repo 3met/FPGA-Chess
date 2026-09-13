@@ -84,7 +84,7 @@ Build information payload:
 
 | Field | Size | Encoding |
 | ----- | ---- | -------- |
-| Build ID | 8 bytes | Unsigned 64-bit little-endian identifier generated freshly for each synthesis invocation. |
+| Build ID | 8 bytes | Unsigned 64-bit little-endian fingerprint of the resolved synthesis target and its repository inputs. Identical inputs produce the same ID. |
 | Search-thread count | 1 byte | Number of search contexts synthesized into the engine. |
 | Engine clock frequency | 4 bytes | Unsigned little-endian frequency in hertz. |
 | Search stack depth | 1 byte | Number of plies allocated per search thread. |
