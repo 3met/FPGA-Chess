@@ -123,8 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     synth_parser = subparsers.add_parser("synth", help="Run a synthesis target")
     synth_parser.add_argument("--target", required=True, help="Synthesis target name")
+    synth_parser.add_argument(
+        "--engine-config",
+        help="Layered FPGA engine profile overriding the synthesis target's profile",
+    )
     synth_parser.add_argument("--part", help="Xilinx part for vivado-generic")
     synth_parser.add_argument("--jobs", type=int, help="Quartus parallel processor limit; overrides automatic detection")
+    synth_parser.add_argument("--seed", type=int, help="Quartus fitter seed; overrides the synthesis target")
     synth_parser.add_argument("--clean", action="store_true", help="Delete the Quartus build directory before synthesis")
     synth_parser.add_argument(
         "--stream-logs",

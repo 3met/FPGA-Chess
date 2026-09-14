@@ -45,4 +45,4 @@ factor = clamp(factor, 2, 8)
 soft = min(hard, base * factor / 4)
 ```
 
-Sixty-four evaluation units are 50 centipawns in the engine's 1/128-pawn score scale. If the root has exactly one legal move, `soft` is capped at 10 ms. The primary thread stops after a completed depth once the soft deadline is reached and does not start another depth after three fifths of the soft budget has elapsed. Helper threads do not control the result or soft stopping.
+Sixty-four evaluation units are 50 centipawns in the engine's 1/128-pawn score scale. Initial allocation, soft scaling, and the next-depth threshold share one iterative divider because setup latency is negligible and arbitrary tuned denominators must not create combinational timing paths. If the root has exactly one legal move, `soft` is capped at 10 ms. The primary thread stops after a completed depth once the soft deadline is reached and does not start another depth after three fifths of the soft budget has elapsed. Helper threads do not control the result or soft stopping.

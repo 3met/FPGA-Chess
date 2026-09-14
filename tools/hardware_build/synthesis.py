@@ -213,6 +213,24 @@ def quartus_smart_commands(action: str, commands: list[list[str]]) -> list[list[
     return commands[first_index:]
 
 
+def artifact_digest(path: Path) -> str:
+    """Hash a completed programming artifact for later flash validation."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validated_quartus_artifact(metadata: dict | None, build_id: int, artifact: Path) -> bool:
+    """Accept cached Quartus output only with a matching successful receipt."""
+    if not isinstance(metadata, dict) or metadata.get("status") != "complete":
+        return False
+    if metadata.get("validated_build_id") != f"{build_id:016x}" or not artifact.is_file():
+        return False
+    return metadata.get("artifact_sha256") == artifact_digest(artifact)
+
+
 def write_quartus_project(
     manifest: dict,
     target: dict,
@@ -355,8 +373,16 @@ def synth_quartus(
         clean_dir(build_dir)
     else:
         build_dir.mkdir(parents=True, exist_ok=True)
+    previous_metadata = None
+    metadata_path = build_dir / "synthesis.json"
+    if metadata_path.is_file():
+        try:
+            previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
     build_id = deterministic_build_id(manifest, target)
     project = write_quartus_project(manifest, target, build_dir, parallel_processors, build_id)
+    artifact = project.with_suffix(".sof")
     metadata = begin_synth_metadata(build_dir, target_name, target)
     resolved_engine_config = engine_config_for_target(target)
     if resolved_engine_config is not None:
@@ -411,7 +437,21 @@ def synth_quartus(
     print(f"  log: {rel(smart_log)}")
     commands = quartus_smart_commands(smart_action, commands)
     if not commands:
-        print("Quartus outputs are up to date; no compilation stages are needed.")
+        if validated_quartus_artifact(previous_metadata, build_id, artifact):
+            metadata["validated_build_id"] = f"{build_id:016x}"
+            metadata["artifact"] = rel(artifact)
+            metadata["artifact_sha256"] = previous_metadata["artifact_sha256"]
+            print("Quartus outputs are up to date; no compilation stages are needed.")
+        else:
+            # Smart Recompile can report DONE after a failed downstream stage,
+            # while an older .sof still exists. Rebuild instead of blessing it.
+            print("Quartus cache has no valid synthesis receipt; rebuilding all stages.")
+            commands = [
+                ["quartus_map", project_name, parallel_arg, *map_args],
+                ["quartus_fit", project_name, parallel_arg, *fit_args],
+                ["quartus_sta", project_name, parallel_arg],
+                ["quartus_asm", project_name],
+            ]
 
     failed = False
     print(f"Quartus parallel processors: {parallel_processors}")
@@ -453,6 +493,16 @@ def synth_quartus(
         if not ok:
             break
 
+    if failed:
+        # Never leave a stale image available for a later programming command.
+        artifact.unlink(missing_ok=True)
+    elif not artifact.is_file():
+        print(f"[FAIL] expected programming artifact was not produced: {rel(artifact)}")
+        failed = True
+    else:
+        metadata["validated_build_id"] = f"{build_id:016x}"
+        metadata["artifact"] = rel(artifact)
+        metadata["artifact_sha256"] = artifact_digest(artifact)
     finish_synth_metadata(build_dir, metadata, failed)
     return 1 if failed else 0
 
@@ -549,7 +599,17 @@ def command_synth(args: argparse.Namespace) -> int:
     if command_gen_data(argparse.Namespace(update=args.update_generated_data)) != 0:
         return 1
     print("\n== Synthesis ==")
-    target = targets[args.target]
+    target = dict(targets[args.target])
+    if args.engine_config:
+        if "engine_config" not in target:
+            raise BuildError(f"Synthesis target '{args.target}' does not support an engine configuration")
+        target["engine_config"] = args.engine_config
+    if getattr(args, "seed", None) is not None:
+        if target["tool"] != "quartus":
+            raise BuildError("--seed is supported only for Quartus targets")
+        if args.seed < 0:
+            raise BuildError("--seed must be nonnegative")
+        target["seed"] = args.seed
     if target["tool"] == "quartus":
         return synth_quartus(manifest, args.target, target, args.jobs, args.clean, args.stream_logs)
     if target["tool"] == "vivado":

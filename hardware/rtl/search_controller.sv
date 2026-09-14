@@ -268,6 +268,7 @@ module search_controller #(
         SEARCH_PHASE_TERMINAL_WAIT,
         SEARCH_PHASE_DONE,
         SEARCH_PHASE_TIME_SCALE,
+        SEARCH_PHASE_TIME_SCALE_WAIT,
         SEARCH_PHASE_TIME_THRESHOLD,
         SEARCH_PHASE_TIME_THRESHOLD_WAIT,
         SEARCH_PHASE_TIME_CHECK
@@ -1197,20 +1198,19 @@ module search_controller #(
         return 4'(factor);
     endfunction : adaptive_soft_factor
 
-    // Scale by the registered small factor in its own iteration-boundary stage.
-    function automatic TimeType scaled_soft_budget(
-        input logic [3:0] factor,
+    // Apply caps after the shared divider scales the base time. Keeping the
+    // division sequential permits every configured factor without a long path.
+    function automatic TimeType capped_soft_budget(
+        input logic [31:0] scaled,
         input logic exactly_one_move
     );
-        automatic logic [31:0] scaled;
         automatic TimeType result;
 
-        scaled = (search_base_ms * factor) / SOFT_FACTOR_DEFAULT;
         result = (scaled > search_hard_ms) ? search_hard_ms : TimeType'(scaled);
         if (exactly_one_move && result > TimeType'(SINGLE_LEGAL_MOVE_MS))
             result = TimeType'(SINGLE_LEGAL_MOVE_MS);
         return result;
-    endfunction : scaled_soft_budget
+    endfunction : capped_soft_budget
 
     function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
@@ -3751,9 +3751,16 @@ module search_controller #(
                     // Clock-search iteration decisions are deliberately staged.
                     // Only registered timing values may control root-state reloads.
                     if (search_thread_phase[0] == SEARCH_PHASE_TIME_SCALE) begin
-                        search_soft_ms <= scaled_soft_budget(
-                            pending_soft_factor, pending_single_legal_move);
-                        search_thread_phase[0] <= SEARCH_PHASE_TIME_THRESHOLD;
+                        time_div_numerator <= 32'(search_base_ms) * pending_soft_factor;
+                        time_div_denominator <= 32'(SOFT_FACTOR_DEFAULT);
+                        time_div_start <= 1'b1;
+                        search_thread_phase[0] <= SEARCH_PHASE_TIME_SCALE_WAIT;
+                    end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_SCALE_WAIT) begin
+                        if (time_div_done) begin
+                            search_soft_ms <= capped_soft_budget(
+                                time_div_quotient, pending_single_legal_move);
+                            search_thread_phase[0] <= SEARCH_PHASE_TIME_THRESHOLD;
+                        end
                     end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_THRESHOLD) begin
                         time_div_numerator <= 32'(search_soft_ms) * NEXT_DEPTH_NUMERATOR;
                         time_div_denominator <= 32'(NEXT_DEPTH_DENOMINATOR);

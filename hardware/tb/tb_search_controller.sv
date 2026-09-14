@@ -1176,7 +1176,7 @@ module tb_search_controller #(
                 make_move(Position'(9), Position'(17), PROMO_QUEEN), EvalScore'(35),
                 8'd1, NodeCountType'(100), NodeCountType'(40)) == 4'd8,
             "a score drop expands and clamps the factor to 2.0x");
-        check(dut.scaled_soft_budget(4'd8, 1'b1) == TimeType'(10),
+        check(dut.capped_soft_budget(32'd200, 1'b1) == TimeType'(10),
             "a single legal move caps the adaptive soft budget at ten milliseconds");
         check(!dut.lmr_eligible(PlyIndex'(0), 8'd8, 8'd2, 1'b0), "LMR excludes root moves");
         check(!dut.lmr_eligible(PlyIndex'(1), 8'd2, 8'd2, 1'b0), "LMR excludes shallow moves");

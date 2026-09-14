@@ -26,3 +26,4 @@ Implementation details are documented only when they establish a contract, expla
 | Build and verification | [development/build-test-synthesis.md](development/build-test-synthesis.md) |
 | Runtime profiling | [development/engine-profiling.md](development/engine-profiling.md) |
 | Evaluation tuning | [development/evaluation-tuning.md](development/evaluation-tuning.md) |
+| Search-parameter tuning | [development/search-parameter-tuning.md](development/search-parameter-tuning.md) |

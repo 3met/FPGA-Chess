@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 from pathlib import Path
 
-from .common import BUILD_ROOT, REPO_ROOT, BuildError, print_failure_excerpt, rel, require_tool, run_command
+from .common import BUILD_ROOT, REPO_ROOT, SYNTH_METADATA, BuildError, print_failure_excerpt, rel, require_tool, run_command
 from .manifest import load_manifest
 
 
@@ -27,6 +29,31 @@ def resolve_artifact(target: dict, override: str | None) -> Path:
             "Run synthesis first or pass --file <path>."
         )
     return artifact
+
+
+def validate_synthesized_artifact(target: dict, artifact: Path) -> None:
+    """Reject stale output unless synthesis recorded this exact artifact as valid."""
+    metadata_path = BUILD_ROOT / target["synthesis_target"] / SYNTH_METADATA
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildError(f"Synthesis receipt is unavailable or invalid: {metadata_path}") from exc
+    digest_builder = hashlib.sha256()
+    with artifact.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest_builder.update(chunk)
+    digest = digest_builder.hexdigest()
+    try:
+        artifact_name = rel(artifact)
+    except ValueError:
+        artifact_name = str(artifact)
+    if (
+        metadata.get("status") != "complete"
+        or metadata.get("validated_build_id") != metadata.get("build_id")
+        or metadata.get("artifact") != artifact_name
+        or metadata.get("artifact_sha256") != digest
+    ):
+        raise BuildError("Programming artifact is not from the latest successful synthesis; synthesize again")
 
 
 JTAG_ID_RE = re.compile(r"^\s*([0-9A-Fa-f]{8})\b", re.MULTILINE)
@@ -105,6 +132,8 @@ def command_flash(args: argparse.Namespace) -> int:
     if args.device_index is not None and args.device_index < 1:
         raise BuildError("--device-index must be at least 1")
     artifact = resolve_artifact(target, args.file)
+    if args.file is None:
+        validate_synthesized_artifact(target, artifact)
     if target["tool"] == "quartus":
         return flash_quartus(args.target, target, artifact, args.cable, args.device_index, args.dry_run)
     raise BuildError(f"Programming target '{args.target}' uses unsupported tool '{target['tool']}'")

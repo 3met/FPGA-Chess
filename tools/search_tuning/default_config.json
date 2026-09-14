@@ -1,0 +1,58 @@
+{
+  "baseline": "hardware/config/search/default.json",
+  "output_root": "work/search-tuning",
+  "iterations": 50,
+  "paired_openings": 500,
+  "opening_start": 1,
+  "progress_interval_games": 100,
+  "random_seed": 1,
+  "synthesis_target": "quartus-de1-soc",
+  "synthesis_jobs": null,
+  "synthesis_seeds": [1, 2, 3],
+  "maximum_synthesis_rejections": 10,
+  "flash_target": "quartus-de1-soc",
+  "fastchess_binary": "../fastchess/fastchess",
+  "stockfish_binary": "../Stockfish/src/stockfish",
+  "opening_book": "../fastchess/books/UHO_Lichess_4852_v1.epd",
+  "benchmark_results_root": "../fastchess/benchmark-results",
+  "fpga_time_control": "2+0.02",
+  "stockfish_time_control": "0.2+0.002",
+  "stockfish_elo": 3100,
+  "stockfish_threads": 1,
+  "stockfish_hash_mb": 256,
+  "confirmation": {
+    "maximum_repeats": 1,
+    "promotion_z_score": 1.5,
+    "minimum_success_probability": 0.10
+  },
+  "early_stopping": {
+    "enabled": true,
+    "start_after_trials": 1,
+    "reject_margin_elo": 40.0,
+    "competitive_margin_elo": 15.0,
+    "alpha": 0.10,
+    "beta": 0.02
+  },
+  "optimizer": {
+    "candidate_pool_size": 200000,
+    "initial_candidate_pool_size": 20000,
+    "acquisition_shortlist_size": 5000,
+    "initial_design": 10,
+    "mutation_axes": 4,
+    "observation_noise_elo": 8.0,
+    "acquisition_exploration_elo": 0.25,
+    "trust_region_success_probability": 0.60,
+    "trust_region_failure_probability": 0.25,
+    "initial_radius": 0.25,
+    "minimum_radius": 0.03,
+    "maximum_radius": 0.65,
+    "successes_before_expand": 3,
+    "failures_before_shrink": 4,
+    "expand_multiplier": 1.5,
+    "shrink_multiplier": 0.6
+  },
+  "parameters": {
+    "enabled": ["*"],
+    "overrides": {}
+  }
+}

@@ -1,3 +1,5 @@
+import argparse
+import hashlib
 import io
 import json
 import tempfile
@@ -9,6 +11,7 @@ from unittest import mock
 from tools.hardware_build.manifest import load_manifest
 from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count, short_quartus_node, wrap_timing_node
 from tools.hardware_build.synthesis import (
+    command_synth,
     deterministic_build_id,
     quartus_negative_slack,
     quartus_smart_commands,
@@ -114,6 +117,24 @@ class QuartusReportTests(unittest.TestCase):
 
 
 class QuartusSynthesisTests(unittest.TestCase):
+    def test_command_synth_applies_engine_profile_override_to_a_copy(self):
+        original = {
+            "tool": "quartus",
+            "engine_config": "hardware/config/engine/de1-soc.json",
+        }
+        manifest = {"synthesis_targets": {"test": original}}
+        args = argparse.Namespace(
+            target="test", engine_config="work/search-tuning/engine.json",
+            update_generated_data=False, jobs=2, clean=False, stream_logs=False, part=None,
+        )
+        with mock.patch("tools.hardware_build.synthesis.load_manifest", return_value=manifest), \
+                mock.patch("tools.hardware_build.synthesis.command_gen_data", return_value=0), \
+                mock.patch("tools.hardware_build.synthesis.synth_quartus", return_value=0) as synth:
+            self.assertEqual(command_synth(args), 0)
+
+        self.assertEqual(original["engine_config"], "hardware/config/engine/de1-soc.json")
+        self.assertEqual(synth.call_args.args[2]["engine_config"], "work/search-tuning/engine.json")
+
     def test_smart_action_selects_only_required_stages(self):
         commands = [[name] for name in ("quartus_map", "quartus_fit", "quartus_sta", "quartus_asm")]
 
@@ -205,6 +226,16 @@ class QuartusSynthesisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             build_root = Path(temp_dir)
             project = build_root / "quartus-test" / "fpga_chess"
+            project.parent.mkdir(parents=True)
+            artifact = project.with_suffix(".sof")
+            artifact.write_bytes(b"valid image")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            (project.parent / "synthesis.json").write_text(json.dumps({
+                "status": "complete",
+                "build_id": "0000000000001234",
+                "validated_build_id": "0000000000001234",
+                "artifact_sha256": digest,
+            }), encoding="utf-8")
             with (
                 mock.patch("tools.hardware_build.synthesis.BUILD_ROOT", build_root),
                 mock.patch("tools.hardware_build.synthesis.require_tool"),
