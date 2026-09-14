@@ -68,12 +68,12 @@ module tb_engine_profile #(
     // controller edge places reads 7.5 ns into the SDRAM's 10 ns data cycle.
     localparam int MEMORY_READ_LAG_NS = 5;
     localparam int ENGINE_STATE_COUNT = 8;
-    localparam int CONTROLLER_STATE_COUNT = 28;
+    localparam int CONTROLLER_STATE_COUNT = 24;
     localparam int THREAD_PHASE_COUNT = 11;
     // Profiler-local copies of the stable state encodings avoid hierarchical
     // enum-item references, which trigger a Verilator width-analysis bug.
-    localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 24;
-    localparam int CONTROLLER_STATE_SEARCH_RUN = 25;
+    localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 20;
+    localparam int CONTROLLER_STATE_SEARCH_RUN = 21;
     localparam int THREAD_PHASE_IDLE = 0;
     localparam int THREAD_PHASE_READY = 1;
     localparam int THREAD_PHASE_EVAL_WAIT = 3;

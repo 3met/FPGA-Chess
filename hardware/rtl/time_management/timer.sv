@@ -15,21 +15,24 @@ module timer #(
     localparam int COUNTER_BITS = (CLKS_PER_MS <= 1) ? 1 : $clog2(CLKS_PER_MS);
 
     logic [COUNTER_BITS-1:0] clk_count;
-    TimeType time_ms_reg;
 
-    assign time_ms = time_ms_reg;
+`ifndef SYNTHESIS
+    initial begin
+        if (CLOCK_FREQ < 1000 || CLOCK_FREQ % 1000 != 0)
+            $fatal(1, "timer CLOCK_FREQ must be a positive whole multiple of 1000 Hz");
+    end
+`endif
 
-    // The timer deliberately holds its partial millisecond count while paused.
+    // Preserve the sub-millisecond remainder while paused and saturate elapsed time.
     always_ff @(posedge clk) begin
         if (rst) begin
             clk_count <= '0;
-            time_ms_reg <= TimeType'(0);
+            time_ms <= TimeType'(0);
         end else if (run) begin
             if (clk_count == COUNTER_BITS'(CLKS_PER_MS - 1)) begin
                 clk_count <= '0;
-                if (time_ms_reg != TimeType'('1)) begin
-                    time_ms_reg <= time_ms_reg + TimeType'(1);
-                end
+                if (time_ms != TimeType'('1))
+                    time_ms <= time_ms + TimeType'(1);
             end else begin
                 clk_count <= clk_count + COUNTER_BITS'(1);
             end

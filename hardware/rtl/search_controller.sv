@@ -148,9 +148,6 @@ module search_controller #(
             $fatal(1, "futility parameters must fit the score range and supported child depth");
         if (QDELTA_MARGIN < 0 || QDELTA_MARGIN > SEARCH_INF_VALUE)
             $fatal(1, "QDELTA_MARGIN must fit the positive score range");
-        if (INCREMENT_DENOMINATOR < 1 || HARD_TIME_DENOMINATOR < 1
-                || NEXT_DEPTH_DENOMINATOR < 1 || DEFAULT_MOVES_DIVISOR < 1)
-            $fatal(1, "time-management denominators must be positive");
     end
 `endif
 
@@ -241,11 +238,7 @@ module search_controller #(
         ST_PERFT_REVERSE_ISSUE,
         ST_PERFT_REVERSE_WAIT,
         ST_SEARCH_TIME_SETUP,
-        ST_SEARCH_TIME_BASE_START,
-        ST_SEARCH_TIME_BASE_WAIT,
-        ST_SEARCH_TIME_INCREMENT_WAIT,
-        ST_SEARCH_TIME_HARD_START,
-        ST_SEARCH_TIME_HARD_WAIT,
+        ST_SEARCH_TIME_WAIT,
         ST_REPETITION_INIT,
         ST_REPETITION_ROOT_WAIT,
         ST_SEARCH_ITER_START,
@@ -269,8 +262,6 @@ module search_controller #(
         SEARCH_PHASE_DONE,
         SEARCH_PHASE_TIME_SCALE,
         SEARCH_PHASE_TIME_SCALE_WAIT,
-        SEARCH_PHASE_TIME_THRESHOLD,
-        SEARCH_PHASE_TIME_THRESHOLD_WAIT,
         SEARCH_PHASE_TIME_CHECK
     } SearchThreadPhase;
 
@@ -587,18 +578,14 @@ module search_controller #(
     TimeType search_soft_ms;
     TimeType search_next_depth_ms;
     TimeType search_hard_ms;
-    logic time_div_start;
-    logic time_div_cancel;
-    logic [31:0] time_div_numerator;
-    logic [31:0] time_div_denominator;
-    logic time_div_busy;
-    logic time_div_done;
-    logic [31:0] time_div_quotient;
-    TimeType time_clock_usable;
-    TimeType time_clock_increment;
-    logic [16:0] time_clock_divisor;
-    logic [31:0] time_clock_share;
-    logic [31:0] time_base_candidate;
+    logic time_management_cancel;
+    logic time_setup_start;
+    logic time_adaptive_start;
+    logic time_management_done;
+    SearchTimeBase allocated_base_ms;
+    TimeType allocated_soft_ms;
+    TimeType allocated_next_depth_ms;
+    TimeType allocated_hard_ms;
     logic [3:0] pending_soft_factor;
     logic pending_single_legal_move;
     Move previous_depth_best_move;
@@ -965,35 +952,48 @@ module search_controller #(
         endcase
     end
 
-    timer #(
-        .CLOCK_FREQ(CLOCK_FREQ)
-    ) search_timer (
-        .clk(clk),
-        .rst(timer_rst),
-        .run(timer_run),
-        .time_ms(elapsed_ms)
-    );
-
-    assign time_div_cancel = state != ST_SEARCH_TIME_SETUP
-        && state != ST_SEARCH_TIME_BASE_START
-        && state != ST_SEARCH_TIME_BASE_WAIT
-        && state != ST_SEARCH_TIME_INCREMENT_WAIT
-        && state != ST_SEARCH_TIME_HARD_START
-        && state != ST_SEARCH_TIME_HARD_WAIT
-        && state != ST_SEARCH_RUN;
-
-    unsigned_iterative_divider #(
-        .WIDTH(32)
-    ) time_divider (
+    time_management #(
+        .CLOCK_FREQ(CLOCK_FREQ),
+        .MOVES_TO_GO_BUFFER(MOVES_TO_GO_BUFFER),
+        .DEFAULT_MOVES_DIVISOR(DEFAULT_MOVES_DIVISOR),
+        .INCREMENT_NUMERATOR(INCREMENT_NUMERATOR),
+        .INCREMENT_DENOMINATOR(INCREMENT_DENOMINATOR),
+        .HARD_BASE_MULTIPLIER(HARD_BASE_MULTIPLIER),
+        .HARD_TIME_NUMERATOR(HARD_TIME_NUMERATOR),
+        .HARD_TIME_DENOMINATOR(HARD_TIME_DENOMINATOR),
+        .SOFT_FACTOR_DEFAULT(SOFT_FACTOR_DEFAULT),
+        .NEXT_DEPTH_NUMERATOR(NEXT_DEPTH_NUMERATOR),
+        .NEXT_DEPTH_DENOMINATOR(NEXT_DEPTH_DENOMINATOR),
+        .SINGLE_LEGAL_MOVE_MS(SINGLE_LEGAL_MOVE_MS)
+    ) search_time_management (
         .clk(clk),
         .rst_n(rst_n),
-        .cancel(time_div_cancel),
-        .start(time_div_start),
-        .numerator(time_div_numerator),
-        .denominator(time_div_denominator),
-        .busy(time_div_busy),
-        .done(time_div_done),
-        .quotient(time_div_quotient)
+        .cancel(time_management_cancel),
+        .timer_reset(timer_rst),
+        .timer_run(timer_run),
+        .elapsed_ms(elapsed_ms),
+        .setup_start(time_setup_start),
+        .setup_fixed_time(active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME),
+        .setup_clock_time(active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK),
+        .side_to_move_white(active_board.turn == WHITE),
+        .time_limit(active_req.time_limit),
+        .move_overhead(active_req.move_overhead),
+        .white_time(active_req.wtime),
+        .black_time(active_req.btime),
+        .white_increment(active_req.winc),
+        .black_increment(active_req.binc),
+        .moves_to_go(active_req.moves_to_go),
+        .adaptive_start(time_adaptive_start),
+        .adaptive_base_ms(search_base_ms),
+        .adaptive_hard_ms(search_hard_ms),
+        .adaptive_factor(pending_soft_factor),
+        .adaptive_single_legal_move(pending_single_legal_move),
+        .busy(),
+        .done(time_management_done),
+        .base_ms(allocated_base_ms),
+        .soft_ms(allocated_soft_ms),
+        .next_depth_ms(allocated_next_depth_ms),
+        .hard_ms(allocated_hard_ms)
     );
 
     nnue_evaluator #(
@@ -1117,47 +1117,6 @@ module search_controller #(
         return setup_req;
     endfunction : new_game_setup_request
 
-    function automatic TimeType usable_clock_time(input EngineControllerRequest request);
-        automatic TimeType stm_time;
-
-        stm_time = (active_board.turn == WHITE) ? request.wtime : request.btime;
-        return (stm_time > request.move_overhead)
-            ? (stm_time - request.move_overhead) : TimeType'(0);
-    endfunction : usable_clock_time
-
-    function automatic SearchTimeBase clock_base(input EngineControllerRequest request);
-        automatic TimeType stm_inc;
-        automatic TimeType usable;
-        automatic logic [16:0] divisor;
-        automatic logic [31:0] base;
-
-        stm_inc = (active_board.turn == WHITE) ? request.winc : request.binc;
-        usable = usable_clock_time(request);
-        divisor = request.moves_to_go != 16'd0
-            ? {1'b0, request.moves_to_go} + 17'(MOVES_TO_GO_BUFFER)
-            : 17'(DEFAULT_MOVES_DIVISOR);
-        base = (usable / divisor)
-            + ((stm_inc * INCREMENT_NUMERATOR) / INCREMENT_DENOMINATOR);
-        return SearchTimeBase'(base);
-    endfunction : clock_base
-
-    function automatic TimeType clock_hard(
-        input EngineControllerRequest request,
-        input SearchTimeBase base
-    );
-        automatic logic [31:0] from_base;
-        automatic logic [31:0] from_clock;
-
-        from_base = base * HARD_BASE_MULTIPLIER;
-        from_clock = (usable_clock_time(request) * HARD_TIME_NUMERATOR) / HARD_TIME_DENOMINATOR;
-        return TimeType'((from_base < from_clock) ? from_base : from_clock);
-    endfunction : clock_hard
-
-    function automatic TimeType fixed_time_budget(input EngineControllerRequest request);
-        return (request.time_limit > request.move_overhead)
-            ? request.time_limit - request.move_overhead : TimeType'(0);
-    endfunction : fixed_time_budget
-
     // Select the adaptive scale separately from the budget arithmetic so root
     // node counters never feed the next iteration's board-register enables.
     function automatic logic [3:0] adaptive_soft_factor(
@@ -1197,20 +1156,6 @@ module search_controller #(
             factor = SOFT_FACTOR_MAXIMUM;
         return 4'(factor);
     endfunction : adaptive_soft_factor
-
-    // Apply caps after the shared divider scales the base time. Keeping the
-    // division sequential permits every configured factor without a long path.
-    function automatic TimeType capped_soft_budget(
-        input logic [31:0] scaled,
-        input logic exactly_one_move
-    );
-        automatic TimeType result;
-
-        result = (scaled > search_hard_ms) ? search_hard_ms : TimeType'(scaled);
-        if (exactly_one_move && result > TimeType'(SINGLE_LEGAL_MOVE_MS))
-            result = TimeType'(SINGLE_LEGAL_MOVE_MS);
-        return result;
-    endfunction : capped_soft_budget
 
     function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
@@ -2596,6 +2541,9 @@ module search_controller #(
             || (state == ST_SEARCH_ITER_START)
             || (state == ST_SEARCH_ROOT_INIT)
             || (state == ST_SEARCH_RUN);
+        time_management_cancel = state != ST_SEARCH_TIME_SETUP
+            && state != ST_SEARCH_TIME_WAIT
+            && state != ST_SEARCH_RUN;
     end
 
     always_ff @(posedge clk) begin
@@ -2647,14 +2595,8 @@ module search_controller #(
             search_soft_ms <= TimeType'(0);
             search_next_depth_ms <= TimeType'(0);
             search_hard_ms <= TimeType'(0);
-            time_div_start <= 1'b0;
-            time_div_numerator <= 32'd0;
-            time_div_denominator <= 32'd1;
-            time_clock_usable <= TimeType'(0);
-            time_clock_increment <= TimeType'(0);
-            time_clock_divisor <= 17'd1;
-            time_clock_share <= 32'd0;
-            time_base_candidate <= 32'd0;
+            time_setup_start <= 1'b0;
+            time_adaptive_start <= 1'b0;
             pending_soft_factor <= 4'(SOFT_FACTOR_DEFAULT);
             pending_single_legal_move <= 1'b0;
             previous_depth_best_move <= NULL_MOVE;
@@ -2786,7 +2728,8 @@ module search_controller #(
             end
         end else begin
             resp_valid <= 1'b0;
-            time_div_start <= 1'b0;
+            time_setup_start <= 1'b0;
+            time_adaptive_start <= 1'b0;
             repetition_init_start <= 1'b0;
             repetition_history_reset <= 1'b0;
             repetition_history_write <= 1'b0;
@@ -3361,75 +3304,18 @@ module search_controller #(
                     end
                 end
 
-                // Clock allocation is serialized because it runs once per search and
-                // a combinational variable divider cannot meet the engine clock.
+                // Time policy arithmetic is owned by the dedicated control-plane module.
                 ST_SEARCH_TIME_SETUP: begin
-                    if (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME) begin
-                        search_base_ms <= SearchTimeBase'(fixed_time_budget(active_req));
-                        search_soft_ms <= fixed_time_budget(active_req);
-                        search_next_depth_ms <= fixed_time_budget(active_req);
-                        search_hard_ms <= fixed_time_budget(active_req);
-                        repetition_init_start <= 1'b1;
-                        state <= ST_REPETITION_INIT;
-                    end else if (active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK) begin
-                        time_clock_usable <= usable_clock_time(active_req);
-                        time_clock_increment <= (active_board.turn == WHITE)
-                            ? active_req.winc : active_req.binc;
-                        time_clock_divisor <= active_req.moves_to_go != 16'd0
-                            ? {1'b0, active_req.moves_to_go} + 17'(MOVES_TO_GO_BUFFER)
-                            : 17'(DEFAULT_MOVES_DIVISOR);
-                        state <= ST_SEARCH_TIME_BASE_START;
-                    end else begin
-                        search_base_ms <= SearchTimeBase'('1);
-                        search_soft_ms <= TimeType'('1);
-                        search_next_depth_ms <= TimeType'('1);
-                        search_hard_ms <= TimeType'('1);
-                        repetition_init_start <= 1'b1;
-                        state <= ST_REPETITION_INIT;
-                    end
+                    time_setup_start <= 1'b1;
+                    state <= ST_SEARCH_TIME_WAIT;
                 end
 
-                ST_SEARCH_TIME_BASE_START: begin
-                    time_div_numerator <= 32'(time_clock_usable);
-                    time_div_denominator <= 32'(time_clock_divisor);
-                    time_div_start <= 1'b1;
-                    state <= ST_SEARCH_TIME_BASE_WAIT;
-                end
-
-                ST_SEARCH_TIME_BASE_WAIT: begin
-                    if (time_div_done) begin
-                        time_clock_share <= time_div_quotient;
-                        time_div_numerator
-                            <= 32'(time_clock_increment) * INCREMENT_NUMERATOR;
-                        time_div_denominator <= 32'(INCREMENT_DENOMINATOR);
-                        time_div_start <= 1'b1;
-                        state <= ST_SEARCH_TIME_INCREMENT_WAIT;
-                    end
-                end
-
-                ST_SEARCH_TIME_INCREMENT_WAIT: begin
-                    if (time_div_done) begin
-                        time_base_candidate <= time_clock_share + time_div_quotient;
-                        state <= ST_SEARCH_TIME_HARD_START;
-                    end
-                end
-
-                ST_SEARCH_TIME_HARD_START: begin
-                    search_base_ms <= SearchTimeBase'(time_base_candidate);
-                    search_soft_ms <= TimeType'(time_base_candidate);
-                    search_next_depth_ms <= TimeType'(0);
-                    time_div_numerator <= 32'(time_clock_usable) * HARD_TIME_NUMERATOR;
-                    time_div_denominator <= 32'(HARD_TIME_DENOMINATOR);
-                    time_div_start <= 1'b1;
-                    state <= ST_SEARCH_TIME_HARD_WAIT;
-                end
-
-                ST_SEARCH_TIME_HARD_WAIT: begin
-                    if (time_div_done) begin
-                        search_hard_ms <= ((time_base_candidate * HARD_BASE_MULTIPLIER)
-                                < time_div_quotient)
-                            ? TimeType'(time_base_candidate * HARD_BASE_MULTIPLIER)
-                            : TimeType'(time_div_quotient);
+                ST_SEARCH_TIME_WAIT: begin
+                    if (time_management_done) begin
+                        search_base_ms <= allocated_base_ms;
+                        search_soft_ms <= allocated_soft_ms;
+                        search_next_depth_ms <= allocated_next_depth_ms;
+                        search_hard_ms <= allocated_hard_ms;
                         repetition_init_start <= 1'b1;
                         state <= ST_REPETITION_INIT;
                     end
@@ -3751,24 +3637,12 @@ module search_controller #(
                     // Clock-search iteration decisions are deliberately staged.
                     // Only registered timing values may control root-state reloads.
                     if (search_thread_phase[0] == SEARCH_PHASE_TIME_SCALE) begin
-                        time_div_numerator <= 32'(search_base_ms) * pending_soft_factor;
-                        time_div_denominator <= 32'(SOFT_FACTOR_DEFAULT);
-                        time_div_start <= 1'b1;
+                        time_adaptive_start <= 1'b1;
                         search_thread_phase[0] <= SEARCH_PHASE_TIME_SCALE_WAIT;
                     end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_SCALE_WAIT) begin
-                        if (time_div_done) begin
-                            search_soft_ms <= capped_soft_budget(
-                                time_div_quotient, pending_single_legal_move);
-                            search_thread_phase[0] <= SEARCH_PHASE_TIME_THRESHOLD;
-                        end
-                    end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_THRESHOLD) begin
-                        time_div_numerator <= 32'(search_soft_ms) * NEXT_DEPTH_NUMERATOR;
-                        time_div_denominator <= 32'(NEXT_DEPTH_DENOMINATOR);
-                        time_div_start <= 1'b1;
-                        search_thread_phase[0] <= SEARCH_PHASE_TIME_THRESHOLD_WAIT;
-                    end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_THRESHOLD_WAIT) begin
-                        if (time_div_done) begin
-                            search_next_depth_ms <= TimeType'(time_div_quotient);
+                        if (time_management_done) begin
+                            search_soft_ms <= allocated_soft_ms;
+                            search_next_depth_ms <= allocated_next_depth_ms;
                             search_thread_phase[0] <= SEARCH_PHASE_TIME_CHECK;
                         end
                     end else if (search_thread_phase[0] == SEARCH_PHASE_TIME_CHECK) begin

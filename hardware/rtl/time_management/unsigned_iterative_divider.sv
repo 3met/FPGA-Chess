@@ -1,7 +1,7 @@
 // By Emet Behrendt
 
 // Small restoring divider for infrequent control-plane arithmetic. One result
-// takes WIDTH cycles, avoiding a full-width combinational divider in the engine.
+// takes WIDTH cycles, avoiding a full-width combinational divider or multiplier.
 module unsigned_iterative_divider #(
     parameter int WIDTH = 32
 ) (
@@ -20,7 +20,7 @@ module unsigned_iterative_divider #(
 
     logic [WIDTH-1:0] dividend;
     logic [WIDTH-1:0] divisor;
-    logic [WIDTH:0] remainder;
+    logic [WIDTH-1:0] remainder;
     logic [COUNT_BITS-1:0] bits_left;
 
     always_ff @(posedge clk) begin
@@ -47,14 +47,14 @@ module unsigned_iterative_divider #(
                 bits_left <= COUNT_BITS'(WIDTH);
             end else if (busy) begin
                 automatic logic [WIDTH:0] shifted_remainder;
-                shifted_remainder = {remainder[WIDTH-1:0], dividend[WIDTH-1]};
+                shifted_remainder = {remainder, dividend[WIDTH-1]};
                 dividend <= {dividend[WIDTH-2:0], 1'b0};
                 quotient <= {quotient[WIDTH-2:0], 1'b0};
                 if (shifted_remainder >= {1'b0, divisor}) begin
-                    remainder <= shifted_remainder - {1'b0, divisor};
+                    remainder <= WIDTH'(shifted_remainder - {1'b0, divisor});
                     quotient[0] <= 1'b1;
                 end else begin
-                    remainder <= shifted_remainder;
+                    remainder <= WIDTH'(shifted_remainder);
                 end
                 bits_left <= bits_left - COUNT_BITS'(1);
                 if (bits_left == COUNT_BITS'(1)) begin

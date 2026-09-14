@@ -18,7 +18,6 @@ module tb_search_controller #(
     logic req_valid;
     logic req_ready;
     EngineControllerRequest req;
-    EngineControllerRequest clock_budget_request;
     logic resp_valid;
     EngineControllerResponse resp;
     logic [7:0] debug_stat_address;
@@ -1145,22 +1144,6 @@ module tb_search_controller #(
             "LMR move/depth bucket upper boundaries");
         check(dut.floor_log2_8(8'd127) == 3'd6 && dut.floor_log2_8(8'd128) == 3'd7,
             "LMR 8-bit saturation bucket boundary");
-        clock_budget_request = zero_request();
-        clock_budget_request.wtime = TimeType'(180_000);
-        clock_budget_request.btime = TimeType'(180_000);
-        clock_budget_request.winc = TimeType'(2_000);
-        clock_budget_request.binc = TimeType'(2_000);
-        clock_budget_request.move_overhead = TimeType'(10);
-        check(dut.clock_base(clock_budget_request) == TimeType'(10_599),
-            "3+2 clock base uses one twentieth of usable time and four fifths increment");
-        check(dut.clock_hard(clock_budget_request, dut.clock_base(clock_budget_request))
-                == TimeType'(42_396),
-            "clock hard limit is four times base under the remaining-time cap");
-        clock_budget_request.moves_to_go = 16'd40;
-        check(dut.clock_base(clock_budget_request) == TimeType'(5_885),
-            "moves-to-go clock base includes the two-move buffer");
-        dut.search_base_ms = TimeType'(100);
-        dut.search_hard_ms = TimeType'(400);
         dut.search_completed_depth = 5'd2;
         dut.previous_depth_best_move = make_move(Position'(8), Position'(16), PROMO_QUEEN);
         dut.previous_depth_score = EvalScore'(100);
@@ -1176,8 +1159,6 @@ module tb_search_controller #(
                 make_move(Position'(9), Position'(17), PROMO_QUEEN), EvalScore'(35),
                 8'd1, NodeCountType'(100), NodeCountType'(40)) == 4'd8,
             "a score drop expands and clamps the factor to 2.0x");
-        check(dut.capped_soft_budget(32'd200, 1'b1) == TimeType'(10),
-            "a single legal move caps the adaptive soft budget at ten milliseconds");
         check(!dut.lmr_eligible(PlyIndex'(0), 8'd8, 8'd2, 1'b0), "LMR excludes root moves");
         check(!dut.lmr_eligible(PlyIndex'(1), 8'd2, 8'd2, 1'b0), "LMR excludes shallow moves");
         check(!dut.lmr_eligible(PlyIndex'(1), 8'd3, 8'd1, 1'b0), "LMR excludes the first two legal moves");

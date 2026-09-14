@@ -66,6 +66,12 @@
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/repetition_checker.sv"
     ],
+    "time-management": [
+      "@common",
+      "hardware/rtl/time_management/timer.sv",
+      "hardware/rtl/time_management/unsigned_iterative_divider.sv",
+      "hardware/rtl/time_management/time_management.sv"
+    ],
     "search-controller": [
       "@board-update-pipeline",
       "@move-generator",
@@ -73,8 +79,7 @@
       "@tt-load-store",
       "@repetition-checker",
       "hardware/rtl/engine_defs.sv",
-      "hardware/rtl/timer.sv",
-      "hardware/rtl/unsigned_iterative_divider.sv",
+      "@time-management",
       "hardware/rtl/search_controller.sv"
     ],
     "engine-rtl": [
@@ -122,6 +127,11 @@
     ]
   },
   "tests": {
+    "time-management": {
+      "source_set": "time-management",
+      "testbench": "hardware/tb/time_management/tb_time_management.sv",
+      "top": "tb_time_management"
+    },
     "repetition-checker": {
       "source_set": "repetition-checker",
       "testbench": "hardware/tb/repetition_checker/tb_repetition_checker.sv",

@@ -12,8 +12,7 @@ CONTROLLER_STATES = [
     "new_clear_wait", "new_setup_issue", "new_setup_wait", "new_done",
     "perft_gen_issue", "perft_gen_wait", "perft_push_issue", "perft_push_wait",
     "perft_reverse_issue", "perft_reverse_wait", "search_time_setup",
-    "search_time_base_start", "search_time_base_wait", "search_time_increment_wait",
-    "search_time_hard_start", "search_time_hard_wait", "repetition_init",
+    "search_time_wait", "repetition_init",
     "repetition_root_wait", "search_iter_start", "search_root_init", "search_run",
     "respond", "flush_respond",
 ]

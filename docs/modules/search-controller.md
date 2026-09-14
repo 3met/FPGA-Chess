@@ -36,7 +36,7 @@ Each search thread owns its current board and incremental state, alpha/beta wind
 
 The primary thread owns the last atomic completed-iteration move, score, principal-variation prefix, and depth. For the active iteration it separately records whether any root child's complete logical search has returned and whether the best such result is exact inside the aspiration window. These two bits permit safe interrupted-iteration selection without a root-move table or per-node bookkeeping. Helpers cooperate only through the TT and never delay or overwrite the primary result. Threads retry aspiration failures or begin new iterations independently.
 
-After a completed primary clock-search iteration, adaptive stopping crosses registered phase boundaries: root-node statistics select the small scale factor, the factor scales and clamps the soft budget, and an iterative control-plane divider produces the next-depth threshold before the final comparison. Initial normal-clock allocation uses the same divider for the variable and constant ratios. Only registered soft and threshold values control stopping or root-state reloads, so request handshakes and wide node-share or budget arithmetic do not feed board-register enables. Helper contexts continue running while the threshold division completes, and the shared hard deadline remains active.
+After a completed primary clock-search iteration, adaptive stopping crosses registered phase boundaries: root-node statistics select the small scale factor, then the dedicated `time_management` child scales and clamps the soft budget and derives the next-depth threshold before the final comparison. The same child performs initial normal-clock allocation. Only registered soft and threshold values control stopping or root-state reloads, so request handshakes and wide node-share or budget arithmetic do not feed board-register enables. Helper contexts continue running while allocation completes, and the shared hard deadline remains active.
 
 ## Shared-Pipeline Scheduling
 
@@ -47,7 +47,7 @@ The controller schedules work across:
 - [NNUE evaluation](nnue-evaluator.md)
 - [transposition-table lookup and store](transposition-table.md)
 - [repetition checking](repetition-checker.md)
-- [timer](timer.md)
+- [time management](time-management.md)
 
 A thread has at most one in-flight request in each subsystem. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
