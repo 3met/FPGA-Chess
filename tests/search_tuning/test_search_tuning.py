@@ -2,6 +2,7 @@ import argparse
 import copy
 import io
 import json
+import math
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -10,7 +11,7 @@ from unittest import mock
 
 from tools.search_tuning.cli import main as tuning_main
 from tools.search_tuning.benchmark import fresh_command, resume_command
-from tools.search_tuning.optimizer import suggest
+from tools.search_tuning.optimizer import posterior_rankings, suggest
 from tools.search_tuning.space import (
     configured_parameters,
     get_path,
@@ -23,9 +24,8 @@ from tools.search_tuning.workflow import (
     Runner,
     TuningError,
     aggregate_evaluations,
-    confirmation_success_probability,
+    paired_elo_difference,
     parse_tournament_completion,
-    promotion_is_significant,
 )
 
 
@@ -62,7 +62,29 @@ def completed_record(identifier, parameters, score, error, promoted=True):
             "score": score, "score_error": error, "games": 1000,
             "completion": "full", "tournament_dir": "synthetic",
         }],
+        "tournament_dirs": ["synthetic"],
     }
+
+
+def write_match_pgn(path: Path, scores: list[float]) -> None:
+    """Write a minimal Fastchess-style PGN with deterministic opening keys."""
+    games = []
+    for index, score in enumerate(scores):
+        fpga_white = index % 2 == 0
+        if score == 0.5:
+            result = "1/2-1/2"
+        elif (score == 1.0) == fpga_white:
+            result = "1-0"
+        else:
+            result = "0-1"
+        games.append(
+            f'[White "{"FPGA-test" if fpga_white else "Stockfish"}"]\n'
+            f'[Black "{"Stockfish" if fpga_white else "FPGA-test"}"]\n'
+            f'[Result "{result}"]\n'
+            f'[FEN "8/8/8/8/8/8/8/K6k w - - 0 {index + 1}"]\n\n'
+            f'{result}\n'
+        )
+    path.write_text("\n".join(games), encoding="utf-8")
 
 
 class CliTests(unittest.TestCase):
@@ -173,6 +195,18 @@ class SearchSpaceTests(unittest.TestCase):
         self.assertEqual(details["center_id"], 1)
         self.assertGreater(details["center_posterior_stddev"], 0.0)
 
+    def test_runtime_invalid_observations_are_excluded_from_the_gp(self):
+        alternative = copy.deepcopy(self.baseline)
+        alternative["aspiration"]["starting_delta"] += 32
+        history = [
+            completed_record(0, self.baseline, 10.0, 20.0),
+            dict(completed_record(1, alternative, 500.0, 1.0), runtime_invalid=True),
+        ]
+
+        rankings = posterior_rankings(self.parameters, history, self.config["optimizer"])
+
+        self.assertEqual([item["trial_id"] for item in rankings], [0])
+
     def test_rejected_candidate_advances_the_initial_design_group(self):
         settings = dict(self.config["optimizer"], initial_design=10, initial_candidate_pool_size=250)
         history = [{
@@ -206,20 +240,20 @@ class StatisticalTests(unittest.TestCase):
         self.assertAlmostEqual(score, 15.0)
         self.assertAlmostEqual(error, 19.6 / 2**0.5)
 
-    def test_promotion_accounts_for_both_measurement_errors(self):
-        incumbent = {"score": 10.0, "score_error": 19.6}
+    def test_paired_elo_uses_matching_game_covariance(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            directory = Path(temp)
+            baseline = directory / "baseline.pgn"
+            candidate = directory / "candidate.pgn"
+            write_match_pgn(baseline, [0.0, 0.5, 0.0, 0.5, 1.0, 0.0])
+            write_match_pgn(candidate, [1.0, 0.5, 0.5, 1.0, 1.0, 0.5])
 
-        self.assertFalse(promotion_is_significant(20.0, 19.6, incumbent, 1.0))
-        self.assertTrue(promotion_is_significant(25.0, 19.6, incumbent, 1.0))
+            result = paired_elo_difference([candidate], [baseline])
 
-    def test_confirmation_probability_rejects_a_noise_level_lead(self):
-        incumbent = {"score": 57.14, "score_error": 19.81}
-        evaluations = [{"score": 58.21, "score_error": 19.79}]
-
-        probability = confirmation_success_probability(evaluations, incumbent, 1.5)
-
-        self.assertLess(probability, 0.01)
-
+            self.assertEqual(result["games"], 6)
+            self.assertGreater(result["elo_difference"], 0.0)
+            self.assertGreater(result["probability_better"], 0.5)
+            self.assertTrue(math.isfinite(result["elo_error"]))
 
 class TournamentParsingTests(unittest.TestCase):
     def test_uses_final_complete_rating(self):
@@ -248,6 +282,16 @@ Games: 40, Wins: 3, Losses: 4
             (-42.0, 25.0, 300, "H0"),
         )
 
+    def test_accepts_an_unbounded_elo_when_sprt_rejects_the_candidate(self):
+        summary = "Elo: -inf +/- -nan\nGames: 104, Wins: 0\n"
+        raw = "SPRT ([-3.36, 21.64]) completed - H0 was accepted\n"
+
+        score, error, games, completion = parse_tournament_completion(summary, raw, 1000)
+
+        self.assertEqual(score, -math.inf)
+        self.assertTrue(math.isnan(error))
+        self.assertEqual((games, completion), (104, "H0"))
+
     def test_detects_an_upper_sprt_decision_for_continuation(self):
         summary = "Elo: 60.0 +/- 40.0\nGames: 200, Wins: 100\n"
         raw = "SPRT ([-40.00, -15.00]) completed - H1 was accepted\n"
@@ -266,6 +310,7 @@ class WorkflowTests(unittest.TestCase):
         config["optimizer"]["candidate_pool_size"] = 250
         config["optimizer"]["initial_candidate_pool_size"] = 250
         config["optimizer"]["acquisition_shortlist_size"] = 50
+        config["validation"]["maximum_finalists"] = 0
         config_path = directory / "config.json"
         directory.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -402,7 +447,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(finished["history"][0]["promoted"])
             self.assertIsNone(finished["pending"])
 
-    def test_apparent_improvement_is_confirmed_before_promotion(self):
+    def test_apparent_improvement_remains_provisional_until_validation(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
             runner = self.make_runner(Path(temp), iterations=2)
             state = runner.initialize()
@@ -413,23 +458,154 @@ class WorkflowTests(unittest.TestCase):
             pending["phase"] = "tournament"
             runner.save(state)
 
-            results = [
-                (20.0, 19.6, Path(temp) / "first", 1000, "full"),
-                (40.0, 19.6, Path(temp) / "confirmation", 1000, "full"),
-            ]
+            results = [(20.0, 19.6, Path(temp) / "first", 1000, "full")]
             with mock.patch.object(runner, "preflight"), \
+                    mock.patch.object(runner, "_run_logged", return_value=""), \
                     mock.patch.object(runner, "_run_tournament", side_effect=results) as tournament:
                 runner._run_locked(False)
 
             finished = json.loads(runner.state_path.read_text(encoding="utf-8"))
             record = finished["history"][-1]
-            self.assertEqual(tournament.call_count, 2)
-            self.assertAlmostEqual(record["score"], 30.0)
-            self.assertAlmostEqual(record["score_error"], 19.6 / 2**0.5)
-            self.assertTrue(record["promoted"])
-            self.assertEqual(finished["best_id"], 1)
+            self.assertEqual(tournament.call_count, 1)
+            self.assertEqual(record["score"], 20.0)
+            self.assertFalse(record["promoted"])
+            self.assertEqual(finished["best_id"], 0)
 
-    def test_resume_does_not_start_a_confirmation_that_cannot_change_promotion(self):
+    def test_ordinary_trial_finishes_without_immediate_validation(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            runner = self.make_runner(Path(temp), iterations=10)
+            state = runner.initialize()
+            baseline = state["baseline"]
+            state["history"] = [completed_record(0, baseline, 10.0, 19.6)]
+            state["best_id"] = 0
+            pending = runner._new_trial(state)
+            pending["evaluations"] = [{
+                "score": 20.0, "score_error": 19.6, "games": 1000,
+                "completion": "full", "tournament_dir": "first",
+            }]
+
+            runner._finish_trial(state)
+
+            self.assertEqual(len(state["history"]), 2)
+            self.assertEqual(len(state["history"][1]["evaluations"]), 1)
+            self.assertIsNone(state["pending"])
+            self.assertIsNone(state["validation"]["active"])
+
+    def test_validation_selects_diverse_posterior_leaders(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            runner = self.make_runner(Path(temp))
+            runner.config["validation"]["maximum_finalists"] = 2
+            runner.config["validation"]["minimum_parameter_distance"] = 0.10
+            state = runner.initialize()
+            baseline = state["baseline"]
+            state["history"] = [
+                completed_record(index, baseline, 10.0 + index, 20.0, promoted=index == 0)
+                for index in range(4)
+            ]
+            state["best_id"] = 0
+            dimension = len(runner.parameters)
+            rankings = [
+                {"trial_id": 0, "posterior_elo": 0.0, "posterior_stddev": 1.0, "vector": [0.0] * dimension},
+                {"trial_id": 1, "posterior_elo": 30.0, "posterior_stddev": 1.0, "vector": [0.0] * dimension},
+                {"trial_id": 2, "posterior_elo": 29.0, "posterior_stddev": 1.0, "vector": [0.01] * dimension},
+                {"trial_id": 3, "posterior_elo": 28.0, "posterior_stddev": 1.0, "vector": [0.5] * dimension},
+            ]
+
+            with mock.patch("tools.search_tuning.workflow.posterior_rankings", return_value=rankings):
+                runner._select_validation_finalists(state)
+
+            self.assertEqual(state["validation"]["finalist_ids"], [1, 3])
+
+    def test_validation_schedules_baseline_before_finalist_on_each_block(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            runner = self.make_runner(Path(temp))
+            state = runner.initialize()
+            baseline = state["baseline"]
+            state["history"] = [
+                completed_record(0, baseline, 10.0, 20.0),
+                completed_record(1, baseline, 20.0, 20.0, promoted=False),
+            ]
+            state["best_id"] = 0
+            state["validation"]["finalist_ids"] = [1]
+
+            first = runner._next_validation_target(state)
+            self.assertEqual((first["trial_id"], first["block"]), (0, 1))
+            state["history"][0]["evaluations"].append(state["history"][0]["evaluations"][0].copy())
+            state["history"][0]["tournament_dirs"].append("baseline-repeat")
+            state["validation"]["active"] = None
+            second = runner._next_validation_target(state)
+
+            self.assertEqual((second["trial_id"], second["block"]), (1, 1))
+
+    def test_paired_validation_promotes_and_writes_report(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            directory = Path(temp)
+            runner = self.make_runner(directory)
+            state = runner.initialize()
+            baseline = state["baseline"]
+            state["history"] = [
+                completed_record(0, baseline, 10.0, 20.0),
+                completed_record(1, baseline, 20.0, 20.0, promoted=False),
+            ]
+            state["best_id"] = 0
+            baseline_run = directory / "baseline-validation"
+            candidate_run = directory / "candidate-validation"
+            baseline_run.mkdir()
+            candidate_run.mkdir()
+            write_match_pgn(baseline_run / "games.pgn", [0.0] * 10)
+            write_match_pgn(candidate_run / "games.pgn", [1.0] * 10)
+            for record, run in zip(state["history"], (baseline_run, candidate_run), strict=True):
+                record["evaluations"].append({
+                    "score": record["score"], "score_error": 20.0, "games": 10,
+                    "completion": "full", "tournament_dir": str(run),
+                })
+                record["tournament_dirs"].append(str(run))
+            state["validation"].update({
+                "finalist_ids": [1], "failed_ids": [], "active": None, "complete": False,
+                "posterior": [{"trial_id": 1, "posterior_elo": 20.0, "posterior_stddev": 5.0}],
+            })
+
+            runner._finish_validation(state)
+
+            self.assertEqual(state["best_id"], 1)
+            self.assertTrue(state["validation"]["complete"])
+            self.assertTrue(runner.report_path.is_file())
+            self.assertTrue(runner.provisional_path.is_file())
+
+    def test_resume_does_not_repeat_a_checkpointed_validation_result(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            runner = self.make_runner(Path(temp), iterations=2)
+            state = runner.initialize()
+            baseline = state["baseline"]
+            state["history"] = [
+                completed_record(0, baseline, 10.0, 19.6),
+                completed_record(1, baseline, 20.0, 19.6, promoted=False),
+            ]
+            state["history"][1]["evaluations"].append({
+                "score": 40.0, "score_error": 19.6, "games": 1000,
+                "completion": "full", "tournament_dir": "validation",
+            })
+            state["history"][1]["tournament_dirs"].append("validation")
+            state["history"][1]["score"] = 30.0
+            state["history"][1]["score_error"] = 19.6 / 2**0.5
+            state["best_id"] = 0
+            state["validation"] = {
+                "finalist_ids": [1], "failed_ids": [], "complete": False,
+                "active": {
+                    "trial_id": 1, "block": 1, "phase": "tournament", "synthesis_seed_index": 0,
+                },
+            }
+            runner.save(state)
+
+            active = state["validation"]["active"]
+            with mock.patch.object(runner, "_run_tournament") as tournament, \
+                    mock.patch.object(runner, "_next_validation_target", side_effect=[active, None]):
+                runner._run_validation(state)
+
+            tournament.assert_not_called()
+            self.assertIsNone(state["validation"]["active"])
+
+    def test_resume_does_not_start_validation_that_cannot_change_promotion(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
             runner = self.make_runner(Path(temp), iterations=2)
             state = runner.initialize()
@@ -602,7 +778,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(saved["sprt"]["enabled"])
             self.assertEqual(output.getvalue().count("Futility upper bound cleared"), 1)
 
-    def test_sprt_bounds_use_the_conservative_best_and_skip_confirmations(self):
+    def test_sprt_bounds_use_the_conservative_best_and_skip_validation(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
             runner = self.make_runner(Path(temp), iterations=2)
             state = runner.initialize()
@@ -610,14 +786,14 @@ class WorkflowTests(unittest.TestCase):
             state["best_id"] = 0
 
             first = runner._sprt_environment(state, repeat=0)
-            confirmation = runner._sprt_environment(state, repeat=1)
+            validation = runner._sprt_environment(state, repeat=1)
 
             self.assertEqual(float(first["SPRT_ELO0"]), 10.0)
             self.assertEqual(float(first["SPRT_ELO1"]), 35.0)
             self.assertEqual(float(first["SPRT_ALPHA"]), 0.1)
             self.assertEqual(first["SPRT_BETA"], "0.02")
-            self.assertNotIn("SPRT_ELO0", confirmation)
-            self.assertEqual(confirmation["OPENING_START"], "501")
+            self.assertNotIn("SPRT_ELO0", validation)
+            self.assertEqual(validation["OPENING_START"], "501")
 
     def test_h0_is_stored_as_a_conservative_censored_observation(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
@@ -635,6 +811,43 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(record["raw_score"], -25.0)
             self.assertEqual(record["censored_upper_elo"], 10.0)
             self.assertGreaterEqual(record["score_error"], 25.0)
+
+    def test_unbounded_h0_is_stored_as_a_finite_censored_observation(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            runner = self.make_runner(Path(temp), iterations=2)
+            state = runner.initialize()
+            state["history"] = [completed_record(0, state["baseline"], 56.43, 19.79)]
+            state["best_id"] = 0
+
+            record = runner._evaluation_record(
+                state, score=-math.inf, error=math.nan, games=104,
+                completion="H0", tournament=Path(temp),
+            )
+
+            self.assertAlmostEqual(record["score"], -3.36)
+            self.assertEqual(record["score_error"], 25.0)
+            self.assertEqual(record["raw_score_unbounded"], "negative")
+            self.assertTrue(math.isfinite(record["score"]))
+            self.assertTrue(math.isfinite(record["score_error"]))
+
+    def test_excessive_runtime_failures_mark_an_evaluation_invalid(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            directory = Path(temp)
+            runner = self.make_runner(directory, iterations=2)
+            state = runner.initialize()
+            state["history"] = [completed_record(0, state["baseline"], 56.43, 19.79)]
+            state["best_id"] = 0
+            (directory / "raw-output.txt").write_text(
+                "Player: FPGA-test\n  Timeouts: 1\n  Crashed: 3\n", encoding="utf-8"
+            )
+
+            record = runner._evaluation_record(
+                state, score=-20.0, error=20.0, games=100,
+                completion="H0", tournament=directory,
+            )
+
+            self.assertEqual((record["timeouts"], record["crashes"]), (1, 3))
+            self.assertTrue(record["runtime_invalid"])
 
     def test_initial_design_does_not_shrink_the_trust_region(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
@@ -655,6 +868,43 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(state["trust_region_radius"], initial_radius)
             self.assertEqual((state["successes"], state["failures"]), (0, 0))
+
+    def test_ambiguous_gp_result_preserves_trust_region_evidence(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            runner = self.make_runner(Path(temp), iterations=12)
+            state = runner.initialize()
+            baseline = state["baseline"]
+            state["history"] = [
+                completed_record(identifier, baseline, 50.0, 20.0)
+                for identifier in range(10)
+            ]
+            state["best_id"] = 0
+            state["successes"] = 1
+            state["failures"] = 0
+            state["pending"] = {
+                "id": 10,
+                "parameter_hash": parameter_hash(baseline),
+                "parameters": baseline,
+                "snapshot": "synthetic",
+                "acquisition": {
+                    "center_id": 0,
+                    "center_posterior_elo": 50.0,
+                    "center_posterior_stddev": 10.0,
+                },
+                "evaluations": [{
+                    "score": 50.0, "score_error": 20.0, "games": 1000,
+                    "completion": "full", "tournament_dir": "synthetic",
+                }],
+                "tournament_dirs": ["synthetic"],
+                "started_at": "synthetic",
+            }
+
+            runner._finish_trial(state)
+
+            probability = state["history"][-1]["optimizer_improvement_probability"]
+            self.assertGreater(probability, runner.config["optimizer"]["trust_region_failure_probability"])
+            self.assertLess(probability, runner.config["optimizer"]["trust_region_success_probability"])
+            self.assertEqual((state["successes"], state["failures"]), (1, 0))
 
 
 if __name__ == "__main__":

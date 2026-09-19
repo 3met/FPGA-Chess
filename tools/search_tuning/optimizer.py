@@ -131,6 +131,37 @@ PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67
           173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263]
 
 
+def posterior_rankings(
+    parameters: list[Parameter], history: list[dict], settings: dict
+) -> list[dict]:
+    """Rank feasible observations by the fitted GP posterior at each point."""
+    feasible = [record for record in history if not record.get("runtime_invalid", False)]
+    if not feasible:
+        return []
+    group_names = sorted({parameter.path.split(".", 1)[0] for parameter in parameters})
+    group_axes = [
+        [axis for axis, parameter in enumerate(parameters) if parameter.path.split(".", 1)[0] == name]
+        for name in group_names
+    ]
+    points = [vector_from_json(record["parameters"], parameters) for record in feasible]
+    scores = [float(record["score"]) for record in feasible]
+    errors = [
+        max(float(settings["observation_noise_elo"]), float(record["score_error"]) / 1.96)
+        for record in feasible
+    ]
+    model = GaussianProcess(points, scores, errors, float(settings["observation_noise_elo"]), group_axes)
+    rankings = []
+    for record, point in zip(feasible, points, strict=True):
+        mean, deviation = model.predict(point)
+        rankings.append({
+            "trial_id": record["id"],
+            "posterior_elo": mean,
+            "posterior_stddev": deviation,
+            "vector": point,
+        })
+    return sorted(rankings, key=lambda item: item["posterior_elo"], reverse=True)
+
+
 def suggest(
     base_json: dict,
     parameters: list[Parameter],
@@ -163,22 +194,23 @@ def suggest(
     mutation_probability = 1.0 if in_initial_design else min(1.0, float(settings["mutation_axes"]) / dimension)
     model = None
     incumbent = None
-    promoted = [record for record in history if record.get("promoted")]
-    center_record = max(promoted or history, key=lambda record: record["score"])
+    model_history = [record for record in history if not record.get("runtime_invalid", False)]
+    promoted = [record for record in model_history if record.get("promoted")]
+    center_record = max(promoted or model_history, key=lambda record: record["score"])
     if not in_initial_design:
-        points = [vector_from_json(record["parameters"], parameters) for record in history]
-        scores = [float(record["score"]) for record in history]
+        points = [vector_from_json(record["parameters"], parameters) for record in model_history]
+        scores = [float(record["score"]) for record in model_history]
         errors = [
             max(float(settings["observation_noise_elo"]), float(record.get("score_error") or 0.0) / 1.96)
-            for record in history
+            for record in model_history
         ]
         model = GaussianProcess(
             points, scores, errors, float(settings["observation_noise_elo"]), group_axes
         )
         posterior_predictions = [model.predict(point) for point in points]
         posterior_means = [prediction[0] for prediction in posterior_predictions]
-        center_index = max(range(len(history)), key=posterior_means.__getitem__)
-        center_record = history[center_index]
+        center_index = max(range(len(model_history)), key=posterior_means.__getitem__)
+        center_record = model_history[center_index]
         incumbent = posterior_means[center_index]
         center_uncertainty = posterior_predictions[center_index][1]
     center = vector_from_json(center_record["parameters"], parameters)

@@ -21,7 +21,7 @@ from tools.hardware_build.common import BuildError, REPO_ROOT, process_group_opt
 from tools.hardware_build.engine_config import load_engine_config
 from tools.hardware_build.manifest import load_manifest
 
-from .optimizer import suggest
+from .optimizer import posterior_rankings, suggest
 from .space import configured_parameters, get_path, parameter_hash
 
 
@@ -32,6 +32,10 @@ REPORT_RE = re.compile(
 )
 RESULTS_RE = re.compile(r"^Results:\s+(.+?)\s*$", re.MULTILINE)
 SPRT_RE = re.compile(r"SPRT \([^\n]+\) completed - (H[01]) was accepted")
+PLAYER_FAILURE_RE = re.compile(
+    r"Player:\s+FPGA[^\n]*\n\s+Timeouts:\s+(\d+)\n\s+Crashed:\s+(\d+)", re.MULTILINE
+)
+PGN_TAG_RE = re.compile(r'^\[([A-Za-z0-9_]+)\s+"(.*)"\]$')
 
 
 class TuningError(RuntimeError):
@@ -103,6 +107,7 @@ def validate_state(state: dict) -> None:
     required = {
         "created_at", "run_id", "experiment", "experiment_digest", "baseline",
         "history", "rejections", "best_id", "pending", "trust_region_radius", "successes", "failures",
+        "validation",
     }
     if (
         not required <= state.keys()
@@ -141,6 +146,8 @@ def validate_state(state: dict) -> None:
             or not valid_number(record.get("score_error"), nonnegative=True)
             or not isinstance(record.get("evaluations"), list)
             or not record["evaluations"]
+            or not isinstance(record.get("tournament_dirs"), list)
+            or len(record["tournament_dirs"]) < len(record["evaluations"])
         ):
             raise TuningError(f"trial {index + 1} has invalid parameters or evaluations")
         for evaluation in record["evaluations"]:
@@ -174,6 +181,34 @@ def validate_state(state: dict) -> None:
         or any(not valid_evaluation(evaluation) for evaluation in pending.get("evaluations", []))
     ):
         raise TuningError("pending trial does not match the current schema")
+    validation = state["validation"]
+    if (
+        not isinstance(validation, dict)
+        or not isinstance(validation.get("finalist_ids"), list)
+        or not isinstance(validation.get("failed_ids"), list)
+        or any(
+            isinstance(identifier, bool) or not isinstance(identifier, int)
+            or not 0 < identifier < len(state["history"])
+            for identifier in validation.get("finalist_ids", [])
+        )
+        or len(set(validation.get("finalist_ids", []))) != len(validation.get("finalist_ids", []))
+        or len(set(validation.get("failed_ids", []))) != len(validation.get("failed_ids", []))
+        or any(identifier not in validation.get("finalist_ids", []) for identifier in validation.get("failed_ids", []))
+        or not isinstance(validation.get("complete"), bool)
+    ):
+        raise TuningError("tuning validation state does not match the current schema")
+    active = validation.get("active")
+    if active is not None and (
+        not isinstance(active, dict)
+        or active.get("trial_id") not in [0, *validation["finalist_ids"]]
+        or isinstance(active.get("block"), bool)
+        or not isinstance(active.get("block"), int)
+        or active["block"] < 1
+        or active.get("phase") not in {"synthesis", "flash", "tournament"}
+        or not isinstance(active.get("synthesis_seed_index"), int)
+        or not 0 <= active["synthesis_seed_index"] < len(state["experiment"]["synthesis_seeds"])
+    ):
+        raise TuningError("active validation target does not match the current schema")
 
 
 def resolve_repo_path(value: str) -> Path:
@@ -319,30 +354,50 @@ def validate_config(config: dict) -> None:
         or maximum_rejections < 1
     ):
         raise TuningError("maximum_synthesis_rejections must be a positive integer")
-    confirmation = config.get("confirmation")
-    if not isinstance(confirmation, dict):
-        raise TuningError("confirmation must be an object")
+    validation = config.get("validation")
+    if not isinstance(validation, dict):
+        raise TuningError("validation must be an object")
     if (
-        isinstance(confirmation.get("maximum_repeats"), bool)
-        or not isinstance(confirmation.get("maximum_repeats"), int)
-        or confirmation["maximum_repeats"] < 0
+        isinstance(validation.get("maximum_finalists"), bool)
+        or not isinstance(validation.get("maximum_finalists"), int)
+        or validation["maximum_finalists"] < 0
     ):
-        raise TuningError("confirmation.maximum_repeats must be a nonnegative integer")
+        raise TuningError("validation.maximum_finalists must be a nonnegative integer")
     if (
-        isinstance(confirmation.get("promotion_z_score"), bool)
-        or not isinstance(confirmation.get("promotion_z_score"), (int, float))
-        or not math.isfinite(confirmation["promotion_z_score"])
-        or confirmation["promotion_z_score"] < 0
+        isinstance(validation.get("maximum_blocks"), bool)
+        or not isinstance(validation.get("maximum_blocks"), int)
+        or validation["maximum_blocks"] < 1
     ):
-        raise TuningError("confirmation.promotion_z_score must be nonnegative")
-    probability = confirmation.get("minimum_success_probability")
+        raise TuningError("validation.maximum_blocks must be a positive integer")
+    if (
+        isinstance(validation.get("promotion_z_score"), bool)
+        or not isinstance(validation.get("promotion_z_score"), (int, float))
+        or not math.isfinite(validation["promotion_z_score"])
+        or validation["promotion_z_score"] < 0
+    ):
+        raise TuningError("validation.promotion_z_score must be nonnegative")
+    probability = validation.get("minimum_success_probability")
     if (
         isinstance(probability, bool)
         or not isinstance(probability, (int, float))
         or not math.isfinite(probability)
         or not 0 <= probability <= 1
     ):
-        raise TuningError("confirmation.minimum_success_probability must be in [0, 1]")
+        raise TuningError("validation.minimum_success_probability must be in [0, 1]")
+    distance = validation.get("minimum_parameter_distance")
+    if (
+        isinstance(distance, bool) or not isinstance(distance, (int, float))
+        or not math.isfinite(distance) or not 0 <= distance <= 1
+    ):
+        raise TuningError("validation.minimum_parameter_distance must be in [0, 1]")
+    runtime = config.get("runtime_failures")
+    if (
+        not isinstance(runtime, dict)
+        or isinstance(runtime.get("maximum_per_tournament"), bool)
+        or not isinstance(runtime.get("maximum_per_tournament"), int)
+        or runtime["maximum_per_tournament"] < 0
+    ):
+        raise TuningError("runtime_failures.maximum_per_tournament must be a nonnegative integer")
     early = config.get("early_stopping")
     if not isinstance(early, dict) or not isinstance(early.get("enabled"), bool):
         raise TuningError("early_stopping.enabled must be boolean")
@@ -419,7 +474,8 @@ def experiment_snapshot(config: dict, baseline: dict, parameters: list[Any]) -> 
         "stockfish_hash_mb": config["stockfish_hash_mb"],
         "parameters": [parameter.__dict__ for parameter in parameters],
         "optimizer": optimizer,
-        "confirmation": config["confirmation"],
+        "validation": config["validation"],
+        "runtime_failures": config["runtime_failures"],
         "early_stopping": config["early_stopping"],
     }
 
@@ -449,37 +505,11 @@ def aggregate_evaluations(evaluations: list[dict]) -> tuple[float, float]:
     return score, confidence_error
 
 
-def promotion_is_significant(score: float, error: float, incumbent: dict, z_score: float) -> bool:
-    combined_standard_error = math.sqrt((error / 1.96) ** 2 + (float(incumbent["score_error"]) / 1.96) ** 2)
-    return score - float(incumbent["score"]) > z_score * combined_standard_error
-
-
 def probability_better(score: float, error: float, reference: dict) -> float:
     """Probability that one noisy Elo estimate exceeds another."""
     deviation = math.sqrt((error / 1.96) ** 2 + (float(reference["score_error"]) / 1.96) ** 2)
     z = (score - float(reference["score"])) / max(deviation, 1e-12)
     return 0.5 * math.erfc(-z / math.sqrt(2.0))
-
-
-def confirmation_success_probability(
-    evaluations: list[dict], incumbent: dict, promotion_z_score: float
-) -> float:
-    """Estimate whether one equally precise repeat can clear promotion."""
-    score, error = aggregate_evaluations(evaluations)
-    existing_se = max(error / 1.96, 1e-12)
-    repeat_se = max(float(evaluations[-1]["score_error"]) / 1.96, 1e-12)
-    incumbent_se = max(float(incumbent["score_error"]) / 1.96, 1e-12)
-    existing_weight = 1.0 / existing_se**2
-    repeat_weight = 1.0 / repeat_se**2
-    total_weight = existing_weight + repeat_weight
-    projected_se = math.sqrt(1.0 / total_weight)
-    promotion_cutoff = float(incumbent["score"]) + promotion_z_score * math.sqrt(
-        projected_se**2 + incumbent_se**2
-    )
-    repeat_fraction = repeat_weight / total_weight
-    projected_score_sd = repeat_fraction * math.sqrt(existing_se**2 + repeat_se**2)
-    z = (promotion_cutoff - score) / max(projected_score_sd, 1e-12)
-    return 0.5 * math.erfc(z / math.sqrt(2.0))
 
 
 def parse_tournament_completion(
@@ -494,14 +524,102 @@ def parse_tournament_completion(
         score, error, games = float(score_text), abs(float(error_text)), int(games_text)
     except ValueError as exc:
         raise TuningError("final tournament result could not be parsed") from exc
-    if not math.isfinite(score) or not math.isfinite(error):
-        raise TuningError("final tournament Elo is not finite; use more games or a better-matched opponent")
     if games == expected_games:
+        if not math.isfinite(score) or not math.isfinite(error):
+            raise TuningError("final tournament Elo is not finite; use more games or a better-matched opponent")
         return score, error, games, "full"
     decisions = SPRT_RE.findall(raw_output)
     if decisions and 0 < games < expected_games:
+        # An extreme early result can legitimately be +/-inf with an undefined
+        # interval. The SPRT decision remains finite evidence and H0 is later
+        # represented by its configured conservative upper bound.
         return score, error, games, decisions[-1]
+    if not math.isfinite(score) or not math.isfinite(error):
+        raise TuningError("tournament Elo is not finite and has no completed SPRT decision")
     raise TuningError(f"tournament summary is incomplete (expected {expected_games} games)")
+
+
+def _pgn_candidate_scores(path: Path) -> list[tuple[str, str, float]]:
+    """Read candidate scores keyed by opening FEN and candidate color."""
+    tags: dict[str, str] = {}
+    games = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = PGN_TAG_RE.match(line)
+        if match:
+            tags[match.group(1)] = match.group(2)
+            continue
+        if line or "Result" not in tags:
+            continue
+        white_fpga = tags.get("White", "").startswith("FPGA-")
+        black_fpga = tags.get("Black", "").startswith("FPGA-")
+        if white_fpga == black_fpga or "FEN" not in tags:
+            raise TuningError(f"could not identify FPGA player in {path}")
+        result = tags["Result"]
+        if result == "1/2-1/2":
+            score = 0.5
+        elif result == "1-0":
+            score = 1.0 if white_fpga else 0.0
+        elif result == "0-1":
+            score = 0.0 if white_fpga else 1.0
+        else:
+            raise TuningError(f"unsupported PGN result {result!r} in {path}")
+        games.append((tags["FEN"], "white" if white_fpga else "black", score))
+        tags = {}
+    if not games:
+        raise TuningError(f"no completed games found in {path}")
+    return games
+
+
+def paired_elo_difference(candidate_pgns: list[Path], baseline_pgns: list[Path]) -> dict:
+    """Estimate an Elo difference using covariance from identical opening/color games."""
+    if len(candidate_pgns) != len(baseline_pgns) or not candidate_pgns:
+        raise TuningError("paired validation requires matching nonempty tournament blocks")
+    candidate_scores: list[float] = []
+    baseline_scores: list[float] = []
+    for candidate_path, baseline_path in zip(candidate_pgns, baseline_pgns, strict=True):
+        candidate_games = _pgn_candidate_scores(candidate_path)
+        baseline_games = _pgn_candidate_scores(baseline_path)
+        if [(fen, color) for fen, color, _ in candidate_games] != [
+            (fen, color) for fen, color, _ in baseline_games
+        ]:
+            raise TuningError("validation tournaments do not contain identical opening/color games")
+        candidate_scores.extend(score for _, _, score in candidate_games)
+        baseline_scores.extend(score for _, _, score in baseline_games)
+    count = len(candidate_scores)
+    if count < 2:
+        raise TuningError("paired validation requires at least two games")
+    candidate_mean = sum(candidate_scores) / count
+    baseline_mean = sum(baseline_scores) / count
+    candidate_probability = (sum(candidate_scores) + 0.5) / (count + 1.0)
+    baseline_probability = (sum(baseline_scores) + 0.5) / (count + 1.0)
+    scale = 400.0 / math.log(10.0)
+    delta = scale * (
+        math.log(candidate_probability / (1.0 - candidate_probability))
+        - math.log(baseline_probability / (1.0 - baseline_probability))
+    )
+    variance_candidate = sum((value - candidate_mean) ** 2 for value in candidate_scores) / (count - 1)
+    variance_baseline = sum((value - baseline_mean) ** 2 for value in baseline_scores) / (count - 1)
+    covariance = sum(
+        (candidate - candidate_mean) * (baseline - baseline_mean)
+        for candidate, baseline in zip(candidate_scores, baseline_scores, strict=True)
+    ) / (count - 1)
+    candidate_gradient = scale / (candidate_probability * (1.0 - candidate_probability))
+    baseline_gradient = scale / (baseline_probability * (1.0 - baseline_probability))
+    variance = (
+        candidate_gradient**2 * variance_candidate
+        + baseline_gradient**2 * variance_baseline
+        - 2.0 * candidate_gradient * baseline_gradient * covariance
+    ) / count
+    standard_error = math.sqrt(max(variance, 1e-12))
+    probability_better = 0.5 * math.erfc(-delta / (standard_error * math.sqrt(2.0)))
+    return {
+        "elo_difference": delta,
+        "elo_error": 1.96 * standard_error,
+        "probability_better": probability_better,
+        "games": count,
+        "candidate_score": candidate_mean,
+        "baseline_score": baseline_mean,
+    }
 
 
 def _engine_profile(candidate_path: Path, profile_path: Path) -> dict:
@@ -525,6 +643,8 @@ class Runner:
         self.state_path = self.output / "state.json"
         self.candidate_path = self.output / "candidate.json"
         self.best_path = self.output / "best.json"
+        self.provisional_path = self.output / "provisional.json"
+        self.report_path = self.output / "report.json"
         self.profile_path = self.output / "engine.json"
         self.trials_path = self.output / "trials"
         self.logs_path = self.output / "logs"
@@ -557,6 +677,9 @@ class Runner:
                     "trust_region_radius": self.config["optimizer"]["initial_radius"],
                     "successes": 0,
                     "failures": 0,
+                    "validation": {
+                        "finalist_ids": [], "failed_ids": [], "active": None, "complete": False,
+                    },
                 })
                 atomic_json(self.candidate_path, current_baseline)
                 atomic_json(self.best_path, current_baseline)
@@ -593,6 +716,9 @@ class Runner:
             "trust_region_radius": self.config["optimizer"]["initial_radius"],
             "successes": 0,
             "failures": 0,
+            "validation": {
+                "finalist_ids": [], "failed_ids": [], "active": None, "complete": False,
+            },
         }
         atomic_json(self.candidate_path, baseline)
         atomic_json(self.best_path, baseline)
@@ -640,11 +766,11 @@ class Runner:
             available_openings = sum(1 for line in handle if line.strip())
         required_openings = (
             self.config["opening_start"] - 1
-            + self.config["paired_openings"] * (1 + self.config["confirmation"]["maximum_repeats"])
+            + self.config["paired_openings"] * (1 + self.config["validation"]["maximum_blocks"])
         )
         if required_openings > available_openings:
             raise TuningError(
-                f"opening book has {available_openings} positions but confirmation may require "
+                f"opening book has {available_openings} positions but validation may require "
                 f"position {required_openings}"
             )
 
@@ -881,9 +1007,12 @@ class Runner:
         pending = state["pending"]
         score, error = aggregate_evaluations(pending["evaluations"])
         incumbent = state["history"][state["best_id"]] if state["best_id"] is not None else None
-        promoted = incumbent is None or promotion_is_significant(
-            score, error, incumbent, float(self.config["confirmation"]["promotion_z_score"])
-        )
+        runtime_invalid = any(evaluation.get("runtime_invalid", False) for evaluation in pending["evaluations"])
+        if pending["id"] == 0 and runtime_invalid:
+            raise TuningError("baseline tournament produced excessive engine failures")
+        # Challengers remain provisional until paired final validation; the
+        # first baseline measurement alone establishes the initial incumbent.
+        promoted = incumbent is None
         record = {
             "id": pending["id"],
             "parameter_hash": pending["parameter_hash"],
@@ -895,6 +1024,7 @@ class Runner:
             "evaluations": pending["evaluations"],
             "tournament_dirs": pending["tournament_dirs"],
             "promoted": promoted,
+            "runtime_invalid": runtime_invalid,
             "started_at": pending["started_at"],
             "completed_at": utc_now(),
         }
@@ -911,7 +1041,7 @@ class Runner:
                 "score": float(pending["acquisition"]["center_posterior_elo"]),
                 "score_error": 1.96 * float(pending["acquisition"]["center_posterior_stddev"]),
             }
-            improvement_probability = probability_better(score, error, center)
+            improvement_probability = 0.0 if runtime_invalid else probability_better(score, error, center)
             record["optimizer_improvement_probability"] = improvement_probability
             if improvement_probability >= float(settings["trust_region_success_probability"]):
                 state["successes"] += 1
@@ -919,9 +1049,8 @@ class Runner:
             elif improvement_probability <= float(settings["trust_region_failure_probability"]):
                 state["failures"] += 1
                 state["successes"] = 0
-            else:
-                state["successes"] = 0
-                state["failures"] = 0
+            # Ambiguous evidence preserves the current streak so occasional
+            # noisy trials do not permanently disable radius adaptation.
             if state["successes"] >= settings["successes_before_expand"]:
                 state["trust_region_radius"] = min(
                     settings["maximum_radius"], state["trust_region_radius"] * settings["expand_multiplier"]
@@ -938,23 +1067,254 @@ class Runner:
         state["pending"] = None
         self.save(state)
 
-    def _needs_confirmation(self, state: dict, pending: dict) -> bool:
-        if not state["history"] or not pending["evaluations"]:
+    def _select_validation_finalists(self, state: dict) -> None:
+        """Choose strong, distinct finalists from the GP posterior."""
+        validation = state["validation"]
+        if validation["finalist_ids"]:
+            return
+        rankings = posterior_rankings(self.parameters, state["history"], self.config["optimizer"])
+        candidates = [item for item in rankings if item["trial_id"] != 0]
+        maximum = int(self.config["validation"]["maximum_finalists"])
+        if maximum == 0:
+            return
+        minimum_distance = float(self.config["validation"]["minimum_parameter_distance"])
+        selected: list[dict] = []
+        deferred: list[dict] = []
+        for item in candidates:
+            distance = min(
+                (
+                    math.sqrt(
+                        sum((a - b) ** 2 for a, b in zip(item["vector"], chosen["vector"], strict=True))
+                        / len(self.parameters)
+                    )
+                )
+                for chosen in selected
+            ) if selected else math.inf
+            if distance >= minimum_distance:
+                selected.append(item)
+            else:
+                deferred.append(item)
+            if len(selected) == maximum:
+                break
+        if len(selected) < maximum:
+            selected.extend(deferred[:maximum - len(selected)])
+        validation["finalist_ids"] = [item["trial_id"] for item in selected]
+        validation["posterior"] = [
+            {
+                "trial_id": item["trial_id"],
+                "posterior_elo": item["posterior_elo"],
+                "posterior_stddev": item["posterior_stddev"],
+            }
+            for item in rankings
+        ]
+        if selected:
+            atomic_json(self.provisional_path, state["history"][selected[0]["trial_id"]]["parameters"])
+        self.save(state)
+
+    def _paired_validation_result(self, state: dict, trial_id: int) -> dict | None:
+        baseline = state["history"][0]
+        candidate = state["history"][trial_id]
+        blocks = min(len(baseline["evaluations"]), len(candidate["evaluations"])) - 1
+        if blocks < 1:
+            return None
+        baseline_pgns = [Path(item["tournament_dir"]) / "games.pgn" for item in baseline["evaluations"][1:blocks + 1]]
+        candidate_pgns = [Path(item["tournament_dir"]) / "games.pgn" for item in candidate["evaluations"][1:blocks + 1]]
+        result = paired_elo_difference(candidate_pgns, baseline_pgns)
+        result.update({"trial_id": trial_id, "blocks": blocks})
+        return result
+
+    def _candidate_needs_block(self, state: dict, trial_id: int, block: int) -> bool:
+        record = state["history"][trial_id]
+        if record.get("runtime_invalid") or trial_id in state["validation"]["failed_ids"]:
             return False
-        score, error = aggregate_evaluations(pending["evaluations"])
-        incumbent = state["history"][state["best_id"]]
-        maximum = 1 + int(self.config["confirmation"]["maximum_repeats"])
-        settings = self.config["confirmation"]
-        return (
-            score > float(incumbent["score"])
-            and len(pending["evaluations"]) < maximum
-            and not promotion_is_significant(
-                score, error, incumbent, float(settings["promotion_z_score"])
-            )
-            and confirmation_success_probability(
-                pending["evaluations"], incumbent, float(settings["promotion_z_score"])
-            ) >= float(settings["minimum_success_probability"])
+        if block == 1:
+            return True
+        result = self._paired_validation_result(state, trial_id)
+        if result is None:
+            return True
+        standard_error = result["elo_error"] / 1.96
+        z_score = float(self.config["validation"]["promotion_z_score"])
+        if abs(result["elo_difference"]) > z_score * standard_error:
+            return False
+        return result["probability_better"] >= float(
+            self.config["validation"]["minimum_success_probability"]
         )
+
+    def _next_validation_target(self, state: dict) -> dict | None:
+        validation = state["validation"]
+        if validation["complete"]:
+            return None
+        if validation["active"] is not None:
+            return validation["active"]
+        self._select_validation_finalists(state)
+        for block in range(1, int(self.config["validation"]["maximum_blocks"]) + 1):
+            candidates = [
+                trial_id for trial_id in validation["finalist_ids"]
+                if self._candidate_needs_block(state, trial_id, block)
+            ]
+            if not candidates:
+                continue
+            baseline = state["history"][0]
+            if len(baseline["evaluations"]) <= block:
+                trial_id = 0
+            else:
+                missing = [trial_id for trial_id in candidates if len(state["history"][trial_id]["evaluations"]) <= block]
+                if not missing:
+                    continue
+                trial_id = missing[0]
+            validation["active"] = {
+                "trial_id": trial_id,
+                "block": block,
+                "phase": "synthesis",
+                "synthesis_seed_index": 0,
+            }
+            self.save(state)
+            return validation["active"]
+        self._finish_validation(state)
+        return None
+
+    def _validation_context(self, state: dict, active: dict) -> dict:
+        record = state["history"][active["trial_id"]]
+        return {
+            "id": record["id"],
+            "parameter_hash": record["parameter_hash"],
+            "parameters": record["parameters"],
+            "synthesis_seed_index": active["synthesis_seed_index"],
+            "evaluations": record["evaluations"],
+            "tournament_dirs": record["tournament_dirs"],
+        }
+
+    def _finish_validation(self, state: dict) -> None:
+        validation = state["validation"]
+        results = []
+        for trial_id in validation["finalist_ids"]:
+            if trial_id not in validation["failed_ids"]:
+                result = self._paired_validation_result(state, trial_id)
+                if result is not None:
+                    results.append(result)
+        z_score = float(self.config["validation"]["promotion_z_score"])
+        for result in results:
+            result["promotion_lower_bound"] = (
+                result["elo_difference"] - z_score * (result["elo_error"] / 1.96)
+            )
+        significant = [
+            result for result in results
+            if result["promotion_lower_bound"] > 0.0
+        ]
+        if significant:
+            winner = max(significant, key=lambda item: item["promotion_lower_bound"])
+            record = state["history"][winner["trial_id"]]
+            record["promoted"] = True
+            state["best_id"] = record["id"]
+            atomic_json(self.best_path, record["parameters"])
+        provisional = max(results, key=lambda item: item["promotion_lower_bound"], default=None)
+        if provisional is not None:
+            atomic_json(self.provisional_path, state["history"][provisional["trial_id"]]["parameters"])
+        else:
+            self.provisional_path.unlink(missing_ok=True)
+        report = {
+            "completed_at": utc_now(),
+            "best_id": state["best_id"],
+            "provisional_id": provisional["trial_id"] if provisional is not None else None,
+            "finalist_ids": validation["finalist_ids"],
+            "failed_finalist_ids": validation["failed_ids"],
+            "paired_results": results,
+            "posterior_ranking": validation.get("posterior", []),
+            "runtime_invalid_ids": [record["id"] for record in state["history"] if record.get("runtime_invalid")],
+            "synthesis_rejections": [
+                {"parameter_hash": item["parameter_hash"], "reason": item["reason"]}
+                for item in state["rejections"]
+            ],
+        }
+        finalist_records = [state["history"][trial_id] for trial_id in validation["finalist_ids"]]
+        report["parameter_consensus"] = {
+            parameter.path: get_path(finalist_records[0]["parameters"], parameter.path)
+            for parameter in self.parameters
+            if finalist_records
+            and all(
+                get_path(record["parameters"], parameter.path)
+                == get_path(finalist_records[0]["parameters"], parameter.path)
+                for record in finalist_records[1:]
+            )
+            and get_path(finalist_records[0]["parameters"], parameter.path)
+            != get_path(state["baseline"], parameter.path)
+        }
+        atomic_json(self.report_path, report)
+        validation["complete"] = True
+        validation["active"] = None
+        validation["results"] = results
+        self.save(state)
+
+    def _run_validation(self, state: dict) -> None:
+        """Run resumable paired baseline-versus-finalist validation blocks."""
+        while True:
+            active = self._next_validation_target(state)
+            if active is None:
+                return
+            record = state["history"][active["trial_id"]]
+            if active["phase"] == "tournament" and len(record["evaluations"]) > active["block"]:
+                state["validation"]["active"] = None
+                self.save(state)
+                continue
+            context = self._validation_context(state, active)
+            atomic_json(self.candidate_path, record["parameters"])
+            _engine_profile(self.candidate_path, self.profile_path)
+            label = "baseline" if record["id"] == 0 else f"trial {record['id'] + 1}"
+            print(f"\nValidation block {active['block']}: {label} ({record['parameter_hash'][:12]})", flush=True)
+            rejected = False
+            while active["phase"] == "synthesis":
+                started = time.monotonic()
+                seed = self.config["synthesis_seeds"][active["synthesis_seed_index"]]
+                context["synthesis_seed_index"] = active["synthesis_seed_index"]
+                print(f"  Synthesis (seed {seed})...", flush=True)
+                try:
+                    self._run_logged(
+                        self._phase_command("synthesis", context),
+                        self.logs_path / f"{record['id']:04d}-validation-synthesis.log",
+                    )
+                except TuningError as exc:
+                    active["synthesis_seed_index"] += 1
+                    if active["synthesis_seed_index"] < len(self.config["synthesis_seeds"]):
+                        self.save(state)
+                        print(f"  Synthesis failed for seed {seed}; trying another fitter seed.")
+                        continue
+                    if record["id"] == 0:
+                        raise exc
+                    state["validation"]["failed_ids"].append(record["id"])
+                    state["validation"]["active"] = None
+                    self.save(state)
+                    print("  Finalist skipped: synthesis failed for every configured fitter seed.")
+                    rejected = True
+                    break
+                active["phase"] = "flash"
+                self.save(state)
+                print(f"  Synthesis complete ({(time.monotonic() - started) / 60:.1f} min)")
+            if rejected:
+                continue
+            context = self._validation_context(state, active)
+            if active["phase"] == "flash":
+                started = time.monotonic()
+                print("  Flash...", flush=True)
+                self._run_logged(
+                    self._phase_command("flash"),
+                    self.logs_path / f"{record['id']:04d}-validation-flash.log",
+                )
+                active["phase"] = "tournament"
+                self.save(state)
+                print(f"  Flash complete ({(time.monotonic() - started) / 60:.1f} min)")
+            if active["phase"] == "tournament":
+                print(f"  Paired tournament: {self.config['paired_openings'] * 2} games...", flush=True)
+                score, error, tournament, games, completion = self._run_tournament(state, context)
+                evaluation = self._evaluation_record(state, score, error, games, completion, tournament)
+                record["evaluations"].append(evaluation)
+                record["score"], record["score_error"] = aggregate_evaluations(record["evaluations"])
+                if evaluation["runtime_invalid"]:
+                    if record["id"] == 0:
+                        raise TuningError("baseline validation produced excessive engine failures")
+                    record["runtime_invalid"] = True
+                    state["validation"]["failed_ids"].append(record["id"])
+                state["validation"]["active"] = None
+                self.save(state)
 
     def _evaluation_record(
         self, state: dict, score: float, error: float, games: int,
@@ -969,17 +1329,29 @@ class Runner:
             "tournament_dir": str(tournament),
             "completed_at": utc_now(),
         }
+        raw_path = tournament / "raw-output.txt"
+        raw_output = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
+        failures = PLAYER_FAILURE_RE.findall(raw_output)
+        timeouts = sum(int(timeout) for timeout, _crashes in failures)
+        crashes = sum(int(crash) for _timeouts, crash in failures)
+        record.update({"timeouts": timeouts, "crashes": crashes})
+        record["runtime_invalid"] = (
+            timeouts + crashes > int(self.config["runtime_failures"]["maximum_per_tournament"])
+        )
         if completion == "H0":
             environment = self._sprt_environment(state, repeat=0)
             elo0 = float(environment["SPRT_ELO0"])
             elo1 = float(environment["SPRT_ELO1"])
+            raw_is_finite = math.isfinite(score) and math.isfinite(error)
             record.update({
                 "score": elo0,
-                "score_error": max(error, elo1 - elo0),
-                "raw_score": score,
-                "raw_score_error": error,
+                "score_error": max(error, elo1 - elo0) if raw_is_finite else elo1 - elo0,
                 "censored_upper_elo": elo0,
             })
+            if raw_is_finite:
+                record.update({"raw_score": score, "raw_score_error": error})
+            else:
+                record["raw_score_unbounded"] = "negative" if score < 0 else "positive"
         return record
 
     def _archive_output(self) -> Path | None:
@@ -1020,9 +1392,17 @@ class Runner:
         print(f"Search tuning: {len(state['history'])}/{total} evaluations complete; {len(self.parameters)} parameters enabled")
         self.preflight()
         if dry_run:
-            pending = state["pending"] or self._new_trial(state)
-            print(f"Trial {pending['id'] + 1}/{total}: {pending['acquisition']['method']}")
-            print(f"Candidate: {relative_repo_path(self.candidate_path)}")
+            if len(state["history"]) < total:
+                pending = state["pending"] or self._new_trial(state)
+                print(f"Trial {pending['id'] + 1}/{total}: {pending['acquisition']['method']}")
+                print(f"Candidate: {relative_repo_path(self.candidate_path)}")
+            else:
+                active = self._next_validation_target(state)
+                if active is None:
+                    print("Validation is complete.")
+                else:
+                    label = "baseline" if active["trial_id"] == 0 else f"trial {active['trial_id'] + 1}"
+                    print(f"Validation block {active['block']}: {label}")
             print("Dry run stopped before synthesis or FPGA programming.")
             return
         while len(state["history"]) < total:
@@ -1093,13 +1473,8 @@ class Runner:
                 self.save(state)
                 print(f"  Flash complete ({(time.monotonic() - started) / 60:.1f} min)")
             if pending["phase"] == "tournament":
-                while True:
-                    if pending["evaluations"] and not self._needs_confirmation(state, pending):
-                        break
-                    started = time.monotonic()
-                    repeat = len(pending["evaluations"])
-                    suffix = f" (confirmation {repeat})" if repeat else ""
-                    print(f"  Tournament{suffix}: {self.config['paired_openings'] * 2} games...", flush=True)
+                if not pending["evaluations"]:
+                    print(f"  Tournament: {self.config['paired_openings'] * 2} games...", flush=True)
                     score, error, tournament, games, completion = self._run_tournament(state, pending)
                     pending["evaluations"].append(
                         self._evaluation_record(state, score, error, games, completion, tournament)
@@ -1107,21 +1482,26 @@ class Runner:
                     self.save(state)
                     if completion == "H0":
                         print(f"  Futility test rejected candidate after {games} games.")
-                    if not self._needs_confirmation(state, pending):
-                        break
-                    combined_score, combined_error = aggregate_evaluations(pending["evaluations"])
-                    print(
-                        f"  Candidate leads at {combined_score:+.2f} +/- {combined_error:.2f}; confirming...",
-                        flush=True,
-                    )
                 self._finish_trial(state)
                 record = state["history"][-1]
                 best = state["history"][state["best_id"]]
-                verdict = "promoted" if record["promoted"] else "not promoted"
+                if record["promoted"]:
+                    verdict = "promoted"
+                elif record["runtime_invalid"]:
+                    failures = sum(
+                        evaluation.get("timeouts", 0) + evaluation.get("crashes", 0)
+                        for evaluation in record["evaluations"]
+                    )
+                    verdict = f"runtime-invalid ({failures} failures)"
+                elif record["score"] > best["score"]:
+                    verdict = "provisional lead; paired validation deferred"
+                else:
+                    verdict = "not promoted"
                 print(
                     f"  Elo {record['score']:+.2f} +/- {record['score_error']:.2f}; {verdict}; "
                     f"best {best['score']:+.2f} (trial {best['id'] + 1})"
                 )
+        self._run_validation(state)
         print(f"\nTuning complete. Best parameters: {relative_repo_path(self.best_path)}")
 
     def status(self) -> None:
@@ -1144,10 +1524,21 @@ class Runner:
             print(f"Pending:    trial {pending['id'] + 1}, {phase}")
         else:
             print("Pending:    none")
+        validation = state["validation"]
+        active = validation["active"]
+        if active:
+            label = "baseline" if active["trial_id"] == 0 else f"trial {active['trial_id'] + 1}"
+            print(f"Validation: block {active['block']}, {label}, {active['phase']}")
+        elif validation["complete"]:
+            print("Validation: complete")
+        elif len(history) >= self.config["iterations"]:
+            print("Validation: ready")
         if state["rejections"]:
             print(f"Rejected:   {len(state['rejections'])} failed candidate builds")
         print(f"Radius:     {state['trust_region_radius']:.3f}")
         print(f"Best file:  {relative_repo_path(self.best_path)}")
+        if self.provisional_path.exists():
+            print(f"Provisional: {relative_repo_path(self.provisional_path)}")
 
 
 def install_signal_handlers() -> None:

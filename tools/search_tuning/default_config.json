@@ -20,10 +20,15 @@
   "stockfish_elo": 3100,
   "stockfish_threads": 1,
   "stockfish_hash_mb": 256,
-  "confirmation": {
-    "maximum_repeats": 1,
+  "validation": {
+    "maximum_finalists": 3,
+    "maximum_blocks": 2,
     "promotion_z_score": 1.5,
-    "minimum_success_probability": 0.10
+    "minimum_success_probability": 0.20,
+    "minimum_parameter_distance": 0.08
+  },
+  "runtime_failures": {
+    "maximum_per_tournament": 2
   },
   "early_stopping": {
     "enabled": true,
