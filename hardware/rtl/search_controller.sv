@@ -51,6 +51,15 @@ module search_controller #(
     parameter int NEXT_DEPTH_NUMERATOR = 3,
     parameter int NEXT_DEPTH_DENOMINATOR = 5,
     parameter int SINGLE_LEGAL_MOVE_MS = 10,
+    parameter int MOVE_MEMORY_ENTRIES = 2048,
+    parameter int MOVE_BUCKET_0_RATIO = 48,
+    parameter int MOVE_BUCKET_1_RATIO = 16,
+    parameter int MOVE_BUCKET_2_RATIO = 192,
+    parameter int MOVE_BUCKET_3_RATIO = 64,
+    parameter int MOVE_BUCKET_4_RATIO = 64,
+    parameter int MOVE_BUCKET_5_RATIO = 32,
+    parameter int MOVE_BUCKET_6_RATIO = 64,
+    parameter int MOVE_BUCKET_7_RATIO = 32,
     parameter int HISTORY_ENTRY_COUNT = 8192,
     parameter int HISTORY_ENTRY_BITS = 8,
     parameter int HISTORY_REWARD_PER_DEPTH = 2,
@@ -184,7 +193,6 @@ module search_controller #(
         EvalScore orig_alpha;
         EvalScore beta;
         Move tt_move;
-        MoveBucketTops bucket_tops;
         PlyIndex repetition_start;
         SearchDepth remaining_depth;
         logic [7:0] legal_move_count;
@@ -267,12 +275,10 @@ module search_controller #(
 
     // Chain the next move-order operation directly from a response when the
     // target generator lane is already ready on that response cycle.
-    typedef enum logic [2:0] {
+    typedef enum logic [1:0] {
         MOVE_FOLLOWUP_NONE,
         MOVE_FOLLOWUP_NOISY_CMD,
         MOVE_FOLLOWUP_QUIET_CMD,
-        MOVE_FOLLOWUP_POP_GOOD,
-        MOVE_FOLLOWUP_POP_QUIET,
         MOVE_FOLLOWUP_POP_BAD
     } MoveFollowupAction;
 
@@ -307,6 +313,10 @@ module search_controller #(
     NodeCountType search_thread_nodes[0:SEARCH_THREAD_COUNT-1];
     logic search_board_inflight[0:SEARCH_THREAD_COUNT-1];
     logic search_move_inflight[0:SEARCH_THREAD_COUNT-1];
+    // Generation owns parent storage until its final tops have been published.
+    // Reads and speculative child preparation can proceed independently.
+    logic search_generation_inflight[0:SEARCH_THREAD_COUNT-1];
+    PlyIndex search_generation_ply[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_lookup_inflight[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_response_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_pending[0:SEARCH_THREAD_COUNT-1];
@@ -442,13 +452,11 @@ module search_controller #(
     FullBoard move_cmd_board;
     logic move_cmd_suppress_valid;
     Move move_cmd_suppress_move;
-    MoveBucketTops move_cmd_tops;
     logic move_cmd_resp_valid;
     ThreadID move_cmd_resp_thread;
     PlyIndex move_cmd_resp_ply;
     logic move_cmd_resp_direct_valid;
     Move move_cmd_resp_direct_move;
-    MoveBucketTops move_cmd_resp_tops;
     logic move_quiet_cmd_valid;
     logic move_quiet_cmd_ready;
     ThreadID move_quiet_cmd_thread;
@@ -456,25 +464,35 @@ module search_controller #(
     FullBoard move_quiet_cmd_board;
     logic move_quiet_cmd_suppress_valid;
     Move move_quiet_cmd_suppress_move;
-    MoveBucketTops move_quiet_cmd_tops;
     logic move_quiet_resp_valid;
     ThreadID move_quiet_resp_thread;
     PlyIndex move_quiet_resp_ply;
-    MoveBucketTops move_quiet_resp_tops;
     logic move_pop_valid;
     logic move_pop_ready;
     ThreadID move_pop_thread;
     PlyIndex move_pop_ply;
-    MoveBucketMask move_pop_eligible;
-    MoveBucketTops move_pop_current_tops;
-    MoveBucketTops move_pop_lower_tops;
     logic move_pop_resp_valid;
     ThreadID move_pop_resp_thread;
     PlyIndex move_pop_resp_ply;
     logic move_pop_resp_found;
     Move move_pop_resp_move;
     MoveBucketIndex move_pop_resp_bucket;
-    MoveBucketTop move_pop_resp_new_top;
+    logic move_pop_valid_vec[SEARCH_THREAD_COUNT], move_pop_ready_vec[SEARCH_THREAD_COUNT];
+    logic move_node_init_valid[SEARCH_THREAD_COUNT];
+    logic move_node_init_ready[SEARCH_THREAD_COUNT];
+    PlyIndex move_node_init_ply[SEARCH_THREAD_COUNT];
+    logic search_node_init_request[SEARCH_THREAD_COUNT];
+    logic search_node_init_pending[SEARCH_THREAD_COUNT];
+    logic search_node_init_done[SEARCH_THREAD_COUNT];
+    logic move_bad_noisy_enable[SEARCH_THREAD_COUNT];
+    PlyIndex move_pop_ply_vec[SEARCH_THREAD_COUNT], move_pop_resp_ply_vec[SEARCH_THREAD_COUNT];
+    logic move_pop_resp_valid_vec[SEARCH_THREAD_COUNT], move_pop_resp_ready_vec[SEARCH_THREAD_COUNT];
+    logic move_pop_resp_found_vec[SEARCH_THREAD_COUNT];
+    Move move_pop_resp_move_vec[SEARCH_THREAD_COUNT];
+    MoveBucketIndex move_pop_resp_bucket_vec[SEARCH_THREAD_COUNT];
+    logic [SEARCH_THREAD_COUNT-1:0] move_pop_response_mask;
+    ThreadID move_pop_response_thread;
+    ThreadID move_pop_response_rr;
     logic move_history_update_valid;
     logic move_history_update_ready;
     ThreadID move_history_update_thread;
@@ -488,9 +506,6 @@ module search_controller #(
     logic [1:0] move_history_update_failed_count;
     logic move_init_busy;
     logic move_overflow_sticky;
-    ThreadID move_overflow_thread;
-    MoveBucketIndex move_overflow_bucket;
-    logic [15:0] move_overflow_count;
     logic [39:0] move_stat_noisy_count;
     logic [39:0] move_stat_quiet_count;
     logic [39:0] move_stat_destination_count;
@@ -619,7 +634,6 @@ module search_controller #(
     Move move_board_bypass_move;
     MoveFollowupAction move_followup_action;
     ThreadID move_followup_thread;
-    MoveBucketTops move_followup_tops;
     logic move_followup_uses_move;
     logic move_followup_uses_quiet;
     logic move_followup_accepted;
@@ -652,12 +666,72 @@ module search_controller #(
     assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
         || state == ST_IDLE;
 
+    // Complete storage ownership independently of the move-read transaction.
+    // The synchronous parent read must be aligned before repairing a saved node.
+    // Collapse independent reader responses in a separate combinational block
+    // so scheduler logic sees the current response without relying on
+    // procedural assignment order inside its larger control block.
+    always_comb begin
+        move_pop_response_mask = '0;
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+            move_pop_response_mask[tid] = move_pop_resp_valid_vec[tid];
+        move_pop_resp_valid = |move_pop_response_mask;
+        move_pop_response_thread = search_select_thread(
+            move_pop_response_mask, move_pop_response_rr);
+        move_pop_resp_thread = move_pop_response_thread;
+        move_pop_resp_ply = PlyIndex'(0);
+        move_pop_resp_found = 1'b0;
+        move_pop_resp_move = NULL_MOVE;
+        move_pop_resp_bucket = MoveBucketIndex'(0);
+        if (move_pop_resp_valid) begin
+            move_pop_resp_ply = move_pop_resp_ply_vec[move_pop_response_thread];
+            move_pop_resp_found = move_pop_resp_found_vec[move_pop_response_thread];
+            move_pop_resp_move = move_pop_resp_move_vec[move_pop_response_thread];
+            move_pop_resp_bucket = move_pop_resp_bucket_vec[move_pop_response_thread];
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+            if (!rst_n || state != ST_SEARCH_RUN
+                    || (req_valid && req.operation == ENGINE_CTRL_KILL)) begin
+                search_generation_inflight[tid] <= 1'b0;
+                search_generation_ply[tid] <= '0;
+            end else begin
+                // A direct-validation response is not generation completion.
+                // Clear only the tracked generation with the matching tag.
+                if (search_generation_inflight[tid]
+                        && ((move_cmd_resp_valid
+                                && move_cmd_resp_thread == ThreadID'(tid)
+                                && move_cmd_resp_ply == search_generation_ply[tid])
+                            || (move_quiet_resp_valid
+                                && move_quiet_resp_thread == ThreadID'(tid)
+                                && move_quiet_resp_ply == search_generation_ply[tid]))) begin
+                    search_generation_inflight[tid] <= 1'b0;
+                end
+                // New ownership takes precedence when a rejected direct move
+                // chains directly into noisy generation on the same edge.
+                if (move_cmd_valid && move_cmd_ready && move_cmd == MOVE_GEN_GENERATE_NOISY
+                        && move_cmd_thread == ThreadID'(tid)) begin
+                    search_generation_inflight[tid] <= 1'b1;
+                    search_generation_ply[tid] <= move_cmd_ply;
+                end
+                if (move_quiet_cmd_valid && move_quiet_cmd_ready
+                        && move_quiet_cmd_thread == ThreadID'(tid)) begin
+                    search_generation_inflight[tid] <= 1'b1;
+                    search_generation_ply[tid] <= move_quiet_cmd_ply;
+                end
+            end
+        end
+    end
+
     // Keep each thread in a separate one-dimensional RAM instance so both
     // Quartus and Vivado recognize the packed node records as block memory.
     genvar stack_tid;
     generate
         for (stack_tid = 0; stack_tid < SEARCH_THREAD_COUNT; stack_tid = stack_tid + 1) begin : gen_search_stack_ram
-            assign search_stack_write_addr[stack_tid] = SearchStackRamAddr'(search_ply[stack_tid]);
+            assign search_stack_write_addr[stack_tid]
+                = SearchStackRamAddr'(search_ply[stack_tid]);
             assign search_stack_read_addr[stack_tid] = SearchStackRamAddr'(
                 (search_ply[stack_tid] == PlyIndex'(0)) ? PlyIndex'(0) : search_ply[stack_tid] - PlyIndex'(1)
             );
@@ -720,6 +794,16 @@ module search_controller #(
 
     move_generator #(
         .THREAD_COUNT(SEARCH_THREAD_COUNT),
+        .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
+        .MOVE_MEMORY_ENTRIES(MOVE_MEMORY_ENTRIES),
+        .MOVE_BUCKET_0_RATIO(MOVE_BUCKET_0_RATIO),
+        .MOVE_BUCKET_1_RATIO(MOVE_BUCKET_1_RATIO),
+        .MOVE_BUCKET_2_RATIO(MOVE_BUCKET_2_RATIO),
+        .MOVE_BUCKET_3_RATIO(MOVE_BUCKET_3_RATIO),
+        .MOVE_BUCKET_4_RATIO(MOVE_BUCKET_4_RATIO),
+        .MOVE_BUCKET_5_RATIO(MOVE_BUCKET_5_RATIO),
+        .MOVE_BUCKET_6_RATIO(MOVE_BUCKET_6_RATIO),
+        .MOVE_BUCKET_7_RATIO(MOVE_BUCKET_7_RATIO),
         .HISTORY_ENTRY_COUNT(HISTORY_ENTRY_COUNT),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
@@ -743,28 +827,25 @@ module search_controller #(
         .noisy_cmd_board(move_cmd_board),
         .noisy_cmd_suppress_valid(move_cmd_suppress_valid),
         .noisy_cmd_suppress_move(move_cmd_suppress_move),
-        .noisy_cmd_bucket_tops(move_cmd_tops),
         .noisy_resp_valid(move_cmd_resp_valid), .noisy_resp_thread(move_cmd_resp_thread),
         .noisy_resp_ply(move_cmd_resp_ply),
         .noisy_resp_direct_valid(move_cmd_resp_direct_valid),
         .noisy_resp_direct_move(move_cmd_resp_direct_move),
-        .noisy_resp_bucket_tops(move_cmd_resp_tops),
         .quiet_cmd_valid(move_quiet_cmd_valid), .quiet_cmd_ready(move_quiet_cmd_ready),
         .quiet_cmd_thread(move_quiet_cmd_thread), .quiet_cmd_ply(move_quiet_cmd_ply),
         .quiet_cmd_board(move_quiet_cmd_board),
         .quiet_cmd_suppress_valid(move_quiet_cmd_suppress_valid),
         .quiet_cmd_suppress_move(move_quiet_cmd_suppress_move),
-        .quiet_cmd_bucket_tops(move_quiet_cmd_tops),
         .quiet_resp_valid(move_quiet_resp_valid),
         .quiet_resp_thread(move_quiet_resp_thread), .quiet_resp_ply(move_quiet_resp_ply),
-        .quiet_resp_bucket_tops(move_quiet_resp_tops),
-        .pop_valid(move_pop_valid), .pop_ready(move_pop_ready),
-        .pop_thread(move_pop_thread), .pop_ply(move_pop_ply), .pop_eligible(move_pop_eligible),
-        .pop_current_tops(move_pop_current_tops), .pop_lower_tops(move_pop_lower_tops),
-        .pop_resp_valid(move_pop_resp_valid), .pop_resp_thread(move_pop_resp_thread),
-        .pop_resp_ply(move_pop_resp_ply), .pop_resp_found(move_pop_resp_found),
-        .pop_resp_move(move_pop_resp_move), .pop_resp_bucket(move_pop_resp_bucket),
-        .pop_resp_new_top(move_pop_resp_new_top),
+        .pop_valid(move_pop_valid_vec), .pop_ready(move_pop_ready_vec),
+        .pop_ply(move_pop_ply_vec),
+        .node_init_valid(move_node_init_valid), .node_init_ready(move_node_init_ready),
+        .node_init_ply(move_node_init_ply),
+        .bad_noisy_enable(move_bad_noisy_enable),
+        .pop_resp_valid(move_pop_resp_valid_vec), .pop_resp_ready(move_pop_resp_ready_vec),
+        .pop_resp_ply(move_pop_resp_ply_vec), .pop_resp_found(move_pop_resp_found_vec),
+        .pop_resp_move(move_pop_resp_move_vec), .pop_resp_bucket(move_pop_resp_bucket_vec),
         .history_update_valid(move_history_update_valid), .history_update_ready(move_history_update_ready),
         .history_update_thread(move_history_update_thread),
         .history_update_color(move_history_update_color), .history_update_from(move_history_update_from),
@@ -773,8 +854,7 @@ module search_controller #(
         .history_update_failed1(move_history_update_failed1),
         .history_update_failed2(move_history_update_failed2),
         .history_update_failed_count(move_history_update_failed_count),
-        .overflow_sticky(move_overflow_sticky), .overflow_thread(move_overflow_thread),
-        .overflow_bucket(move_overflow_bucket), .overflow_count(move_overflow_count),
+        .overflow_sticky(move_overflow_sticky),
         .stat_noisy_count(move_stat_noisy_count), .stat_quiet_count(move_stat_quiet_count),
         .stat_destination_count(move_stat_destination_count), .stat_candidate_count(move_stat_candidate_count),
         .stat_history_lookup_count(move_stat_history_lookup_count),
@@ -929,10 +1009,7 @@ module search_controller #(
             ENGINE_STAT_MOVE_CANDIDATES:  debug_stat_value = move_stat_candidate_count;
             ENGINE_STAT_HISTORY_LOOKUPS:  debug_stat_value = move_stat_history_lookup_count;
             ENGINE_STAT_MOVE_GEN_CYCLES:  debug_stat_value = move_stat_generation_cycles;
-            ENGINE_STAT_MOVE_OVERFLOWS:   debug_stat_value = {24'd0, move_overflow_count};
-            ENGINE_STAT_MOVE_OVERFLOW_ID: debug_stat_value = {
-                32'd0, move_overflow_sticky, move_overflow_thread, move_overflow_bucket
-            };
+            ENGINE_STAT_MOVE_OVERFLOW:   debug_stat_value = 40'(move_overflow_sticky);
             default: begin
                 for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                     for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
@@ -1350,7 +1427,6 @@ module search_controller #(
         entry.orig_alpha = -SEARCH_INF;
         entry.beta = SEARCH_INF;
         entry.tt_move = NULL_MOVE;
-        entry.bucket_tops = MoveBucketTops'(0);
         entry.repetition_start = PlyIndex'(0);
         entry.remaining_depth = SearchDepth'(0);
         entry.legal_move_count = 8'd0;
@@ -1636,6 +1712,7 @@ module search_controller #(
 
     function automatic logic search_thread_reverse_pending(input int thread_index);
         return search_thread_phase[thread_index] == SEARCH_PHASE_REVERSE_WAIT
+            && !search_generation_inflight[thread_index]
             && !search_board_inflight[thread_index];
     endfunction : search_thread_reverse_pending
 
@@ -1684,6 +1761,7 @@ module search_controller #(
 
     function automatic logic search_thread_null_ready(input int thread_index);
         return search_thread_ready(thread_index)
+            && !search_generation_inflight[thread_index]
             && !search_thread_terminal_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
             && !search_thread_rfp_ready(thread_index)
@@ -1706,19 +1784,22 @@ module search_controller #(
                         || int'(search_ply[thread_index]) >= SEARCH_STACK_DEPTH - 1)));
     endfunction : search_thread_eval_ready
 
+    // Select requests from thread state alone; destination readiness depends on
+    // the selected tags and is checked only when accepting the request.
     function automatic logic search_thread_move_ready(input int thread_index);
         automatic MoveOrderState order_state =
             search_stack_top[thread_index].move_order_state;
         return search_thread_ready(thread_index)
+            // Child TT/evaluation work can overlap parent generation, but
+            // moving deeper or allocating moves needs final parent bounds.
+            && (!search_generation_inflight[thread_index]
+                || search_ply[thread_index] == search_generation_ply[thread_index])
             && !search_thread_terminal_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
             && !search_thread_null_ready(thread_index)
             && !search_thread_eval_ready(thread_index)
             && order_state != MOVE_ORDER_GENERATE_QUIET
-            && !search_move_inflight[thread_index]
-            && ((order_state != MOVE_ORDER_DIRECT
-                    && order_state != MOVE_ORDER_GENERATE_NOISY)
-                || move_cmd_ready);
+            && !search_move_inflight[thread_index];
     endfunction : search_thread_move_ready
 
     function automatic logic search_thread_quiet_ready(input int thread_index);
@@ -1729,7 +1810,7 @@ module search_controller #(
             && !search_thread_eval_ready(thread_index)
             && search_stack_top[thread_index].move_order_state
                 == MOVE_ORDER_GENERATE_QUIET
-            && move_quiet_cmd_ready
+            && !search_generation_inflight[thread_index]
             && !search_move_inflight[thread_index];
     endfunction : search_thread_quiet_ready
 
@@ -1956,6 +2037,12 @@ module search_controller #(
         end
     end
 
+    // Readiness acknowledges the selected follow-up but never selects its payload.
+    assign move_followup_accepted =
+            (move_followup_action == MOVE_FOLLOWUP_NOISY_CMD && move_cmd_ready)
+            || (move_followup_action == MOVE_FOLLOWUP_POP_BAD && move_pop_ready)
+            || (move_followup_uses_quiet && move_quiet_cmd_ready);
+
     always_comb begin
         setup_req_comb = new_game_setup_request(new_setup_index);
         search_store_mask = '0;
@@ -1989,10 +2076,19 @@ module search_controller #(
             end
         end
         for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++) begin
+            automatic Move order_move = ordering_move_for_thread(ThreadID'(idx));
+            automatic logic direct_init_needed = search_thread_move_ready(idx)
+                && search_stack_top[idx].move_order_state == MOVE_ORDER_DIRECT
+                && !is_null_move(order_move);
+            automatic logic null_init_needed = search_thread_null_ready(idx);
+            search_node_init_request[idx]
+                = !search_node_init_done[idx]
+                    && (direct_init_needed || null_init_needed);
             search_store_mask[idx] = search_thread_store_pending(idx);
             search_board_mask[idx] = search_thread_board_pending(idx)
                 || search_thread_reverse_pending(idx);
-            search_move_mask[idx] = search_thread_move_ready(idx);
+            search_move_mask[idx] = search_thread_move_ready(idx)
+                && !search_node_init_request[idx];
             search_quiet_mask[idx] = search_thread_quiet_ready(idx);
             search_eval_mask[idx] = search_thread_eval_ready(idx)
                 && (!(nnue_delta_busy || nnue_plan_any)
@@ -2000,7 +2096,8 @@ module search_controller #(
             search_tt_lookup_mask[idx] = search_thread_tt_lookup_ready(idx);
             search_return_mask[idx] = search_thread_return_pending(idx);
             search_tt_response_mask[idx] = search_thread_tt_response_pending(idx);
-            search_null_mask[idx] = search_thread_null_ready(idx);
+            search_null_mask[idx] = search_thread_null_ready(idx)
+                && !search_node_init_request[idx];
             search_terminal_mask[idx] = search_thread_terminal_ready(idx);
             search_terminal_no_move_mask[idx] = search_terminal_mask[idx]
                 && search_stack_top[idx].move_order_state == MOVE_ORDER_DONE;
@@ -2012,6 +2109,7 @@ module search_controller #(
         search_tt_consume_thread = search_select_thread(
             search_tt_response_mask, search_dispatch.tt_response);
         search_tt_consume_response = search_tt_response[search_tt_consume_thread];
+
         move_board_bypass_valid = state == ST_SEARCH_RUN
             && ((move_pop_resp_valid && move_pop_resp_found)
                 || (move_cmd_resp_valid && move_cmd_resp_direct_valid));
@@ -2025,26 +2123,15 @@ module search_controller #(
         // ordering does not spend a READY scheduler cycle between operations.
         move_followup_action = MOVE_FOLLOWUP_NONE;
         move_followup_thread = ThreadID'(0);
-        move_followup_tops = MoveBucketTops'(0);
-        if (state == ST_SEARCH_RUN && move_cmd_resp_valid) begin
+        if (state == ST_SEARCH_RUN && move_cmd_resp_valid
+                && !search_generation_inflight[move_cmd_resp_thread]
+                && !move_cmd_resp_direct_valid) begin
             move_followup_thread = move_cmd_resp_thread;
-            move_followup_tops = move_cmd_resp_tops;
-            if (search_stack_top[move_cmd_resp_thread].move_order_state
-                    == MOVE_ORDER_DIRECT) begin
-                if (!move_cmd_resp_direct_valid)
-                    move_followup_action = MOVE_FOLLOWUP_NOISY_CMD;
-            end else begin
-                move_followup_action = MOVE_FOLLOWUP_POP_GOOD;
-            end
-        end else if (state == ST_SEARCH_RUN && move_quiet_resp_valid) begin
-            move_followup_action = MOVE_FOLLOWUP_POP_QUIET;
-            move_followup_thread = move_quiet_resp_thread;
-            move_followup_tops = move_quiet_resp_tops;
+            move_followup_action = MOVE_FOLLOWUP_NOISY_CMD;
         end else if (state == ST_SEARCH_RUN && move_pop_resp_valid
-                && !move_pop_resp_found) begin
+                && !move_pop_resp_found
+                && !search_generation_inflight[move_pop_resp_thread]) begin
             move_followup_thread = move_pop_resp_thread;
-            move_followup_tops =
-                search_stack_top[move_pop_resp_thread].bucket_tops;
             case (search_stack_top[move_pop_resp_thread].move_order_state)
                 MOVE_ORDER_GOOD_NOISY:
                     if (!(search_in_qsearch(move_pop_resp_thread)
@@ -2056,18 +2143,9 @@ module search_controller #(
             endcase
         end
         move_followup_uses_move = move_followup_action == MOVE_FOLLOWUP_NOISY_CMD
-            || move_followup_action == MOVE_FOLLOWUP_POP_GOOD
-            || move_followup_action == MOVE_FOLLOWUP_POP_QUIET
             || move_followup_action == MOVE_FOLLOWUP_POP_BAD;
         move_followup_uses_quiet =
             move_followup_action == MOVE_FOLLOWUP_QUIET_CMD;
-        move_followup_accepted =
-            (move_followup_action == MOVE_FOLLOWUP_NOISY_CMD && move_cmd_ready)
-            || ((move_followup_action == MOVE_FOLLOWUP_POP_GOOD
-                    || move_followup_action == MOVE_FOLLOWUP_POP_QUIET
-                    || move_followup_action == MOVE_FOLLOWUP_POP_BAD)
-                && move_pop_ready)
-            || (move_followup_uses_quiet && move_quiet_cmd_ready);
         search_null_issue_valid = (state == ST_SEARCH_RUN)
             && !move_board_bypass_valid
             && !(|search_board_mask)
@@ -2181,31 +2259,18 @@ module search_controller #(
         move_cmd_board = search_board[search_move_issue_thread];
         move_cmd_suppress_valid = 1'b0;
         move_cmd_suppress_move = NULL_MOVE;
-        move_cmd_tops = MoveBucketTops'(0);
         move_quiet_cmd_valid = 1'b0;
         move_quiet_cmd_thread = ThreadID'(0);
         move_quiet_cmd_ply = PlyIndex'(0);
         move_quiet_cmd_board = search_board[search_quiet_issue_thread];
         move_quiet_cmd_suppress_valid = 1'b0;
         move_quiet_cmd_suppress_move = NULL_MOVE;
-        move_quiet_cmd_tops = MoveBucketTops'(0);
         move_pop_valid = 1'b0;
         // Preselect the complete pop address payload. It is ignored until
         // valid, and keeping readiness out of it shortens every bucket-RAM
         // read-address path.
         move_pop_thread = search_move_issue_thread;
         move_pop_ply = search_ply[search_move_issue_thread];
-        move_pop_eligible = MoveBucketMask'(0);
-        move_pop_current_tops = search_stack_top[search_move_issue_thread].bucket_tops;
-        move_pop_lower_tops = search_ply[search_move_issue_thread] == PlyIndex'(0)
-            ? MoveBucketTops'(0)
-            : search_stack_parent_q[search_move_issue_thread].bucket_tops;
-        case (search_stack_top[search_move_issue_thread].move_order_state)
-            MOVE_ORDER_GOOD_NOISY: move_pop_eligible = GOOD_NOISY_BUCKET_MASK;
-            MOVE_ORDER_QUIET: move_pop_eligible = QUIET_BUCKET_MASK;
-            MOVE_ORDER_BAD_NOISY: move_pop_eligible = BAD_NOISY_BUCKET_MASK;
-            default: begin end
-        endcase
         move_history_update_valid = 1'b0;
         move_history_update_thread = ThreadID'(0);
         move_history_update_color = WHITE;
@@ -2235,19 +2300,14 @@ module search_controller #(
             move_cmd_thread = ThreadID'(0);
             move_cmd_ply = search_ply[0];
             move_cmd_board = search_board[0];
-            move_cmd_tops = search_stack_top[0].bucket_tops;
             move_pop_thread = ThreadID'(0);
             move_pop_ply = search_ply[0];
-            move_pop_current_tops = search_stack_top[0].bucket_tops;
-            move_pop_lower_tops = search_ply[0] == PlyIndex'(0)
-                ? MoveBucketTops'(0) : search_stack_parent_q[0].bucket_tops;
             case (search_stack_top[0].move_order_state)
                 MOVE_ORDER_GENERATE_NOISY: begin
                     move_cmd = MOVE_GEN_GENERATE_NOISY;
                     move_cmd_valid = 1'b1;
                 end
                 MOVE_ORDER_GOOD_NOISY: begin
-                    move_pop_eligible = GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK;
                     move_pop_valid = 1'b1;
                 end
                 MOVE_ORDER_GENERATE_QUIET: begin
@@ -2255,10 +2315,11 @@ module search_controller #(
                     move_quiet_cmd_thread = ThreadID'(0);
                     move_quiet_cmd_ply = search_ply[0];
                     move_quiet_cmd_board = search_board[0];
-                    move_quiet_cmd_tops = search_stack_top[0].bucket_tops;
                 end
                 MOVE_ORDER_QUIET: begin
-                    move_pop_eligible = QUIET_BUCKET_MASK;
+                    move_pop_valid = 1'b1;
+                end
+                MOVE_ORDER_BAD_NOISY: begin
                     move_pop_valid = 1'b1;
                 end
                 default: begin end
@@ -2267,28 +2328,14 @@ module search_controller #(
             move_cmd_thread = move_followup_thread;
             move_cmd_ply = search_ply[move_followup_thread];
             move_cmd_board = search_board[move_followup_thread];
-            move_cmd_tops = move_followup_tops;
             move_pop_thread = move_followup_thread;
             move_pop_ply = search_ply[move_followup_thread];
-            move_pop_current_tops = move_followup_tops;
-            move_pop_lower_tops = search_ply[move_followup_thread] == PlyIndex'(0)
-                ? MoveBucketTops'(0)
-                : search_stack_parent_q[move_followup_thread].bucket_tops;
             case (move_followup_action)
                 MOVE_FOLLOWUP_NOISY_CMD: begin
                     move_cmd = MOVE_GEN_GENERATE_NOISY;
                     move_cmd_valid = 1'b1;
                 end
-                MOVE_FOLLOWUP_POP_GOOD: begin
-                    move_pop_eligible = GOOD_NOISY_BUCKET_MASK;
-                    move_pop_valid = 1'b1;
-                end
-                MOVE_FOLLOWUP_POP_QUIET: begin
-                    move_pop_eligible = QUIET_BUCKET_MASK;
-                    move_pop_valid = 1'b1;
-                end
                 MOVE_FOLLOWUP_POP_BAD: begin
-                    move_pop_eligible = BAD_NOISY_BUCKET_MASK;
                     move_pop_valid = 1'b1;
                 end
                 default: begin end
@@ -2299,7 +2346,6 @@ module search_controller #(
             move_cmd_thread = search_move_issue_thread;
             move_cmd_ply = search_ply[search_move_issue_thread];
             move_cmd_board = search_board[search_move_issue_thread];
-            move_cmd_tops = search_stack_top[search_move_issue_thread].bucket_tops;
             move_cmd_suppress_valid = search_stack_top[search_move_issue_thread].direct_attempted;
             move_cmd_suppress_move = search_stack_top[search_move_issue_thread].tt_move;
             if (move_state_uses_pop(order_state)) begin
@@ -2325,7 +2371,6 @@ module search_controller #(
                 search_stack_top[move_followup_thread].direct_attempted;
             move_quiet_cmd_suppress_move =
                 search_stack_top[move_followup_thread].tt_move;
-            move_quiet_cmd_tops = move_followup_tops;
         end else if (state == ST_SEARCH_RUN && search_quiet_issue_valid) begin
             move_quiet_cmd_valid = 1'b1;
             move_quiet_cmd_thread = search_quiet_issue_thread;
@@ -2335,8 +2380,6 @@ module search_controller #(
                 search_stack_top[search_quiet_issue_thread].direct_attempted;
             move_quiet_cmd_suppress_move =
                 search_stack_top[search_quiet_issue_thread].tt_move;
-            move_quiet_cmd_tops =
-                search_stack_top[search_quiet_issue_thread].bucket_tops;
         end
 
         nnue_update_valid = 1'b0;
@@ -2531,6 +2574,29 @@ module search_controller #(
         tt_store_req.age = tt_age;
         tt_store_req.ply = search_ply[search_tt_store_issue_thread];
 
+        // Each search thread can launch a bucket pop independently. The
+        // shared controller consumes completed results one per cycle while
+        // every reader retains its own result until selected here.
+        move_pop_ready = move_pop_ready_vec[move_pop_thread];
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+            automatic MoveOrderState order_state = search_stack_top[tid].move_order_state;
+            move_bad_noisy_enable[tid] = 1'b0;
+            move_node_init_valid[tid] = 1'b0;
+            move_node_init_ply[tid] = PlyIndex'(0);
+            if (state == ST_SEARCH_RUN && search_node_init_pending[tid]) begin
+                move_node_init_valid[tid] = 1'b1;
+                move_node_init_ply[tid] = search_ply[tid];
+            end
+            move_pop_valid_vec[tid] = state == ST_SEARCH_RUN
+                && search_thread_move_ready(tid) && move_state_uses_pop(order_state);
+            move_pop_ply_vec[tid] = search_ply[tid];
+            if (move_pop_valid && move_pop_thread == ThreadID'(tid)) begin
+                move_pop_valid_vec[tid] = 1'b1;
+                move_pop_ply_vec[tid] = move_pop_ply;
+            end
+            move_pop_resp_ready_vec[tid] = move_pop_resp_valid
+                && move_pop_response_thread == ThreadID'(tid);
+        end
         timer_rst = (state == ST_IDLE);
         timer_run = ((state == ST_PERFT_GEN_ISSUE)
             || (state == ST_PERFT_GEN_WAIT)
@@ -2548,6 +2614,7 @@ module search_controller #(
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
+            move_pop_response_rr <= ThreadID'(0);
             state <= ST_IDLE;
             active_req <= EngineControllerRequest'('0);
             resp_reg <= EngineControllerResponse'('0);
@@ -2694,6 +2761,8 @@ module search_controller #(
                 search_eval_is_rfp[tid] <= 1'b0;
                 search_eval_is_futility[tid] <= 1'b0;
                 search_futility_eval_pending[tid] <= 1'b0;
+                search_node_init_pending[tid] <= 1'b0;
+                search_node_init_done[tid] <= 1'b0;
                 nnue_plan_pending[tid] <= 1'b0;
                 nnue_plan_inflight[tid] <= 1'b0;
                 nnue_plan_kind[tid] <= NNUE_PLAN_REBUILD;
@@ -2727,6 +2796,8 @@ module search_controller #(
                 search_move_in_check_pipe[idx] <= 1'b0;
             end
         end else begin
+            if (move_pop_resp_valid)
+                move_pop_response_rr <= search_thread_after(move_pop_resp_thread);
             resp_valid <= 1'b0;
             time_setup_start <= 1'b0;
             time_adaptive_start <= 1'b0;
@@ -3232,23 +3303,22 @@ module search_controller #(
 
                 ST_PERFT_GEN_WAIT: begin
                     if (move_cmd_resp_valid && move_cmd_resp_thread == ThreadID'(0)) begin
-                        search_stack_top[0].bucket_tops <= move_cmd_resp_tops;
                         search_stack_top[0].move_order_state <= MOVE_ORDER_GOOD_NOISY;
                         state <= ST_PERFT_GEN_ISSUE;
                     end else if (move_quiet_resp_valid
                             && move_quiet_resp_thread == ThreadID'(0)) begin
-                        search_stack_top[0].bucket_tops <= move_quiet_resp_tops;
                         search_stack_top[0].move_order_state <= MOVE_ORDER_QUIET;
                         state <= ST_PERFT_GEN_ISSUE;
                     end else if (move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)) begin
                         if (move_pop_resp_found) begin
-                            search_stack_top[0].bucket_tops[move_pop_resp_bucket] <= move_pop_resp_new_top;
                             search_pending_move[0] <= move_pop_resp_move;
                             board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
                             state <= ST_PERFT_PUSH_WAIT;
                         end else begin
                             if (search_stack_top[0].move_order_state == MOVE_ORDER_GOOD_NOISY)
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_QUIET;
+                            else if (search_stack_top[0].move_order_state == MOVE_ORDER_QUIET)
+                                search_stack_top[0].move_order_state <= MOVE_ORDER_BAD_NOISY;
                             else
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_DONE;
                             state <= ST_PERFT_GEN_ISSUE;
@@ -3269,13 +3339,11 @@ module search_controller #(
                             search_nodes <= search_nodes + NodeCountType'(1);
                             state <= ST_PERFT_GEN_ISSUE;
                         end else begin
-                            automatic MoveBucketTops inherited_tops = search_stack_top[0].bucket_tops;
                             search_board[0] <= board_update_out;
                             search_zobrist_key[0] <= board_update_zobrist_out;
                             search_pst_eval[0] <= board_update_pst_out;
                             search_piece_count[0] <= board_update_piece_count_out;
                             search_stack_top[0] <= empty_search_stack_entry();
-                            search_stack_top[0].bucket_tops <= inherited_tops;
                             search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_NOISY;
                             search_ply[0] <= search_ply[0] + PlyIndex'(1);
                             state <= ST_PERFT_GEN_ISSUE;
@@ -3379,6 +3447,8 @@ module search_controller #(
                         search_eval_is_rfp[tid] <= 1'b0;
                         search_eval_is_futility[tid] <= 1'b0;
                         search_futility_eval_pending[tid] <= 1'b0;
+                        search_node_init_pending[tid] <= 1'b0;
+                        search_node_init_done[tid] <= 1'b0;
                         search_stack_top[tid] <= empty_search_stack_entry();
                         search_tt_validation_pending[tid] <= 1'b0;
                         search_tt_validation_passed[tid] <= 1'b0;
@@ -3452,6 +3522,18 @@ module search_controller #(
                     nodes_next = search_nodes;
                     nnue_eval_enqueued = nnue_eval_valid && nnue_eval_ready;
                     nnue_eval_dequeued = nnue_result_valid;
+
+                    for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                        if (search_node_init_request[tid])
+                            search_node_init_pending[tid] <= 1'b1;
+                        if (move_node_init_valid[tid] && move_node_init_ready[tid]) begin
+                            search_node_init_pending[tid] <= 1'b0;
+                            search_node_init_done[tid] <= 1'b1;
+                        end
+                    end
+                    if (move_cmd_valid && move_cmd_ready
+                            && move_cmd == MOVE_GEN_GENERATE_NOISY)
+                        search_node_init_done[move_cmd_thread] <= 1'b1;
 
 `ifndef SYNTHESIS
                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
@@ -3925,6 +4007,12 @@ module search_controller #(
                                 search_return_was_null[board_thread_id]
                                     <= search_stack_top[board_thread_id].entered_by_null;
                                 search_stack_top[board_thread_id] <= search_stack_parent_q[board_thread_id];
+                                // A saved parent left DIRECT only after move-memory
+                                // initialization; a null descent records the other case.
+                                search_node_init_done[board_thread_id]
+                                    <= search_stack_parent_q[board_thread_id].move_order_state
+                                            != MOVE_ORDER_DIRECT
+                                        || search_stack_parent_q[board_thread_id].null_attempted;
                                 if (!search_stack_top[board_thread_id].entered_by_null
                                         && search_stack_top[board_thread_id].count_move_on_return
                                         && search_stack_parent_q[board_thread_id].legal_move_count != 8'hff) begin
@@ -3995,12 +4083,16 @@ module search_controller #(
                                     <= -search_stack_top[board_thread_id].beta + EvalScore'(1);
                                 search_stack_top[board_thread_id].remaining_depth
                                     <= search_pending_child_depth[board_thread_id];
+                                // The child inherits arena tails but begins at
+                                // the start of its own FIFO ranges.
                                 search_stack_top[board_thread_id].legal_move_count <= 8'd0;
                                 search_stack_top[board_thread_id].count_move_on_return <= 1'b0;
                                 search_stack_top[board_thread_id].tt_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].repetition_start <= child_ply;
                                 search_stack_top[board_thread_id].has_legal <= 1'b0;
                                 search_stack_top[board_thread_id].move_order_state <= MOVE_ORDER_DIRECT;
+                                search_node_init_pending[board_thread_id] <= 1'b0;
+                                search_node_init_done[board_thread_id] <= 1'b0;
                                 search_stack_top[board_thread_id].direct_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
@@ -4233,6 +4325,8 @@ module search_controller #(
                                 end
                                 search_pvs_research[board_thread_id] <= 1'b0;
                                 search_stack_top[board_thread_id].remaining_depth <= search_pending_child_depth[board_thread_id];
+                                // The child inherits arena tails but begins at
+                                // the start of its own FIFO ranges.
                                 search_stack_top[board_thread_id].legal_move_count <= 8'd0;
                                 search_stack_top[board_thread_id].count_move_on_return <= !search_pvs_research[board_thread_id];
                                 search_stack_top[board_thread_id].tt_move <= NULL_MOVE;
@@ -4243,6 +4337,8 @@ module search_controller #(
                                 ) ? child_ply : search_stack_top[board_thread_id].repetition_start;
                                 search_stack_top[board_thread_id].has_legal <= 1'b0;
                                 search_stack_top[board_thread_id].move_order_state <= MOVE_ORDER_DIRECT;
+                                search_node_init_pending[board_thread_id] <= 1'b0;
+                                search_node_init_done[board_thread_id] <= 1'b0;
                                 search_stack_top[board_thread_id].direct_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].tt_checked <= 1'b0;
                                 search_stack_top[board_thread_id].has_tt_move <= 1'b0;
@@ -4266,70 +4362,36 @@ module search_controller #(
                             end
                         end
 
-                        if (move_cmd_resp_valid) begin
-                            automatic ThreadID move_thread_id;
-                            move_thread_id = move_cmd_resp_thread;
+                        // Generation completion is handled separately from pop
+                        // completion: an early candidate may already be a child.
+                        if (move_cmd_resp_valid
+                                && !search_generation_inflight[move_cmd_resp_thread]) begin
+                            automatic ThreadID move_thread_id = move_cmd_resp_thread;
                             search_move_result_thread_id <= move_thread_id;
                             search_move_result_valid <= 1'b1;
-                            search_move_inflight[move_thread_id]
-                                <= move_followup_accepted
-                                    && move_followup_thread == move_thread_id;
-                            search_stack_top[move_thread_id].bucket_tops <= move_cmd_resp_tops;
-                            if (search_stack_top[move_thread_id].move_order_state == MOVE_ORDER_DIRECT) begin
-                                search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_GENERATE_NOISY;
-                                if (move_cmd_resp_direct_valid) begin
-                                    search_stack_top[move_thread_id].direct_attempted <= 1'b1;
-                                    search_stack_top[move_thread_id].tt_move <= move_cmd_resp_direct_move;
-                                    search_pending_move[move_thread_id] <= move_cmd_resp_direct_move;
-                                    search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
-                                end else begin
-                                    search_tt_validation_pending[move_thread_id] <= 1'b0;
-                                    search_thread_phase[move_thread_id]
-                                        <= move_followup_accepted
-                                                && move_followup_thread == move_thread_id
-                                            ? SEARCH_PHASE_MOVE_WAIT
-                                            : SEARCH_PHASE_READY;
-                                end
+                            search_move_inflight[move_thread_id] <= 1'b0;
+                            search_stack_top[move_thread_id].move_order_state
+                                <= move_followup_accepted && move_followup_thread == move_thread_id
+                                    ? MOVE_ORDER_GOOD_NOISY : MOVE_ORDER_GENERATE_NOISY;
+                            if (move_cmd_resp_direct_valid) begin
+                                search_stack_top[move_thread_id].direct_attempted <= 1'b1;
+                                search_stack_top[move_thread_id].tt_move <= move_cmd_resp_direct_move;
+                                search_pending_move[move_thread_id] <= move_cmd_resp_direct_move;
+                                search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
-                                search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_GOOD_NOISY;
-                                search_thread_phase[move_thread_id]
-                                    <= move_followup_accepted
-                                            && move_followup_thread == move_thread_id
-                                        ? SEARCH_PHASE_MOVE_WAIT
-                                        : SEARCH_PHASE_READY;
+                                search_tt_validation_pending[move_thread_id] <= 1'b0;
+                                search_thread_phase[move_thread_id] <= SEARCH_PHASE_READY;
                             end
                         end
-
-                        if (move_quiet_resp_valid) begin
-                            automatic ThreadID move_thread_id;
-                            move_thread_id = move_quiet_resp_thread;
-                            search_move_result_thread_id <= move_thread_id;
-                            search_move_result_valid <= 1'b1;
-                            search_move_inflight[move_thread_id]
-                                <= move_followup_accepted
-                                    && move_followup_thread == move_thread_id;
-                            search_stack_top[move_thread_id].bucket_tops
-                                <= move_quiet_resp_tops;
-                            search_stack_top[move_thread_id].move_order_state
-                                <= MOVE_ORDER_QUIET;
-                            search_thread_phase[move_thread_id]
-                                <= move_followup_accepted
-                                        && move_followup_thread == move_thread_id
-                                    ? SEARCH_PHASE_MOVE_WAIT
-                                    : SEARCH_PHASE_READY;
-                        end
-
                         if (move_pop_resp_valid) begin
                             automatic ThreadID move_thread_id;
                             move_thread_id = move_pop_resp_thread;
                             search_move_result_thread_id <= move_thread_id;
                             search_move_result_valid <= 1'b1;
                             search_move_inflight[move_thread_id]
-                                <= move_followup_accepted
+                                <= move_followup_accepted && !move_followup_uses_quiet
                                     && move_followup_thread == move_thread_id;
                             if (move_pop_resp_found) begin
-                                search_stack_top[move_thread_id].bucket_tops[move_pop_resp_bucket]
-                                    <= move_pop_resp_new_top;
                                 search_pending_move[move_thread_id] <= move_pop_resp_move;
                                 search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
@@ -4338,17 +4400,19 @@ module search_controller #(
                                         search_stack_top[move_thread_id].move_order_state
                                             <= search_in_qsearch(move_thread_id)
                                                     && !search_board_in_check[move_thread_id]
-                                                ? MOVE_ORDER_DONE : MOVE_ORDER_GENERATE_QUIET;
+                                                ? MOVE_ORDER_DONE
+                                                : move_followup_accepted && move_followup_uses_quiet
+                                                    && move_followup_thread == move_thread_id
+                                                    ? MOVE_ORDER_QUIET : MOVE_ORDER_GENERATE_QUIET;
                                     MOVE_ORDER_QUIET:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_BAD_NOISY;
                                     default:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_DONE;
                                 endcase
                                 search_thread_phase[move_thread_id]
-                                    <= move_followup_accepted
+                                    <= move_followup_accepted && !move_followup_uses_quiet
                                             && move_followup_thread == move_thread_id
-                                        ? SEARCH_PHASE_MOVE_WAIT
-                                        : SEARCH_PHASE_READY;
+                                        ? SEARCH_PHASE_MOVE_WAIT : SEARCH_PHASE_READY;
                             end
                         end
 
@@ -4842,15 +4906,19 @@ module search_controller #(
                                 && ((move_cmd_valid && move_cmd_ready)
                                     || (move_pop_valid && move_pop_ready))) begin
                             search_thread_id <= search_move_issue_thread;
-                            search_thread_phase[search_move_issue_thread] <= SEARCH_PHASE_MOVE_WAIT;
-                            search_move_inflight[search_move_issue_thread] <= 1'b1;
+                            // Generation and reads are separate transactions:
+                            // start reading the admitted class on the next cycle.
+                            search_thread_phase[search_move_issue_thread]
+                                <= move_cmd_valid && move_cmd == MOVE_GEN_GENERATE_NOISY
+                                    ? SEARCH_PHASE_READY : SEARCH_PHASE_MOVE_WAIT;
+                            search_move_inflight[search_move_issue_thread]
+                                <= !(move_cmd_valid && move_cmd == MOVE_GEN_GENERATE_NOISY);
                             // RFP is an entry-time decision; a full window that
                             // narrows after a child return must not enable it.
                             search_stack_top[search_move_issue_thread].rfp_checked <= 1'b1;
-                            if (search_stack_top[search_move_issue_thread].move_order_state == MOVE_ORDER_DIRECT
-                                    && move_cmd == MOVE_GEN_GENERATE_NOISY) begin
+                            if (move_cmd_valid && move_cmd == MOVE_GEN_GENERATE_NOISY) begin
                                 search_stack_top[search_move_issue_thread].move_order_state
-                                    <= MOVE_ORDER_GENERATE_NOISY;
+                                    <= MOVE_ORDER_GOOD_NOISY;
                             end else if (move_cmd_valid && move_cmd == MOVE_GEN_VALIDATE_DIRECT
                                     && !search_stack_top[search_move_issue_thread].has_tt_move) begin
                                 search_stack_top[search_move_issue_thread].tt_move
@@ -4860,12 +4928,26 @@ module search_controller #(
                             search_dispatch.move <= search_thread_after(search_move_issue_thread);
                         end
 
+                        // Pop-capable threads do not share request bandwidth.
+                        // The scalar block above still handles generation and
+                        // its selected pop; this loop advances every additional
+                        // independently accepted reader request.
+                        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                            if (move_pop_valid_vec[tid] && move_pop_ready_vec[tid]
+                                    && !(search_move_issue_valid && move_pop_valid
+                                        && search_move_issue_thread == ThreadID'(tid))) begin
+                                search_thread_phase[tid] <= SEARCH_PHASE_MOVE_WAIT;
+                                search_move_inflight[tid] <= 1'b1;
+                                search_stack_top[tid].rfp_checked <= 1'b1;
+                            end
+                        end
+
                         if (search_quiet_issue_valid
                                 && move_quiet_cmd_valid && move_quiet_cmd_ready) begin
                             search_thread_id <= search_quiet_issue_thread;
-                            search_thread_phase[search_quiet_issue_thread]
-                                <= SEARCH_PHASE_MOVE_WAIT;
-                            search_move_inflight[search_quiet_issue_thread] <= 1'b1;
+                            search_thread_phase[search_quiet_issue_thread] <= SEARCH_PHASE_READY;
+                            search_move_inflight[search_quiet_issue_thread] <= 1'b0;
+                            search_stack_top[search_quiet_issue_thread].move_order_state <= MOVE_ORDER_QUIET;
                             search_stack_top[search_quiet_issue_thread].rfp_checked <= 1'b1;
                             search_dispatch.quiet
                                 <= search_thread_after(search_quiet_issue_thread);

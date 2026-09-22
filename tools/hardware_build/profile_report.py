@@ -398,8 +398,11 @@ def build_profile_report(
             "bucket_writes": _named_series(metrics, "move_order.bucket_writes", MOVE_BUCKETS),
             "bucket_pops": _named_series(metrics, "move_order.bucket_pops", MOVE_BUCKETS),
             "bucket_cutoffs": _named_series(metrics, "move_order.bucket_cutoffs", MOVE_BUCKETS),
-            "bucket_high_water": _named_series(
-                metrics, "move_order.bucket_high_water", MOVE_BUCKETS
+            "bucket_max_occupancy": _named_series(
+                metrics, "move_order.bucket_max_occupancy", MOVE_BUCKETS
+            ),
+            "bucket_arena_high_water": _named_series(
+                metrics, "move_order.bucket_arena_high_water", MOVE_BUCKETS
             ),
             "legal_move_ordinal": _named_series(
                 metrics, "move_order.legal_ordinal", ORDINAL_BUCKETS
@@ -477,6 +480,7 @@ def _aggregate_profile_reports(reports: list[dict], configuration: dict) -> dict
         return (
             name.endswith(".max_cycles")
             or name.endswith(".max_ply")
+            or "max_occupancy" in name
             or "high_water" in name
         )
 

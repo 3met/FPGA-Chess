@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -148,7 +149,8 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         metrics[f"move_order.bucket_writes.{index}"] = 1 if index == 2 else 0
         metrics[f"move_order.bucket_pops.{index}"] = 1 if index == 2 else 0
         metrics[f"move_order.bucket_cutoffs.{index}"] = 1 if index == 2 else 0
-        metrics[f"move_order.bucket_high_water.{index}"] = 1 if index == 2 else 0
+        metrics[f"move_order.bucket_max_occupancy.{index}"] = 1 if index == 2 else 0
+        metrics[f"move_order.bucket_arena_high_water.{index}"] = 2 if index == 2 else 0
     for index in range(len(ORDINAL_BUCKETS)):
         metrics[f"move_order.legal_ordinal.{index}"] = 1 if index == 0 else 0
         metrics[f"move_order.cutoff_ordinal.{index}"] = 1 if index == 0 else 0
@@ -242,6 +244,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("20.00 search cycles/wall s", text)
         self.assertNotIn("wall s/search cycle", text)
         self.assertIn("Peak queued", text)
+        self.assertIn("Arena high", text)
         self.assertIn("Per-depth breakdown", text)
         self.assertIn("max ply  status", text)
         self.assertIn("Deepest search ply reached (including quiescence search): 3", text)
@@ -581,6 +584,20 @@ class ProfileArgumentTests(unittest.TestCase):
         self.assertIn("-GTT_CACHE_INDEX_BITS=11", parameters)
         self.assertIn("-GENABLE_SEARCH_STATS=0", parameters)
 
+    def test_profile_bench_accepts_and_connects_every_device_parameter(self):
+        """Keep profiling's RTL interface aligned with the synthesis configuration."""
+        args = self.namespace(threads=None, stack_depth=None, engine_clock_hz=None)
+        args.target = "quartus-de1-soc"
+        args.engine_config = None
+        config = _resolve_profile_config(args)
+        bench = Path("hardware/tb/profile/tb_engine_profile.sv").read_text(encoding="utf-8")
+        header = bench.split(");", 1)[0]
+        for argument in _profile_parameter_args(config, "-G"):
+            name = argument[2:].split("=", 1)[0]
+            with self.subTest(parameter=name):
+                self.assertRegex(header, rf"parameter\s+[^,;=]*\b{re.escape(name)}\s*=")
+                self.assertIn(f".{name}({name})", bench)
+
 
 class ProfileSuiteTests(unittest.TestCase):
     def make_report(self, fen: str, nodes: int, wall_seconds: float) -> dict:
@@ -624,6 +641,12 @@ class ProfileSuiteTests(unittest.TestCase):
         aggregate = report["aggregate_profile"]
         self.assertEqual(aggregate["timing"]["setup_cycles"], 4)
         self.assertEqual(aggregate["components"]["board_update"]["issues"], 4)
+        self.assertEqual(
+            aggregate["move_ordering"]["bucket_max_occupancy"]["quiet_low"], 1
+        )
+        self.assertEqual(
+            aggregate["move_ordering"]["bucket_arena_high_water"]["quiet_low"], 2
+        )
         self.assertEqual(aggregate["transposition_table"]["store_fifo_high_water"], 1)
         self.assertEqual(
             aggregate["components"]["move_generator"]["operations"]

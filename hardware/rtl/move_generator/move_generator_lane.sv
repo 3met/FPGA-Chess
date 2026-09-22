@@ -6,23 +6,12 @@ import move_generator_defs::*;
 
 module move_generator_lane #(
     parameter int THREAD_COUNT = 1,
-    parameter int BUCKET_0_CAPACITY = 512,
-    parameter int BUCKET_1_CAPACITY = 512,
-    parameter int BUCKET_2_CAPACITY = 1024,
-    parameter int BUCKET_3_CAPACITY = 512,
-    parameter int BUCKET_4_CAPACITY = 512,
-    parameter int BUCKET_5_CAPACITY = 512,
-    parameter int BUCKET_6_CAPACITY = 512,
-    parameter int BUCKET_7_CAPACITY = 512,
     parameter MoveGenCommand GENERATION_COMMAND = MOVE_GEN_GENERATE_NOISY,
-    parameter MoveBucketMask OWNED_BUCKETS =
-        GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK,
     parameter int HISTORY_ENTRY_BITS = 8,
     parameter int QUIET_THRESHOLD_1 = 8,
     parameter int QUIET_THRESHOLD_2 = 32,
     parameter int QUIET_THRESHOLD_3 = 64,
     parameter int CASTLING_HISTORY_BONUS = 8,
-    parameter bit ASSERT_ON_OVERFLOW = 1'b1,
     parameter bit ENABLE_STATS = 1'b0
 ) (
     input logic clk,
@@ -39,29 +28,21 @@ module move_generator_lane #(
     input FullBoard cmd_board,
     input logic cmd_suppress_valid,
     input Move cmd_suppress_move,
-    input MoveBucketTops cmd_bucket_tops,
 
     output logic cmd_resp_valid,
     output ThreadID cmd_resp_thread,
     output PlyIndex cmd_resp_ply,
     output logic cmd_resp_direct_valid,
     output Move cmd_resp_direct_move,
-    output MoveBucketTops cmd_resp_bucket_tops,
 
-    input logic pop_valid,
-    output logic pop_ready,
-    input ThreadID pop_thread,
-    input PlyIndex pop_ply,
-    input MoveBucketMask pop_eligible,
-    input MoveBucketTops pop_current_tops,
-    input MoveBucketTops pop_lower_tops,
-    output logic pop_resp_valid,
-    output ThreadID pop_resp_thread,
-    output PlyIndex pop_resp_ply,
-    output logic pop_resp_found,
-    output Move pop_resp_move,
-    output MoveBucketIndex pop_resp_bucket,
-    output MoveBucketTop pop_resp_new_top,
+    // Storage and destructive reads are owned by the independent read pipeline.
+    output logic live_active,
+    output ThreadID live_thread,
+    output PlyIndex live_ply,
+    output logic write_valid,
+    output Move write_move,
+    output MoveBucketIndex write_bucket,
+    input MoveBucketTop write_top,
 
     output logic history_lookup_valid,
     output ThreadID history_lookup_thread,
@@ -70,10 +51,6 @@ module move_generator_lane #(
     output Position history_lookup_to,
     input logic signed [HISTORY_ENTRY_BITS-1:0] history_lookup_value,
 
-    output logic overflow_sticky,
-    output ThreadID overflow_thread,
-    output MoveBucketIndex overflow_bucket,
-    output logic [15:0] overflow_count,
     output logic [39:0] stat_noisy_count,
     output logic [39:0] stat_quiet_count,
     output logic [39:0] stat_destination_count,
@@ -95,35 +72,6 @@ module move_generator_lane #(
         GEN_FINISH
     } GeneratorState;
 
-    function automatic MoveBucketTop bucket_capacity(input MoveBucketIndex bucket);
-        case (bucket)
-            0: return MoveBucketTop'(BUCKET_0_CAPACITY);
-            1: return MoveBucketTop'(BUCKET_1_CAPACITY);
-            2: return MoveBucketTop'(BUCKET_2_CAPACITY);
-            3: return MoveBucketTop'(BUCKET_3_CAPACITY);
-            4: return MoveBucketTop'(BUCKET_4_CAPACITY);
-            5: return MoveBucketTop'(BUCKET_5_CAPACITY);
-            6: return MoveBucketTop'(BUCKET_6_CAPACITY);
-            default: return MoveBucketTop'(BUCKET_7_CAPACITY);
-        endcase
-    endfunction
-
-    // Forward the top produced by a bucket write so a generation response can
-    // accompany the final write instead of waiting another cycle.
-    function automatic MoveBucketTops tops_after_candidate_write(
-        input MoveBucketTops tops,
-        input MoveBucketIndex selected
-    );
-        automatic MoveBucketTops result = tops;
-        if (tops[selected] < bucket_capacity(selected))
-            result[selected] = tops[selected] + MoveBucketTop'(1);
-        return result;
-    endfunction
-
-    function automatic logic is_power_of_two(input int value);
-        return value > 0 && (value & (value - 1)) == 0;
-    endfunction
-
 `ifndef SYNTHESIS
     initial begin
         if (THREAD_COUNT < 1 || THREAD_COUNT > chess_defs::THREAD_COUNT)
@@ -137,11 +85,6 @@ module move_generator_lane #(
         if (GENERATION_COMMAND != MOVE_GEN_GENERATE_NOISY
                 && GENERATION_COMMAND != MOVE_GEN_GENERATE_QUIET)
             $fatal(1, "move-generator lane must be noisy or quiet");
-        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
-            if (!is_power_of_two(int'(bucket_capacity(MoveBucketIndex'(bucket))))
-                    || int'(bucket_capacity(MoveBucketIndex'(bucket))) > (1 << (MOVE_BUCKET_TOP_BITS - 1)))
-                $fatal(1, "move bucket capacities must be powers of two no larger than 1024");
-        end
     end
 `endif
 
@@ -152,7 +95,6 @@ module move_generator_lane #(
     FullBoard job_board;
     logic job_suppress_valid;
     Move job_suppress_move;
-    MoveBucketTops job_tops;
     logic [63:0] destination_mask;
     Position scan_destination;
     logic next_destination_valid;
@@ -195,31 +137,13 @@ module move_generator_lane #(
     logic source_is_knight;
     Direction source_lane;
 
-    logic bucket_wr_en[MOVE_BUCKET_COUNT];
-    Move bucket_wr_data;
-    ThreadID bucket_wr_thread;
-    MoveBucketTop bucket_wr_top;
+    // Register classification before RAM addressing and destructive-pop arbitration.
+    logic store_valid, store_noisy;
+    Move store_move;
+    MoveBucketIndex store_bucket;
+    localparam MoveBucketMask OWNED_BUCKETS = GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
+        ? GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK : QUIET_BUCKET_MASK;
     MoveBucketIndex bucket_wr_select;
-    logic bucket_rd_en[MOVE_BUCKET_COUNT];
-    ThreadID bucket_rd_thread;
-    MoveBucketTop bucket_rd_top;
-    Move bucket_q[MOVE_BUCKET_COUNT];
-
-    logic pop_read_pending;
-    logic pop_read_found;
-    ThreadID pop_read_thread;
-    PlyIndex pop_read_ply;
-    MoveBucketIndex pop_read_bucket;
-    MoveBucketTop pop_read_top;
-    logic pop_pending;
-    logic pop_found_q;
-    ThreadID pop_thread_q;
-    PlyIndex pop_ply_q;
-    MoveBucketIndex pop_bucket_q;
-    MoveBucketTop pop_new_top_q;
-    logic pop_select_found;
-    MoveBucketIndex pop_select_bucket;
-    MoveBucketTop pop_select_new_top;
 
     logic generator_history_read;
     logic generator_history_read_early;
@@ -228,8 +152,8 @@ module move_generator_lane #(
     logic castle_candidate_pseudo_legal;
     logic castle_candidate_suppressed;
 
-    // Generate distant destinations first so the per-bucket LIFO stores return
-    // otherwise equally ranked moves toward the center before edge moves.
+    // The fixed table is edge-in; traversing it backwards generates central
+    // destinations first so FIFO readers see useful moves as early as possible.
     localparam Position DESTINATION_ORDER[0:63] = '{
         Position'(0),  Position'(7),  Position'(56), Position'(63),
         Position'(1),  Position'(6),  Position'(8),  Position'(15),
@@ -265,14 +189,14 @@ module move_generator_lane #(
         automatic logic [2:0] lane_index;
         automatic logic [5:0] order_index;
         for (int index = 0; index < 64; index++)
-            ordered_mask[index] = mask[DESTINATION_ORDER[index]];
+            ordered_mask[index] = mask[DESTINATION_ORDER[63-index]];
         for (int group = 0; group < 8; group++)
             group_mask[group] = |ordered_mask[group*8 +: 8];
         group_index = first_set_lane(group_mask);
         lane_mask = ordered_mask[int'(group_index)*8 +: 8];
         lane_index = first_set_lane(lane_mask);
         order_index = {group_index, lane_index};
-        return DESTINATION_ORDER[order_index];
+        return DESTINATION_ORDER[63-order_index];
     endfunction
 
     // Avoid scheduling pawn-only noisy destinations that have no possible source.
@@ -830,20 +754,6 @@ module move_generator_lane #(
         source_valid = source_mask[source_select_index];
     end
 
-    always_comb begin
-        pop_select_found = 1'b0;
-        pop_select_bucket = MoveBucketIndex'(0);
-        pop_select_new_top = MoveBucketTop'(0);
-        for (int bucket = MOVE_BUCKET_COUNT - 1; bucket >= 0; bucket--) begin
-            if (!pop_select_found && pop_eligible[bucket]
-                    && pop_current_tops[bucket] != pop_lower_tops[bucket]) begin
-                pop_select_found = 1'b1;
-                pop_select_bucket = MoveBucketIndex'(bucket);
-                pop_select_new_top = pop_current_tops[bucket] - MoveBucketTop'(1);
-            end
-        end
-    end
-
     assign path_ready = state == GEN_IDLE && !init_busy;
     assign init_busy = 1'b0;
     // A normal candidate is consumed every cycle; promotion variants retain
@@ -856,33 +766,15 @@ module move_generator_lane #(
         && (cmd == GENERATION_COMMAND
             || (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
                 && cmd == MOVE_GEN_VALIDATE_DIRECT));
-    // The RAM and response tag registers advance together every clock;
-    // an outstanding response does not prevent accepting the next read.
-    assign pop_ready = !init_busy && !flush;
-    assign pop_resp_valid = pop_pending;
-    assign pop_resp_thread = pop_thread_q;
-    assign pop_resp_ply = pop_ply_q;
-    assign pop_resp_found = pop_found_q;
-    assign pop_resp_bucket = pop_bucket_q;
-    assign pop_resp_new_top = pop_new_top_q;
-    assign pop_resp_move = pop_found_q ? bucket_q[pop_bucket_q] : NULL_MOVE;
+    assign live_active = state != GEN_IDLE && state != GEN_DIRECT;
+    assign live_thread = job_thread;
+    assign live_ply = job_ply;
+    assign write_valid = store_valid && !flush && !clear && rst_n;
+    assign write_move = store_move;
+    assign write_bucket = store_bucket;
 
     always_comb begin
-        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
-            bucket_wr_en[bucket] = 1'b0;
-            bucket_rd_en[bucket] = 1'b0;
-        end
-        bucket_wr_data = candidate_move;
-        bucket_wr_thread = job_thread;
         bucket_wr_select = MoveBucketIndex'(0);
-        bucket_wr_top = job_tops[0];
-        // Read from the registered selection, independently of the next
-        // request's thread arbitration and bucket comparisons.
-        bucket_rd_thread = pop_read_thread;
-        bucket_rd_top = pop_read_top;
-        if (pop_read_pending && pop_read_found && !flush)
-            bucket_rd_en[pop_read_bucket] = 1'b1;
-
         generator_history_read_early = state == GEN_EXPAND_SOURCE
             && candidate_slot_ready
             && source_mask != 16'd0 && source_valid
@@ -901,43 +793,22 @@ module move_generator_lane #(
         history_lookup_to = generator_history_read_castle
             ? castle_candidate_move.to_pos : source_move.to_pos;
 
-        if (candidate_valid && (candidate_is_capture || candidate_is_promotion)) begin
+        // Each class lane has a fixed bucket family; do not route history RAM
+        // data into the noisy classifier through unreachable candidate flags.
+        if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY) begin
             bucket_wr_select = noisy_bucket();
-            bucket_wr_top = job_tops[bucket_wr_select];
-            if (job_tops[bucket_wr_select] < bucket_capacity(bucket_wr_select))
-                bucket_wr_en[bucket_wr_select] = 1'b1;
-        end else if (candidate_valid) begin
+        end else begin
             automatic logic signed [HISTORY_ENTRY_BITS:0] score;
             score = $signed(history_lookup_value);
             if (candidate_is_castle) score += CASTLING_HISTORY_BONUS;
             bucket_wr_select = quiet_bucket(score);
-            bucket_wr_top = job_tops[bucket_wr_select];
-            if (job_tops[bucket_wr_select] < bucket_capacity(bucket_wr_select))
-                bucket_wr_en[bucket_wr_select] = 1'b1;
         end
     end
-
-    // Move storage is a separate resource so lane control does not own RAM layout.
-    move_generator_bucket_store #(
-        .THREAD_COUNT(THREAD_COUNT),
-        .BUCKET_0_CAPACITY(BUCKET_0_CAPACITY), .BUCKET_1_CAPACITY(BUCKET_1_CAPACITY),
-        .BUCKET_2_CAPACITY(BUCKET_2_CAPACITY), .BUCKET_3_CAPACITY(BUCKET_3_CAPACITY),
-        .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
-        .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
-        .OWNED_BUCKETS(OWNED_BUCKETS)
-    ) bucket_store (
-        .clk,
-        .wr_en(bucket_wr_en), .wr_data(bucket_wr_data),
-        .wr_thread(bucket_wr_thread), .wr_top(bucket_wr_top),
-        .rd_en(bucket_rd_en), .rd_thread(bucket_rd_thread), .rd_top(bucket_rd_top),
-        .rd_data(bucket_q)
-    );
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             state <= GEN_IDLE;
-            pop_pending <= 1'b0;
-            pop_read_pending <= 1'b0;
+            store_valid <= 1'b0;
             candidate_valid <= 1'b0;
             source_select_index <= 4'd0;
             cmd_resp_valid <= 1'b0;
@@ -945,11 +816,6 @@ module move_generator_lane #(
             cmd_resp_ply <= PlyIndex'(0);
             cmd_resp_direct_valid <= 1'b0;
             cmd_resp_direct_move <= NULL_MOVE;
-            cmd_resp_bucket_tops <= '0;
-            overflow_sticky <= 1'b0;
-            overflow_thread <= ThreadID'(0);
-            overflow_bucket <= MoveBucketIndex'(0);
-            overflow_count <= 16'd0;
             stat_noisy_count <= 40'd0;
             stat_quiet_count <= 40'd0;
             stat_destination_count <= 40'd0;
@@ -962,36 +828,17 @@ module move_generator_lane #(
             end
         end else begin
             cmd_resp_valid <= 1'b0;
-            // Selection and RAM access are separate stages. Both stages
-            // advance each cycle, preserving full streaming throughput.
-            pop_read_pending <= pop_valid && pop_ready;
-            pop_pending <= pop_read_pending;
-            if (pop_valid && pop_ready) begin
-                pop_read_found <= pop_select_found;
-                pop_read_thread <= pop_thread;
-                pop_read_ply <= pop_ply;
-                pop_read_bucket <= pop_select_bucket;
-                pop_read_top <= pop_select_new_top;
-            end
-            if (pop_read_pending) begin
-                pop_found_q <= pop_read_found;
-                pop_thread_q <= pop_read_thread;
-                pop_ply_q <= pop_read_ply;
-                pop_bucket_q <= pop_read_bucket;
-                pop_new_top_q <= pop_read_top;
-            end
-
-            if (clear) begin
-                overflow_sticky <= 1'b0;
-                overflow_count <= 16'd0;
-            end
-
-            if (flush) begin
+            if (flush || clear) begin
                 state <= GEN_IDLE;
-                pop_pending <= 1'b0;
-                pop_read_pending <= 1'b0;
+                store_valid <= 1'b0;
                 candidate_valid <= 1'b0;
             end else begin
+                store_valid <= candidate_valid;
+                if (candidate_valid) begin
+                    store_move <= candidate_move;
+                    store_bucket <= bucket_wr_select;
+                    store_noisy <= GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY;
+                end
                 if (state != GEN_IDLE && ENABLE_STATS)
                     stat_generation_cycles <= stat_generation_cycles + 40'd1;
                 if (destination_examined_event && ENABLE_STATS)
@@ -1000,37 +847,27 @@ module move_generator_lane #(
                 // Candidate writeback runs independently of destination/source
                 // walking, permitting one ordinary candidate to complete while
                 // the next candidate or destination is prepared.
+                if (write_valid && ENABLE_STATS) begin
+                    stat_bucket_count[store_bucket] <= stat_bucket_count[store_bucket] + 40'd1;
+                    if (store_noisy)
+                        stat_noisy_count <= stat_noisy_count + 40'd1;
+                    else
+                        stat_quiet_count <= stat_quiet_count + 40'd1;
+                    if (write_top + MoveBucketTop'(1)
+                            > stat_bucket_high_water[store_bucket])
+                        stat_bucket_high_water[store_bucket]
+                            <= write_top + MoveBucketTop'(1);
+                end
                 if (candidate_valid) begin
-                    automatic MoveBucketIndex selected = bucket_wr_select;
-                    if (job_tops[selected] < bucket_capacity(selected)) begin
-                        job_tops[selected] <= job_tops[selected] + MoveBucketTop'(1);
-                        if (ENABLE_STATS) begin
-                            stat_bucket_count[selected] <= stat_bucket_count[selected] + 40'd1;
-                            if (candidate_is_capture || candidate_is_promotion)
-                                stat_noisy_count <= stat_noisy_count + 40'd1;
-                            else
-                                stat_quiet_count <= stat_quiet_count + 40'd1;
-                            if (job_tops[selected] + MoveBucketTop'(1)
-                                    > stat_bucket_high_water[selected])
-                                stat_bucket_high_water[selected]
-                                    <= job_tops[selected] + MoveBucketTop'(1);
-                        end
-                    end else begin
-                        overflow_sticky <= 1'b1;
-                        overflow_thread <= job_thread;
-                        overflow_bucket <= selected;
-                        if (overflow_count != 16'hffff)
-                            overflow_count <= overflow_count + 16'd1;
-`ifndef SYNTHESIS
-                        if (ASSERT_ON_OVERFLOW)
-                            $error("move bucket overflow bucket=%0d thread=%0d",
-                                selected, job_thread);
-`endif
-                    end
                     if (candidate_is_promotion && candidate_promo_counter != 2'd0) begin
                         candidate_promo_counter <= candidate_promo_counter - 2'd1;
-                        candidate_move.promo_piece
-                            <= PromoType'(candidate_promo_counter - 2'd1);
+                        // Emit promotions in search order while retaining the
+                        // remaining-variants counter used by candidate control.
+                        case (candidate_promo_counter)
+                            2'd3: candidate_move.promo_piece <= PROMO_KNIGHT;
+                            2'd2: candidate_move.promo_piece <= PROMO_ROOK;
+                            default: candidate_move.promo_piece <= PROMO_BISHOP;
+                        endcase
                     end else begin
                         candidate_valid <= 1'b0;
                     end
@@ -1047,7 +884,6 @@ module move_generator_lane #(
                             job_board <= cmd_board;
                             job_suppress_valid <= cmd_suppress_valid;
                             job_suppress_move <= cmd_suppress_move;
-                            job_tops <= cmd_bucket_tops;
                             candidate_valid <= 1'b0;
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
                                     && cmd == MOVE_GEN_VALIDATE_DIRECT) begin
@@ -1064,7 +900,6 @@ module move_generator_lane #(
                         cmd_resp_ply <= job_ply;
                         cmd_resp_direct_valid <= move_pseudo_legal(job_board, job_suppress_move);
                         cmd_resp_direct_move <= job_suppress_move;
-                        cmd_resp_bucket_tops <= job_tops;
                         state <= GEN_IDLE;
                     end
 
@@ -1080,15 +915,7 @@ module move_generator_lane #(
                                 castle_index <= !kingside_castle_permitted(job_board);
                                 state <= GEN_CASTLE;
                             end else begin
-                                cmd_resp_valid <= 1'b1;
-                                cmd_resp_thread <= job_thread;
-                                cmd_resp_ply <= job_ply;
-                                cmd_resp_direct_valid <= 1'b0;
-                                cmd_resp_direct_move <= NULL_MOVE;
-                                cmd_resp_bucket_tops <= tops_after_candidate_write(
-                                    job_tops, bucket_wr_select
-                                );
-                                state <= GEN_IDLE;
+                                state <= GEN_FINISH;
                             end
                         end else if (!candidate_valid) begin
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET
@@ -1100,12 +927,14 @@ module move_generator_lane #(
                                 castle_index <= !kingside_castle_permitted(job_board);
                                 state <= GEN_CASTLE;
                             end else begin
+                                // No candidate remains in classification. Any
+                                // registered store commits on this edge, so its
+                                // next tops can be returned without a drain cycle.
                                 cmd_resp_valid <= 1'b1;
                                 cmd_resp_thread <= job_thread;
                                 cmd_resp_ply <= job_ply;
                                 cmd_resp_direct_valid <= 1'b0;
                                 cmd_resp_direct_move <= NULL_MOVE;
-                                cmd_resp_bucket_tops <= job_tops;
                                 state <= GEN_IDLE;
                             end
                         end
@@ -1137,7 +966,7 @@ module move_generator_lane #(
                                 );
                                 candidate_promo_counter <= source_is_promotion ? 2'd3 : 2'd0;
                                 if (source_is_promotion)
-                                    candidate_move.promo_piece <= PROMO_BISHOP;
+                                    candidate_move.promo_piece <= PROMO_QUEEN;
                                 if (ENABLE_STATS)
                                     stat_candidate_count <= stat_candidate_count + 40'd1;
                                 if (job_suppress_valid
@@ -1232,47 +1061,20 @@ module move_generator_lane #(
                         end else if (!castle_index
                                 && queenside_castle_permitted(job_board)) begin
                             castle_index <= 1'b1;
-                        end else if (candidate_valid) begin
-                            // A previously accepted castle writes on this edge;
-                            // forward its incremented top with the response.
-                            cmd_resp_valid <= 1'b1;
-                            cmd_resp_thread <= job_thread;
-                            cmd_resp_ply <= job_ply;
-                            cmd_resp_direct_valid <= 1'b0;
-                            cmd_resp_direct_move <= NULL_MOVE;
-                            cmd_resp_bucket_tops <= tops_after_candidate_write(
-                                job_tops, bucket_wr_select
-                            );
-                            state <= GEN_IDLE;
                         end else begin
-                            cmd_resp_valid <= 1'b1;
-                            cmd_resp_thread <= job_thread;
-                            cmd_resp_ply <= job_ply;
-                            cmd_resp_direct_valid <= 1'b0;
-                            cmd_resp_direct_move <= NULL_MOVE;
-                            cmd_resp_bucket_tops <= job_tops;
-                            state <= GEN_IDLE;
+                            // Drain any accepted castle through registered writeback.
+                            state <= GEN_FINISH;
                         end
                     end
 
                     GEN_FINISH: begin
-                        if (candidate_finishes_write) begin
+                        // The classification stage must drain before reporting final tops.
+                        if (!candidate_valid) begin
                             cmd_resp_valid <= 1'b1;
                             cmd_resp_thread <= job_thread;
                             cmd_resp_ply <= job_ply;
                             cmd_resp_direct_valid <= 1'b0;
                             cmd_resp_direct_move <= NULL_MOVE;
-                            cmd_resp_bucket_tops <= tops_after_candidate_write(
-                                job_tops, bucket_wr_select
-                            );
-                            state <= GEN_IDLE;
-                        end else if (!candidate_valid) begin
-                            cmd_resp_valid <= 1'b1;
-                            cmd_resp_thread <= job_thread;
-                            cmd_resp_ply <= job_ply;
-                            cmd_resp_direct_valid <= 1'b0;
-                            cmd_resp_direct_move <= NULL_MOVE;
-                            cmd_resp_bucket_tops <= job_tops;
                             state <= GEN_IDLE;
                         end
                     end

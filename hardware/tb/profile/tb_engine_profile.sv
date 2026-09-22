@@ -48,6 +48,17 @@ module tb_engine_profile #(
     parameter int NEXT_DEPTH_NUMERATOR = 3,
     parameter int NEXT_DEPTH_DENOMINATOR = 5,
     parameter int SINGLE_LEGAL_MOVE_MS = 10,
+    parameter int MOVE_MEMORY_ENTRIES = 2048,
+    parameter int MOVE_BUCKET_0_RATIO = 48,
+    parameter int MOVE_BUCKET_1_RATIO = 16,
+    parameter int MOVE_BUCKET_2_RATIO = 192,
+    parameter int MOVE_BUCKET_3_RATIO = 64,
+    parameter int MOVE_BUCKET_4_RATIO = 64,
+    parameter int MOVE_BUCKET_5_RATIO = 32,
+    parameter int MOVE_BUCKET_6_RATIO = 64,
+    parameter int MOVE_BUCKET_7_RATIO = 32,
+    parameter int HISTORY_ENTRY_COUNT = 8192,
+    parameter int HISTORY_ENTRY_BITS = 8,
     parameter int HISTORY_REWARD_PER_DEPTH = 4,
     parameter int HISTORY_MAXIMUM_REWARD = 63,
     parameter int HISTORY_MALUS_DIVISOR = 2,
@@ -176,6 +187,17 @@ module tb_engine_profile #(
         .SCORE_DROP_THRESHOLD(SCORE_DROP_THRESHOLD),
         .NEXT_DEPTH_NUMERATOR(NEXT_DEPTH_NUMERATOR), .NEXT_DEPTH_DENOMINATOR(NEXT_DEPTH_DENOMINATOR),
         .SINGLE_LEGAL_MOVE_MS(SINGLE_LEGAL_MOVE_MS),
+        .MOVE_MEMORY_ENTRIES(MOVE_MEMORY_ENTRIES),
+        .MOVE_BUCKET_0_RATIO(MOVE_BUCKET_0_RATIO),
+        .MOVE_BUCKET_1_RATIO(MOVE_BUCKET_1_RATIO),
+        .MOVE_BUCKET_2_RATIO(MOVE_BUCKET_2_RATIO),
+        .MOVE_BUCKET_3_RATIO(MOVE_BUCKET_3_RATIO),
+        .MOVE_BUCKET_4_RATIO(MOVE_BUCKET_4_RATIO),
+        .MOVE_BUCKET_5_RATIO(MOVE_BUCKET_5_RATIO),
+        .MOVE_BUCKET_6_RATIO(MOVE_BUCKET_6_RATIO),
+        .MOVE_BUCKET_7_RATIO(MOVE_BUCKET_7_RATIO),
+        .HISTORY_ENTRY_COUNT(HISTORY_ENTRY_COUNT),
+        .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
         .HISTORY_MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
         .HISTORY_MALUS_DIVISOR(HISTORY_MALUS_DIVISOR),
@@ -288,7 +310,8 @@ module tb_engine_profile #(
     longint unsigned bucket_writes[0:MOVE_BUCKET_COUNT-1];
     longint unsigned bucket_pops[0:MOVE_BUCKET_COUNT-1];
     longint unsigned bucket_cutoffs[0:MOVE_BUCKET_COUNT-1];
-    longint unsigned bucket_high_water[0:MOVE_BUCKET_COUNT-1];
+    longint unsigned bucket_max_occupancy[0:MOVE_BUCKET_COUNT-1];
+    longint unsigned bucket_arena_high_water[0:MOVE_BUCKET_COUNT-1];
     longint unsigned legal_ordinal_histogram[0:ORDINAL_BUCKET_COUNT-1];
     longint unsigned cutoff_ordinal_histogram[0:ORDINAL_BUCKET_COUNT-1];
     longint unsigned direct_move_cutoffs;
@@ -296,6 +319,9 @@ module tb_engine_profile #(
     longint unsigned legal_candidates, illegal_candidates;
     longint unsigned board_stall_cycles, move_stall_cycles, tt_request_stall_cycles;
     longint unsigned move_commands, move_pops, move_pop_misses;
+    longint unsigned early_noisy_reads = 0, early_quiet_reads = 0;
+    longint unsigned last_progress_cycle = 0, last_progress_nodes = 0;
+    longint unsigned generation_child_overlap_cycles = 0;
     longint unsigned move_operation_count[0:MOVE_OPERATION_COUNT-1];
     longint unsigned move_operation_cycles[0:MOVE_OPERATION_COUNT-1];
     longint unsigned move_operation_max_cycles[0:MOVE_OPERATION_COUNT-1];
@@ -425,6 +451,21 @@ module tb_engine_profile #(
             // avoid scheduling thousands of needless NBA events without changing
             // any DUT timing or sampled value.
             search_cycles = search_cycles + 1;
+            // Fail a stuck search well before the global wall-clock timeout.
+            // A million cycles without entering a node exceeds normal pipeline,
+            // memory, generation, and complete-stack unwind latency by far.
+            if (dut.controller.search_nodes != last_progress_nodes) begin
+                last_progress_nodes = dut.controller.search_nodes;
+                last_progress_cycle = search_cycles;
+            end else if (search_cycles - last_progress_cycle >= 1_000_000) begin
+                for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                    $display("Stalled thread %0d: phase=%0d ply=%0d gen=%0d gen_ply=%0d pop=%0d order=%0d",
+                        tid, dut.controller.search_thread_phase[tid], dut.controller.search_ply[tid],
+                        dut.controller.search_generation_inflight[tid],
+                        dut.controller.search_generation_ply[tid], dut.controller.search_move_inflight[tid],
+                        dut.controller.search_stack_top[tid].move_order_state);
+                $fatal(1, "search made no node progress for a million cycles at node %0d", last_progress_nodes);
+            end
             depth_cycles[iteration_depth] = depth_cycles[iteration_depth] + 1;
             engine_state_cycles[int'(dut.command_layer.state)] =
                 engine_state_cycles[int'(dut.command_layer.state)] + 1;
@@ -450,6 +491,11 @@ module tb_engine_profile #(
                     && dut.controller.external_tt_gen.tt_load_store.store_write_pending)
                 tt_store_write_preemptions = tt_store_write_preemptions + 1;
 
+            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_MOVE_WAIT
+                        && !dut.controller.search_move_inflight[tid]
+                        && !dut.controller.search_return_valid[tid])
+                    $fatal(1, "move wait without an outstanding operation: thread %0d cycle %0d", tid, search_cycles);
             active_count = 0;
             inflight_count = 0;
             any_ready_move_blocked = 1'b0;
@@ -495,7 +541,9 @@ module tb_engine_profile #(
                             && dut.controller.search_eval_issue_thread == ThreadID'(tid))
                         || (dut.controller.search_move_issue_valid
                             && ((dut.controller.move_cmd_valid && dut.controller.move_cmd_ready)
-                                || (dut.controller.move_pop_valid && dut.controller.move_pop_ready))
+                                || (dut.controller.move_pop_valid && dut.controller.move_pop_ready)
+                                || (dut.controller.move_pop_valid_vec[tid]
+                                    && dut.controller.move_pop_ready_vec[tid]))
                             && dut.controller.search_move_issue_thread == ThreadID'(tid))
                         || (dut.controller.search_quiet_issue_valid
                             && dut.controller.move_quiet_cmd_valid
@@ -660,6 +708,25 @@ module tb_engine_profile #(
                 move_command_start_cycle[tid] = search_cycles;
             end
 
+            // Count results actually delivered before their generation lane
+            // finishes, rather than requests that merely wait inside the reader.
+            if (dut.controller.move_pop_resp_valid && dut.controller.move_pop_resp_found) begin
+                for (int lane = 0; lane < 2; lane++) begin
+                    if (dut.controller.move_generator.live_active[lane]
+                            && dut.controller.move_generator.live_thread[lane]
+                                == dut.controller.move_pop_resp_thread
+                            && dut.controller.move_generator.live_ply[lane]
+                                == dut.controller.move_pop_resp_ply) begin
+                        if (lane == 0) early_noisy_reads++;
+                        else early_quiet_reads++;
+                    end
+                end
+            end
+            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                if (dut.controller.search_generation_inflight[tid]
+                        && dut.controller.search_ply[tid] != dut.controller.search_generation_ply[tid])
+                    generation_child_overlap_cycles++;
+
             // Bucket pops are pipelined and may accept a new request on the
             // same edge that the previous response is consumed.
             if (dut.controller.move_pop_resp_valid) begin
@@ -673,13 +740,15 @@ module tb_engine_profile #(
                 );
                 move_pop_active[tid] = 1'b0;
             end
-            if (dut.controller.move_pop_valid && dut.controller.move_pop_ready) begin
-                automatic int tid = int'(dut.controller.move_pop_thread);
-                if (move_pop_active[tid])
-                    $fatal(1, "thread accepted more than one outstanding move bucket request");
-                move_pops <= move_pops + 1;
-                move_pop_active[tid] = 1'b1;
-                move_pop_start_cycle[tid] = search_cycles;
+            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                if (dut.controller.move_pop_valid_vec[tid]
+                        && dut.controller.move_pop_ready_vec[tid]) begin
+                    if (move_pop_active[tid])
+                        $fatal(1, "thread accepted more than one outstanding move bucket request");
+                    move_pops = move_pops + 1;
+                    move_pop_active[tid] = 1'b1;
+                    move_pop_start_cycle[tid] = search_cycles;
+                end
             end
 
             // Destination/source events are classified by the active
@@ -719,22 +788,37 @@ module tb_engine_profile #(
                     move_pop_misses <= move_pop_misses + 1;
                 end
             end
+            // Count generated candidates even when a simultaneous read forwards them.
             for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
-                if (dut.controller.move_generator.noisy_lane.bucket_wr_en[bucket]) begin
+                if (dut.controller.move_generator.noisy_lane.write_valid
+                        && dut.controller.move_generator.noisy_lane.write_bucket == MoveBucketIndex'(bucket)) begin
+                    automatic int tid = int'(dut.controller.move_generator.live_thread[0]);
+                    automatic int occupancy =
+                        int'(dut.controller.move_generator.reader.next_state[tid].tops[bucket])
+                        - int'(dut.controller.move_generator.reader.next_state[tid].heads[bucket]);
+                    automatic int arena_high_water =
+                        int'(dut.controller.move_generator.reader.next_state[tid].tops[bucket]);
                     bucket_writes[bucket] <= bucket_writes[bucket] + 1;
                     noisy_candidates_emitted = noisy_candidates_emitted + 1;
-                    if (int'(dut.controller.move_generator.noisy_lane.bucket_wr_top) + 1
-                            > bucket_high_water[bucket])
-                        bucket_high_water[bucket] =
-                            int'(dut.controller.move_generator.noisy_lane.bucket_wr_top) + 1;
+                    if (occupancy > bucket_max_occupancy[bucket])
+                        bucket_max_occupancy[bucket] = occupancy;
+                    if (arena_high_water > bucket_arena_high_water[bucket])
+                        bucket_arena_high_water[bucket] = arena_high_water;
                 end
-                if (dut.controller.move_generator.quiet_lane.bucket_wr_en[bucket]) begin
+                if (dut.controller.move_generator.quiet_lane.write_valid
+                        && dut.controller.move_generator.quiet_lane.write_bucket == MoveBucketIndex'(bucket)) begin
+                    automatic int tid = int'(dut.controller.move_generator.live_thread[1]);
+                    automatic int occupancy =
+                        int'(dut.controller.move_generator.reader.next_state[tid].tops[bucket])
+                        - int'(dut.controller.move_generator.reader.next_state[tid].heads[bucket]);
+                    automatic int arena_high_water =
+                        int'(dut.controller.move_generator.reader.next_state[tid].tops[bucket]);
                     bucket_writes[bucket] <= bucket_writes[bucket] + 1;
                     quiet_candidates_emitted = quiet_candidates_emitted + 1;
-                    if (int'(dut.controller.move_generator.quiet_lane.bucket_wr_top) + 1
-                            > bucket_high_water[bucket])
-                        bucket_high_water[bucket] =
-                            int'(dut.controller.move_generator.quiet_lane.bucket_wr_top) + 1;
+                    if (occupancy > bucket_max_occupancy[bucket])
+                        bucket_max_occupancy[bucket] = occupancy;
+                    if (arena_high_water > bucket_arena_high_water[bucket])
+                        bucket_arena_high_water[bucket] = arena_high_water;
                 end
             end
             // An accepted evaluator request is one static evaluation.
@@ -1045,7 +1129,10 @@ module tb_engine_profile #(
             emit($sformatf("move_order.bucket_writes.%0d", bucket), bucket_writes[bucket]);
             emit($sformatf("move_order.bucket_pops.%0d", bucket), bucket_pops[bucket]);
             emit($sformatf("move_order.bucket_cutoffs.%0d", bucket), bucket_cutoffs[bucket]);
-            emit($sformatf("move_order.bucket_high_water.%0d", bucket), bucket_high_water[bucket]);
+            emit($sformatf("move_order.bucket_max_occupancy.%0d", bucket),
+                bucket_max_occupancy[bucket]);
+            emit($sformatf("move_order.bucket_arena_high_water.%0d", bucket),
+                bucket_arena_high_water[bucket]);
         end
         for (int idx = 0; idx < ORDINAL_BUCKET_COUNT; idx++)
             emit($sformatf("move_order.legal_ordinal.%0d", idx), legal_ordinal_histogram[idx]);
@@ -1059,7 +1146,10 @@ module tb_engine_profile #(
         emit("move_order.candidates", candidates_analyzed);
         emit("move_order.history_lookups", history_lookups);
         emit("move_order.generation_cycles", move_generation_cycles);
-        emit("move_order.overflows", dut.controller.move_overflow_count);
+        emit("move_order.overflow", dut.controller.move_overflow_sticky);
+        emit("move_order.early_noisy_reads", early_noisy_reads);
+        emit("move_order.early_quiet_reads", early_quiet_reads);
+        emit("move_order.generation_child_overlap_cycles", generation_child_overlap_cycles);
         emit("algorithm.main_board_issues", main_search_board_issues);
         emit("algorithm.qsearch_board_issues", qsearch_board_issues);
         emit("algorithm.pvs_scouts", pvs_scouts);
@@ -1145,8 +1235,10 @@ module tb_engine_profile #(
         candidates_analyzed = 0;
         history_lookups = 0;
         move_generation_cycles = 0;
-        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++)
-            bucket_high_water[bucket] = 0;
+        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+            bucket_max_occupancy[bucket] = 0;
+            bucket_arena_high_water[bucket] = 0;
+        end
         evaluations = 0;
         eval_completions = 0;
         nnue_update_requests = 0;

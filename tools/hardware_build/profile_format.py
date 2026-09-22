@@ -331,8 +331,8 @@ def format_profile_report(
     lines += [
         "",
         "Move ordering",
-        "  Bucket                  Writes        Pops  Beta cutoffs  Cutoff rate  Peak queued",
-        "  ------------------  ----------  ----------  ------------  -----------  -----------",
+        "  Bucket                  Writes        Pops  Beta cutoffs  Cutoff rate  Peak queued  Arena high",
+        "  ------------------  ----------  ----------  ------------  -----------  -----------  ----------",
     ]
     # Hardware bucket indices run from worst to best; reports read more
     # naturally in the opposite direction.
@@ -340,11 +340,12 @@ def format_profile_report(
         writes = report["move_ordering"]["bucket_writes"][bucket]
         pops = report["move_ordering"]["bucket_pops"][bucket]
         cutoffs = report["move_ordering"]["bucket_cutoffs"][bucket]
-        high = report["move_ordering"]["bucket_high_water"][bucket]
+        queued = report["move_ordering"]["bucket_max_occupancy"][bucket]
+        arena = report["move_ordering"]["bucket_arena_high_water"][bucket]
         lines.append(
             f"  {bucket.replace('_', ' ').capitalize():<18}"
             f"{writes:>12,}{pops:>12,}{cutoffs:>14,}"
-            f"{_format_percent(percent(cutoffs, pops)):>13}{high:>13,}"
+            f"{_format_percent(percent(cutoffs, pops)):>13}{queued:>13,}{arena:>12,}"
         )
     cutoff_total = sum(report["move_ordering"]["cutoff_ordinal"].values())
     lines += [

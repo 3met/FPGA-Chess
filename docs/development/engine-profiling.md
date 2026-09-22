@@ -25,7 +25,7 @@ Reports, machine-readable metrics, simulator logs, and optional traces are writt
 
 Search measurements begin when the controller accepts the search request and end when it presents the response. Setup, response serialization, and post-search TT-store drain are labeled separately. Per-thread phase totals and other exclusive state totals are checked against the measured window so instrumentation drift fails loudly.
 
-The reports cover search throughput, pipeline stalls, thread activity, move ordering and pruning, TT and cache behavior, SDRAM traffic, and simulator speed. Per-depth data follows the primary thread's target depth; helper threads may be searching another depth during the same interval.
+The reports cover search throughput, pipeline stalls, thread activity, move ordering and pruning, TT and cache behavior, SDRAM traffic, and simulator speed. Move-order metrics include early noisy and quiet reads, generation overlap, peak unread bucket occupancy, and the highest arena address reached. Per-depth data follows the primary thread's target depth; helper threads may be searching another depth during the same interval.
 
 Profiler counters are 64-bit testbench state and do not exist in synthesis builds. The smaller optional `ENABLE_SEARCH_STATS` counters remain the hardware-visible diagnostic interface.
 

@@ -68,6 +68,7 @@ class DebugStatAddress(IntEnum):
     TT_CACHE_LOOKUPS = 5
     TT_CACHE_HITS = 6
     PHASE_BASE = 16
+    MOVE_OVERFLOW = 182
 
 
 class EngineError(IntEnum):

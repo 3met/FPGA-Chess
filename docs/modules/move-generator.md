@@ -4,11 +4,11 @@
 
 ## RTL Organization
 
-The top level coordinates independent noisy/direct and quiet lanes and selects moves by global bucket priority. Shared lane logic performs destination selection, source expansion, validation, and candidate storage; separate storage and quiet-history modules own their RAM interfaces. Quiet-history updates run in their own pipeline rather than in the quiet generation lane.
+The top level coordinates noisy/direct and quiet generation lanes, move memory, and quiet history. Generation lanes produce ordered candidates while move memory owns per-thread storage, per-ply FIFO state, bucket sequencing, and destructive pops. Quiet-history updates run independently of generation.
 
 ## Commands
 
-The noisy/direct and quiet interfaces use independent ready/valid channels. Requests carry the board, thread and ply tags, current bucket state, and an optional move to suppress; responses return the routing tags and updated bucket state.
+The noisy/direct and quiet interfaces use independent ready/valid channels. Requests carry the board, thread and ply tags, and an optional move to suppress. Responses return routing tags and direct-validation results; FIFO state never crosses the module boundary.
 
 | Command | Behavior |
 | ------- | -------- |
@@ -16,17 +16,17 @@ The noisy/direct and quiet interfaces use independent ready/valid channels. Requ
 | `MOVE_GEN_GENERATE_NOISY` | Generate captures, en passant, and all promotions. |
 | `MOVE_GEN_GENERATE_QUIET` | Generate ordinary non-captures and standard castling. |
 
-Commands are variable latency. Completion is returned only after the final candidate has been classified and stored. The two class lanes may process different threads concurrently, and bucket pops may overlap generation.
+Commands are variable latency. Completion is returned only after the final candidate has been classified and stored. The two class lanes may process different threads concurrently, and bucket pops may overlap generation. Generation commands for the same thread are serialized before acceptance so its memory has at most one writer; accepted generation never stalls for storage or reads.
 
 An attempted direct move is suppressed from later generation only after successful validation. Equality includes origin, destination, and promotion encoding so promotion choices remain distinct.
 
 ## Generation
 
-Generation is destination-centric. Each class lane selects relevant destination squares, captures the ray and knight context from a registered scan address, then derives an exact source mask from those registered tiles. Source expansion constructs moves from that mask without repeating geometry checks. The next destination address is prefetched during source preparation, allowing its context to replace the current context as the final source enters writeback; board lookup and source eligibility remain in separate timing stages without a second context bank. Empty or unproductive destinations are skipped without producing a move. Promotions emit all four legal choices.
+Generation is destination-centric and visits central squares before moving outward. Each class lane selects relevant destination squares, captures the ray and knight context from a registered scan address, then derives an exact source mask from those registered tiles. Source expansion constructs moves from that mask without repeating geometry checks. The next destination address is prefetched during source preparation, allowing its context to replace the current context as the final source enters writeback; board lookup and source eligibility remain in separate timing stages without a second context bank. Empty or unproductive destinations are skipped without producing a move. Promotions are generated in queen, knight, rook, bishop order.
 
 Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 
-The pop frontend selects the highest non-empty eligible bucket, registers its address and tags, then reads RAM and returns one tagged move with two-cycle latency. It accepts consecutive requests, including requests that switch lanes; readiness depends only on initialization and flush, not bucket selection. Callers issuing overlapping pops from the same node must reserve distinct bucket slots before the earlier responses return. Search may forward the result directly to board update. Popping consumes the candidate even if later king-safety validation rejects it.
+Move memory scans buckets in descending priority. While generation can still add to the highest eligible bucket, an empty bucket makes the read wait for a move or generation completion before considering lower buckets. Writes continue without waiting for reads, including when the same bucket is being read. Each thread has independent storage and a pop channel, so threads can read concurrently and a wait affects only its thread. Flush and New Game cancel pending requests and responses.
 
 ## Ordering
 
@@ -47,18 +47,20 @@ Capture classification uses a bounded visible static-exchange approximation. Qui
 
 History lookups have unconditional priority over the update pipeline's read port. Incoming updates are best-effort: an update presented while the pipeline is occupied is dropped, an update read waits behind lookups, and a write colliding with a lookup is dropped so generation never stalls or observes ambiguous read-during-write data.
 
-Only the encoded `Move` is stored. Ordering within a bucket is deterministic LIFO; fixed destination selection gives a reproducible preference among otherwise equal moves but never overrides bucket priority.
+Move memory tracks each node's progress through good noisy, quiet, and bad noisy buckets. Noisy generation enables buckets 7–6. After they are exhausted, search may stop or generate quiet moves in buckets 5–2; exhausting quiet moves enables buckets 1–0. Search issues `pop(thread, ply)` without supplying bucket state, and each pop consumes the returned move even if later legality checks reject it.
+
+Only the encoded `Move` is stored. Ordering within a bucket is deterministic FIFO, so center-first generation makes central moves available earlier and preserves that preference among otherwise equal moves without overriding bucket priority.
 
 ## Bucket Storage
 
-Each bucket is a synchronous simple-dual-port RAM divided into fixed per-thread regions. The noisy lane owns the capture/promotion buckets and the quiet lane owns the quiet buckets, avoiding write-port contention between the generators.
+Each thread has its own move RAM and pointer stack. Fixed unequal bucket partitions derive from the per-device `move_memory.entries_per_thread` and `move_memory.bucket_ratios_descending` settings. Defaults are 2,048 entries per thread and ratios 32/64/32/64/64/192/16/48 for buckets 7 through 0. Ratios must be positive, their sum must divide the memory size, and every resulting partition must fit its pointer type; invalid settings fail build validation and synthesis elaboration.
 
-Every search node stores the eight current bucket tops. The parent's tops form the child's lower bounds, so descendants may reuse slots released by popped parent moves without overwriting unsearched ancestor moves. Restoring the parent stack record restores its remaining candidates; no allocator or per-move links are required.
+Each pointer-stack entry records the FIFO bounds and bucket progress for one ply. A child begins at its parent's write tails, preventing it from reading or overwriting unsearched ancestor moves. Restoring a parent restores its unread moves, while later siblings may reuse descendant storage.
 
-A write that exceeds a bucket's per-thread region is suppressed and sets sticky overflow diagnostics.
+A write beyond its bucket partition sets a sticky overflow error bit but is not blocked or redirected. Contents for that thread are not guaranteed after overflow. Reset and New Game clear the bit; no overflow location or count is tracked.
 
 ## Lifecycle and Instrumentation
 
-Move RAM contents need not be cleared because node tops define live storage. Reset and New Game clear quiet-history state; Kill and New Game cancel active generation and pop work.
+Move RAM and pointer-stack contents need not be cleared because node initialization defines the live range. Reset and New Game clear quiet-history state; Kill and New Game cancel active generation and pop work.
 
 Optional counters expose generation work, history lookups, bucket traffic, high-water marks, and overflow information without affecting search semantics.

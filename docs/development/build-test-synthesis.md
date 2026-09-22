@@ -18,7 +18,7 @@ Generated projects, simulator libraries, logs, and reports are written under `wo
 
 ## Engine Configuration
 
-Reusable search policies live under `hardware/config/search/`. Engine profiles live under `hardware/config/engine/` and select structural settings such as thread count, stack depth, clock frequency, TT sizing, and instrumentation. Synthesis targets reference an engine profile while vendor, device, source, constraint, and fitter settings remain in the build manifest.
+Reusable search policies live under `hardware/config/search/`. Engine profiles live under `hardware/config/engine/` and select structural settings such as thread count, stack depth, clock frequency, TT sizing, per-thread move memory sizing and bucket ratios, and instrumentation. Synthesis targets reference an engine profile while vendor, device, source, constraint, and fitter settings remain in the build manifest.
 
 Synthesis and runtime profiling resolve profiles through the same path so they use matching structural and search settings. A board target may define its own engine profile while reusing an existing search policy.
 
@@ -46,7 +46,7 @@ Synthesis verifies generated data before invoking the vendor flow. Quartus targe
 
 Targets with an engine profile also accept `--engine-config <path>` to synthesize an isolated profile without modifying the manifest target. This is used by search-parameter tuning and records the resolved override in normal synthesis metadata.
 
-The DE1-SoC profile runs the engine at 75 MHz with one search thread and a 32-ply stack. Synthesis generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from the profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
+The DE1-SoC profile runs the engine at 75 MHz with two search threads, a 32-ply stack, and 4,096 move-memory entries per thread. Synthesis generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from the profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 

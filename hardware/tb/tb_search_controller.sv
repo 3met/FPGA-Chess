@@ -7,7 +7,8 @@ import nnue_defs::*;
 import tt_defs::*;
 
 module tb_search_controller #(
-    parameter int THREAD_COUNT = 1
+    parameter int THREAD_COUNT = 1,
+    parameter bit EARLY_ONLY = 0
 );
 
     // Run the same acceptance checks with serial and concurrent dispatch.
@@ -51,6 +52,14 @@ module tb_search_controller #(
     bit store_wait_issue_seen;
     bit return_pending_dispatch_seen;
     bit move_followup_seen;
+    bit direct_reject_followup_seen = 1'b0;
+    bit direct_reject_followup_check_pending = 1'b0;
+    ThreadID direct_reject_followup_thread;
+    PlyIndex direct_reject_followup_ply;
+    int early_noisy_reads = 0, early_quiet_reads = 0;
+    int early_child_preparations = 0, repaired_parents = 0;
+    int early_child_search_requests = 0;
+    move_generator_defs::MoveBucketIndex last_read_bucket[THREAD_COUNT][SEARCH_STACK_DEPTH];
     bit tt_response_consume_seen;
     bit tt_response_buffered_consume_seen;
     bit multi_move_inflight_seen;
@@ -129,6 +138,11 @@ module tb_search_controller #(
         .TT_INDEX_BITS(4),
         .SEARCH_THREAD_COUNT(THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
+        // The focused variant puts ordinary quiets in bucket 5 without
+        // seeding internal RAM, so real search must exercise early quiet reads.
+        .QUIET_THRESHOLD_1(EARLY_ONLY ? -2 : 8),
+        .QUIET_THRESHOLD_2(EARLY_ONLY ? -1 : 32),
+        .QUIET_THRESHOLD_3(EARLY_ONLY ? 0 : 64),
         .ENABLE_SEARCH_STATS(1'b1)
     ) dut (
         .clk(clk),
@@ -296,6 +310,20 @@ module tb_search_controller #(
         while (!resp_valid && wait_cycles < 200000) begin
             do_clock(1);
             wait_cycles += 1;
+        end
+        if (!resp_valid) begin
+            $display("timeout %s state=%0d active=%0d", label, dut.state,
+                dut.search_active_thread_count);
+            for (int tid = 0; tid < THREAD_COUNT; tid++)
+                $display("tid=%0d phase=%0d ply=%0d order=%0d gen=%0b cache_valid=%0b cache_ply=%0d mem_phase=%0d stage=%0b load=%0b",
+                    tid, dut.search_thread_phase[tid], dut.search_ply[tid],
+                    dut.search_stack_top[tid].move_order_state,
+                    dut.search_generation_inflight[tid],
+                    dut.move_generator.reader.cache_valid[tid],
+                    dut.move_generator.reader.cache_ply[tid],
+                    dut.move_generator.reader.cache_state[tid].phase,
+                    dut.move_generator.reader.stage_valid[tid],
+                    dut.move_generator.reader.pointer_load_pending[tid]);
         end
         check(resp_valid, {label, " response valid"});
         do_clock(1);
@@ -467,6 +495,24 @@ module tb_search_controller #(
         check(nodes != NodeCountType'(0), {label, " root hit searches legal children"});
         check(score != EvalScore'(600), {label, " root hit ignores cached score"});
     endtask : run_root_tt_score_policy_test
+
+    // Reject an impossible TT move through the real direct-validation lane and
+    // require its same-cycle noisy follow-up to retain generation ownership.
+    task automatic run_direct_reject_followup_test(input string label);
+        automatic Move best_move;
+        automatic EvalScore score;
+        automatic NodeCountType nodes;
+
+        new_game();
+        direct_reject_followup_seen = 1'b0;
+        direct_reject_followup_check_pending = 1'b0;
+        preload_root_tt(
+            make_move(Position'(12), Position'(36), PROMO_QUEEN),
+            EvalScore'(0), TTDepth'(1));
+        run_search_depth_record(8'd1, label, best_move, score, nodes);
+        check(direct_reject_followup_seen,
+            {label, " exercised rejected-direct noisy follow-up"});
+    endtask : run_direct_reject_followup_test
 
     task automatic run_shallow_tt_move_ordering_test(input string label);
         automatic Move best_move;
@@ -773,6 +819,41 @@ module tb_search_controller #(
                 $sformatf("%s move tag pipe %0d canceled", label, idx));
         end
     endtask : kill_active_search
+
+    // Cancel after a real early quiet has entered its child while the parent
+    // is still writing, then verify no ownership or read response survives.
+    task automatic kill_early_generation();
+        automatic EngineControllerRequest request = zero_request();
+        automatic int cycles = 0;
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd6;
+        pulse_request(request, "start early generation kill");
+        while (!(dut.search_generation_inflight[0]
+                    && dut.search_ply[0] != dut.search_generation_ply[0])
+                && cycles < 20000) begin
+            do_clock();
+            cycles++;
+        end
+        check(cycles < 20000, "kill reaches active parent generation and child preparation");
+        request = zero_request();
+        request.operation = ENGINE_CTRL_KILL;
+        req = request;
+        req_valid = 1'b1;
+        #1;
+        check(req_ready, "overlapped generation kill is accepted");
+        do_clock();
+        req_valid = 1'b0;
+        req = zero_request();
+        wait_response("overlapped generation kill");
+        check(!resp.error && resp.end_reason == ENGINE_END_KILLED,
+            "overlapped generation returns killed completion");
+        for (int tid = 0; tid < THREAD_COUNT; tid++)
+            check(!dut.search_generation_inflight[tid]
+                    && !dut.search_move_inflight[tid], "kill clears generation and read ownership");
+        do_clock(8);
+        check(!dut.move_pop_resp_valid && !dut.move_cmd_resp_valid && !dut.move_quiet_resp_valid,
+            "kill leaves no late move responses");
+    endtask
 
     task automatic kill_search_before_root_init(input string label);
         automatic EngineControllerRequest request = zero_request();
@@ -1127,6 +1208,41 @@ module tb_search_controller #(
 
     initial begin
         reset_dut();
+        if (EARLY_ONLY) begin
+            new_game();
+            run_search_depth(8'd2, "early quiet search");
+            new_game();
+            setup_promotion_perft_position();
+            run_search_depth(8'd2, "early noisy promotion search");
+            new_game();
+            clear_start_position("early noisy captures");
+            set_tile(WHITE_KING, Position'(4), "early capture white king e1");
+            set_tile(WHITE_ROOK, Position'(0), "early capture white rook a1");
+            set_tile(WHITE_BISHOP, Position'(18), "early capture white bishop c3");
+            set_tile(BLACK_KING, Position'(60), "early capture black king e8");
+            set_tile(BLACK_QUEEN, Position'(27), "early capture black queen d4");
+            set_tile(BLACK_ROOK, Position'(8), "early capture black rook a2");
+            set_tile(BLACK_ROOK, Position'(63), "early capture black rook h8");
+            set_tile(BLACK_QUEEN, Position'(59), "early capture black queen d8");
+            set_tile(BLACK_PAWN, Position'(49), "early capture black pawn b7");
+            set_tile(BLACK_PAWN, Position'(50), "early capture black pawn c7");
+            run_search_depth(8'd1, "early noisy capture search");
+            check(early_noisy_reads > 0, "search receives bucket 7 before noisy generation completes");
+            check(early_quiet_reads > 0, "search receives bucket 5 before quiet generation completes");
+            check(early_child_preparations > 0, "early candidates begin child preparation during generation");
+            check(repaired_parents > 0, "completed generation publishes remaining moves to saved parents");
+            check(early_child_search_requests > 0, "child TT lookup or evaluation overlaps parent generation");
+            check(!dut.move_overflow_sticky, "early search preserves move-memory bounds");
+            new_game();
+            kill_early_generation();
+            run_search_depth(8'd1, "search restarts after overlapped generation kill");
+            $display("Early reads: noisy=%0d quiet=%0d child preparation=%0d saved parents=%0d",
+                early_noisy_reads, early_quiet_reads, early_child_preparations, repaired_parents);
+            $display("Pass Count: %0d", pass_count);
+            $display("Fail Count: %0d", fail_count);
+            if (fail_count != 0) $fatal(1, "early search integration failed");
+            $finish;
+        end
 
         check(dut.lmr_table_value_for_params(128, 256, 1, 1) == 8'd1,
             "LMR non-default half-ply offset rounds the complete curve once");
@@ -1407,6 +1523,7 @@ module tb_search_controller #(
         run_repetition_draw_search("threefold root search");
 
         run_root_tt_score_policy_test("root TT score policy");
+        run_direct_reject_followup_test("direct rejection generation tracking");
 
         new_game();
         run_tt_reuse_test("startpos TT reuse");
@@ -1486,6 +1603,86 @@ module tb_search_controller #(
             $fatal(1, "search controller testbench failed");
         end
         $finish;
+    end
+
+    // Observe actual handshakes: no forced responses or bypassed generators.
+    always @(posedge clk) begin
+        if (direct_reject_followup_check_pending) begin
+            check(dut.search_generation_inflight[direct_reject_followup_thread],
+                "direct rejection preserves noisy generation tracking");
+            check(dut.search_generation_ply[direct_reject_followup_thread]
+                    == direct_reject_followup_ply,
+                "direct rejection preserves noisy generation ply");
+            check(dut.move_generator.live_active[0]
+                    && dut.move_generator.live_thread[0] == direct_reject_followup_thread
+                    && dut.move_generator.live_ply[0] == direct_reject_followup_ply,
+                "direct rejection follow-up matches the actual noisy generator");
+            direct_reject_followup_check_pending = 1'b0;
+        end
+        if (rst_n && dut.state == dut.ST_SEARCH_RUN) begin
+            for (int lane = 0; lane < 2; lane++) begin
+                if (dut.move_generator.live_active[lane]) begin
+                    assert (dut.search_generation_inflight[
+                            dut.move_generator.live_thread[lane]])
+                        else $fatal(1, "live generator lacks controller ownership");
+                    assert (dut.search_generation_ply[
+                            dut.move_generator.live_thread[lane]]
+                            == dut.move_generator.live_ply[lane])
+                        else $fatal(1, "live generator/controller ply mismatch");
+                end
+            end
+            if (dut.move_cmd_resp_valid && !dut.move_cmd_resp_direct_valid
+                    && dut.move_cmd_valid && dut.move_cmd_ready
+                    && dut.move_cmd == move_generator_defs::MOVE_GEN_GENERATE_NOISY
+                    && dut.move_cmd_thread == dut.move_cmd_resp_thread) begin
+                direct_reject_followup_seen = 1'b1;
+                direct_reject_followup_check_pending = 1'b1;
+                direct_reject_followup_thread = dut.move_cmd_thread;
+                direct_reject_followup_ply = dut.move_cmd_ply;
+            end
+            if (dut.move_cmd_valid && dut.move_cmd_ready
+                    && dut.move_cmd == move_generator_defs::MOVE_GEN_GENERATE_NOISY)
+                last_read_bucket[dut.move_cmd_thread][dut.move_cmd_ply] = 7;
+            if (dut.move_quiet_cmd_valid && dut.move_quiet_cmd_ready) begin
+                assert (dut.move_generator.reader.cache_state[dut.move_quiet_cmd_thread].phase
+                        == move_generator_defs::MOVE_MEMORY_WAIT_QUIET)
+                    else $fatal(1, "quiet generation began before good noisy exhaustion");
+            end
+            if (dut.move_pop_resp_valid && dut.move_pop_resp_found) begin
+                assert (dut.move_pop_resp_bucket <= last_read_bucket[dut.move_pop_resp_thread][dut.move_pop_resp_ply])
+                    else $fatal(1, "search returned to a higher bucket after serving a lower one");
+                last_read_bucket[dut.move_pop_resp_thread][dut.move_pop_resp_ply] = dut.move_pop_resp_bucket;
+            end
+            if (dut.move_pop_resp_valid && dut.move_pop_resp_found)
+                for (int lane = 0; lane < 2; lane++) begin
+                    if (dut.move_generator.live_active[lane]
+                            && dut.move_generator.live_thread[lane] == dut.move_pop_resp_thread
+                            && dut.move_generator.live_ply[lane] == dut.move_pop_resp_ply) begin
+                        assert ((lane == 0 && dut.move_pop_resp_bucket == 7)
+                                || (lane == 1 && dut.move_pop_resp_bucket == 5))
+                            else $fatal(1, "early search read escaped the highest unfinished bucket");
+                        if (lane == 0) early_noisy_reads++;
+                        else early_quiet_reads++;
+                    end
+                end
+            for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                if (dut.move_generator.reader.pointer_load_issue[tid]) repaired_parents++;
+                if (dut.search_generation_inflight[tid]
+                        && dut.search_ply[tid] != dut.search_generation_ply[tid]) begin
+                    assert (dut.search_ply[tid] == dut.search_generation_ply[tid] + PlyIndex'(1))
+                        else $fatal(1, "descended past unfinished parent storage");
+                    assert (!(dut.move_cmd_valid && dut.move_cmd_ready && dut.move_cmd_thread == ThreadID'(tid))
+                        && !(dut.move_quiet_cmd_valid && dut.move_quiet_cmd_ready
+                            && dut.move_quiet_cmd_thread == ThreadID'(tid)))
+                        else $fatal(1, "child allocated storage before parent completion");
+                    early_child_preparations++;
+                    if ((dut.search_tt_lookup_issue_valid && dut.tt_lookup_req_ready
+                                && dut.search_tt_lookup_issue_thread == ThreadID'(tid))
+                            || (dut.search_eval_issue_valid && dut.search_eval_issue_thread == ThreadID'(tid)))
+                        early_child_search_requests++;
+                end
+            end
+        end
     end
 
     initial begin
@@ -1950,7 +2147,12 @@ module tb_search_controller #(
                 thread_eval_tag_seen[int'(dut.search_eval_result_thread_id)] = 1'b1;
             end
             if (dut.state == dut.ST_SEARCH_RUN && dut.search_board_issue_valid) begin
+                automatic int issue_tid = int'(dut.search_board_issue_thread);
                 thread_move_handoff_seen[int'(dut.search_board_issue_thread)] = 1'b1;
+                if (dut.board_update_op == BOARD_PUSH_MOVE_OP
+                        || dut.board_update_op == BOARD_PUSH_NULL_OP)
+                    check(dut.search_node_init_done[issue_tid],
+                        "move memory is initialized before descent");
                 if (dut.board_update_op == BOARD_PUSH_NULL_OP) null_push_seen = 1'b1;
                 if (dut.board_update_op == BOARD_REVERSE_MOVE_OP
                         && dut.search_stack_top[dut.search_board_issue_thread].entered_by_null)
@@ -1992,3 +2194,8 @@ endmodule : tb_search_controller
 module tb_search_controller_multithread;
     tb_search_controller #(.THREAD_COUNT(2)) bench();
 endmodule : tb_search_controller_multithread
+
+// Force only the ordering thresholds, retaining real generation and search.
+module tb_search_controller_early_reads;
+    tb_search_controller #(.THREAD_COUNT(2), .EARLY_ONLY(1)) bench();
+endmodule : tb_search_controller_early_reads

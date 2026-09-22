@@ -1,19 +1,20 @@
-// Dual-class frontend. Noisy and quiet jobs occupy independent lanes while the
-// shared pop interface preserves global bucket priority.
+// Dual-class frontend with per-thread readers that preserve global bucket priority.
 
 import chess_defs::*;
 import move_generator_defs::*;
 
 module move_generator #(
     parameter int THREAD_COUNT = 1,
-    parameter int BUCKET_0_CAPACITY = 512,
-    parameter int BUCKET_1_CAPACITY = 512,
-    parameter int BUCKET_2_CAPACITY = 1024,
-    parameter int BUCKET_3_CAPACITY = 512,
-    parameter int BUCKET_4_CAPACITY = 512,
-    parameter int BUCKET_5_CAPACITY = 512,
-    parameter int BUCKET_6_CAPACITY = 512,
-    parameter int BUCKET_7_CAPACITY = 512,
+    parameter int SEARCH_STACK_DEPTH = 32,
+    parameter int MOVE_MEMORY_ENTRIES = 2048,
+    parameter int MOVE_BUCKET_0_RATIO = 48,
+    parameter int MOVE_BUCKET_1_RATIO = 16,
+    parameter int MOVE_BUCKET_2_RATIO = 192,
+    parameter int MOVE_BUCKET_3_RATIO = 64,
+    parameter int MOVE_BUCKET_4_RATIO = 64,
+    parameter int MOVE_BUCKET_5_RATIO = 32,
+    parameter int MOVE_BUCKET_6_RATIO = 64,
+    parameter int MOVE_BUCKET_7_RATIO = 32,
     parameter int HISTORY_ENTRY_COUNT = 8192,
     parameter int HISTORY_ENTRY_BITS = 8,
     parameter int HISTORY_REWARD_PER_DEPTH = 2,
@@ -23,7 +24,6 @@ module move_generator #(
     parameter int QUIET_THRESHOLD_2 = 32,
     parameter int QUIET_THRESHOLD_3 = 64,
     parameter int CASTLING_HISTORY_BONUS = 8,
-    parameter bit ASSERT_ON_OVERFLOW = 1'b1,
     parameter bit ENABLE_STATS = 1'b0
 ) (
     input logic clk,
@@ -40,13 +40,11 @@ module move_generator #(
     input FullBoard noisy_cmd_board,
     input logic noisy_cmd_suppress_valid,
     input Move noisy_cmd_suppress_move,
-    input MoveBucketTops noisy_cmd_bucket_tops,
     output logic noisy_resp_valid,
     output ThreadID noisy_resp_thread,
     output PlyIndex noisy_resp_ply,
     output logic noisy_resp_direct_valid,
     output Move noisy_resp_direct_move,
-    output MoveBucketTops noisy_resp_bucket_tops,
 
     input logic quiet_cmd_valid,
     output logic quiet_cmd_ready,
@@ -55,26 +53,23 @@ module move_generator #(
     input FullBoard quiet_cmd_board,
     input logic quiet_cmd_suppress_valid,
     input Move quiet_cmd_suppress_move,
-    input MoveBucketTops quiet_cmd_bucket_tops,
     output logic quiet_resp_valid,
     output ThreadID quiet_resp_thread,
     output PlyIndex quiet_resp_ply,
-    output MoveBucketTops quiet_resp_bucket_tops,
 
-    input logic pop_valid,
-    output logic pop_ready,
-    input ThreadID pop_thread,
-    input PlyIndex pop_ply,
-    input MoveBucketMask pop_eligible,
-    input MoveBucketTops pop_current_tops,
-    input MoveBucketTops pop_lower_tops,
-    output logic pop_resp_valid,
-    output ThreadID pop_resp_thread,
-    output PlyIndex pop_resp_ply,
-    output logic pop_resp_found,
-    output Move pop_resp_move,
-    output MoveBucketIndex pop_resp_bucket,
-    output MoveBucketTop pop_resp_new_top,
+    input logic pop_valid[THREAD_COUNT],
+    output logic pop_ready[THREAD_COUNT],
+    input PlyIndex pop_ply[THREAD_COUNT],
+    input logic node_init_valid[THREAD_COUNT],
+    output logic node_init_ready[THREAD_COUNT],
+    input PlyIndex node_init_ply[THREAD_COUNT],
+    input logic bad_noisy_enable[THREAD_COUNT],
+    output logic pop_resp_valid[THREAD_COUNT],
+    input logic pop_resp_ready[THREAD_COUNT],
+    output PlyIndex pop_resp_ply[THREAD_COUNT],
+    output logic pop_resp_found[THREAD_COUNT],
+    output Move pop_resp_move[THREAD_COUNT],
+    output MoveBucketIndex pop_resp_bucket[THREAD_COUNT],
 
     input logic history_update_valid,
     output logic history_update_ready,
@@ -89,9 +84,6 @@ module move_generator #(
     input logic [1:0] history_update_failed_count,
 
     output logic overflow_sticky,
-    output ThreadID overflow_thread,
-    output MoveBucketIndex overflow_bucket,
-    output logic [15:0] overflow_count,
     output logic [39:0] stat_noisy_count,
     output logic [39:0] stat_quiet_count,
     output logic [39:0] stat_destination_count,
@@ -106,20 +98,20 @@ module move_generator #(
         GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK;
 
     logic noisy_init_busy, quiet_init_busy, history_init_busy;
-    logic quiet_lane_cmd_ready;
-    logic noisy_pop_ready, quiet_pop_ready;
-    logic noisy_pop_resp_valid, quiet_pop_resp_valid;
-    ThreadID noisy_pop_resp_thread, quiet_pop_resp_thread;
-    PlyIndex noisy_pop_resp_ply, quiet_pop_resp_ply;
-    logic noisy_pop_resp_found, quiet_pop_resp_found;
-    Move noisy_pop_resp_move, quiet_pop_resp_move;
-    MoveBucketIndex noisy_pop_resp_bucket, quiet_pop_resp_bucket;
-    MoveBucketTop noisy_pop_resp_new_top, quiet_pop_resp_new_top;
+    logic quiet_lane_cmd_ready, noisy_lane_cmd_ready;
+    logic noisy_admit, quiet_admit, reader_ready[THREAD_COUNT], reader_valid[THREAD_COUNT];
+    logic starting_pop_node[THREAD_COUNT];
     logic quiet_history_update_ready;
-    logic noisy_overflow_sticky, quiet_overflow_sticky;
-    ThreadID noisy_overflow_thread, quiet_overflow_thread;
-    MoveBucketIndex noisy_overflow_bucket, quiet_overflow_bucket;
-    logic [15:0] noisy_overflow_count, quiet_overflow_count;
+    logic live_active[2], write_valid[2];
+    ThreadID live_thread[2];
+    PlyIndex live_ply[2];
+    Move write_move[2];
+    MoveBucketIndex write_bucket[2];
+    MoveBucketTop write_top[2];
+    logic generation_request_valid[2], generation_start_accept[2];
+    logic generation_start_valid[2], generation_start_ready[2];
+    ThreadID generation_thread[2], generation_start_thread[2];
+    PlyIndex generation_ply[2], generation_start_ply[2];
     logic [39:0] noisy_stat_noisy_count, quiet_stat_noisy_count;
     logic [39:0] noisy_stat_quiet_count, quiet_stat_quiet_count;
     logic [39:0] noisy_stat_destination_count, quiet_stat_destination_count;
@@ -137,33 +129,76 @@ module move_generator #(
     Position quiet_history_lookup_from, quiet_history_lookup_to;
     logic signed [HISTORY_ENTRY_BITS-1:0] quiet_history_lookup_value;
 
-    logic pop_use_quiet;
-    logic noisy_good_available, quiet_available, noisy_bad_available;
+    assign init_busy = noisy_init_busy || quiet_init_busy || history_init_busy;
+    // Each thread has one write port. Arbitrate jobs before accepting them;
+    // accepted generators never wait for storage or readers.
+    assign noisy_admit = !init_busy && !flush && !clear
+        && !(live_active[1] && live_thread[1] == noisy_cmd_thread)
+        && (noisy_cmd == MOVE_GEN_VALIDATE_DIRECT || generation_start_ready[0]);
+    assign noisy_cmd_ready = noisy_lane_cmd_ready && noisy_admit;
+    assign quiet_admit = !init_busy && !flush && !clear
+        && !(live_active[0] && live_thread[0] == quiet_cmd_thread)
+        && !(noisy_cmd_valid && noisy_cmd_ready && noisy_cmd_thread == quiet_cmd_thread)
+        && generation_start_ready[1];
+    assign quiet_cmd_ready = quiet_lane_cmd_ready && quiet_admit;
+    assign history_update_ready = quiet_history_update_ready;
+    always_comb for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+        starting_pop_node[tid] = (noisy_cmd_valid && noisy_cmd_ready
+                && noisy_cmd != MOVE_GEN_VALIDATE_DIRECT
+                && noisy_cmd_thread == ThreadID'(tid) && noisy_cmd_ply == pop_ply[tid])
+            || (quiet_cmd_valid && quiet_cmd_ready && quiet_cmd_thread == ThreadID'(tid)
+                && quiet_cmd_ply == pop_ply[tid]);
+        pop_ready[tid] = reader_ready[tid] && !init_busy && !starting_pop_node[tid];
+        reader_valid[tid] = pop_valid[tid] && pop_ready[tid];
+    end
+    assign generation_start_accept[0] = noisy_cmd_valid && noisy_cmd_ready
+        && noisy_cmd == MOVE_GEN_GENERATE_NOISY;
+    assign generation_start_accept[1] = quiet_cmd_valid && quiet_cmd_ready;
+    assign generation_request_valid[0]
+        = noisy_cmd_valid && noisy_cmd == MOVE_GEN_GENERATE_NOISY;
+    assign generation_request_valid[1] = quiet_cmd_valid;
+    assign generation_thread[0] = noisy_cmd_thread;
+    assign generation_thread[1] = quiet_cmd_thread;
+    assign generation_ply[0] = noisy_cmd_ply;
+    assign generation_ply[1] = quiet_cmd_ply;
 
-    always_comb begin
-        noisy_good_available = 1'b0;
-        quiet_available = 1'b0;
-        noisy_bad_available = 1'b0;
-        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
-            automatic logic available = pop_eligible[bucket]
-                && pop_current_tops[bucket] != pop_lower_tops[bucket];
-            if (bucket >= int'(GOOD_NOISY_LOW_BUCKET)) noisy_good_available |= available;
-            else if (bucket >= int'(QUIET_LOW_BUCKET)) quiet_available |= available;
-            else noisy_bad_available |= available;
+    // Register accepted generation ownership before updating the pointer RAM,
+    // keeping controller scheduling logic off the RAM write-data path.
+    always_ff @(posedge clk) begin
+        if (!rst_n || clear || flush) begin
+            generation_start_valid[0] <= 1'b0;
+            generation_start_valid[1] <= 1'b0;
+        end else begin
+            for (int lane = 0; lane < 2; lane++) begin
+                generation_start_valid[lane] <= generation_start_accept[lane];
+                if (generation_start_accept[lane]) begin
+                    generation_start_thread[lane] <= generation_thread[lane];
+                    generation_start_ply[lane] <= generation_ply[lane];
+                end
+            end
         end
-        // Preserve global bucket priority even when a caller supplies ALL_BUCKET_MASK.
-        pop_use_quiet = !noisy_good_available
-            && (quiet_available
-                || (!noisy_bad_available
-                    && (pop_eligible & QUIET_BUCKET_MASK) != MoveBucketMask'(0)));
     end
 
-    assign init_busy = noisy_init_busy || quiet_init_busy || history_init_busy;
-    // Both lanes accept one pop each cycle. Readiness depends only on their
-    // lifecycle state, never on bucket tops or the selected search thread.
-    assign pop_ready = noisy_pop_ready && quiet_pop_ready && !history_init_busy;
-    assign quiet_cmd_ready = quiet_lane_cmd_ready && !history_init_busy;
-    assign history_update_ready = quiet_history_update_ready;
+    move_generator_read_pipeline #(
+        .THREAD_COUNT(THREAD_COUNT), .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
+        .MEMORY_ENTRIES(MOVE_MEMORY_ENTRIES),
+        .BUCKET_RATIOS('{MOVE_BUCKET_0_RATIO, MOVE_BUCKET_1_RATIO,
+            MOVE_BUCKET_2_RATIO, MOVE_BUCKET_3_RATIO, MOVE_BUCKET_4_RATIO,
+            MOVE_BUCKET_5_RATIO, MOVE_BUCKET_6_RATIO, MOVE_BUCKET_7_RATIO})
+    ) reader (
+        .clk, .rst_n, .clear, .flush,
+        .pop_valid(reader_valid), .pop_ready(reader_ready),
+        .pop_ply, .node_init_valid, .node_init_ready, .node_init_ply, .bad_noisy_enable,
+        .pop_resp_valid, .pop_resp_ready, .pop_resp_ply, .pop_resp_found,
+        .pop_resp_move, .pop_resp_bucket,
+        .generation_request_valid, .generation_start_valid, .generation_start_ready,
+        .generation_request_thread(generation_thread),
+        .generation_request_ply(generation_ply),
+        .generation_start_thread, .generation_start_ply,
+        .live_active, .live_thread, .live_ply,
+        .write_valid, .write_move, .write_bucket, .write_top,
+        .overflow_sticky
+    );
 
     // History owns one shared RAM and a private best-effort update pipeline;
     // the quiet generator's synchronous lookups always take read priority.
@@ -190,19 +225,6 @@ module move_generator #(
         .update_failed_count(history_update_failed_count)
     );
 
-    assign pop_resp_valid = noisy_pop_resp_valid || quiet_pop_resp_valid;
-    assign pop_resp_thread = noisy_pop_resp_valid ? noisy_pop_resp_thread : quiet_pop_resp_thread;
-    assign pop_resp_ply = noisy_pop_resp_valid ? noisy_pop_resp_ply : quiet_pop_resp_ply;
-    assign pop_resp_found = noisy_pop_resp_valid ? noisy_pop_resp_found : quiet_pop_resp_found;
-    assign pop_resp_move = noisy_pop_resp_valid ? noisy_pop_resp_move : quiet_pop_resp_move;
-    assign pop_resp_bucket = noisy_pop_resp_valid ? noisy_pop_resp_bucket : quiet_pop_resp_bucket;
-    assign pop_resp_new_top = noisy_pop_resp_valid
-        ? noisy_pop_resp_new_top : quiet_pop_resp_new_top;
-
-    assign overflow_sticky = noisy_overflow_sticky || quiet_overflow_sticky;
-    assign overflow_thread = noisy_overflow_sticky ? noisy_overflow_thread : quiet_overflow_thread;
-    assign overflow_bucket = noisy_overflow_sticky ? noisy_overflow_bucket : quiet_overflow_bucket;
-    assign overflow_count = noisy_overflow_count + quiet_overflow_count;
     assign stat_noisy_count = noisy_stat_noisy_count + quiet_stat_noisy_count;
     assign stat_quiet_count = noisy_stat_quiet_count + quiet_stat_quiet_count;
     assign stat_destination_count =
@@ -223,38 +245,27 @@ module move_generator #(
 
     move_generator_lane #(
         .THREAD_COUNT(THREAD_COUNT),
-        .BUCKET_0_CAPACITY(BUCKET_0_CAPACITY), .BUCKET_1_CAPACITY(BUCKET_1_CAPACITY),
-        .BUCKET_2_CAPACITY(BUCKET_2_CAPACITY), .BUCKET_3_CAPACITY(BUCKET_3_CAPACITY),
-        .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
-        .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
-        .GENERATION_COMMAND(MOVE_GEN_GENERATE_NOISY), .OWNED_BUCKETS(NOISY_BUCKET_MASK),
+        .GENERATION_COMMAND(MOVE_GEN_GENERATE_NOISY),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1), .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
         .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3), .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
-        .ASSERT_ON_OVERFLOW(ASSERT_ON_OVERFLOW), .ENABLE_STATS(ENABLE_STATS)
+        .ENABLE_STATS(ENABLE_STATS)
     ) noisy_lane (
         .clk, .rst_n, .clear, .flush, .init_busy(noisy_init_busy),
-        .cmd_valid(noisy_cmd_valid), .cmd_ready(noisy_cmd_ready), .cmd(noisy_cmd),
+        .cmd_valid(noisy_cmd_valid && noisy_admit), .cmd_ready(noisy_lane_cmd_ready), .cmd(noisy_cmd),
         .cmd_thread(noisy_cmd_thread), .cmd_ply(noisy_cmd_ply), .cmd_board(noisy_cmd_board),
         .cmd_suppress_valid(noisy_cmd_suppress_valid),
         .cmd_suppress_move(noisy_cmd_suppress_move),
-        .cmd_bucket_tops(noisy_cmd_bucket_tops),
         .cmd_resp_valid(noisy_resp_valid), .cmd_resp_thread(noisy_resp_thread),
         .cmd_resp_ply(noisy_resp_ply), .cmd_resp_direct_valid(noisy_resp_direct_valid),
         .cmd_resp_direct_move(noisy_resp_direct_move),
-        .cmd_resp_bucket_tops(noisy_resp_bucket_tops),
-        .pop_valid(pop_valid && pop_ready && !pop_use_quiet), .pop_ready(noisy_pop_ready),
-        .pop_thread, .pop_ply, .pop_eligible(pop_eligible & NOISY_BUCKET_MASK),
-        .pop_current_tops, .pop_lower_tops,
-        .pop_resp_valid(noisy_pop_resp_valid), .pop_resp_thread(noisy_pop_resp_thread),
-        .pop_resp_ply(noisy_pop_resp_ply), .pop_resp_found(noisy_pop_resp_found),
-        .pop_resp_move(noisy_pop_resp_move), .pop_resp_bucket(noisy_pop_resp_bucket),
-        .pop_resp_new_top(noisy_pop_resp_new_top),
+        .live_active(live_active[0]), .live_thread(live_thread[0]),
+        .live_ply(live_ply[0]),
+        .write_valid(write_valid[0]), .write_move(write_move[0]),
+        .write_bucket(write_bucket[0]), .write_top(write_top[0]),
         .history_lookup_valid(), .history_lookup_thread(), .history_lookup_color(),
         .history_lookup_from(), .history_lookup_to(),
         .history_lookup_value(quiet_history_lookup_value),
-        .overflow_sticky(noisy_overflow_sticky), .overflow_thread(noisy_overflow_thread),
-        .overflow_bucket(noisy_overflow_bucket), .overflow_count(noisy_overflow_count),
         .stat_noisy_count(noisy_stat_noisy_count), .stat_quiet_count(noisy_stat_quiet_count),
         .stat_destination_count(noisy_stat_destination_count),
         .stat_candidate_count(noisy_stat_candidate_count),
@@ -266,42 +277,31 @@ module move_generator #(
 
     move_generator_lane #(
         .THREAD_COUNT(THREAD_COUNT),
-        .BUCKET_0_CAPACITY(BUCKET_0_CAPACITY), .BUCKET_1_CAPACITY(BUCKET_1_CAPACITY),
-        .BUCKET_2_CAPACITY(BUCKET_2_CAPACITY), .BUCKET_3_CAPACITY(BUCKET_3_CAPACITY),
-        .BUCKET_4_CAPACITY(BUCKET_4_CAPACITY), .BUCKET_5_CAPACITY(BUCKET_5_CAPACITY),
-        .BUCKET_6_CAPACITY(BUCKET_6_CAPACITY), .BUCKET_7_CAPACITY(BUCKET_7_CAPACITY),
-        .GENERATION_COMMAND(MOVE_GEN_GENERATE_QUIET), .OWNED_BUCKETS(QUIET_BUCKET_MASK),
+        .GENERATION_COMMAND(MOVE_GEN_GENERATE_QUIET),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1), .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
         .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3), .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
-        .ASSERT_ON_OVERFLOW(ASSERT_ON_OVERFLOW), .ENABLE_STATS(ENABLE_STATS)
+        .ENABLE_STATS(ENABLE_STATS)
     ) quiet_lane (
         .clk, .rst_n, .clear, .flush, .init_busy(quiet_init_busy),
-        .cmd_valid(quiet_cmd_valid && !history_init_busy), .cmd_ready(quiet_lane_cmd_ready),
+        .cmd_valid(quiet_cmd_valid && quiet_admit), .cmd_ready(quiet_lane_cmd_ready),
         .cmd(MOVE_GEN_GENERATE_QUIET),
         .cmd_thread(quiet_cmd_thread), .cmd_ply(quiet_cmd_ply), .cmd_board(quiet_cmd_board),
         .cmd_suppress_valid(quiet_cmd_suppress_valid),
         .cmd_suppress_move(quiet_cmd_suppress_move),
-        .cmd_bucket_tops(quiet_cmd_bucket_tops),
         .cmd_resp_valid(quiet_resp_valid), .cmd_resp_thread(quiet_resp_thread),
         .cmd_resp_ply(quiet_resp_ply), .cmd_resp_direct_valid(),
         .cmd_resp_direct_move(),
-        .cmd_resp_bucket_tops(quiet_resp_bucket_tops),
-        .pop_valid(pop_valid && pop_ready && pop_use_quiet), .pop_ready(quiet_pop_ready),
-        .pop_thread, .pop_ply, .pop_eligible(pop_eligible & QUIET_BUCKET_MASK),
-        .pop_current_tops, .pop_lower_tops,
-        .pop_resp_valid(quiet_pop_resp_valid), .pop_resp_thread(quiet_pop_resp_thread),
-        .pop_resp_ply(quiet_pop_resp_ply), .pop_resp_found(quiet_pop_resp_found),
-        .pop_resp_move(quiet_pop_resp_move), .pop_resp_bucket(quiet_pop_resp_bucket),
-        .pop_resp_new_top(quiet_pop_resp_new_top),
+        .live_active(live_active[1]), .live_thread(live_thread[1]),
+        .live_ply(live_ply[1]),
+        .write_valid(write_valid[1]), .write_move(write_move[1]),
+        .write_bucket(write_bucket[1]), .write_top(write_top[1]),
         .history_lookup_valid(quiet_history_lookup_valid),
         .history_lookup_thread(quiet_history_lookup_thread),
         .history_lookup_color(quiet_history_lookup_color),
         .history_lookup_from(quiet_history_lookup_from),
         .history_lookup_to(quiet_history_lookup_to),
         .history_lookup_value(quiet_history_lookup_value),
-        .overflow_sticky(quiet_overflow_sticky), .overflow_thread(quiet_overflow_thread),
-        .overflow_bucket(quiet_overflow_bucket), .overflow_count(quiet_overflow_count),
         .stat_noisy_count(quiet_stat_noisy_count), .stat_quiet_count(quiet_stat_quiet_count),
         .stat_destination_count(quiet_stat_destination_count),
         .stat_candidate_count(quiet_stat_candidate_count),

@@ -20,31 +20,34 @@ module tb_move_generator;
     FullBoard cmd_board;
     logic cmd_suppress_valid;
     Move cmd_suppress_move;
-    MoveBucketTops cmd_bucket_tops;
     logic cmd_resp_valid;
     ThreadID cmd_resp_thread;
     PlyIndex cmd_resp_ply;
     logic cmd_resp_direct_valid;
     Move cmd_resp_direct_move;
-    MoveBucketTops cmd_resp_bucket_tops;
     logic quiet_resp_valid;
     ThreadID quiet_resp_thread;
     PlyIndex quiet_resp_ply;
-    MoveBucketTops quiet_resp_bucket_tops;
     logic pop_valid;
     logic pop_ready;
+    logic bad_noisy_enable;
+    logic node_init_valid;
     ThreadID pop_thread;
     PlyIndex pop_ply;
-    MoveBucketMask pop_eligible;
-    MoveBucketTops pop_current_tops;
-    MoveBucketTops pop_lower_tops;
     logic pop_resp_valid;
     ThreadID pop_resp_thread;
     PlyIndex pop_resp_ply;
     logic pop_resp_found;
     Move pop_resp_move;
     MoveBucketIndex pop_resp_bucket;
-    MoveBucketTop pop_resp_new_top;
+    logic pop_valid_vec[2], pop_ready_vec[2], pop_resp_valid_vec[2], pop_resp_ready_vec[2];
+    logic bad_noisy_enable_vec[2];
+    logic node_init_valid_vec[2];
+    logic node_init_ready_vec[2];
+    PlyIndex node_init_ply_vec[2];
+    PlyIndex pop_ply_vec[2], pop_resp_ply_vec[2];
+    logic pop_resp_found_vec[2]; Move pop_resp_move_vec[2];
+    MoveBucketIndex pop_resp_bucket_vec[2];
     logic history_update_valid;
     logic history_update_ready;
     ThreadID history_update_thread;
@@ -57,9 +60,6 @@ module tb_move_generator;
     logic [11:0] history_update_failed2;
     logic [1:0] history_update_failed_count;
     logic overflow_sticky;
-    ThreadID overflow_thread;
-    MoveBucketIndex overflow_bucket;
-    logic [15:0] overflow_count;
     logic [39:0] stat_noisy_count;
     logic [39:0] stat_quiet_count;
     logic [39:0] stat_destination_count;
@@ -68,21 +68,16 @@ module tb_move_generator;
     logic [39:0] stat_generation_cycles;
     logic [39:0] stat_bucket_count[MOVE_BUCKET_COUNT];
     MoveBucketTop stat_bucket_high_water[MOVE_BUCKET_COUNT];
+    logic monitor_promotion_writes;
+    int promotion_write_count;
+    PromoType promotion_write_order[4];
 
     int pass_count;
     int fail_count;
 
     move_generator #(
         .THREAD_COUNT(2),
-        .BUCKET_0_CAPACITY(32),
-        .BUCKET_1_CAPACITY(32),
-        .BUCKET_2_CAPACITY(64),
-        .BUCKET_3_CAPACITY(32),
-        .BUCKET_4_CAPACITY(32),
-        .BUCKET_5_CAPACITY(32),
-        .BUCKET_6_CAPACITY(32),
-        .BUCKET_7_CAPACITY(32),
-        .ASSERT_ON_OVERFLOW(1'b0),
+        .MOVE_MEMORY_ENTRIES(512),
         .ENABLE_STATS(1'b1)
     ) dut (
         .clk, .rst_n, .clear, .flush, .init_busy,
@@ -92,36 +87,68 @@ module tb_move_generator;
         .noisy_cmd_board(cmd_board),
         .noisy_cmd_suppress_valid(cmd_suppress_valid),
         .noisy_cmd_suppress_move(cmd_suppress_move),
-        .noisy_cmd_bucket_tops(cmd_bucket_tops),
         .noisy_resp_valid(cmd_resp_valid), .noisy_resp_thread(cmd_resp_thread),
         .noisy_resp_ply(cmd_resp_ply),
         .noisy_resp_direct_valid(cmd_resp_direct_valid),
         .noisy_resp_direct_move(cmd_resp_direct_move),
-        .noisy_resp_bucket_tops(cmd_resp_bucket_tops),
         .quiet_cmd_valid(cmd_valid && cmd == MOVE_GEN_GENERATE_QUIET),
         .quiet_cmd_ready,
         .quiet_cmd_thread(cmd_thread), .quiet_cmd_ply(cmd_ply),
         .quiet_cmd_board(cmd_board),
         .quiet_cmd_suppress_valid(cmd_suppress_valid),
         .quiet_cmd_suppress_move(cmd_suppress_move),
-        .quiet_cmd_bucket_tops(cmd_bucket_tops),
         .quiet_resp_valid, .quiet_resp_thread, .quiet_resp_ply,
-        .quiet_resp_bucket_tops,
-        .pop_valid, .pop_ready, .pop_thread, .pop_ply, .pop_eligible,
-        .pop_current_tops, .pop_lower_tops,
-        .pop_resp_valid, .pop_resp_thread, .pop_resp_ply, .pop_resp_found,
-        .pop_resp_move, .pop_resp_bucket, .pop_resp_new_top,
+        .pop_valid(pop_valid_vec), .pop_ready(pop_ready_vec), .pop_ply(pop_ply_vec),
+        .node_init_valid(node_init_valid_vec), .node_init_ready(node_init_ready_vec),
+        .node_init_ply(node_init_ply_vec),
+        .bad_noisy_enable(bad_noisy_enable_vec),
+        .pop_resp_valid(pop_resp_valid_vec),
+        .pop_resp_ready(pop_resp_ready_vec), .pop_resp_ply(pop_resp_ply_vec),
+        .pop_resp_found(pop_resp_found_vec),
+        .pop_resp_move(pop_resp_move_vec), .pop_resp_bucket(pop_resp_bucket_vec),
         .history_update_valid, .history_update_ready,
         .history_update_thread,
         .history_update_color, .history_update_from, .history_update_to,
         .history_update_depth,
         .history_update_failed0, .history_update_failed1, .history_update_failed2,
         .history_update_failed_count,
-        .overflow_sticky, .overflow_thread, .overflow_bucket, .overflow_count,
+        .overflow_sticky,
         .stat_noisy_count, .stat_quiet_count, .stat_destination_count,
         .stat_candidate_count, .stat_history_lookup_count, .stat_generation_cycles,
         .stat_bucket_count, .stat_bucket_high_water
     );
+
+    // Capture the noisy lane's actual store order independently of readback.
+    always @(posedge clk) begin
+        if (monitor_promotion_writes && dut.write_valid[0]
+                && dut.write_move[0].from_pos == Position'(48)
+                && dut.write_move[0].to_pos == Position'(56)) begin
+            if (promotion_write_count < 4)
+                promotion_write_order[promotion_write_count] =
+                    dut.write_move[0].promo_piece;
+            promotion_write_count = promotion_write_count + 1;
+        end
+    end
+
+    always_comb begin
+        for (int tid = 0; tid < 2; tid++) begin
+            pop_valid_vec[tid] = pop_valid && pop_thread == ThreadID'(tid);
+            pop_ply_vec[tid] = pop_ply;
+            bad_noisy_enable_vec[tid]
+                = bad_noisy_enable && pop_thread == ThreadID'(tid);
+            node_init_valid_vec[tid]
+                = node_init_valid && cmd_thread == ThreadID'(tid);
+            node_init_ply_vec[tid] = cmd_ply;
+            pop_resp_ready_vec[tid] = 1'b1;
+        end
+        pop_ready = pop_ready_vec[pop_thread];
+        pop_resp_valid = pop_resp_valid_vec[pop_thread];
+        pop_resp_thread = pop_thread;
+        pop_resp_ply = pop_resp_ply_vec[pop_thread];
+        pop_resp_found = pop_resp_found_vec[pop_thread];
+        pop_resp_move = pop_resp_move_vec[pop_thread];
+        pop_resp_bucket = pop_resp_bucket_vec[pop_thread];
+    end
 
     assign cmd_ready = cmd == MOVE_GEN_GENERATE_QUIET
         ? quiet_cmd_ready : noisy_cmd_ready;
@@ -205,13 +232,11 @@ module tb_move_generator;
         cmd_board = FullBoard'('0);
         cmd_suppress_valid = 1'b0;
         cmd_suppress_move = NULL_MOVE;
-        cmd_bucket_tops = '0;
         pop_valid = 1'b0;
+        bad_noisy_enable = 1'b0;
+        node_init_valid = 1'b0;
         pop_thread = ThreadID'(0);
         pop_ply = PlyIndex'(0);
-        pop_eligible = '0;
-        pop_current_tops = '0;
-        pop_lower_tops = '0;
         history_update_valid = 1'b0;
         history_update_thread = ThreadID'(0);
         history_update_color = WHITE;
@@ -222,6 +247,35 @@ module tb_move_generator;
         history_update_failed1 = 12'd0;
         history_update_failed2 = 12'd0;
         history_update_failed_count = 2'd0;
+    endtask
+
+    // Establish the legal quiet-generation phase without adding any moves.
+    task automatic prepare_quiet_phase();
+        automatic ThreadID saved_pop_thread = pop_thread;
+        automatic PlyIndex saved_pop_ply = pop_ply;
+        node_init_valid = 1'b1;
+        while (!node_init_ready_vec[cmd_thread]) tick();
+        tick();
+        node_init_valid = 1'b0;
+        cmd = MOVE_GEN_GENERATE_NOISY;
+        cmd_board = FullBoard'('0);
+        while (!cmd_ready) tick();
+        cmd_valid = 1'b1;
+        tick();
+        cmd_valid = 1'b0;
+        while (!cmd_resp_valid) tick();
+        tick();
+        pop_thread = cmd_thread;
+        pop_ply = cmd_ply;
+        while (!pop_ready) tick();
+        pop_valid = 1'b1;
+        tick();
+        pop_valid = 1'b0;
+        while (!pop_resp_valid) tick();
+        check(!pop_resp_found, "empty noisy generation reaches quiet phase");
+        tick();
+        pop_thread = saved_pop_thread;
+        pop_ply = saved_pop_ply;
     endtask
 
     task automatic run_command(
@@ -241,12 +295,17 @@ module tb_move_generator;
             if (board.tiles[pos].piece_type == KING)
                 tracked_board.king_positions[board.tiles[pos].piece_color] = Position'(pos);
         end
-        while (!cmd_ready) tick();
+        if (operation == MOVE_GEN_GENERATE_QUIET
+                && !(dut.reader.cache_valid[cmd_thread]
+                    && dut.reader.cache_ply[cmd_thread] == cmd_ply
+                    && dut.reader.cache_state[cmd_thread].phase
+                        == MOVE_MEMORY_WAIT_QUIET))
+            prepare_quiet_phase();
         cmd = operation;
+        while (!cmd_ready) tick();
         cmd_board = tracked_board;
         cmd_suppress_valid = suppress_valid;
         cmd_suppress_move = suppress_move;
-        cmd_bucket_tops = tops_in;
         cmd_valid = 1'b1;
         tick();
         cmd_valid = 1'b0;
@@ -254,12 +313,15 @@ module tb_move_generator;
             while (!quiet_resp_valid) tick();
             direct_valid = 1'b0;
             direct_move = NULL_MOVE;
-            tops_out = quiet_resp_bucket_tops;
+            tops_out = tops_in;
+            tops_out[0] = MoveBucketTop'(1);
         end else begin
             while (!cmd_resp_valid) tick();
             direct_valid = cmd_resp_direct_valid;
             direct_move = cmd_resp_direct_move;
-            tops_out = cmd_resp_bucket_tops;
+            tops_out = tops_in;
+            if (operation == MOVE_GEN_GENERATE_NOISY)
+                tops_out[0] = MoveBucketTop'(1);
         end
         tick();
     endtask
@@ -273,19 +335,16 @@ module tb_move_generator;
         output MoveBucketIndex bucket
     );
         while (!pop_ready) tick();
-        pop_eligible = eligible;
-        pop_current_tops = tops;
-        pop_lower_tops = lower;
         pop_valid = 1'b1;
         tick();
         pop_valid = 1'b0;
         check(!pop_resp_valid, "pop selection precedes the RAM response");
         tick();
-        check(pop_resp_valid, "pop response has two-cycle synchronous valid");
+        while (!pop_resp_valid) tick();
+        check(pop_resp_valid, "pop response follows synchronous pointer and move reads");
         found = pop_resp_found;
         move = pop_resp_move;
         bucket = pop_resp_bucket;
-        if (found) tops[bucket] = pop_resp_new_top;
         tick();
     endtask
 
@@ -305,6 +364,18 @@ module tb_move_generator;
         for (int iteration = 0; iteration < 512; iteration++) begin
             pop_one(eligible, tops, lower, found, move, bucket);
             if (!found) begin
+                if ((eligible & BAD_NOISY_BUCKET_MASK) != MoveBucketMask'(0)
+                        && dut.reader.cache_state[pop_thread].phase
+                            == MOVE_MEMORY_WAIT_QUIET) begin
+                    bad_noisy_enable = 1'b1;
+                    tick();
+                    bad_noisy_enable = 1'b0;
+                    continue;
+                end
+                if ((eligible & BAD_NOISY_BUCKET_MASK) != MoveBucketMask'(0)
+                        && dut.reader.cache_state[pop_thread].phase
+                            == MOVE_MEMORY_BAD_NOISY)
+                    continue;
                 check(!duplicate_seen, "bucket collection returns each move once");
                 return;
             end
@@ -315,60 +386,67 @@ module tb_move_generator;
         check(1'b0, "bucket collection terminated");
     endtask
 
-    // Model bucket reservations ahead of the two-cycle response so requests
-    // remain consecutive even when reading the same thread and switching lanes.
+    // Drain the internally owned FIFO state after both generation classes.
     task automatic collect_streaming(inout MoveBucketTops tops,
         output logic [16383:0] seen);
-        automatic bit duplicate_seen = 1'b0;
-        automatic MoveBucketIndex expected_bucket[512];
-        automatic MoveBucketTop expected_top[512];
-        automatic int request_count = 0;
-        automatic int response_count = 0;
-        automatic bit sent_empty = 1'b0;
-        seen = '0;
-        pop_eligible = ALL_BUCKET_MASK;
-        pop_lower_tops = '0;
-        for (int iteration = 0; iteration < 512; iteration++) begin
-            automatic bit found = 1'b0;
-            pop_valid = !sent_empty;
-            pop_current_tops = tops;
-            if (pop_valid) begin
-                check(pop_ready, "streaming pop accepts every cycle");
-                for (int bucket = 7; bucket >= 0; bucket--) begin
-                    if (!found && tops[bucket] != MoveBucketTop'(0)) begin
-                        found = 1'b1;
-                        tops[bucket] -= MoveBucketTop'(1);
-                        expected_bucket[request_count] = MoveBucketIndex'(bucket);
-                        expected_top[request_count] = tops[bucket];
-                    end
-                end
-                sent_empty = !found;
-                request_count++;
-            end
+        automatic int count;
+        collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), count, seen);
+    endtask
+
+    // Compare early destructive reads with a completed-generation reference set.
+    task automatic collect_while_generating(input MoveGenCommand operation,
+        input FullBoard board, input logic [16383:0] expected_seen);
+        automatic logic [16383:0] seen = '0;
+        automatic bit generation_done = 0;
+        automatic bit outstanding = 0;
+        automatic bit duplicate = 0;
+        automatic bit early_response = 0;
+        if (operation == MOVE_GEN_GENERATE_QUIET)
+            prepare_quiet_phase();
+        cmd = operation;
+        cmd_board = board;
+        while (!cmd_ready) tick();
+        cmd_valid = 1;
+        tick();
+        cmd_valid = 0;
+        for (int cycle = 0; cycle < 5000; cycle++) begin
+            pop_valid = !outstanding;
+            #1;
+            if (pop_valid && pop_ready) outstanding = 1;
             tick();
-            if (iteration == 0) begin
-                check(!pop_resp_valid, "stream starts with a selection cycle");
-            end else begin
-                check(pop_resp_valid && pop_resp_thread == pop_thread
-                    && pop_resp_ply == pop_ply, "streaming response preserves routing tags");
-                if (sent_empty && response_count == request_count - 1) begin
-                    check(!pop_resp_found, "final streaming response reports exhaustion");
-                    pop_valid = 1'b0;
+            if (pop_resp_valid) begin
+                outstanding = 0;
+                if (pop_resp_found) begin
+                    duplicate |= seen[14'(pop_resp_move)];
+                    seen[14'(pop_resp_move)] = 1;
+                    early_response |= !generation_done && !cmd_resp_valid && !quiet_resp_valid;
+                end else begin
+                    pop_valid = 0;
+                    check(generation_done, "early reader reports exhaustion only after completion");
+                    if (dut.reader.cache_state[pop_thread].phase
+                            == MOVE_MEMORY_WAIT_QUIET) begin
+                        bad_noisy_enable = 1'b1;
+                        tick();
+                        bad_noisy_enable = 1'b0;
+                        continue;
+                    end
+                    if (dut.reader.cache_state[pop_thread].phase
+                            == MOVE_MEMORY_BAD_NOISY)
+                        continue;
+                    check(!duplicate && seen === expected_seen,
+                        "early reads and generation writeback preserve every move exactly once");
+                    if (operation == MOVE_GEN_GENERATE_NOISY)
+                        check(early_response, "generator serves a top-bucket move before completion");
                     tick();
-                    check(!pop_resp_valid && !duplicate_seen,
-                        "streaming pops drain without duplicates or extra responses");
                     return;
                 end
-                check(pop_resp_found && pop_resp_bucket == expected_bucket[response_count]
-                    && pop_resp_new_top == expected_top[response_count],
-                    "streaming response matches its reserved bucket slot");
-                duplicate_seen |= seen[14'(pop_resp_move)];
-                seen[14'(pop_resp_move)] = 1'b1;
-                response_count++;
+            end
+            // Completion is authoritative over older pop pointer snapshots.
+            if (cmd_resp_valid || quiet_resp_valid) begin
+                generation_done = 1;
             end
         end
-        check(1'b0, "streaming collection terminated");
-        pop_valid = 1'b0;
+        $fatal(1, "early generation collection timeout");
     endtask
 
     // Independent source-centric oracle: walk board coordinates rather than
@@ -533,23 +611,30 @@ module tb_move_generator;
         rst_n = 1'b0;
         pass_count = 0;
         fail_count = 0;
+        monitor_promotion_writes = 1'b0;
+        promotion_write_count = 0;
         idle_inputs();
         tick(2);
         rst_n = 1'b1;
         while (init_busy) tick();
 
         start_board(board);
+        cmd_thread = ThreadID'(1);
+        prepare_quiet_phase();
+        cmd_thread = ThreadID'(0);
         concurrent_response_seen[0] = 1'b0;
         concurrent_response_seen[1] = 1'b0;
         cmd = MOVE_GEN_GENERATE_NOISY;
         cmd_thread = ThreadID'(0);
         cmd_board = board;
-        cmd_bucket_tops = '0;
         cmd_valid = 1'b1;
         check(cmd_ready, "noisy pipeline accepts first concurrent job");
         tick();
         cmd = MOVE_GEN_GENERATE_QUIET;
+        #1;
+        check(!quiet_cmd_ready, "same-thread generation waits for its reserved write port");
         cmd_thread = ThreadID'(1);
+        #1;
         check(quiet_cmd_ready, "quiet pipeline is available while noisy pipeline is busy");
         tick();
         cmd_valid = 1'b0;
@@ -561,6 +646,10 @@ module tb_move_generator;
                 concurrent_response_seen[int'(quiet_resp_thread)] = 1'b1;
             tick();
         end
+        clear = 1'b1;
+        tick();
+        clear = 1'b0;
+        tick();
         cmd_thread = ThreadID'(0);
 
         tops = '0;
@@ -573,8 +662,8 @@ module tb_move_generator;
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
         check(count == 0, "start position has no noisy moves");
 
-        // Static destination priority generates edge moves first, making the
-        // central move the first same-bucket result returned by LIFO storage.
+        // Center-out destination priority and FIFO storage return central
+        // moves before later edge destinations in both generator lanes.
         empty_board(board);
         board.tiles[10] = WHITE_KNIGHT;
         board.tiles[0] = BLACK_PAWN;
@@ -585,7 +674,7 @@ module tb_move_generator;
             tops, direct_valid, direct_move, tops);
         pop_one(GOOD_NOISY_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
         check(found && same_move(popped, make_move(Position'(10), Position'(27))),
-            "noisy LIFO returns central destination before edge destination");
+            "noisy FIFO returns central destination before edge destination");
 
         empty_board(board);
         board.tiles[10] = WHITE_KNIGHT;
@@ -596,7 +685,7 @@ module tb_move_generator;
             tops, direct_valid, direct_move, tops);
         pop_one(QUIET_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
         check(found && same_move(popped, make_move(Position'(10), Position'(27))),
-            "quiet LIFO returns central destination before edge destination");
+            "quiet FIFO returns central destination before edge destination");
 
         // An enemy king is not capturable, even when a friendly slider attacks it.
         empty_board(board);
@@ -662,6 +751,34 @@ module tb_move_generator;
         board.tiles[4] = WHITE_KING;
         board.tiles[48] = WHITE_PAWN;
         board.tiles[60] = BLACK_KING;
+        tops = '0;
+        promotion_write_count = 0;
+        monitor_promotion_writes = 1'b1;
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            tops, direct_valid, direct_move, tops);
+        monitor_promotion_writes = 1'b0;
+        check(promotion_write_count == 4, "four promotion writes observed");
+        check(promotion_write_order[0] == PROMO_QUEEN,
+            "queen promotion generated first");
+        check(promotion_write_order[1] == PROMO_KNIGHT,
+            "knight promotion generated second");
+        check(promotion_write_order[2] == PROMO_ROOK,
+            "rook promotion generated third");
+        check(promotion_write_order[3] == PROMO_BISHOP,
+            "bishop promotion generated fourth");
+        pop_one(ALL_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
+        check(found && popped.promo_piece == PROMO_QUEEN,
+            "promotion FIFO reads queen first");
+        pop_one(ALL_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
+        check(found && popped.promo_piece == PROMO_KNIGHT,
+            "promotion FIFO reads knight second");
+        pop_one(ALL_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
+        check(found && popped.promo_piece == PROMO_ROOK,
+            "promotion FIFO reads rook third");
+        pop_one(ALL_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
+        check(found && popped.promo_piece == PROMO_BISHOP,
+            "promotion FIFO reads bishop fourth");
+
         tops = '0;
         run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
             tops, direct_valid, direct_move, tops);
@@ -786,6 +903,10 @@ module tb_move_generator;
         // Exercise the depth-first arena invariant independently of search.
         start_board(board);
         parent_tops = '0;
+        cmd_ply = PlyIndex'(0);
+        pop_ply = PlyIndex'(0);
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            parent_tops, direct_valid, direct_move, parent_tops);
         run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
             parent_tops, direct_valid, direct_move, parent_tops);
         pop_one(ALL_BUCKET_MASK, parent_tops, lower, found, popped, popped_bucket);
@@ -795,20 +916,29 @@ module tb_move_generator;
         board.tiles[0] = WHITE_KING;
         board.tiles[1] = WHITE_KNIGHT;
         board.tiles[63] = BLACK_KING;
+        cmd_ply = PlyIndex'(1);
+        pop_ply = PlyIndex'(1);
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            child_tops, direct_valid, direct_move, child_tops);
         run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
             child_tops, direct_valid, direct_move, child_tops);
         collect(ALL_BUCKET_MASK, child_tops, parent_tops, count, seen);
         check(count != 0, "child pushes and pops above inherited lower bounds");
-        check(child_tops == parent_tops, "child exhaustion returns to inherited tops");
         tops = parent_tops;
+        pop_ply = PlyIndex'(0);
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
         check(count == 19, "return preserves all unsearched parent moves");
         child_tops = parent_tops;
+        cmd_ply = PlyIndex'(1);
+        pop_ply = PlyIndex'(1);
+        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
+            child_tops, direct_valid, direct_move, child_tops);
         run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
             child_tops, direct_valid, direct_move, child_tops);
         collect(ALL_BUCKET_MASK, child_tops, parent_tops, count, seen);
-        check(count != 0 && child_tops == parent_tops,
-            "sibling reuses released descendant slots");
+        check(count != 0, "sibling allocates and drains its own descendant range");
+        cmd_ply = PlyIndex'(0);
+        pop_ply = PlyIndex'(0);
 
         // Exercise blocked and open rays, board edges, knight wraparound,
         // double pushes, en passant, and capture/quiet promotions in both colors.
@@ -872,11 +1002,27 @@ module tb_move_generator;
             run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
                 tops, direct_valid, direct_move, tops);
             collect_streaming(tops, streaming_seen);
-            check(streaming_seen === seen && tops == MoveBucketTops'(0),
+            check(streaming_seen === seen,
                 "continuous cross-lane pops preserve the complete move set");
         end
+        // Promotions populate the highest bucket early; lower captures and
+        // quiets exercise the generation-completion barrier with real lanes.
+        empty_board(board);
+        board.tiles[4] = WHITE_KING;
+        board.tiles[60] = BLACK_KING;
+        board.tiles[48] = WHITE_PAWN;
+        board.tiles[57] = BLACK_ROOK;
+        board.tiles[27] = WHITE_QUEEN;
+        board.tiles[35] = BLACK_PAWN;
+        for (int lane = 0; lane < 2; lane++) begin
+            tops = '0;
+            run_command(lane == 0 ? MOVE_GEN_GENERATE_NOISY : MOVE_GEN_GENERATE_QUIET,
+                board, 1'b0, NULL_MOVE, tops, direct_valid, direct_move, tops);
+            collect(ALL_BUCKET_MASK, tops, lower, count, seen);
+            collect_while_generating(lane == 0 ? MOVE_GEN_GENERATE_NOISY : MOVE_GEN_GENERATE_QUIET,
+                board, seen);
+        end
         // Cancel an accepted request between selection and the RAM access.
-        pop_current_tops = tops;
         pop_valid = 1'b1;
         tick();
         pop_valid = 1'b0;
@@ -914,20 +1060,18 @@ module tb_move_generator;
         cmd_thread = ThreadID'(0);
         pop_thread = ThreadID'(0);
         tops = '0;
-        for (int fill = 0; fill < 4 && !overflow_sticky; fill++) begin
+        for (int fill = 0; fill < 16 && !overflow_sticky; fill++) begin
+            cmd_ply = PlyIndex'(fill);
             run_command(MOVE_GEN_GENERATE_QUIET, board, 1'b0, NULL_MOVE,
                 tops, direct_valid, direct_move, tops);
         end
-        check(overflow_sticky && overflow_thread == ThreadID'(0)
-            && overflow_bucket == QUIET_LOW_BUCKET && overflow_count != 16'd0,
-            "overflow identifies the full low bucket and thread");
-        check(tops[QUIET_LOW_BUCKET] == MoveBucketTop'(64)
-                && tops[QUIET_MEDIUM_BUCKET] == MoveBucketTop'(0)
-                && tops[QUIET_HIGH_BUCKET] == MoveBucketTop'(0)
-                && tops[QUIET_HIGHEST_BUCKET] == MoveBucketTop'(0),
-            "overflow preserves strict quiet bucket assignment");
-        check(stat_bucket_high_water[QUIET_LOW_BUCKET] == MoveBucketTop'(64),
-            "high-water telemetry reaches the configured bucket capacity");
+        check(overflow_sticky, "overflow sets the sticky error bit");
+        check(dut.reader.cache_state[0].tops[QUIET_LOW_BUCKET]
+                > MoveBucketTop'(192),
+            "overflow does not clamp the move-memory tail");
+        check(stat_bucket_high_water[QUIET_LOW_BUCKET] > MoveBucketTop'(192),
+            "high-water telemetry includes overflowing writes");
+        cmd_ply = PlyIndex'(0);
 
         pop_thread = ThreadID'(1);
         pop_one(ALL_BUCKET_MASK, adjacent_tops, lower, found, popped, popped_bucket);

@@ -15,5 +15,18 @@
   },
   "instrumentation": {
     "search_statistics": false
+  },
+  "move_memory": {
+    "entries_per_thread": 4096,
+    "bucket_ratios_descending": [
+      32,
+      64,
+      64,
+      112,
+      64,
+      112,
+      16,
+      48
+    ]
   }
 }

@@ -55,7 +55,7 @@ The `uci` handshake is hardware-independent and advertises the `Ponder` and `Mov
 
 The host advertises the standard UCI `Ponder` option. `go ponder` searches the speculative position to the hardware depth ceiling without consuming the normal clock budget, and `ponderhit` restarts the saved search limit on the same transposition-table-warmed position.
 
-Immutable synthesized properties are available through `debug build`. To measure serial command turnaround, use `debug latency` for 100 status transactions or `debug latency <count>` for 100–1000 transactions; the host reports minimum, median, and p95 round-trip latency.
+Immutable synthesized properties are available through `debug build`. `debug stats` always reports whether move memory has overflowed since the last new game or reset, even when detailed search statistics are disabled. To measure serial command turnaround, use `debug latency` for 100 status transactions or `debug latency <count>` for 100–1000 transactions; the host reports minimum, median, and p95 round-trip latency.
 
 The UART byte protocol, reset sequence, and error behavior are specified in [Host-FPGA Protocol](../protocols/host-fpga-protocol.md).
 

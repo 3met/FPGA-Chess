@@ -33,6 +33,7 @@
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/move_generator/defs.sv",
       "hardware/rtl/move_generator/move_generator_bucket_store.sv",
+      "hardware/rtl/move_generator/move_generator_read_pipeline.sv",
       "hardware/rtl/move_generator/move_generator_history_table.sv",
       "hardware/rtl/move_generator/move_generator_quiet_history.sv",
       "hardware/rtl/move_generator/move_generator_lane.sv",
@@ -142,6 +143,11 @@
       "testbench": "hardware/tb/board_update_pipeline/tb_board_update_pipeline.sv",
       "top": "tb_board_update_pipeline"
     },
+    "move-reader": {
+      "source_set": "move-generator",
+      "testbench": "hardware/tb/move_generator/tb_move_generator_read_pipeline.sv",
+      "top": "tb_move_generator_read_pipeline"
+    },
     "move-generator": {
       "source_set": "move-generator",
       "testbench": "hardware/tb/move_generator/tb_move_generator.sv",
@@ -206,6 +212,11 @@
       "source_set": "search-controller",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller"
+    },
+    "search-controller-early-reads": {
+      "source_set": "search-controller",
+      "testbench": "hardware/tb/tb_search_controller.sv",
+      "top": "tb_search_controller_early_reads"
     },
     "search-controller-multithread": {
       "source_set": "search-controller",

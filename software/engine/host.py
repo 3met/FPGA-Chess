@@ -587,6 +587,8 @@ class FPGAUCIHost:
 
     def _debug_stats(self) -> None:
         """Print aggregate and per-thread FPGA search statistics."""
+        move_overflow = self._read_debug_stat(DebugStatAddress.MOVE_OVERFLOW)
+        self.emit(f"info string move memory overflow={move_overflow}")
         if not self._read_debug_stat(DebugStatAddress.ENABLED):
             self.emit("info string search statistics disabled in this FPGA build")
             return

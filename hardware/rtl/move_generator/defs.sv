@@ -4,14 +4,23 @@ package move_generator_defs;
     import chess_defs::*;
 
     localparam int MOVE_BUCKET_COUNT = 8;
-    // Bucket tops include the one-past-last value for the 1,024-entry low
-    // quiet partition, so they require one more bit than its address.
+    // External bucket-relative pointers include the one-past-last entry.
+    // Device configurations must keep every partition below 2**11 entries.
     localparam int MOVE_BUCKET_TOP_BITS = 11;
-
     typedef logic [2:0] MoveBucketIndex;
     typedef logic [MOVE_BUCKET_TOP_BITS-1:0] MoveBucketTop;
     typedef logic [MOVE_BUCKET_COUNT-1:0][MOVE_BUCKET_TOP_BITS-1:0] MoveBucketTops;
     typedef logic [MOVE_BUCKET_COUNT-1:0] MoveBucketMask;
+
+    // Move memory owns the bucket cursor so callers only request the next move.
+    typedef enum logic [2:0] {
+        MOVE_MEMORY_GOOD_NOISY = 3'd0,
+        MOVE_MEMORY_WAIT_QUIET = 3'd1,
+        MOVE_MEMORY_QUIET = 3'd2,
+        MOVE_MEMORY_BAD_NOISY = 3'd3,
+        MOVE_MEMORY_DONE = 3'd4,
+        MOVE_MEMORY_INITIALIZED = 3'd5
+    } MoveMemoryPhase;
 
     localparam MoveBucketIndex BAD_NOISY_LOW_BUCKET = MoveBucketIndex'(0);
     localparam MoveBucketIndex BAD_NOISY_HIGH_BUCKET = MoveBucketIndex'(1);

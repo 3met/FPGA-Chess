@@ -73,6 +73,22 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(rtl_parameters["SINGLE_LEGAL_MOVE_MS"], timing["single_legal_move_ms"])
         self.assertEqual(len(config["digest"]), 64)
 
+    def test_move_memory_device_parameters_and_ratio_order(self):
+        config = self.load_temporary_config()
+        params = engine_rtl_parameter_values(config)
+        self.assertEqual(params["MOVE_MEMORY_ENTRIES"], 4096)
+        self.assertEqual([params[f"MOVE_BUCKET_{b}_RATIO"] for b in range(7, -1, -1)],
+                         [32, 64, 64, 112, 64, 112, 16, 48])
+
+    def test_move_memory_rejects_invalid_partitions(self):
+        for updates in ({"entries_per_thread": 2049},
+                        {"bucket_ratios_descending": [1] * 7},
+                        {"bucket_ratios_descending": [0] * 8},
+                        {"bucket_ratios_descending": [True] * 8},
+                        {"entries_per_thread": 16384}):
+            with self.subTest(updates=updates), self.assertRaises(BuildError):
+                self.load_temporary_config(engine_updates={"move_memory": updates})
+
     def test_soft_factor_range_must_contain_default(self):
         with self.assertRaisesRegex(BuildError, "minimum <= default <= maximum"):
             self.load_temporary_config({"time_management": {"soft_factor_minimum": 5}})
@@ -90,6 +106,8 @@ class EngineConfigTests(unittest.TestCase):
                     "engine": {"threads": 17, "stack_depth": 65, "clock_frequency_hz": 1},
                     "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
+                    "move_memory": {"entries_per_thread": 2048,
+                                    "bucket_ratios_descending": [32, 64, 32, 64, 64, 192, 16, 48]},
                     "instrumentation": {"search_statistics": False},
                 }),
                 encoding="utf-8",
@@ -110,6 +128,8 @@ class EngineConfigTests(unittest.TestCase):
                     "engine": {"threads": 0, "stack_depth": 1, "clock_frequency_hz": 1},
                     "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
+                    "move_memory": {"entries_per_thread": 2048,
+                                    "bucket_ratios_descending": [32, 64, 32, 64, 64, 192, 16, 48]},
                     "instrumentation": {"search_statistics": False},
                 }),
                 encoding="utf-8",

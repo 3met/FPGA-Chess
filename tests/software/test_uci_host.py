@@ -567,7 +567,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
         class Client:
             def request(self, command):
                 address = command[1]
-                values = {0: 1, 1: 1, 2: 10, 3: 8, 4: 2, 5: 4, 6: 3}
+                values = {0: 1, 1: 1, 2: 10, 3: 8, 4: 2, 5: 4, 6: 3, 182: 0}
                 return DebugStatResponse(address=address, value=values.get(address, address - 15))
 
         host = object.__new__(FPGAUCIHost)
@@ -580,11 +580,36 @@ class UCIHostDiagnosticTests(unittest.TestCase):
 
         host._handle_debug_command(["stats"])
 
-        self.assertEqual(lines[0], "info string TT hits=2 lookups=8 hit_rate=25.00%")
-        self.assertEqual(lines[1], "info string TT cache hits=3 lookups=4 hit_rate=75.00%")
-        self.assertIn("ready=1", lines[2])
-        self.assertIn("store_publish=8", lines[2])
-        self.assertIn("done=10", lines[2])
+        self.assertEqual(lines[0], "info string move memory overflow=0")
+        self.assertEqual(lines[1], "info string TT hits=2 lookups=8 hit_rate=25.00%")
+        self.assertEqual(lines[2], "info string TT cache hits=3 lookups=4 hit_rate=75.00%")
+        self.assertIn("ready=1", lines[3])
+        self.assertIn("store_publish=8", lines[3])
+        self.assertIn("done=10", lines[3])
+
+    def test_stats_diagnostic_reports_move_overflow_when_search_stats_are_disabled(self):
+        class Client:
+            def request(self, command):
+                address = command[1]
+                return DebugStatResponse(address=address, value=int(address == 182))
+
+        host = object.__new__(FPGAUCIHost)
+        host.client = Client()
+        host._search_active = False
+        host._search_lock = threading.Lock()
+        lines: list[str] = []
+        host.emit = lines.append
+        host.connect = lambda: host.client
+
+        host._handle_debug_command(["stats"])
+
+        self.assertEqual(
+            lines,
+            [
+                "info string move memory overflow=1",
+                "info string search statistics disabled in this FPGA build",
+            ],
+        )
 
 
 class FPGAClientInitializationTests(unittest.TestCase):

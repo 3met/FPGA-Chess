@@ -94,7 +94,6 @@ module tt_external_load_store #(
     TTAge generation;
     logic clear_prev;
     logic clear_pending;
-    EntryIndex cache_request_index;
     EntryIndex lookup_request_index;
     StoreFifoCount store_fifo_count;
     TTStoreRequest store_fifo_data;
@@ -142,6 +141,10 @@ module tt_external_load_store #(
         logic [TT_HASH_BITS + ENTRY_INDEX_BITS-1:0] product;
         product = tt_index_hash(key, TAG_BITS) * ENTRY_COUNT;
         return EntryIndex'(product >> TT_HASH_BITS);
+    endfunction
+
+    function automatic CacheIndex cache_index(input ZobristKey key);
+        return CacheIndex'(tt_index_hash(key, TAG_BITS));
     endfunction
 
     function automatic TTWordAddress word_address(input EntryIndex index);
@@ -213,13 +216,14 @@ module tt_external_load_store #(
         // Lookup reduction remains combinational so blocking probes retain
         // their latency. Best-effort stores are reduced into a staging register.
         lookup_request_index = entry_index(lookup_req.zobrist_key);
-        cache_request_index = lookup_req_valid
-            ? lookup_request_index : store_stage_index;
         // One buffered probe is sufficient to serve cache hits while an
         // unrelated SDRAM transaction is active. Cache-fill/write cycles are
         // excluded so inferred single-port RAM read-during-write behavior is
         // never part of the frontend contract.
-        lookup_req_ready = memory_ready && !memory_error && !clear && !clear_busy
+        // External-TT users hold this frontend in reset until memory is ready
+        // and reset it on backend failure, so request readiness only needs to
+        // reflect frontend capacity and clear state.
+        lookup_req_ready = !clear && !clear_busy
             && !lookup_probe_valid && !lookup_miss_valid
             && state != S_READ_DONE && state != S_WRITE_DONE;
         // A full queue drops the incoming best-effort publication rather than
@@ -234,7 +238,11 @@ module tt_external_load_store #(
             && !store_stage_valid
             && store_fifo_valid;
         cache_read_enable = (lookup_req_valid && lookup_req_ready) || store_stage_issue;
-        cache_read_index = CacheIndex'(cache_request_index);
+        // The direct-mapped cache uses the same mixed hash without the wide
+        // external-table range reduction. Its full entry index remains the tag.
+        cache_read_index = lookup_req_valid
+            ? cache_index(lookup_req.zobrist_key)
+            : cache_index(store_stage_req.zobrist_key);
         clear_busy = clear || clear_pending || state == S_CACHE_CLEAR
             || state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE;
         mem_req_valid = state == S_READ_REQ || state == S_WRITE_REQ || state == S_CLEAR_REQ;
@@ -296,7 +304,7 @@ module tt_external_load_store #(
 
             if (lookup_req_valid && lookup_req_ready) begin
                 lookup_probe_req <= lookup_req;
-                lookup_probe_index <= cache_request_index;
+                lookup_probe_index <= lookup_request_index;
                 lookup_probe_valid <= 1'b1;
             end
 
@@ -405,7 +413,9 @@ module tt_external_load_store #(
                         state <= S_IDLE;
                     end else begin
                         CacheIndex cidx;
-                        cidx = CacheIndex'(active_index);
+                        cidx = operation_store
+                            ? cache_index(active_store.zobrist_key)
+                            : cache_index(active_lookup.zobrist_key);
                         cache[cidx] <= CacheLine'({1'b1, active_index, transfer_entry});
                         if (!operation_store) begin
                             drive_lookup_response(active_lookup, transfer_entry);
@@ -427,7 +437,7 @@ module tt_external_load_store #(
                 end
                 S_WRITE_DONE: if (mem_done_valid) begin
                     CacheIndex cidx;
-                    cidx = CacheIndex'(active_index);
+                    cidx = cache_index(active_store.zobrist_key);
                     if (!mem_done_error) begin
                         cache[cidx] <= CacheLine'({1'b1, active_index, write_entry});
                     end

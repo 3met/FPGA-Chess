@@ -29,6 +29,9 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
         "SEARCH_STACK_DEPTH": config["stack_depth"],
         "TT_TAG_BITS": config["tt_tag_bits"],
         "TT_CACHE_INDEX_BITS": config["tt_cache_index_bits"],
+        "MOVE_MEMORY_ENTRIES": config["move_memory_entries"],
+        **{f"MOVE_BUCKET_{7-index}_RATIO": ratio
+           for index, ratio in enumerate(config["move_bucket_ratios_descending"])},
         "HISTORY_ENTRY_COUNT": config["history_entry_count"],
         "HISTORY_ENTRY_BITS": config["history_entry_bits"],
         "ENABLE_SEARCH_STATS": int(config["search_statistics"]),
@@ -318,7 +321,7 @@ def load_engine_config(value: str) -> dict:
     engine_profile = _load_object(engine_path, "engine configuration")
     _require_keys(
         engine_profile,
-        {"search_config", "engine", "transposition_table", "history_heuristic", "instrumentation"},
+        {"search_config", "engine", "transposition_table", "history_heuristic", "move_memory", "instrumentation"},
         rel(engine_path),
     )
     search_value = engine_profile.get("search_config")
@@ -329,12 +332,25 @@ def load_engine_config(value: str) -> dict:
     engine = _object(engine_profile, "engine", rel(engine_path))
     tt = _object(engine_profile, "transposition_table", rel(engine_path))
     history = _object(engine_profile, "history_heuristic", rel(engine_path))
+    move_memory = _object(engine_profile, "move_memory", rel(engine_path))
     instrumentation = _object(engine_profile, "instrumentation", rel(engine_path))
     _require_keys(engine, {"threads", "stack_depth", "clock_frequency_hz"}, f"{rel(engine_path)}.engine")
     _require_keys(tt, {"tag_bits", "cache_index_bits"}, f"{rel(engine_path)}.transposition_table")
     _require_keys(history, {"entry_count", "entry_bits"}, f"{rel(engine_path)}.history_heuristic")
     _require_keys(instrumentation, {"search_statistics"}, f"{rel(engine_path)}.instrumentation")
+    _require_keys(move_memory, {"entries_per_thread", "bucket_ratios_descending"}, f"{rel(engine_path)}.move_memory")
+    entries = _integer(move_memory, "entries_per_thread", f"{rel(engine_path)}.move_memory", 2)
+    ratios = move_memory.get("bucket_ratios_descending")
+    if (not isinstance(ratios, list) or len(ratios) != 8
+            or any(type(ratio) is not int or ratio <= 0 for ratio in ratios)):
+        raise BuildError("move_memory.bucket_ratios_descending must contain eight positive integers")
+    if entries % sum(ratios):
+        raise BuildError("move_memory.entries_per_thread must be a multiple of the bucket ratio sum")
+    if any(entries // sum(ratios) * ratio >= 2048 for ratio in ratios):
+        raise BuildError("move_memory bucket capacities must fit the 11-bit bucket pointers")
     resolved = {
+        "move_memory_entries": entries,
+        "move_bucket_ratios_descending": ratios,
         "engine_config": rel(engine_path),
         "search_config": rel(search_path),
         "threads": _integer(engine, "threads", f"{rel(engine_path)}.engine", 1),

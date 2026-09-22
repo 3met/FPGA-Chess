@@ -49,7 +49,7 @@ The controller schedules work across:
 - [repetition checking](repetition-checker.md)
 - [time management](time-management.md)
 
-A thread has at most one in-flight request in each subsystem. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
+A thread has at most one in-flight request in each subsystem, with generation and move reads tracked independently. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
 TT responses are buffered per thread before score and window classification. The board-history and depth condition for TT validation is captured when the lookup is issued and retained through response replay, keeping those comparisons out of response dispatch. The selected thread's board and depth remain unchanged during this validation.
 
@@ -67,6 +67,10 @@ A main-search node follows this logical order:
 4. Generate quiet moves and futility-prune eligible late quiets before committing their children.
 5. Search deferred unfavorable captures.
 6. Return checkmate, stalemate, or the completed alpha/beta result.
+
+Generation and move reads are scheduled independently. Per-thread pop channels allow concurrent reads, while returned moves wait for the shared board scheduler. A thread advances only after its request is accepted.
+
+Move memory owns bucket eligibility and FIFO state, so pop requests carry only thread and ply. A node's move range is initialized before any descent, including direct and null moves that precede generation. Move memory may return high-priority noisy or quiet moves before generation completes while preserving strict bucket order. Early results may begin child preparation, but the child cannot allocate move storage, descend, or reverse the parent until that generation completes. Cancellation invalidates both generation and read work.
 
 Move generation is pseudo-legal. The controller speculatively applies each candidate and rejects it if the moving side remains in check. A legal child is recorded in repetition history and prepares its NNUE state before TT lookup, evaluation, or deeper search. On return, the controller reverses the board and accumulator changes and folds the child score into the saved parent.
 
