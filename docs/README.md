@@ -2,8 +2,6 @@
 
 These docs describe the FPGA chess engine architecture, module contracts, protocols, usage, and development workflows.
 
-Implementation details are documented only when they establish a contract, explain a non-obvious invariant, or materially constrain another subsystem. Source code and tests remain authoritative for incidental signal names, state-machine encoding, test coverage, and target-specific measurements.
-
 ## Structure
 
 | Directory | Contents |
