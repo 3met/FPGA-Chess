@@ -262,7 +262,7 @@
         "kind": "intel-pll",
         "template": "hardware/ip/pll"
       },
-      "seed": 1,
+      "seed": 3,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",

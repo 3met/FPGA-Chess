@@ -186,10 +186,12 @@ module nnue_evaluator #(
                                 : $signed(feature_row_black[
                                     lane * NNUE_FEATURE_WEIGHT_BITS
                                         +: NNUE_FEATURE_WEIGHT_BITS]);
-                            automatic NnueAccumulator changed =
-                                active_update.add
-                                    ? old_value + NnueAccumulator'(feature_weight)
-                                    : old_value - NnueAccumulator'(feature_weight);
+                            // Reuse one carry chain for addition and subtraction.
+                            automatic NnueAccumulator weight_operand =
+                                NnueAccumulator'(feature_weight)
+                                    ^ {NNUE_ACCUMULATOR_BITS{!active_update.add}};
+                            automatic NnueAccumulator changed = old_value
+                                + weight_operand + NnueAccumulator'(!active_update.add);
 `ifdef FPGA_CHESS_PROFILE
                             automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
                                 old_extended = {old_value[NNUE_ACCUMULATOR_BITS-1], old_value};

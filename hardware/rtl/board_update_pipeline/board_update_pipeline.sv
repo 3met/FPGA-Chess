@@ -109,6 +109,7 @@ module board_update_pipeline #(
     logic [63:0] check_rook_mask_d, check_rook_mask_q;
     Tile check_mover_tile_d, check_mover_tile_q;
     Color check_mover_color_d, check_mover_color_q;
+    FullBoard check_board;
 
     genvar port_pair;
     generate
@@ -235,15 +236,16 @@ module board_update_pipeline #(
         return (tile.piece_color == WHITE) ? score : -score;
     endfunction : signed_piece_score
 
-    // Apply registered special-move masks to the stage-0 board during both
-    // king-safety scans; decoding is kept out of the attack-scan timing path.
-    function automatic Tile checked_tile(input FullBoard board, input Position pos);
-        automatic Tile tile = board.tiles[pos];
-        if (check_empty_mask_q[pos]) tile = EMPTY_TILE;
-        if (check_mover_mask_q[pos]) tile = check_mover_tile_q;
-        if (check_rook_mask_q[pos]) tile = Tile'({check_mover_color_q, ROOK});
-        return tile;
-    endfunction : checked_tile
+    // Apply registered move overlays once before both king-safety scans.
+    always_comb begin
+        check_board = ctx_pipe[1].board;
+        for (int pos = 0; pos < 64; pos++) begin
+            if (check_empty_mask_q[pos]) check_board.tiles[pos] = EMPTY_TILE;
+            if (check_mover_mask_q[pos]) check_board.tiles[pos] = check_mover_tile_q;
+            if (check_rook_mask_q[pos])
+                check_board.tiles[pos] = Tile'({check_mover_color_q, ROOK});
+        end
+    end
 
     function automatic logic board_square_attacked(
         input FullBoard board,
@@ -255,20 +257,20 @@ module board_update_pipeline #(
 
         if (attacker_color == WHITE) begin
             if (is_shift_on_board(square, SOUTH_WEST, 3'd1)
-                    && checked_tile(board, shift_position(square, SOUTH_WEST, 3'd1)) == WHITE_PAWN) return 1'b1;
+                    && board.tiles[shift_position(square, SOUTH_WEST, 3'd1)] == WHITE_PAWN) return 1'b1;
             if (is_shift_on_board(square, SOUTH_EAST, 3'd1)
-                    && checked_tile(board, shift_position(square, SOUTH_EAST, 3'd1)) == WHITE_PAWN) return 1'b1;
+                    && board.tiles[shift_position(square, SOUTH_EAST, 3'd1)] == WHITE_PAWN) return 1'b1;
         end else begin
             if (is_shift_on_board(square, NORTH_WEST, 3'd1)
-                    && checked_tile(board, shift_position(square, NORTH_WEST, 3'd1)) == BLACK_PAWN) return 1'b1;
+                    && board.tiles[shift_position(square, NORTH_WEST, 3'd1)] == BLACK_PAWN) return 1'b1;
             if (is_shift_on_board(square, NORTH_EAST, 3'd1)
-                    && checked_tile(board, shift_position(square, NORTH_EAST, 3'd1)) == BLACK_PAWN) return 1'b1;
+                    && board.tiles[shift_position(square, NORTH_EAST, 3'd1)] == BLACK_PAWN) return 1'b1;
         end
 
         for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
             if (is_knight_shift_on_board(square, KnightDirection'(knight_dir))) begin
                 test_pos = shift_knight_position(square, KnightDirection'(knight_dir));
-                if (checked_tile(board, test_pos) == Tile'({attacker_color, KNIGHT})) return 1'b1;
+                if (board.tiles[test_pos] == Tile'({attacker_color, KNIGHT})) return 1'b1;
             end
         end
 
@@ -277,7 +279,7 @@ module board_update_pipeline #(
             for (int distance = 1; distance < 8; distance++) begin
                 if (is_shift_on_board(square, dir, distance[2:0])) begin
                     test_pos = shift_position(square, dir, distance[2:0]);
-                    test_tile = checked_tile(board, test_pos);
+                    test_tile = board.tiles[test_pos];
                     if (test_tile.piece_type != NULL_PIECE) begin
                         if (test_tile.piece_color == attacker_color) begin
                             if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
@@ -459,12 +461,12 @@ module board_update_pipeline #(
         piece_count_out <= next_piece_count_out;
         mover_in_check_out <= ctx_pipe[1].board_op == BOARD_PUSH_MOVE_OP
             && board_square_attacked(
-                ctx_pipe[1].board,
+                check_board,
                 ctx_pipe[1].mover_king_square,
                 Color'(~ctx_pipe[1].board.turn)
             );
         side_in_check_out <= board_square_attacked(
-            ctx_pipe[1].board,
+            check_board,
             ctx_pipe[1].side_king_square,
             Color'(~result_turn(ctx_pipe[1]))
         );
@@ -783,25 +785,39 @@ module board_update_pipeline #(
     always_comb begin
         automatic BoardUpdatePipelineCtx in = ctx_pipe[1];
         automatic BoardUpdatePipelineCtx out = in;
+        ZobristKey tile_delta[ZOBRIST_TILE_READ_PORTS];
+        ZobristKey side_delta;
+        ZobristKey old_ep_delta, new_ep_delta;
 
         for (int port_idx = 0; port_idx < ZOBRIST_TILE_READ_PORTS; port_idx++) begin
+            tile_delta[port_idx] = '0;
             if (zobrist_read_enable_q[port_idx])
-                out.zobrist_key ^= zobrist_read_data[port_idx];
+                tile_delta[port_idx] = zobrist_read_data[port_idx];
         end
+        side_delta = '0;
         if (zobrist_turn_toggle_q)
-            out.zobrist_key ^= ZOBRIST_TURN_BLACK_VALUE;
+            side_delta ^= ZOBRIST_TURN_BLACK_VALUE;
         if (zobrist_castle_toggle_q.white_kingside)
-            out.zobrist_key ^= ZOBRIST_WHITE_KINGSIDE_VALUE;
+            side_delta ^= ZOBRIST_WHITE_KINGSIDE_VALUE;
         if (zobrist_castle_toggle_q.white_queenside)
-            out.zobrist_key ^= ZOBRIST_WHITE_QUEENSIDE_VALUE;
+            side_delta ^= ZOBRIST_WHITE_QUEENSIDE_VALUE;
         if (zobrist_castle_toggle_q.black_kingside)
-            out.zobrist_key ^= ZOBRIST_BLACK_KINGSIDE_VALUE;
+            side_delta ^= ZOBRIST_BLACK_KINGSIDE_VALUE;
         if (zobrist_castle_toggle_q.black_queenside)
-            out.zobrist_key ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
+            side_delta ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
+        old_ep_delta = '0;
         if (zobrist_old_ep_valid_q)
-            out.zobrist_key ^= zobrist_old_ep_data;
+            old_ep_delta = zobrist_old_ep_data;
+        new_ep_delta = '0;
         if (zobrist_new_ep_valid_q)
-            out.zobrist_key ^= zobrist_new_ep_data;
+            new_ep_delta = zobrist_new_ep_data;
+
+        // Balance the independent hash contributions within the existing
+        // board-mutation stage instead of chaining each 64-bit XOR.
+        out.zobrist_key = (in.zobrist_key ^ side_delta)
+            ^ ((tile_delta[0] ^ tile_delta[1])
+                ^ (tile_delta[2] ^ tile_delta[3]))
+            ^ (old_ep_delta ^ new_ep_delta);
 
         case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
@@ -860,6 +876,10 @@ module board_update_pipeline #(
                     replace_tile(out.board, out.piece_count,
                         rook_to, EMPTY_TILE, rook_tile);
                 end
+                // A legal move changes occupancy only when it captures;
+                // castling moves its rook and promotion replaces its pawn.
+                out.piece_count = in.piece_count - PieceCount'(
+                    is_ep || destination_tile.piece_type != NULL_PIECE);
 
                 out.move_record.from_pos = from_pos;
                 out.move_record.to_pos = to_pos;
@@ -930,6 +950,9 @@ module board_update_pipeline #(
                         replace_tile(out.board, out.piece_count,
                             rook_from, EMPTY_TILE, rook_tile);
                     end
+                    // Reverse restores at most the one captured piece.
+                    out.piece_count = in.piece_count + PieceCount'(
+                        is_ep || restored_capture.piece_type != NULL_PIECE);
                 end
 
                 replace_side_data(out.board, moved_color, rec.castling_rights, rec.has_ep, rec.ep_file, rec.halfmove_clock);

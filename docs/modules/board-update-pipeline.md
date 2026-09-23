@@ -40,7 +40,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Pipeline
 
-The fixed three-stage pipeline decodes the operation, starts table reads, and registers complete special-move overlay masks; aligns synchronous table results while checking both kings against the masked board; then registers the transformed board and aligned check flags. Registering the masks keeps en passant and castling decode out of the attack-scan timing paths, while the check flags keep attack scans out of the search controller's state-update muxes.
+The fixed three-stage pipeline decodes the operation, starts table reads, and registers complete special-move overlay masks; aligns synchronous table results while checking both kings against one shared masked board; then registers the transformed board and aligned check flags. Registering the masks keeps en passant and castling decode out of the attack-scan timing paths, while the check flags keep attack scans out of the search controller's state-update muxes.
 
 ## Board Setup
 
