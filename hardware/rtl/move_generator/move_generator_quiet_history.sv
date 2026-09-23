@@ -42,8 +42,9 @@ module move_generator_quiet_history #(
         ? 1 : $clog2(REWARD_PER_DEPTH + 1);
     localparam int DEPTH_REWARD_BITS = $bits(PlyIndex) + REWARD_PER_DEPTH_BITS;
     localparam int PRODUCT_BITS = HISTORY_ENTRY_BITS + REWARD_BITS;
-    localparam int UPDATE_BITS = ((HISTORY_ENTRY_BITS > REWARD_BITS)
-        ? HISTORY_ENTRY_BITS : REWARD_BITS) + 2;
+    // The constrained bonus can move a history entry at most one step beyond
+    // its signed range, so one guard bit is sufficient for saturation.
+    localparam int UPDATE_BITS = HISTORY_ENTRY_BITS + 1;
     localparam logic signed [HISTORY_ENTRY_BITS-1:0] HISTORY_MINIMUM =
         {1'b1, {(HISTORY_ENTRY_BITS-1){1'b0}}};
     localparam logic signed [HISTORY_ENTRY_BITS-1:0] HISTORY_MAXIMUM =
@@ -149,7 +150,8 @@ module move_generator_quiet_history #(
                 ? REWARD_BITS'(MAXIMUM_REWARD)
                 : REWARD_BITS'(depth_reward);
             magnitude = update_is_malus
-                ? (reward_magnitude / MALUS_DIVISOR) : reward_magnitude;
+                ? REWARD_BITS'(reward_magnitude / MALUS_DIVISOR)
+                : reward_magnitude;
             signed_bonus = update_is_malus
                 ? -$signed({1'b0, magnitude}) : $signed({1'b0, magnitude});
             // Gravity scales with the configured signed range:
@@ -183,65 +185,62 @@ module move_generator_quiet_history #(
             init_busy <= 1'b1;
             clear_address <= '0;
             state <= UPDATE_IDLE;
+        end else if (clear) begin
+            init_busy <= 1'b1;
+            clear_address <= '0;
+            state <= UPDATE_IDLE;
+        end else if (init_busy) begin
+            if (clear_address == HISTORY_ADDRESS_BITS'(HISTORY_ENTRY_COUNT - 1))
+                init_busy <= 1'b0;
+            else
+                clear_address <= clear_address + HISTORY_ADDRESS_BITS'(1);
         end else begin
-            if (clear) begin
-                init_busy <= 1'b1;
-                clear_address <= '0;
-                state <= UPDATE_IDLE;
-            end else if (init_busy) begin
-                if (clear_address == HISTORY_ADDRESS_BITS'(HISTORY_ENTRY_COUNT - 1))
-                    init_busy <= 1'b0;
-                else
-                    clear_address <= clear_address + HISTORY_ADDRESS_BITS'(1);
-            end
-
-            if (!init_busy) begin
-                case (state)
-                    UPDATE_IDLE: begin
-                        // The input is best-effort: ready remains asserted and
-                        // any update arriving while this pipeline is occupied
-                        // is deliberately dropped.
-                        if (update_valid) begin
-                            active_thread <= update_thread;
-                            active_color <= update_color;
-                            active_from <= update_from;
-                            active_to <= update_to;
-                            active_depth <= update_depth;
-                            failed0 <= update_failed0;
-                            failed1 <= update_failed1;
-                            failed2 <= update_failed2;
-                            failed_count <= update_failed_count;
-                            update_entry <= 2'd0;
-                            update_is_malus <= 1'b0;
-                            state <= UPDATE_READ;
-                        end
+            case (state)
+                UPDATE_IDLE: begin
+                    // The input is best-effort: ready remains asserted and
+                    // any update arriving while this pipeline is occupied
+                    // is deliberately dropped.
+                    if (update_valid) begin
+                        active_thread <= update_thread;
+                        active_color <= update_color;
+                        active_from <= update_from;
+                        active_to <= update_to;
+                        active_depth <= update_depth;
+                        failed0 <= update_failed0;
+                        failed1 <= update_failed1;
+                        failed2 <= update_failed2;
+                        failed_count <= update_failed_count;
+                        update_entry <= 2'd0;
+                        update_is_malus <= 1'b0;
+                        state <= UPDATE_READ;
                     end
-                    UPDATE_READ: begin
-                        if (!lookup_valid)
-                            state <= UPDATE_CAPTURE;
+                end
+                UPDATE_READ: begin
+                    if (!lookup_valid)
+                        state <= UPDATE_CAPTURE;
+                end
+                UPDATE_CAPTURE: begin
+                    captured_value <= read_data;
+                    state <= UPDATE_WRITE;
+                end
+                UPDATE_WRITE: begin
+                    // A same-address generator lookup wins; drop this one
+                    // write instead of exposing ambiguous read-during-write data.
+                    if (update_entry < failed_count) begin
+                        case (update_entry)
+                            2'd0: {active_from, active_to} <= failed0;
+                            2'd1: {active_from, active_to} <= failed1;
+                            default: {active_from, active_to} <= failed2;
+                        endcase
+                        update_entry <= update_entry + 2'd1;
+                        update_is_malus <= 1'b1;
+                        state <= UPDATE_READ;
+                    end else begin
+                        state <= UPDATE_IDLE;
                     end
-                    UPDATE_CAPTURE: begin
-                        captured_value <= read_data;
-                        state <= UPDATE_WRITE;
-                    end
-                    default: begin
-                        // A same-address generator lookup wins; drop this one
-                        // write instead of exposing ambiguous read-during-write data.
-                        if (update_entry < failed_count) begin
-                            case (update_entry)
-                                2'd0: {active_from, active_to} <= failed0;
-                                2'd1: {active_from, active_to} <= failed1;
-                                default: {active_from, active_to} <= failed2;
-                            endcase
-                            update_entry <= update_entry + 2'd1;
-                            update_is_malus <= 1'b1;
-                            state <= UPDATE_READ;
-                        end else begin
-                            state <= UPDATE_IDLE;
-                        end
-                    end
-                endcase
-            end
+                end
+                default: state <= UPDATE_IDLE;
+            endcase
         end
     end
 

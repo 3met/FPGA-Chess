@@ -886,6 +886,25 @@ module tb_move_generator;
                     Position'(3), Position'(11))]) == 8'sd0,
             "busy history pipeline drops a new update without backpressure");
 
+        // Clearing during a pending read must cancel the update pipeline; the
+        // RAM sweep must not be followed by a stale write from that update.
+        launch_history_update_with_failures(
+            make_move(Position'(2), Position'(10)),
+            NULL_MOVE, NULL_MOVE, NULL_MOVE, 2'd0, 6'd4
+        );
+        check(dut.quiet_history.state == 1, "history update reaches read state");
+        clear = 1'b1;
+        tick();
+        check(dut.quiet_history.state == 0 && dut.quiet_history.init_busy,
+            "clear cancels a pending history update");
+        clear = 1'b0;
+        while (init_busy) tick();
+        tick();
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
+                dut.quiet_history.history_hash(ThreadID'(0), WHITE,
+                    Position'(2), Position'(10))]) == 8'sd0,
+            "cleared history remains zero after cancelling an update");
+
         // Pins are deliberately left to board update: the sideways rook move
         // must remain in the pseudo-legal stream even though it exposes e1.
         empty_board(board);
