@@ -68,8 +68,8 @@ class ProtocolEncodingTests(unittest.TestCase):
     def test_timed_search_commands_include_default_overhead(self):
         self.assertEqual(cmd_search_fixed_time(250), bytes.fromhex("11fa00000a0000"))
         self.assertEqual(
-            cmd_search_on_clock(1000, 2000, 10, 20, 30),
-            bytes.fromhex("12e80300d007000a00001400001e000a0000"),
+            cmd_search_on_clock(1000, 10, 30),
+            bytes.fromhex("12e803000a00001e000a0000"),
         )
 
     def test_search_response_decoding(self):

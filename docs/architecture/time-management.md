@@ -1,6 +1,6 @@
 # Time Management
 
-The UCI host sends `wtime`, `btime`, `winc`, `binc`, `movestogo`, and the current `Move Overhead` option with a clock search. The option defaults to 10 ms. Fixed `movetime` searches also carry the overhead; fixed-depth, fixed-node, and perft commands do not use time management.
+The UCI host selects the time and increment for the side to move from `wtime`/`winc` or `btime`/`binc` and sends only those values, `movestogo`, and the current `Move Overhead` option to the FPGA. A clock search is selected when either side's remaining time is supplied; an omitted time or increment for the side to move is treated as zero. The option defaults to 10 ms. Fixed `movetime` searches also carry the overhead; fixed-depth, fixed-node, and perft commands do not use time management.
 
 All time values use the 24-bit millisecond `TimeType`; representable durations must be less than `16,777,216 ms`, about 4.66 hours. The main policy constants are centralized in `hardware/config/search/default.json`.
 

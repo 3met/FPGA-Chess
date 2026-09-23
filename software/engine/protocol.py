@@ -401,10 +401,8 @@ def cmd_search_fixed_time(milliseconds: int, move_overhead_ms: int = 10) -> byte
 
 
 def cmd_search_on_clock(
-    wtime: int,
-    btime: int,
-    winc: int = 0,
-    binc: int = 0,
+    remaining_time: int,
+    increment: int = 0,
     moves_to_go: int = 0,
     move_overhead_ms: int = 10,
 ) -> bytes:
@@ -412,10 +410,8 @@ def cmd_search_on_clock(
         raise ProtocolError(f"Moves to go must fit in 16 bits: {moves_to_go}")
     return command(
         Command.SEARCH_ON_CLOCK,
-        encode_time_ms(wtime)
-        + encode_time_ms(btime)
-        + encode_time_ms(winc)
-        + encode_time_ms(binc)
+        encode_time_ms(remaining_time)
+        + encode_time_ms(increment)
         + moves_to_go.to_bytes(2, "little", signed=False)
         + encode_time_ms(move_overhead_ms),
     )

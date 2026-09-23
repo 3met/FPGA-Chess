@@ -1195,10 +1195,8 @@ module tb_search_controller #(
         automatic EngineControllerRequest request = zero_request();
 
         request.operation = ENGINE_CTRL_SEARCH_ON_CLOCK;
-        request.wtime = TimeType'(0);
-        request.btime = TimeType'(1000);
-        request.winc = TimeType'(0);
-        request.binc = TimeType'(0);
+        request.remaining_time = TimeType'(0);
+        request.increment = TimeType'(0);
         pulse_request(request, label);
         wait_response(label);
         check(!resp.error, {label, " no error"});

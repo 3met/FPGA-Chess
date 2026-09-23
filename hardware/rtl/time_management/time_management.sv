@@ -28,13 +28,10 @@ module time_management #(
     input logic setup_start,
     input logic setup_fixed_time,
     input logic setup_clock_time,
-    input logic side_to_move_white,
     input TimeType time_limit,
     input TimeType move_overhead,
-    input TimeType white_time,
-    input TimeType black_time,
-    input TimeType white_increment,
-    input TimeType black_increment,
+    input TimeType remaining_time,
+    input TimeType clock_increment,
     input logic [15:0] moves_to_go,
 
     input logic adaptive_start,
@@ -166,13 +163,9 @@ module time_management #(
             case (state)
                 TM_IDLE: begin
                     if (setup_start) begin
-                        automatic TimeType selected_time;
-                        automatic TimeType selected_increment;
                         automatic TimeType usable;
-                        selected_time = side_to_move_white ? white_time : black_time;
-                        selected_increment = side_to_move_white ? white_increment : black_increment;
-                        usable = (selected_time > move_overhead)
-                            ? selected_time - move_overhead : TimeType'(0);
+                        usable = (remaining_time > move_overhead)
+                            ? remaining_time - move_overhead : TimeType'(0);
                         if (setup_fixed_time) begin
                             automatic TimeType fixed_budget;
                             fixed_budget = (time_limit > move_overhead)
@@ -184,7 +177,7 @@ module time_management #(
                             done <= 1'b1;
                         end else if (setup_clock_time) begin
                             usable_time <= usable;
-                            increment <= selected_increment;
+                            increment <= clock_increment;
                             clock_divisor <= moves_to_go != 16'd0
                                 ? {1'b0, moves_to_go} + 17'(MOVES_TO_GO_BUFFER)
                                 : 17'(DEFAULT_MOVES_DIVISOR);

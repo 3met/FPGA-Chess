@@ -151,6 +151,7 @@ def _go_values(args: list[str]) -> dict[str, str]:
 
 def parse_go_command(
     args: list[str],
+    side_to_move_white: bool,
     move_overhead_ms: int = DEFAULT_MOVE_OVERHEAD_MS,
 ) -> ParsedGoCommand:
     """Parse UCI go arguments and encode the supported FPGA operation."""
@@ -175,12 +176,12 @@ def parse_go_command(
         )
     elif "nodes" in values:
         command = cmd_search_nodes(parse_nodes(values["nodes"]))
-    elif "wtime" in values and "btime" in values:
+    elif "wtime" in values or "btime" in values:
+        # Only the clock of the side to move is relevant to this search.
+        time_key, increment_key = ("wtime", "winc") if side_to_move_white else ("btime", "binc")
         command = cmd_search_on_clock(
-            parse_time(values["wtime"], "wtime"),
-            parse_time(values["btime"], "btime"),
-            parse_time(values.get("winc", "0"), "winc"),
-            parse_time(values.get("binc", "0"), "binc"),
+            parse_time(values.get(time_key, "0"), time_key),
+            parse_time(values.get(increment_key, "0"), increment_key),
             parse_time(values.get("movestogo", "0"), "movestogo"),
             move_overhead_ms,
         )

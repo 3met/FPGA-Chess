@@ -57,6 +57,14 @@ class UCIHostSpecTests(unittest.TestCase):
         with mock.patch("sys.stdin", stream):
             self.assertEqual(list(_input_lines()), ["uci\n", "isready\n"])
 
+    def test_clock_command_uses_the_current_board_turn(self):
+        host = self.make_host()
+        args = ["wtime", "1000", "btime", "2000", "winc", "10", "binc", "20"]
+        self.assertEqual(host._build_go_command(args).command, bytes.fromhex("12e803000a000000000a0000"))
+
+        host.board.turn = False
+        self.assertEqual(host._build_go_command(args).command, bytes.fromhex("12d0070014000000000a0000"))
+
     def test_input_lines_uses_editable_input_for_a_terminal(self):
         stream = mock.Mock()
         stream.isatty.return_value = True

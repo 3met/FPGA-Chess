@@ -705,7 +705,7 @@ class FPGAUCIHost:
         thread.start()
 
     def _build_go_command(self, args: list[str]) -> ParsedGoCommand:
-        parsed = parse_go_command(args, self.move_overhead_ms)
+        parsed = parse_go_command(args, self.board.turn, self.move_overhead_ms)
         if self.debug:
             for warning in parsed.warnings:
                 self.emit(f"info string {warning}")

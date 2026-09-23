@@ -21,7 +21,7 @@ class UCICommandParsingTests(unittest.TestCase):
         )
 
     def test_go_parsing_encodes_supported_limit_and_reports_ignored_constraints(self):
-        parsed = parse_go_command(["searchmoves", "e2e4", "depth", "3"])
+        parsed = parse_go_command(["searchmoves", "e2e4", "depth", "3"], True)
         self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
         self.assertFalse(parsed.is_perft)
         self.assertFalse(parsed.wait_for_stop)
@@ -37,49 +37,64 @@ class UCICommandParsingTests(unittest.TestCase):
     def test_clock_fields_and_move_overhead_are_encoded(self):
         parsed = parse_go_command(
             ["wtime", "1000", "btime", "2000", "winc", "10", "binc", "20", "movestogo", "30"],
+            True,
             move_overhead_ms=15,
         )
         self.assertEqual(
             parsed.command,
-            bytes.fromhex("12e80300d007000a00001400001e000f0000"),
+            bytes.fromhex("12e803000a00001e000f0000"),
         )
 
+        black = parse_go_command(
+            ["wtime", "1000", "btime", "2000", "winc", "10", "binc", "20", "movestogo", "30"],
+            False,
+            move_overhead_ms=15,
+        )
+        self.assertEqual(black.command, bytes.fromhex("12d007001400001e000f0000"))
+
+    def test_clock_search_accepts_one_remaining_clock(self):
+        white = parse_go_command(["wtime", "1000", "winc", "10"], True)
+        self.assertEqual(white.command, bytes.fromhex("12e803000a000000000a0000"))
+
+        black = parse_go_command(["btime", "2000", "binc", "20"], False)
+        self.assertEqual(black.command, bytes.fromhex("12d0070014000000000a0000"))
+
     def test_movetime_carries_move_overhead(self):
-        parsed = parse_go_command(["movetime", "250"], move_overhead_ms=10)
+        parsed = parse_go_command(["movetime", "250"], True, move_overhead_ms=10)
         self.assertEqual(parsed.command, bytes.fromhex("11fa00000a0000"))
 
     def test_go_parsing_keeps_original_range_validation(self):
         with self.assertRaisesRegex(ProtocolError, "depth must be between 0 and 31"):
-            parse_go_command(["depth", "32"])
+            parse_go_command(["depth", "32"], True)
         with self.assertRaisesRegex(ProtocolError, "nodes must be nonnegative"):
-            parse_go_command(["nodes", "-1"])
+            parse_go_command(["nodes", "-1"], True)
 
     def test_go_parsing_rejects_recognized_fields_without_values(self):
         with self.assertRaisesRegex(ProtocolError, "go depth requires a value"):
-            parse_go_command(["depth"])
+            parse_go_command(["depth"], True)
         with self.assertRaisesRegex(ProtocolError, "go wtime requires a value"):
-            parse_go_command(["wtime", "btime", "1000"])
+            parse_go_command(["wtime", "btime", "1000"], True)
         with self.assertRaisesRegex(ProtocolError, "go searchmoves requires at least one move"):
-            parse_go_command(["searchmoves", "depth", "3"])
+            parse_go_command(["searchmoves", "depth", "3"], True)
 
     def test_unknown_tokens_are_ignored_and_infinite_waits_for_stop(self):
-        parsed = parse_go_command(["nonsense", "depth", "3"])
+        parsed = parse_go_command(["nonsense", "depth", "3"], True)
         self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 3]))
         self.assertFalse(parsed.wait_for_stop)
 
-        parsed = parse_go_command(["infinite"])
+        parsed = parse_go_command(["infinite"], True)
         self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
         self.assertTrue(parsed.wait_for_stop)
 
     def test_ponder_searches_to_max_depth_then_resumes_the_clock_limit(self):
-        parsed = parse_go_command(["ponder", "wtime", "1000", "btime", "2000", "winc", "10"])
+        parsed = parse_go_command(["ponder", "wtime", "1000", "btime", "2000", "winc", "10"], True)
 
         self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
         self.assertTrue(parsed.is_ponder)
         self.assertFalse(parsed.wait_for_stop)
         self.assertEqual(
             parsed.resume_command,
-            bytes.fromhex("12e80300d007000a000000000000000a0000"),
+            bytes.fromhex("12e803000a000000000a0000"),
         )
 
 
