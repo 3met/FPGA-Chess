@@ -1,6 +1,6 @@
 # Build, Test, and Synthesis
 
-The repository entrypoint is `python -m tools.hardware_build`. It uses only the Python standard library and supports Windows and Linux when the required simulator or vendor tools are on `PATH`.
+The hardware workflow entrypoint is `python -m tools.hardware_build`. It uses only the Python standard library and supports Windows and Linux when the required simulator or vendor tools are on `PATH`.
 
 ## Manifest
 
@@ -40,13 +40,13 @@ Synthesis and runtime profiling resolve profiles through the same path so they u
 | `python -m tools.hardware_build synth-report` | Summarize the selected or most recent synthesis result. |
 | `python -m tools.hardware_build timing-paths --target quartus-de1-soc` | Report the worst or tightest setup paths from an existing Quartus fit. |
 
-Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`. `check --tuning` includes the optional tuning tests when `requirements-tuning.txt` is installed.
+Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`. `check` runs Python tests under `tests/engine/`, `tests/live_fpga/`, and `tests/hardware_build/` before the RTL tests; the live FPGA tests mock the device. `check --tuning` also includes the optional tuning tests when `requirements-tuning.txt` is installed.
 
 Synthesis verifies generated data before invoking the vendor flow. Quartus targets use Smart Recompile to determine the earliest invalid stage, preserve valid upstream results, and skip compilation entirely when all outputs are current; `--clean` intentionally discards that state and forces a full build. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Results and timing metadata are stored beside the vendor reports for `synth-report`.
 
 Targets with an engine profile also accept `--engine-config <path>` to synthesize an isolated profile without modifying the manifest target. This is used by search-parameter tuning and records the resolved override in normal synthesis metadata.
 
-The DE1-SoC profile runs the engine at 75 MHz with two search threads, a 32-ply stack, and 4,096 move-memory entries per thread. Synthesis generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from the profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
+The DE1-SoC target generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from its selected profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 

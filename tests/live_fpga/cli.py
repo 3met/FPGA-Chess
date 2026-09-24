@@ -7,13 +7,13 @@ import re
 import sys
 from typing import Iterable, Sequence
 
-from software.benchmarks.positions import (
+from tests.live_fpga.positions import (
     PERFT_POSITIONS,
     REPETITION_CASES,
     SANITY_POSITIONS,
     RepetitionCase,
 )
-from software.benchmarks.session import FPGAUCISession, FPGAUCIError
+from tests.live_fpga.session import FPGAUCISession, FPGAUCIError
 from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS
 
 NODES_RE = re.compile(r"\bnodes\s+(\d+)\b")

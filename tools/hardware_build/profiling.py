@@ -12,7 +12,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from software.benchmarks.positions import PROFILE_POSITIONS
 from software.engine.protocol import (
     NODE_COUNT_MAX,
     TIME_MAX_MS,
@@ -37,6 +36,7 @@ from .engine_config import (
 )
 from .manifest import expand_source_set, load_manifest
 from .profile_format import format_profile_report, format_profile_suite_report
+from .profile_positions import PROFILE_POSITIONS
 from .profile_report import (
     build_profile_report,
     build_profile_suite_report,

@@ -14,8 +14,7 @@ The complete board target is the Intel/Altera DE1-SoC, where the FPGA-side SDR S
 | `hardware/build/manifest.json` | Source sets, tests, generated data, and synthesis targets. |
 | `hardware/data/` | Generated Zobrist and evaluation data. |
 | `software/engine/` | UCI host, protocol encoding, FEN handling, and serial transport. |
-| `software/benchmarks/` | Live-engine integration checks. |
-| `tests/` | Python tests grouped by software subsystem. |
+| `tests/` | Python tests, including opt-in checks against a connected FPGA. |
 | `tools/hardware_build/` | Build, simulation, profiling, synthesis, and programming CLI. |
 | `tools/tuning/` | Evaluation training and parameter export. |
 
@@ -90,8 +89,8 @@ python -m software.engine --port <serial-port>
 
 When `--port` is omitted, the host uses `FPGA_CHESS_PORT` or attempts to identify an unambiguous USB-UART adapter. See [DE1-SoC and UCI Host Setup](docs/usage/de1-soc-uci.md) for wiring, port selection, connection behavior, and pondering. The FPGA command and response format is specified in [Host-FPGA Protocol](docs/protocols/host-fpga-protocol.md).
 
-## Profiling, Tuning, and Benchmarks
+## Profiling, Tuning, and Live FPGA Checks
 
 Cycle-accurate simulation profiling is documented in [Engine Runtime Profiling](docs/development/engine-profiling.md). Evaluation training is documented in [Evaluation Tuning](docs/development/evaluation-tuning.md).
 
-`python -m software.benchmarks` runs opt-in checks against a connected FPGA. These hardware-dependent commands are not part of the normal `check` workflow. Each benchmark command accepts `--port <serial-port>`; when it is omitted, the host uses `FPGA_CHESS_PORT` or USB-UART auto-detection.
+`python -m tests.live_fpga sanity` runs opt-in search checks against a connected FPGA; `python -m tests.live_fpga perft` checks move-generation counts. These hardware-dependent commands are not part of the normal `check` workflow. Each command accepts `--port <serial-port>`; when it is omitted, the host uses `FPGA_CHESS_PORT` or USB-UART auto-detection.

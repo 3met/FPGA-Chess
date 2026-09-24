@@ -4,13 +4,12 @@ import io
 import unittest
 from unittest.mock import MagicMock, patch
 
-from software.benchmarks.positions import (
+from tests.live_fpga.positions import (
     PERFT_POSITIONS,
-    PROFILE_POSITIONS,
     REPETITION_CASES,
     SANITY_POSITIONS,
 )
-from software.benchmarks.cli import (
+from tests.live_fpga.cli import (
     SANITY_DEPTH,
     SANITY_MOVETIME_MS,
     SANITY_MOVETIME_TOLERANCE_MS,
@@ -25,7 +24,7 @@ from software.benchmarks.cli import (
 from software.engine.protocol import encode_fen
 
 
-class BenchmarkPositionTests(unittest.TestCase):
+class LiveFPGAPositionTests(unittest.TestCase):
     def test_perft_positions_are_valid_and_unique(self):
         self.assertTrue(PERFT_POSITIONS)
         self.assertEqual(len({case.name for case in PERFT_POSITIONS}), len(PERFT_POSITIONS))
@@ -54,15 +53,6 @@ class BenchmarkPositionTests(unittest.TestCase):
         self.assertEqual(len({case.name for case in SANITY_POSITIONS}), len(SANITY_POSITIONS))
         self.assertEqual(len({case.fen for case in SANITY_POSITIONS}), len(SANITY_POSITIONS))
         for case in SANITY_POSITIONS:
-            self.assertTrue(case.name)
-            self.assertEqual(len(case.fen.split()), 6)
-            self.assertEqual(len(encode_fen(case.fen)), 36)
-
-    def test_profile_positions_are_complete_and_unique(self):
-        self.assertTrue(PROFILE_POSITIONS)
-        self.assertEqual(len({case.name for case in PROFILE_POSITIONS}), len(PROFILE_POSITIONS))
-        self.assertEqual(len({case.fen for case in PROFILE_POSITIONS}), len(PROFILE_POSITIONS))
-        for case in PROFILE_POSITIONS:
             self.assertTrue(case.name)
             self.assertEqual(len(case.fen.split()), 6)
             self.assertEqual(len(encode_fen(case.fen)), 36)
@@ -155,9 +145,9 @@ class SanitySuiteTests(unittest.TestCase):
             events.append(("search", fen, go, timeout))
             return 100 + len(calls), "e2e4", 0.240
 
-        with patch("software.benchmarks.cli.FPGAUCISession", return_value=engine), \
-                patch("software.benchmarks.cli._search", side_effect=search), \
-                patch("software.benchmarks.cli._run_repetition_checks", return_value=[]) as repetition, \
+        with patch("tests.live_fpga.cli.FPGAUCISession", return_value=engine), \
+                patch("tests.live_fpga.cli._search", side_effect=search), \
+                patch("tests.live_fpga.cli._run_repetition_checks", return_value=[]) as repetition, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             status = run_sanity(SANITY_DEPTH, 10.0, 120.0, False)
 
@@ -180,7 +170,7 @@ class SanitySuiteTests(unittest.TestCase):
         self.assertIn("reset determinism disabled", output.getvalue())
 
     def test_sanity_cli_uses_configured_defaults(self):
-        with patch("software.benchmarks.cli.run_sanity", return_value=0) as sanity:
+        with patch("tests.live_fpga.cli.run_sanity", return_value=0) as sanity:
             self.assertEqual(main(["sanity"]), 0)
 
         sanity.assert_called_once_with(SANITY_DEPTH, 10.0, 120.0, False, None)
@@ -194,9 +184,9 @@ class SanitySuiteTests(unittest.TestCase):
         ]
         output = io.StringIO()
 
-        with patch("software.benchmarks.cli.FPGAUCISession", return_value=engine), \
-                patch("software.benchmarks.cli._search", side_effect=results), \
-                patch("software.benchmarks.cli._run_repetition_checks", return_value=[]), \
+        with patch("tests.live_fpga.cli.FPGAUCISession", return_value=engine), \
+                patch("tests.live_fpga.cli._search", side_effect=results), \
+                patch("tests.live_fpga.cli._run_repetition_checks", return_value=[]), \
                 contextlib.redirect_stdout(output):
             status = run_sanity(SANITY_DEPTH, 10.0, 120.0, False)
 
@@ -235,7 +225,7 @@ class RepetitionSanityTests(unittest.TestCase):
     def test_repetition_checks_detection_and_policy_separately(self):
         engine = MagicMock()
 
-        with patch("software.benchmarks.cli._search_position", side_effect=self._passing_results()) as search:
+        with patch("tests.live_fpga.cli._search_position", side_effect=self._passing_results()) as search:
             failures = _run_repetition_checks(engine, SANITY_REPETITION_DEPTH, 10.0, 120.0)
 
         self.assertEqual(failures, [])
@@ -263,8 +253,8 @@ class RepetitionSanityTests(unittest.TestCase):
         results = self._passing_results()[:4]
         results[-1] = (100, "e2e5", 0.0, "cp 0")
 
-        with patch("software.benchmarks.cli.REPETITION_CASES", (case,)), \
-                patch("software.benchmarks.cli._search_position", side_effect=results):
+        with patch("tests.live_fpga.cli.REPETITION_CASES", (case,)), \
+                patch("tests.live_fpga.cli._search_position", side_effect=results):
             failures = _run_repetition_checks(MagicMock(), SANITY_REPETITION_DEPTH, 10.0, 120.0)
 
         self.assertEqual(len(failures), 1)
@@ -275,8 +265,8 @@ class RepetitionSanityTests(unittest.TestCase):
         results = self._passing_results()[:4]
         results[-1] = (100, case.draw_move, 0.0, "cp 0")
 
-        with patch("software.benchmarks.cli.REPETITION_CASES", (case,)), \
-                patch("software.benchmarks.cli._search_position", side_effect=results):
+        with patch("tests.live_fpga.cli.REPETITION_CASES", (case,)), \
+                patch("tests.live_fpga.cli._search_position", side_effect=results):
             failures = _run_repetition_checks(MagicMock(), SANITY_REPETITION_DEPTH, 10.0, 120.0)
 
         self.assertEqual(len(failures), 1)

@@ -15,7 +15,7 @@ python -m tools.hardware_build profile --nodes 10000 --threads 4 --stack-depth 3
 python -m tools.hardware_build profile-position --fen "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1" --depth 4
 ```
 
-At most one of `--depth`, `--nodes`, or `--time-ms` selects the search limit. `--target` selects the engine profile, while `--engine-config`, `--threads`, `--stack-depth`, and `--engine-clock-hz` override it. `--simulator` selects the backend, `--jobs` controls suite concurrency, and `--output` selects the artifact directory. Use `--event-trace` or `--waveform` only when the additional diagnostic output is needed.
+At most one of `--depth`, `--nodes`, or `--time-ms` selects the search limit; the default is 50 ms of simulated search. `--timeout` sets a wall-clock limit per position and is disabled by default. `--target` selects the engine profile, while `--engine-config`, `--threads`, `--stack-depth`, and `--engine-clock-hz` override it. `--simulator` selects the backend, `--jobs` controls suite concurrency, and `--output` selects the artifact directory. Use `--event-trace` or `--waveform` only when the additional diagnostic output is needed.
 
 Verilator and ModelSim must produce the same engine result and measurement events, although clock-edge scheduling may attribute an occasional sample to an adjacent internal state.
 

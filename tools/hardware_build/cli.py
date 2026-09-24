@@ -5,7 +5,8 @@ import signal
 import sys
 
 from .common import BuildError, RTL_TEST_TIMEOUT_SECONDS
-from .generated_data import command_check, command_gen_data
+from .check import command_check
+from .generated_data import command_gen_data
 from .manifest import command_list, command_validate
 from .programming import command_flash
 from .profiling import command_profile, command_profile_position

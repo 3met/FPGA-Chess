@@ -5,8 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from software.engine.protocol import encode_fen
 from tools.hardware_build.common import BuildError
 from tools.hardware_build.profile_format import format_profile_report, format_profile_suite_report
+from tools.hardware_build.profile_positions import PROFILE_POSITIONS
 from tools.hardware_build.profile_report import (
     build_profile_report,
     build_profile_suite_report,
@@ -600,6 +602,15 @@ class ProfileArgumentTests(unittest.TestCase):
 
 
 class ProfileSuiteTests(unittest.TestCase):
+    def test_profile_positions_are_complete_and_unique(self):
+        self.assertTrue(PROFILE_POSITIONS)
+        self.assertEqual(len({case.name for case in PROFILE_POSITIONS}), len(PROFILE_POSITIONS))
+        self.assertEqual(len({case.fen for case in PROFILE_POSITIONS}), len(PROFILE_POSITIONS))
+        for case in PROFILE_POSITIONS:
+            self.assertTrue(case.name)
+            self.assertEqual(len(case.fen.split()), 6)
+            self.assertEqual(len(encode_fen(case.fen)), 36)
+
     def make_report(self, fen: str, nodes: int, wall_seconds: float) -> dict:
         metrics = sample_metrics()
         result_values = {
