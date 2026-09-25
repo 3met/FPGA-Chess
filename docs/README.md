@@ -22,6 +22,7 @@ These docs describe the FPGA chess engine architecture, module contracts, protoc
 | DE1-SoC and UCI setup | [usage/de1-soc-uci.md](usage/de1-soc-uci.md) |
 | Host protocol | [protocols/host-fpga-protocol.md](protocols/host-fpga-protocol.md) and [protocols/binary-encoding.md](protocols/binary-encoding.md) |
 | Build and verification | [development/build-test-synthesis.md](development/build-test-synthesis.md) |
+| Stockfish benchmark | [development/stockfish-benchmark.md](development/stockfish-benchmark.md) |
 | Runtime profiling | [development/engine-profiling.md](development/engine-profiling.md) |
 | Evaluation tuning | [development/evaluation-tuning.md](development/evaluation-tuning.md) |
 | Search-parameter tuning | [development/search-parameter-tuning.md](development/search-parameter-tuning.md) |

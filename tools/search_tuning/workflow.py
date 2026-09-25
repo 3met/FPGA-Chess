@@ -20,6 +20,13 @@ from typing import Any, Callable
 from tools.hardware_build.common import BuildError, REPO_ROOT, process_group_options, stop_process_tree
 from tools.hardware_build.engine_config import load_engine_config
 from tools.hardware_build.manifest import load_manifest
+from tools.stockfish_benchmark import (
+    BenchmarkConfig,
+    BenchmarkError,
+    DEFAULT_STOCKFISH_NODES,
+    resume_tournament,
+    run_tournament,
+)
 
 from .optimizer import posterior_rankings, suggest
 from .space import configured_parameters, get_path, parameter_hash
@@ -30,7 +37,6 @@ REPORT_RE = re.compile(
     r"([-+]?(?:\d+(?:\.\d+)?|inf|nan)).*?^Games:\s+(\d+),",
     re.MULTILINE | re.DOTALL | re.IGNORECASE,
 )
-RESULTS_RE = re.compile(r"^Results:\s+(.+?)\s*$", re.MULTILINE)
 SPRT_RE = re.compile(r"SPRT \([^\n]+\) completed - (H[01]) was accepted")
 PLAYER_FAILURE_RE = re.compile(
     r"Player:\s+FPGA[^\n]*\n\s+Timeouts:\s+(\d+)\n\s+Crashed:\s+(\d+)", re.MULTILINE
@@ -265,10 +271,12 @@ def hash_source_tree(paths: list[Path]) -> str:
 
 
 def validate_config(config: dict) -> None:
+    if "stockfish_elo" in config or "stockfish_time_control" in config:
+        raise TuningError("Stockfish Elo and time controls are unsupported; use full strength with stockfish_nodes")
     required_strings = (
         "baseline", "output_root", "synthesis_target", "flash_target",
         "fastchess_binary", "stockfish_binary", "opening_book", "benchmark_results_root",
-        "fpga_time_control", "stockfish_time_control",
+        "fpga_time_control",
     )
     for name in required_strings:
         if not isinstance(config.get(name), str) or not config[name]:
@@ -276,9 +284,12 @@ def validate_config(config: dict) -> None:
     for name in ("iterations", "paired_openings", "progress_interval_games", "opening_start"):
         if isinstance(config.get(name), bool) or not isinstance(config.get(name), int) or config[name] < 1:
             raise TuningError(f"{name} must be a positive integer")
-    for name in ("stockfish_elo", "stockfish_threads", "stockfish_hash_mb"):
+    for name in ("stockfish_threads", "stockfish_hash_mb"):
         if isinstance(config.get(name), bool) or not isinstance(config.get(name), int) or config[name] < 1:
             raise TuningError(f"{name} must be a positive integer")
+    nodes = config.get("stockfish_nodes", DEFAULT_STOCKFISH_NODES)
+    if isinstance(nodes, bool) or not isinstance(nodes, int) or nodes < 1:
+        raise TuningError("stockfish_nodes must be a positive integer")
     optimizer = config.get("optimizer")
     if not isinstance(optimizer, dict):
         raise TuningError("optimizer must be an object")
@@ -450,6 +461,7 @@ def experiment_snapshot(config: dict, baseline: dict, parameters: list[Any]) -> 
         REPO_ROOT / "hardware/config/engine/de1-soc.json",
         REPO_ROOT / "software/engine",
         REPO_ROOT / "tools/hardware_build",
+        REPO_ROOT / "tools/stockfish_benchmark.py",
         *(REPO_ROOT / "tools/search_tuning").glob("*.py"),
     ])
     return {
@@ -468,8 +480,7 @@ def experiment_snapshot(config: dict, baseline: dict, parameters: list[Any]) -> 
         "stockfish_binary": config["stockfish_binary"],
         "opening_book": config["opening_book"],
         "fpga_time_control": config["fpga_time_control"],
-        "stockfish_time_control": config["stockfish_time_control"],
-        "stockfish_elo": config["stockfish_elo"],
+        "stockfish_nodes": config.get("stockfish_nodes", DEFAULT_STOCKFISH_NODES),
         "stockfish_threads": config["stockfish_threads"],
         "stockfish_hash_mb": config["stockfish_hash_mb"],
         "parameters": [parameter.__dict__ for parameter in parameters],
@@ -688,7 +699,7 @@ class Runner:
             if state.get("experiment_digest") != current_digest:
                 raise TuningError(
                     "tuning configuration is incompatible with the saved experiment; "
-                    "restore it or choose a new output_root"
+                    "restore it, choose a new output_root, or use --clean to archive it"
                 )
             required_iterations = len(state["history"]) + int(state.get("pending") is not None)
             if self.config["iterations"] < required_iterations:
@@ -760,7 +771,7 @@ class Runner:
         book = resolve_repo_path(self.config["opening_book"])
         if not book.is_file():
             raise TuningError(
-                f"opening book is missing: {book}; run the benchmark wrapper once before tuning"
+                f"opening book is missing: {book}; run tools.stockfish_benchmark once before tuning"
             )
         with book.open(encoding="utf-8", errors="replace") as handle:
             available_openings = sum(1 for line in handle if line.strip())
@@ -864,9 +875,10 @@ class Runner:
         raise AssertionError(phase)
 
     def _discover_tournament(self, label: str) -> Path | None:
+        """Locate the named directory used by the shared benchmark runner."""
         root = resolve_repo_path(self.config["benchmark_results_root"])
-        matches = sorted(root.glob(f"{label}-*"), key=lambda path: path.stat().st_mtime, reverse=True)
-        return matches[0].resolve() if matches else None
+        tournament = root / label
+        return tournament.resolve() if tournament.is_dir() else None
 
     def _sprt_environment(self, state: dict, repeat: int) -> dict[str, str]:
         """Return dynamic absolute-Elo bounds for an ordinary challenger."""
@@ -935,40 +947,12 @@ class Runner:
             except TuningError:
                 pass
         environment = self._sprt_environment(state, repeat)
-        if tournament is None:
-            command = [
-                sys.executable, "-m", "tools.search_tuning.benchmark",
-                "--fastchess", str(platform_executable(self.config["fastchess_binary"])),
-                "--results-root", str(resolve_repo_path(self.config["benchmark_results_root"])),
-                "--label", label,
-                "--rounds", str(self.config["paired_openings"]),
-                "--repo-root", str(REPO_ROOT),
-                "--stockfish", str(platform_executable(self.config["stockfish_binary"])),
-                "--book", str(resolve_repo_path(self.config["opening_book"])),
-                "--opening-start", environment["OPENING_START"],
-                "--fpga-tc", self.config["fpga_time_control"],
-                "--stockfish-tc", self.config["stockfish_time_control"],
-                "--stockfish-elo", str(self.config["stockfish_elo"]),
-                "--stockfish-threads", str(self.config["stockfish_threads"]),
-                "--stockfish-hash", str(self.config["stockfish_hash_mb"]),
-            ]
-            if "SPRT_ELO0" in environment:
-                command.extend([
-                    "--sprt-elo0", environment["SPRT_ELO0"],
-                    "--sprt-elo1", environment["SPRT_ELO1"],
-                    "--sprt-alpha", environment["SPRT_ALPHA"],
-                    "--sprt-beta", environment["SPRT_BETA"],
-                ])
-        else:
-            command = [
-                sys.executable, "-m", "tools.search_tuning.benchmark",
-                "--fastchess", str(platform_executable(self.config["fastchess_binary"])),
-                "--resume", str(tournament),
-            ]
-            while len(pending["tournament_dirs"]) <= repeat:
-                pending["tournament_dirs"].append(None)
-            pending["tournament_dirs"][repeat] = str(tournament)
-            self.save(state)
+        results_root = resolve_repo_path(self.config["benchmark_results_root"])
+        tournament = tournament or (results_root / label).resolve()
+        while len(pending["tournament_dirs"]) <= repeat:
+            pending["tournament_dirs"].append(None)
+        pending["tournament_dirs"][repeat] = str(tournament)
+        self.save(state)
         last_rating = [""]
 
         def report_progress(line: str) -> None:
@@ -984,19 +968,56 @@ class Runner:
                     rating = f", Elo {last_rating[0]}" if last_rating[0] else ""
                     print(f"    {games}/{expected_games} games{rating}", flush=True)
 
-        output = self._run_logged(
-            command, self.logs_path / f"{pending['id']:04d}-tournament.log", True,
-            report_progress, environment,
-        )
-        if tournament is None:
-            match = RESULTS_RE.search(output)
-            tournament = Path(match.group(1)).resolve() if match else self._discover_tournament(label)
-        if tournament is None:
-            raise TuningError("benchmark completed but its result directory could not be located")
-        while len(pending["tournament_dirs"]) <= repeat:
-            pending["tournament_dirs"].append(None)
-        pending["tournament_dirs"][repeat] = str(tournament)
-        self.save(state)
+        class ProgressOutput:
+            """Write benchmark output to the trial log and forward complete progress lines."""
+
+            def __init__(self, log: Any):
+                self.log = log
+                self.buffer = ""
+
+            def write(self, value: str) -> int:
+                self.log.write(value)
+                self.buffer += value
+                while "\n" in self.buffer:
+                    line, self.buffer = self.buffer.split("\n", 1)
+                    report_progress(line + "\n")
+                return len(value)
+
+            def flush(self) -> None:
+                self.log.flush()
+
+        log_path = self.logs_path / f"{pending['id']:04d}-tournament.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8", newline="\n") as log:
+            log.write(f"\n[{utc_now()}] Stockfish benchmark: {tournament}\n")
+            progress_output = ProgressOutput(log)
+            try:
+                if (tournament / "state.json").is_file():
+                    resume_tournament(
+                        tournament, fastchess=str(platform_executable(self.config["fastchess_binary"])),
+                        output=progress_output,
+                    )
+                else:
+                    if tournament.exists() and not (tournament / "run.json").is_file():
+                        raise TuningError(f"benchmark directory is not owned by the runner: {tournament}")
+                    run_tournament(BenchmarkConfig(
+                        name=label, matches=self.config["paired_openings"], results_root=results_root,
+                        book=resolve_repo_path(self.config["opening_book"]),
+                        fastchess=str(platform_executable(self.config["fastchess_binary"])),
+                        stockfish=str(platform_executable(self.config["stockfish_binary"])),
+                        fpga_time_control=self.config["fpga_time_control"],
+                        stockfish_nodes=self.config.get("stockfish_nodes", DEFAULT_STOCKFISH_NODES),
+                        stockfish_threads=self.config["stockfish_threads"],
+                        stockfish_hash_mb=self.config["stockfish_hash_mb"],
+                        opening_start=int(environment["OPENING_START"]),
+                        sprt_elo0=float(environment["SPRT_ELO0"]) if "SPRT_ELO0" in environment else None,
+                        sprt_elo1=float(environment["SPRT_ELO1"]) if "SPRT_ELO1" in environment else None,
+                        sprt_alpha=float(environment.get("SPRT_ALPHA", 0.10)),
+                        sprt_beta=float(environment.get("SPRT_BETA", 0.02)),
+                        force=tournament.exists(),
+                    ), output=progress_output)
+            except BenchmarkError as exc:
+                raise TuningError(f"benchmark failed: {exc}; see {relative_repo_path(log_path)}") from exc
         score, error, games, completion = self._read_tournament_completion(tournament, expected_games)
         if completion == "H1":
             self._disable_completed_upper_sprt(tournament)

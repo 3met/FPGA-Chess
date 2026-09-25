@@ -1,4 +1,3 @@
-import argparse
 import copy
 import io
 import json
@@ -10,7 +9,6 @@ from pathlib import Path
 from unittest import mock
 
 from tools.search_tuning.cli import main as tuning_main
-from tools.search_tuning.benchmark import fresh_command, resume_command
 from tools.search_tuning.optimizer import posterior_rankings, suggest
 from tools.search_tuning.space import (
     configured_parameters,
@@ -95,32 +93,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(tuning_main(["run", "--clean"]), 0)
 
         runner_type.return_value.run.assert_called_once_with(False, clean=True)
-
-
-class BenchmarkCommandTests(unittest.TestCase):
-    def test_fresh_command_contains_reproducible_match_and_sprt_settings(self):
-        run_dir = Path("results/run")
-        args = argparse.Namespace(
-            fastchess=Path("fastchess"), label="candidate", repo_root=Path("fpga"),
-            fpga_tc="2+0.02", stockfish=Path("stockfish"), stockfish_tc="0.2+0.002",
-            stockfish_elo=3100, stockfish_threads=1, stockfish_hash=256,
-            book=Path("book.epd"), opening_start=501, rounds=500,
-            sprt_elo0=-20.0, sprt_elo1=5.0, sprt_alpha=0.1, sprt_beta=0.02,
-        )
-
-        command = fresh_command(args, run_dir)
-
-        self.assertIn("args=-m software.engine", command)
-        self.assertIn("start=501", command)
-        self.assertIn("elo0=-20.0", command)
-        self.assertIn("outname=results/run/state.json", command)
-        self.assertEqual(command.count("-engine"), 2)
-
-    def test_resume_command_uses_only_the_saved_configuration(self):
-        command = resume_command(Path("fastchess"), Path("results/run"))
-
-        self.assertEqual(command[:3], ["fastchess", "-config", "file=results/run/state.json"])
-        self.assertIn("append=true", command)
 
 
 class SearchSpaceTests(unittest.TestCase):
@@ -315,6 +287,17 @@ class WorkflowTests(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config), encoding="utf-8")
         return Runner(config_path)
+
+    def test_rejects_limited_strength_stockfish_settings(self):
+        """Old Elo controls must not silently change the shared benchmark semantics."""
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            directory = Path(temp)
+            config = json.loads((ROOT / "tools/search_tuning/default_config.json").read_text(encoding="utf-8"))
+            config["stockfish_elo"] = 3000
+            config_path = directory / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(TuningError, "full strength"):
+                Runner(config_path)
 
     def test_experiment_changes_are_rejected_but_operational_changes_are_allowed(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
@@ -708,30 +691,61 @@ class WorkflowTests(unittest.TestCase):
                 f"search-tune-{state['run_id']}-0000-"
                 f"{pending['parameter_hash'][:8]}-s1-r0"
             )
-            tournament_dir = directory / f"{label}-20260913-120000"
+            tournament_dir = directory / label
             tournament_dir.mkdir()
+            (tournament_dir / "state.json").write_text("{}", encoding="utf-8")
             (tournament_dir / "summary.txt").write_text(
                 "Elo: 1.0 +/- 2.0\nGames: 20, Wins: 1\n", encoding="utf-8"
             )
             captured = {}
 
-            def complete_resume(command, _log, _inspect, _progress, environment):
-                captured["command"] = command
-                captured["opening_start"] = environment["OPENING_START"]
+            def complete_resume(run_dir, *, fastchess, output):
+                captured["run_dir"] = run_dir
+                captured["fastchess"] = fastchess
                 (tournament_dir / "summary.txt").write_text(
                     "Elo: 12.0 +/- 19.6\nGames: 1000, Wins: 400\n", encoding="utf-8"
                 )
-                return ""
 
-            with mock.patch.object(runner, "_run_logged", side_effect=complete_resume):
+            with mock.patch("tools.search_tuning.workflow.resume_tournament", side_effect=complete_resume):
                 score, error, result, games, completion = runner._run_tournament(state, pending)
 
             self.assertEqual((score, error), (12.0, 19.6))
             self.assertEqual(result, tournament_dir)
             self.assertEqual((games, completion), (1000, "full"))
-            self.assertIn("--resume", captured["command"])
-            self.assertEqual(captured["opening_start"], "1")
+            self.assertEqual(captured["run_dir"], tournament_dir)
             self.assertEqual(pending["tournament_dirs"], [str(tournament_dir)])
+
+    def test_new_tournament_uses_shared_stockfish_benchmark(self):
+        """The tuner passes its trial settings to the full-strength benchmark API."""
+        with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
+            directory = Path(temp)
+            runner = self.make_runner(
+                directory, iterations=1, stockfish_nodes=1234,
+                benchmark_results_root=directory.relative_to(ROOT).as_posix(),
+            )
+            state = runner.initialize()
+            pending = runner._new_trial(state)
+            captured = {}
+
+            def complete_match(config, *, output):
+                captured["config"] = config
+                tournament = config.results_root / config.name
+                tournament.mkdir()
+                (tournament / "summary.txt").write_text(
+                    f"Elo: 12.0 +/- 19.6\nGames: {2 * config.matches}, Wins: 400\n",
+                    encoding="utf-8",
+                )
+
+            with mock.patch("tools.search_tuning.workflow.run_tournament", side_effect=complete_match) as started:
+                score, error, tournament, games, completion = runner._run_tournament(state, pending)
+
+            config = captured["config"]
+            self.assertEqual(started.call_count, 1)
+            self.assertEqual(config.stockfish_nodes, runner.config["stockfish_nodes"])
+            self.assertEqual(config.stockfish_hash_mb, runner.config["stockfish_hash_mb"])
+            self.assertIsNone(config.sprt_elo0)
+            self.assertEqual(tournament, config.results_root / config.name)
+            self.assertEqual((score, error, games, completion), (12.0, 19.6, 2 * config.matches, "full"))
 
     def test_h1_checkpoint_continues_the_same_match_without_sprt(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:
@@ -748,7 +762,7 @@ class WorkflowTests(unittest.TestCase):
                 f"search-tune-{state['run_id']}-0000-"
                 f"{pending['parameter_hash'][:8]}-s1-r0"
             )
-            tournament_dir = directory / f"{label}-20260913-120000"
+            tournament_dir = directory / label
             tournament_dir.mkdir()
             (tournament_dir / "summary.txt").write_text(
                 "Elo: 60.0 +/- 40.0\nGames: 200, Wins: 100\n", encoding="utf-8"
@@ -767,7 +781,7 @@ class WorkflowTests(unittest.TestCase):
                 return ""
 
             output = io.StringIO()
-            with mock.patch.object(runner, "_run_logged", side_effect=complete_resume) as resumed, \
+            with mock.patch("tools.search_tuning.workflow.resume_tournament", side_effect=complete_resume) as resumed, \
                     redirect_stdout(output):
                 result = runner._run_tournament(state, pending)
 

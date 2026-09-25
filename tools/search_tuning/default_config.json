@@ -16,10 +16,8 @@
   "opening_book": "../fastchess/books/UHO_Lichess_4852_v1.epd",
   "benchmark_results_root": "../fastchess/benchmark-results",
   "fpga_time_control": "2+0.02",
-  "stockfish_time_control": "0.2+0.002",
-  "stockfish_elo": 3100,
   "stockfish_threads": 1,
-  "stockfish_hash_mb": 256,
+  "stockfish_hash_mb": 32,
   "validation": {
     "maximum_finalists": 3,
     "maximum_blocks": 2,
