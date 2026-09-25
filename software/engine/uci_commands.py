@@ -17,7 +17,7 @@ from software.engine.protocol import (
 
 
 DEFAULT_SEARCH_DEPTH = MAX_SEARCH_DEPTH
-DEFAULT_MOVE_OVERHEAD_MS = 10
+DEFAULT_MOVE_OVERHEAD_MS = 2
 
 KNOWN_COMMANDS = frozenset({
     "uci",
