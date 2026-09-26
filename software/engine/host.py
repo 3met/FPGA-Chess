@@ -35,6 +35,7 @@ from software.engine.protocol import (
     cmd_kill,
     cmd_make_move,
     cmd_new_game,
+    cmd_perft,
     cmd_set_board,
     move_to_uci,
     read_response,
