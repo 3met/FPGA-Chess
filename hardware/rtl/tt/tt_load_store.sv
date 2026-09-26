@@ -288,9 +288,9 @@ module tt_load_store #(
         resp.thread_id = req.thread_id;
         resp.hit = entry_hit;
         resp.score = entry_hit ? tt_restore_mate_score(storage_score(entry), req.ply) : UNKNOWN_EVAL_SCORE;
-        resp.bound_type = entry_hit ? storage_bound_type(entry) : TT_BOUND_INVALID;
-        resp.depth = entry_hit ? storage_depth(entry) : TTDepth'(0);
-        resp.best_move = entry_hit ? storage_best_move(entry) : NULL_MOVE;
+        resp.bound_type = entry_hit ? storage_bound_type(entry) : TTBoundType'('x);
+        resp.depth = entry_hit ? storage_depth(entry) : TTDepth'('x);
+        resp.best_move = entry_hit ? storage_best_move(entry) : Move'('x);
         return resp;
     endfunction : make_lookup_response
 

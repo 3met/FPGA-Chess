@@ -26,8 +26,6 @@ package nnue_defs;
     // Group four counts from the legal two-king minimum upward so the scarce
     // low-piece positions share heads; the final head covers 30 through 32.
     function automatic NnueOutputBucket nnue_output_bucket(input PieceCount piece_count);
-        if (piece_count <= PieceCount'(2))
-            return NnueOutputBucket'(0);
         return NnueOutputBucket'((piece_count - PieceCount'(2)) >> 2);
     endfunction
 

@@ -110,6 +110,11 @@ package chess_helpers;
             || (piece == BISHOP && is_diagonal_direction(dir));
     endfunction : is_line_attacker
 
+	// Return whether a piece is a real piece (not NULL_PIECE or SPARE_PIECE)
+	function automatic logic valid_piece_type(input PieceType piece);
+		return piece != NULL_PIECE && piece != SPARE_PIECE;
+	endfunction
+
     // Return whether one color attacks a square on an unmodified board.
     function automatic logic square_attacked(
         input FullBoard board,

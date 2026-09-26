@@ -167,10 +167,10 @@ module board_update_pipeline #(
     endgenerate
 
     // Keep all accumulated evaluation state at 16 bits while the ROM uses compact entries.
-    assign pst_source_out = pst_read_enable_q[0] ? EvalScore'(pst_read_data[0]) : EvalScore'(0);
-    assign pst_destination_out = pst_read_enable_q[1] ? EvalScore'(pst_read_data[1]) : EvalScore'(0);
-    assign pst_captured_out = pst_read_enable_q[2] ? EvalScore'(pst_read_data[2]) : EvalScore'(0);
-    assign pst_castle_out = pst_read_enable_q[3] ? EvalScore'(pst_read_data[3]) : EvalScore'(0);
+    assign pst_source_out = pst_read_enable_q[0] ? EvalScore'(pst_read_data[0]) : EvalScore'('x);
+    assign pst_destination_out = pst_read_enable_q[1] ? EvalScore'(pst_read_data[1]) : EvalScore'('x);
+    assign pst_captured_out = pst_read_enable_q[2] ? EvalScore'(pst_read_data[2]) : EvalScore'('x);
+    assign pst_castle_out = pst_read_enable_q[3] ? EvalScore'(pst_read_data[3]) : EvalScore'('x);
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
         return MoveRecordAddr'(MoveRecordAddr'(tid) * MoveRecordAddr'(MOVE_RECORD_PLY_COUNT)
@@ -188,8 +188,8 @@ module board_update_pipeline #(
     endfunction : oriented_pos
 
     function automatic PstAddr pst_addr(input PieceType piece, input Position pos);
-        if (piece == NULL_PIECE) begin
-            return PstAddr'(0);
+        if (~valid_piece_type(piece)) begin
+            return PstAddr'('x);
         end
 
         return {PstPieceIndex'(piece) - PstPieceIndex'(1), pos};
@@ -327,11 +327,8 @@ module board_update_pipeline #(
             && (get_file(effects.to_pos) == BoardFile'('d2)
                 || get_file(effects.to_pos) == BoardFile'('d6));
         effects.is_ep = effects.moving_tile.piece_type == PAWN
-            && board.has_ep
-            && board.ep_file == get_file(effects.to_pos)
-            && effects.destination_tile.piece_type == NULL_PIECE
-            && ((moved_color == WHITE && get_rank(effects.to_pos) == BoardRank'('d5))
-                || (moved_color == BLACK && get_rank(effects.to_pos) == BoardRank'('d2)));
+            && get_file(effects.from_pos) != get_file(effects.to_pos)
+            && effects.destination_tile.piece_type == NULL_PIECE;
         effects.placed_tile = Tile'({
             moved_color,
             effects.is_promo
@@ -576,9 +573,9 @@ module board_update_pipeline #(
                 automatic BoardFile next_ep_file = get_file(to_pos);
 
                 plan.address[0] = zobrist_tile_addr(moving_tile, from_pos);
-                plan.enable[0] = (moving_tile.piece_type != NULL_PIECE);
+                plan.enable[0] = valid_piece_type(moving_tile.piece_type) ? 1'b1 : 1'bx;
                 plan.address[1] = zobrist_tile_addr(placed_tile, to_pos);
-                plan.enable[1] = (placed_tile.piece_type != NULL_PIECE);
+                plan.enable[1] = valid_piece_type(placed_tile.piece_type) ? 1'b1 : 1'bx;
                 if (is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
                     plan.address[2] = zobrist_tile_addr(rook_tile, rook_from);
@@ -716,9 +713,9 @@ module board_update_pipeline #(
                 automatic Tile captured_tile = is_ep ? Tile'({captured_color, PAWN}) : destination_tile;
 
                 plan.address[0] = pst_addr(moving_tile.piece_type, oriented_pos(moving_tile, from_pos));
-                plan.enable[0] = (moving_tile.piece_type != NULL_PIECE);
+                plan.enable[0] = valid_piece_type(moving_tile.piece_type) ? 1'b1 : 1'bx;
                 plan.address[1] = pst_addr(placed_tile.piece_type, oriented_pos(placed_tile, to_pos));
-                plan.enable[1] = (placed_tile.piece_type != NULL_PIECE);
+                plan.enable[1] = valid_piece_type(placed_tile.piece_type) ? 1'b1 : 1'bx;
                 if (is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
                     plan.address[2] = pst_addr(ROOK, oriented_pos(rook_tile, rook_from));

@@ -205,9 +205,7 @@ module move_generator_lane #(
         input Position destination
     );
         if (get_rank(destination) == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))) begin
-            return is_shift_on_board(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)
-                && board.tiles[shift_position(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)]
-                    == Tile'({board.turn, PAWN});
+            return board.tiles[shift_position(destination, board.turn == WHITE ? SOUTH : NORTH, 3'd1)] == Tile'({board.turn, PAWN});
         end
         if (board.has_ep && get_file(destination) == board.ep_file
                 && get_rank(destination) == (board.turn == WHITE ? BoardRank'(5) : BoardRank'(2))) begin
@@ -231,8 +229,7 @@ module move_generator_lane #(
                 // Capturing a king is never a chess move; check detection
                 // determines mate without presenting its square as a capture.
                 if ((board.tiles[pos].piece_type != NULL_PIECE
-                        && board.tiles[pos].piece_color != board.turn
-                        && board.tiles[pos].piece_type != KING)
+                        && board.tiles[pos].piece_color != board.turn)
                         || (board.tiles[pos].piece_type == NULL_PIECE
                             && get_rank(Position'(pos))
                                 == (board.turn == WHITE ? BoardRank'(7) : BoardRank'(0))
@@ -247,9 +244,7 @@ module move_generator_lane #(
             automatic Position ep_destination = Position'({
                 board.turn == WHITE ? BoardRank'(5) : BoardRank'(2), board.ep_file
             });
-            if (board.tiles[ep_destination].piece_type == NULL_PIECE
-                    && noisy_pawn_destination_has_source(board, ep_destination))
-                mask[ep_destination] = 1'b1;
+            mask[ep_destination] = 1'b1;
         end
         return mask;
     endfunction
@@ -339,7 +334,6 @@ module move_generator_lane #(
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
         if (board.turn != WHITE || !board.castling_rights.white_kingside
-                || board.tiles[4] != WHITE_KING || board.tiles[7] != WHITE_ROOK
                 || board.tiles[5].piece_type != NULL_PIECE
                 || board.tiles[6].piece_type != NULL_PIECE) return 1'b0;
         transit_board.tiles[4] = EMPTY_TILE;
@@ -357,7 +351,6 @@ module move_generator_lane #(
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
         if (board.turn != WHITE || !board.castling_rights.white_queenside
-                || board.tiles[4] != WHITE_KING || board.tiles[0] != WHITE_ROOK
                 || board.tiles[1].piece_type != NULL_PIECE
                 || board.tiles[2].piece_type != NULL_PIECE
                 || board.tiles[3].piece_type != NULL_PIECE) return 1'b0;
@@ -376,7 +369,6 @@ module move_generator_lane #(
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
         if (board.turn != BLACK || !board.castling_rights.black_kingside
-                || board.tiles[60] != BLACK_KING || board.tiles[63] != BLACK_ROOK
                 || board.tiles[61].piece_type != NULL_PIECE
                 || board.tiles[62].piece_type != NULL_PIECE) return 1'b0;
         transit_board.tiles[60] = EMPTY_TILE;
@@ -394,7 +386,6 @@ module move_generator_lane #(
         automatic FullBoard transit_board = board;
         automatic FullBoard final_board = board;
         if (board.turn != BLACK || !board.castling_rights.black_queenside
-                || board.tiles[60] != BLACK_KING || board.tiles[56] != BLACK_ROOK
                 || board.tiles[57].piece_type != NULL_PIECE
                 || board.tiles[58].piece_type != NULL_PIECE
                 || board.tiles[59].piece_type != NULL_PIECE) return 1'b0;
@@ -474,7 +465,7 @@ module move_generator_lane #(
                 if (abs_dr <= 1 && abs_df <= 1) return 1'b1;
                 return castle_pseudo_legal(board, move);
             end
-            default: return 1'b0;
+            default: return 1'bx;
         endcase
     endfunction
 
@@ -492,6 +483,7 @@ module move_generator_lane #(
             ROOK: return is_cardinal_direction(dir);
             QUEEN: return 1'b1;
             KING: return distance == 0;
+            SPARE_PIECE: return 1'bx;
             default: return 1'b0;
         endcase
     endfunction
@@ -533,7 +525,7 @@ module move_generator_lane #(
                         ROOK: enemy_classes[2] = 1'b1;
                         QUEEN: enemy_classes[3] = 1'b1;
                         KING: enemy_classes[4] = 1'b1;
-                        default: begin end
+                        default: ;
                     endcase
                 end
             end
@@ -564,11 +556,9 @@ module move_generator_lane #(
                 ? GOOD_NOISY_HIGH_BUCKET : GOOD_NOISY_LOW_BUCKET;
         end
         if (candidate_see_good) begin
-            return victim == ROOK || victim == QUEEN || victim == KING
-                ? GOOD_NOISY_HIGH_BUCKET : GOOD_NOISY_LOW_BUCKET;
+            return victim == ROOK || victim == QUEEN ? GOOD_NOISY_HIGH_BUCKET : GOOD_NOISY_LOW_BUCKET;
         end
-        return victim == ROOK || victim == QUEEN || victim == KING
-            ? BAD_NOISY_HIGH_BUCKET : BAD_NOISY_LOW_BUCKET;
+        return victim == ROOK || victim == QUEEN ? BAD_NOISY_HIGH_BUCKET : BAD_NOISY_LOW_BUCKET;
     endfunction
 
     function automatic MoveBucketIndex quiet_bucket(
@@ -601,8 +591,7 @@ module move_generator_lane #(
         automatic logic high_half = !(|mask[7:0]);
         automatic logic [2:0] low_index = first_set_lane(mask[7:0]);
         automatic logic [2:0] high_index = first_set_lane(mask[15:8]);
-        return mask == 16'd0 ? 4'd0
-            : {high_half, high_half ? high_index : low_index};
+        return {high_half, high_half ? high_index : low_index};
     endfunction
 
     // Build an exact eligibility mask once per destination; the expander
@@ -659,6 +648,7 @@ module move_generator_lane #(
             ROOK: return phase_matches && is_cardinal_direction(dir);
             QUEEN: return phase_matches;
             KING: return phase_matches && ray.distance == 3'd0;
+            SPARE_PIECE: return 1'bx;
             default: return 1'b0;
         endcase
     endfunction

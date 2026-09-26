@@ -283,8 +283,9 @@ module move_generator_read_pipeline #(
             pop_resp_ply[tid] = result_ply[tid];
             pop_resp_found[tid] = result_found[tid];
             pop_resp_bucket[tid] = result_bucket[tid];
-            pop_resp_move[tid] = !result_found[tid] ? NULL_MOVE
-                : result_bypass[tid] ? result_forward[tid] : ram_move[tid];
+            pop_resp_move[tid] = result_found[tid]
+                ? (result_bypass[tid] ? result_forward[tid] : ram_move[tid])
+                : Move'('x);
 
             pointer_load_issue[tid] = 1'b0;
             pointer_read_ply[tid] = stage_ply[tid];

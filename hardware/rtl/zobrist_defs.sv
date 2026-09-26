@@ -18,8 +18,8 @@ package zobrist_defs;
     // never issue a read, so their address is only a harmless default.
     function automatic ZobristTileAddr zobrist_tile_addr(input Tile tile, input Position pos);
         automatic logic [3:0] piece_index;
-        if (tile.piece_type == NULL_PIECE) begin
-            return ZobristTileAddr'(0);
+        if (~valid_piece_type(tile.piece_type)) begin
+            return ZobristTileAddr'('x);
         end
 
         piece_index = (tile.piece_color ? 4'd6 : 4'd0)

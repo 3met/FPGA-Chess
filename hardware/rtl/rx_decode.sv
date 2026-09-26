@@ -71,7 +71,7 @@ module uart_receiver #(
         end
     end
 
-    assign break_active = (low_timer >= BREAK_TIMER_BITS'(BREAK_CLKS));
+    assign break_active = (low_timer == BREAK_TIMER_BITS'(BREAK_CLKS));
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
