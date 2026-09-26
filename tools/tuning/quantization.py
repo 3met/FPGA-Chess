@@ -57,7 +57,9 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
     state = checkpoint["model"]
     output_buckets = int(state["output_weights"].shape[0])
     model = EvaluationModel(output_buckets=output_buckets)
-    model.load_state_dict(state)
+    from .training import _initialize_model
+
+    _initialize_model(model, checkpoint)
     model.project_parameters()
     model.eval()
 

@@ -12,7 +12,7 @@ module tb_board_update_pipeline;
     BoardOp board_op;
     FullBoard board_in;
     ZobristKey zobrist_key_in;
-    EvalScore pst_eval_in;
+    PstEvalPair pst_eval_in;
     PieceCount piece_count_in;
     Move move_in;
     logic [6:0] set_data;
@@ -21,7 +21,7 @@ module tb_board_update_pipeline;
 
     FullBoard board_out;
     ZobristKey zobrist_key_out;
-    EvalScore pst_eval_out;
+    PstEvalPair pst_eval_out;
     PieceCount piece_count_out;
     logic mover_in_check_out;
     logic side_in_check_out;
@@ -247,8 +247,8 @@ module tb_board_update_pipeline;
 
         expect_equal(board_out === expected_board,
             $sformatf("%s board mismatch expected=%s found=%s", test_name, to_fen(expected_board), to_fen(board_out)));
-        expect_equal(pst_eval_out === expected_pst,
-            $sformatf("%s PST mismatch expected=%0d found=%0d", test_name, expected_pst, pst_eval_out));
+        expect_equal(pst_eval_out.first === expected_pst && pst_eval_out.endgame === expected_pst,
+            $sformatf("%s PST mismatch expected=%0d found=%0d", test_name, expected_pst, pst_eval_out.first));
         expect_equal(piece_count_out === ref_piece_count(expected_board),
             $sformatf("%s piece-count mismatch expected=%0d found=%0d",
                 test_name, ref_piece_count(expected_board), piece_count_out));
@@ -454,7 +454,7 @@ module tb_board_update_pipeline;
 
         board_in = old_board;
         zobrist_key_in = old_zobrist;
-        pst_eval_in = old_pst;
+        pst_eval_in = { old_pst, old_pst };
         piece_count_in = ref_piece_count(old_board);
         move_in = move;
         set_data = data;
@@ -483,7 +483,7 @@ module tb_board_update_pipeline;
     );
         board_in = in_board;
         zobrist_key_in = in_zobrist;
-        pst_eval_in = in_pst;
+        pst_eval_in = { in_pst, in_pst };
         piece_count_in = ref_piece_count(in_board);
         move_in = move;
         set_data = data;
@@ -496,7 +496,7 @@ module tb_board_update_pipeline;
         do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
         out_board = board_out;
         out_zobrist = zobrist_key_out;
-        out_pst = pst_eval_out;
+        out_pst = pst_eval_out.first;
     endtask
 
     task automatic set_tile(
@@ -876,7 +876,7 @@ module tb_board_update_pipeline;
 
         board_in = base_board;
         zobrist_key_in = base_zobrist;
-        pst_eval_in = base_pst;
+        pst_eval_in = { base_pst, base_pst };
         piece_count_in = ref_piece_count(base_board);
         move_in = move_a;
         set_data = {3'b0, WHITE_KNIGHT};
@@ -887,7 +887,7 @@ module tb_board_update_pipeline;
 
         board_in = base_board;
         zobrist_key_in = base_zobrist;
-        pst_eval_in = base_pst;
+        pst_eval_in = { base_pst, base_pst };
         piece_count_in = ref_piece_count(base_board);
         move_in = move_b;
         set_data = {3'b0, BLACK_BISHOP};
@@ -932,7 +932,7 @@ module tb_board_update_pipeline;
 
         board_in = board_a;
         zobrist_key_in = ref_zobrist_full(board_a);
-        pst_eval_in = ref_eval(board_a);
+        pst_eval_in = { ref_eval(board_a), ref_eval(board_a) };
         piece_count_in = ref_piece_count(board_a);
         move_in = move_a;
         set_data = 7'd0;
@@ -943,7 +943,7 @@ module tb_board_update_pipeline;
 
         board_in = board_b;
         zobrist_key_in = ref_zobrist_full(board_b);
-        pst_eval_in = ref_eval(board_b);
+        pst_eval_in = { ref_eval(board_b), ref_eval(board_b) };
         piece_count_in = ref_piece_count(board_b);
         move_in = move_b;
         board_op = BOARD_PUSH_MOVE_OP;
@@ -954,6 +954,36 @@ module tb_board_update_pipeline;
         expect_equal(mover_in_check_out, "back-to-back request A exposes its king");
         do_clock(1);
         expect_equal(!mover_in_check_out, "back-to-back request B keeps its king safe");
+    endtask
+
+    // A distinct endgame ROM entry must change only the endgame accumulator.
+    task automatic test_distinct_phase_table();
+        automatic FullBoard empty_board;
+        automatic Move move = NULL_MOVE;
+        automatic int address = (int'(KNIGHT) - int'(PAWN)) * 64 + 1;
+        automatic PstScore original_value;
+        init_empty_board(empty_board);
+        move.to_pos = Position'(1);
+        original_value = dut.gen_pst_rom[0].pst_endgame_rom.mem[address];
+        dut.gen_pst_rom[0].pst_endgame_rom.mem[address] = original_value + PstScore'(7);
+        board_in = empty_board;
+        zobrist_key_in = ref_zobrist_full(empty_board);
+        pst_eval_in = PstEvalPair'('0);
+        piece_count_in = PieceCount'(0);
+        move_in = move;
+        set_data = {3'b0, WHITE_KNIGHT};
+        thread_id = ThreadID'(0);
+        search_ply = PlyIndex'(0);
+        board_op = BOARD_SET_TILE_OP;
+        do_clock(1);
+        drive_idle();
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
+        expect_equal(pst_eval_out.first == PIECE_VALS_128[KNIGHT] + EvalScore'(pst_values[address]),
+            "first PST sum uses the first table");
+        expect_equal(pst_eval_out.endgame == PIECE_VALS_ENDGAME_128[KNIGHT]
+                + EvalScore'(original_value) + EvalScore'(7),
+            "endgame PST sum uses its independent table");
+        dut.gen_pst_rom[0].pst_endgame_rom.mem[address] = original_value;
     endtask
 
     initial begin
@@ -976,6 +1006,7 @@ module tb_board_update_pipeline;
         test_set_tile_overwrite();
         test_commit_history_not_written();
         test_thread_history_isolation();
+        test_distinct_phase_table();
 
         $display("Testbench run complete.");
         $display("Pass Count: %0d", pass_count);

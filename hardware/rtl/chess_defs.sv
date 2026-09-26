@@ -144,6 +144,11 @@ package chess_defs;
 
 	// -- Evaluation Related Definitions --
 	typedef logic signed [15:0] EvalScore;
+	// Both phase tables are accumulated before the piece-count blend.
+	typedef struct packed {
+		EvalScore first;
+		EvalScore endgame;
+	} PstEvalPair;
 	// PST ROM entries are individually small; expand them before accumulating.
 	typedef logic signed [9:0] PstScore;
 	// Standard chess starts with 32 pieces; six bits include the full endpoint.

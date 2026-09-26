@@ -1,6 +1,6 @@
 # NNUE Evaluator (`nnue_evaluator`)
 
-The NNUE evaluator produces a side-to-move-relative correction that search adds to material plus PST after converting the latter to side-to-move point of view. It stores one live accumulator per search thread; callers must preserve per-thread update ordering and wait for outstanding updates before evaluating that thread.
+The NNUE evaluator produces a side-to-move-relative correction and a blended White-relative material/PST score. Search converts the blended score to side-to-move point of view before adding the correction. It stores one live accumulator per search thread; callers must preserve per-thread update ordering and wait for outstanding updates before evaluating that thread.
 
 ## Encoding
 
@@ -20,7 +20,7 @@ Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumul
 
 ## Output Layer
 
-Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The result is clipped to the finite search-score range.
+Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The result is clipped to the finite search-score range. In parallel, the evaluator blends the two incoming material/PST sums linearly from the two-king position through the full 32-piece position, using signed truncation. The blended result is aligned with the NNUE output.
 
 Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
 

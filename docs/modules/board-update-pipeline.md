@@ -10,7 +10,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Input | `board_op` | Operation code for what the board update pipeline should do. |
 | Input | `board_in` | Input `FullBoard` state. |
 | Input | `zobrist_key_in` | Input Zobrist key for the board position. |
-| Input | `pst_eval_in` | Current White-relative piece-square-table evaluation. |
+| Input | `pst_eval_in` | Two current White-relative material/PST sums. |
 | Input | `piece_count_in` | Current total number of occupied squares, from 0 through 32. |
 | Input | `move_in` | Move to apply for push/commit operations, or destination square for set-tile operations. |
 | Input | `set_data` | Tile, turn, castling rights, en passant state, or halfmove clock depending on the set operation. This signal is 7 bits wide; narrow setup values use the low bits. |
@@ -18,7 +18,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 | Input | `search_ply` | Search ply before the current operation. |
 | Output | `board_out` | Output `FullBoard` state. |
 | Output | `zobrist_key_out` | Updated Zobrist key for the board position. |
-| Output | `pst_eval_out` | Updated White-relative PST evaluation. |
+| Output | `pst_eval_out` | Two updated White-relative material/PST sums. |
 | Output | `piece_count_out` | Updated total number of occupied squares. |
 | Output | `mover_in_check_out` | For push operations, indicates that the resulting position attacks the king of the side that moved. |
 | Output | `side_in_check_out` | Indicates that the resulting position attacks the king of the side to move. |
@@ -50,11 +50,11 @@ The engine sets up a board through Set Tile, Set Castling Rights, Set Turn, Set 
 
 Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king safety is checked through the normal move path. Deterministic generated data supplies the piece-square, en passant, turn, and castling keys.
 
-The pipeline always maintains the cached king squares, Zobrist key, incremental material/PST evaluation, and six-bit piece count. The shared tile-replacement path increments the count only for empty-to-piece changes and decrements it only for piece-to-empty changes, so ordinary captures, en passant, setup, and reversal need no board scan. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
+The pipeline always maintains the cached king squares, Zobrist key, both incremental material/PST sums, and six-bit piece count. The shared tile-replacement path increments the count only for empty-to-piece changes and decrements it only for piece-to-empty changes, so ordinary captures, en passant, setup, and reversal need no board scan. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
 
 ## PST Tables
 
-Material and piece-square parameters are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces the ROM data and material definitions consumed by RTL. PST entries are sign-extended to `EvalScore` before being applied, so table storage width does not narrow the accumulated score.
+Both material and piece-square parameter sets are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces a ROM and material definitions for each set. Both ROMs receive the same square addresses, and their entries are sign-extended to separate `EvalScore` sums.
 
 ## Move History
 

@@ -119,6 +119,16 @@ def print_report(run: Path) -> None:
             f"{report['pst_ranges_cp'][piece][1]:.1f}"
             for piece in PIECE_ORDER
         ))
+        if "endgame_material_values_cp" in report and "endgame_pst_ranges_cp" in report:
+            print("Endgame material values (cp): " + ", ".join(
+                f"{piece}={report['endgame_material_values_cp'][piece]:.1f}"
+                for piece in PIECE_ORDER
+            ))
+            print("Endgame normalized PST ranges (cp): " + ", ".join(
+                f"{piece}={report['endgame_pst_ranges_cp'][piece][0]:.1f}.."
+                f"{report['endgame_pst_ranges_cp'][piece][1]:.1f}"
+                for piece in PIECE_ORDER
+            ))
     elif parameters_path.is_file():
         parameters = json.loads(parameters_path.read_text(encoding="utf-8"))
         _print_parameter_values(parameters)
@@ -147,3 +157,14 @@ def _print_parameter_values(parameters: dict, prefix: str = "") -> None:
         f"{max(pst[piece][8:56] if piece == 'pawn' else pst[piece]):.1f}"
         for piece in PIECE_ORDER
     ))
+    if "material_endgame" in parameters and "pst_endgame" in parameters:
+        print(f"{prefix}Endgame material values (cp): " + ", ".join(
+            f"{piece}={float(parameters['material_endgame'][piece]):.1f}"
+            for piece in PIECE_ORDER
+        ))
+        endgame_pst = parameters["pst_endgame"]
+        print(f"{prefix}Endgame normalized PST ranges (cp): " + ", ".join(
+            f"{piece}={min(endgame_pst[piece][8:56] if piece == 'pawn' else endgame_pst[piece]):.1f}.."
+            f"{max(endgame_pst[piece][8:56] if piece == 'pawn' else endgame_pst[piece]):.1f}"
+            for piece in PIECE_ORDER
+        ))

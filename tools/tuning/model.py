@@ -37,6 +37,11 @@ def nnue_output_bucket(codes: torch.Tensor, bucket_count: int = NNUE_OUTPUT_BUCK
     return scaled.clamp_max(bucket_count - 1).to(torch.long)
 
 
+def pst_opening_phase(codes: torch.Tensor) -> torch.Tensor:
+    """Return the legal two-to-32-piece interpolation numerator."""
+    return codes.ne(0).sum(dim=1).sub(2).clamp(0, 30)
+
+
 def engine_parameters_cp() -> tuple[torch.Tensor, torch.Tensor]:
     """Load canonical material and PST values in centipawns."""
     parameters = json.loads(PST_PATH.read_text(encoding="utf-8"))
@@ -88,6 +93,8 @@ class EvaluationModel(nn.Module):
         self.terms = nn.ParameterDict({
             "material": nn.Parameter(material[1:5].clone()),
             "pst": nn.Parameter(pst.reshape(FEATURE_COUNT).clone()),
+            "material_endgame": nn.Parameter(material[1:5].clone()),
+            "pst_endgame": nn.Parameter(pst.reshape(FEATURE_COUNT).clone()),
         })
         # Pair-identical sparse channels cancel against the alternating
         # head at startup, while every quantized parameter still has a gradient.
@@ -131,6 +138,23 @@ class EvaluationModel(nn.Module):
         """Return the effective PST with unreachable pawn entries fixed at zero."""
         return self.terms["pst"].reshape(6, 64) * self._pst_mask
 
+    def material_endgame_cp(self) -> torch.Tensor:
+        """Return endgame material values with fixed pawn and king terms."""
+        fixed = self.terms["material_endgame"].new_tensor
+        return torch.cat((
+            fixed([FIXED_MATERIAL_CP["pawn"]]),
+            self.terms["material_endgame"],
+            fixed([FIXED_MATERIAL_CP["king"]]),
+        ))
+
+    def pst_endgame_cp(self) -> torch.Tensor:
+        """Return the endgame PST with unreachable pawn entries fixed at zero."""
+        return self.terms["pst_endgame"].reshape(6, 64) * self._pst_mask
+
+    def combined_endgame_cp(self) -> torch.Tensor:
+        """Return the effective endgame material-plus-PST table."""
+        return self.material_endgame_cp()[:, None] + self.pst_endgame_cp()
+
     def combined_cp(self) -> torch.Tensor:
         """Return the effective combined material-plus-PST table."""
         return self.material_cp()[:, None] + self.pst_cp()
@@ -138,15 +162,16 @@ class EvaluationModel(nn.Module):
     @torch.no_grad()
     def project_parameters(self) -> None:
         """Keep identifiable PST values and latent QAT parameters in their legal ranges."""
-        pst = self.terms["pst"].reshape(6, 64)
-        pst[0, :8] = 0
-        pst[0, 56:] = 0
-        for piece_index in range(1, 5):
-            center = (pst[piece_index].min() + pst[piece_index].max()) / 2.0
-            pst[piece_index].sub_(center)
-            self.terms["material"][piece_index - 1].add_(center)
-        king_center = (pst[5].min() + pst[5].max()) / 2.0
-        pst[5].sub_(king_center)
+        for suffix in ("", "_endgame"):
+            pst = self.terms[f"pst{suffix}"].reshape(6, 64)
+            pst[0, :8] = 0
+            pst[0, 56:] = 0
+            for piece_index in range(1, 5):
+                center = (pst[piece_index].min() + pst[piece_index].max()) / 2.0
+                pst[piece_index].sub_(center)
+                self.terms[f"material{suffix}"][piece_index - 1].add_(center)
+            king_center = (pst[5].min() + pst[5].max()) / 2.0
+            pst[5].sub_(king_center)
         # Projecting the latent values prevents straight-through gradients from
         # stranding parameters far beyond a deployable quantization bin.
         self.feature_weights.clamp_(-2, 1)
@@ -264,8 +289,12 @@ class EvaluationModel(nn.Module):
         mask = codes != 0
         indices = codes.abs().to(torch.long).sub(1).clamp_min(0)
         signs = codes.sign().to(self.terms["pst"].dtype)
-        values = self.combined_cp().reshape(FEATURE_COUNT)[indices] * signs * mask
-        white_relative = values.sum(dim=1)
+        opening = self.combined_cp().reshape(FEATURE_COUNT)[indices] * signs * mask
+        endgame = self.combined_endgame_cp().reshape(FEATURE_COUNT)[indices] * signs * mask
+        opening_sum = opening.sum(dim=1)
+        endgame_sum = endgame.sum(dim=1)
+        phase = pst_opening_phase(codes).to(opening_sum.dtype)
+        white_relative = endgame_sum + (opening_sum - endgame_sum) * (phase / 30.0)
         stm_sign = torch.where(
             white_to_move.to(device=codes.device, dtype=torch.bool),
             white_relative.new_tensor(1.0),

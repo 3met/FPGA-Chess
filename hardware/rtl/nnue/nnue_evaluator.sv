@@ -19,8 +19,10 @@ module nnue_evaluator #(
     input ThreadID eval_thread_id,
     input Color eval_turn,
     input PieceCount eval_piece_count,
+    input PstEvalPair eval_pst,
     output logic result_valid,
-    output EvalScore result
+    output EvalScore result,
+    output EvalScore result_pst
 );
 
     // Each thread owns one live accumulator. Search stores compact move deltas
@@ -68,6 +70,20 @@ module nnue_evaluator #(
     QuadSum partial_q[32];
     OutputSum eval_sum;
     OutputSum result_sum;
+    EvalScore pst_blend_active, pst_blend_pending;
+
+    // The legal endpoints are two kings and the 32-piece initial position.
+    // Signed division truncates toward zero, matching the training model.
+    function automatic EvalScore blend_pst(input PstEvalPair scores, input PieceCount count);
+        automatic int signed first_weight;
+        automatic int signed numerator;
+        if (count <= PieceCount'(2)) first_weight = 0;
+        else if (count >= PieceCount'(32)) first_weight = 30;
+        else first_weight = int'(count) - 2;
+        numerator = int'(scores.first) * first_weight
+            + int'(scores.endgame) * (30 - first_weight);
+        return EvalScore'(numerator / 30);
+    endfunction
 
     (* ram_style = "block" *)
     logic [NNUE_ROW_BYTES * 8-1:0] feature_rom[NNUE_FEATURE_COUNT];
@@ -94,6 +110,7 @@ module nnue_evaluator #(
         $readmemh("hardware/data/nnue/output_bias.hex", output_bias);
         $readmemh("hardware/data/nnue/accumulator_bias.hex", accumulator_bias);
     end
+
 
     function automatic StateAddress state_address(input ThreadID thread_id);
         return StateAddress'(thread_id);
@@ -144,6 +161,7 @@ module nnue_evaluator #(
             result_pending <= 1'b0;
             result_valid <= 1'b0;
             result <= '0;
+            result_pst <= '0;
 `ifdef FPGA_CHESS_PROFILE
             profile_accumulator_wrap_lanes <= 0;
 `endif
@@ -234,6 +252,7 @@ module nnue_evaluator #(
                 else
                     result <= EvalScore'(result_sum);
                 result_valid <= 1'b1;
+                result_pst <= pst_blend_pending;
                 result_pending <= 1'b0;
             end
 
@@ -300,6 +319,7 @@ module nnue_evaluator #(
                     cycle_sum = eval_sum + OutputSum'(lane_sum);
                     if (partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1) begin
                         result_sum <= cycle_sum;
+                        pst_blend_pending <= pst_blend_active;
                         result_pending <= 1'b1;
                         if (eval_valid && eval_ready) begin
                             eval_cycle <= '0;
@@ -329,6 +349,7 @@ module nnue_evaluator #(
             // the two perspectives once, then shift one MAC row per cycle.
             if (eval_valid && eval_ready) begin
                 automatic logic [ACCUMULATOR_WORD_BITS-1:0] selected_state;
+                pst_blend_active <= blend_pst(eval_pst, eval_piece_count);
 
                 // A single-thread build has no other state to update while it
                 // evaluates, so reuse the update mirror and avoid a very wide,

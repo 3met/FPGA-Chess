@@ -14,7 +14,7 @@ module board_update_pipeline #(
     input BoardOp board_op,
     input FullBoard board_in,
     input ZobristKey zobrist_key_in,
-    input EvalScore pst_eval_in,
+    input PstEvalPair pst_eval_in,
     input PieceCount piece_count_in,
     input Move move_in,
     input logic [6:0] set_data,
@@ -23,7 +23,7 @@ module board_update_pipeline #(
 
     output FullBoard board_out,
     output ZobristKey zobrist_key_out,
-    output EvalScore pst_eval_out,
+    output PstEvalPair pst_eval_out,
     output PieceCount piece_count_out,
     output logic mover_in_check_out,
     output logic side_in_check_out
@@ -33,6 +33,7 @@ module board_update_pipeline #(
     typedef logic [2:0] PstPieceIndex;
     localparam int PST_ENTRY_COUNT = 6 * 64;
     localparam PST_MEM_INIT_FILE = "hardware/data/pst_values/pst_values.hex";
+    localparam PST_ENDGAME_MEM_INIT_FILE = "hardware/data/pst_values/pst_values_endgame.hex";
     localparam int PST_READ_PORTS = 4;
     localparam int ZOBRIST_TILE_READ_PORTS = 4;
 
@@ -70,7 +71,7 @@ module board_update_pipeline #(
     BoardUpdatePipelineCtx next_ctx_pipe[2];
     FullBoard next_board_out;
     ZobristKey next_zobrist_key_out;
-    EvalScore next_pst_eval_out;
+    PstEvalPair next_pst_eval_out;
     PieceCount next_piece_count_out;
 
     MoveRecord move_record_in, move_record_out;
@@ -93,7 +94,8 @@ module board_update_pipeline #(
     PstReadPlan pst_read_plan;
     logic [PST_READ_PORTS-1:0] pst_read_enable_q;
     PstScore pst_read_data[PST_READ_PORTS];
-    EvalScore pst_source_out, pst_destination_out, pst_captured_out, pst_castle_out;
+    PstScore pst_endgame_read_data[PST_READ_PORTS];
+    PstEvalPair pst_source_out, pst_destination_out, pst_captured_out, pst_castle_out;
     ZobristReadPlan zobrist_read_plan;
     logic [ZOBRIST_TILE_READ_PORTS-1:0] zobrist_read_enable_q;
     ZobristKey zobrist_read_data[ZOBRIST_TILE_READ_PORTS];
@@ -163,14 +165,27 @@ module board_update_pipeline #(
                 .q_a(pst_read_data[port_pair * 2]),
                 .q_b(pst_read_data[port_pair * 2 + 1])
             );
+            sync_read_dual_port_rom #(
+                .NUM_WORDS(PST_ENTRY_COUNT),
+                .WORD_SIZE($bits(PstScore)),
+                .MEM_INIT_FILE(PST_ENDGAME_MEM_INIT_FILE)
+            ) pst_endgame_rom (
+                .clock(clk),
+                .address_a(pst_read_plan.address[port_pair * 2]),
+                .address_b(pst_read_plan.address[port_pair * 2 + 1]),
+                .rden_a(pst_read_plan.enable[port_pair * 2]),
+                .rden_b(pst_read_plan.enable[port_pair * 2 + 1]),
+                .q_a(pst_endgame_read_data[port_pair * 2]),
+                .q_b(pst_endgame_read_data[port_pair * 2 + 1])
+            );
         end
     endgenerate
 
     // Keep all accumulated evaluation state at 16 bits while the ROM uses compact entries.
-    assign pst_source_out = pst_read_enable_q[0] ? EvalScore'(pst_read_data[0]) : EvalScore'('x);
-    assign pst_destination_out = pst_read_enable_q[1] ? EvalScore'(pst_read_data[1]) : EvalScore'('x);
-    assign pst_captured_out = pst_read_enable_q[2] ? EvalScore'(pst_read_data[2]) : EvalScore'('x);
-    assign pst_castle_out = pst_read_enable_q[3] ? EvalScore'(pst_read_data[3]) : EvalScore'('x);
+    assign pst_source_out = pst_read_enable_q[0] ? {EvalScore'(pst_read_data[0]), EvalScore'(pst_endgame_read_data[0])} : PstEvalPair'('x);
+    assign pst_destination_out = pst_read_enable_q[1] ? {EvalScore'(pst_read_data[1]), EvalScore'(pst_endgame_read_data[1])} : PstEvalPair'('x);
+    assign pst_captured_out = pst_read_enable_q[2] ? {EvalScore'(pst_read_data[2]), EvalScore'(pst_endgame_read_data[2])} : PstEvalPair'('x);
+    assign pst_castle_out = pst_read_enable_q[3] ? {EvalScore'(pst_read_data[3]), EvalScore'(pst_endgame_read_data[3])} : PstEvalPair'('x);
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
         return MoveRecordAddr'(MoveRecordAddr'(tid) * MoveRecordAddr'(MOVE_RECORD_PLY_COUNT)
@@ -225,15 +240,27 @@ module board_update_pipeline #(
         endcase
     endfunction : castle_rook_to
 
-    function automatic EvalScore signed_piece_score(input Tile tile, input EvalScore pst_value);
-        automatic EvalScore score;
+    // Component-wise operations prevent a carry from crossing between phases.
+    function automatic PstEvalPair pair_add(input PstEvalPair a, input PstEvalPair b);
+        return '{first: a.first + b.first, endgame: a.endgame + b.endgame};
+    endfunction
 
-        if (tile.piece_type == NULL_PIECE) begin
-            return EvalScore'(0);
-        end
+    function automatic PstEvalPair pair_neg(input PstEvalPair value);
+        return '{first: -value.first, endgame: -value.endgame};
+    endfunction
 
-        score = PIECE_VALS_128[tile.piece_type] + pst_value;
-        return (tile.piece_color == WHITE) ? score : -score;
+    function automatic PstEvalPair pair_sub(input PstEvalPair a, input PstEvalPair b);
+        return pair_add(a, pair_neg(b));
+    endfunction
+
+    // White-relative material and PST use the same color sign in both sets.
+    function automatic PstEvalPair signed_piece_score(input Tile tile, input PstEvalPair pst_value);
+        automatic PstEvalPair score;
+        if (tile.piece_type == NULL_PIECE)
+            return PstEvalPair'('0);
+        score.first = PIECE_VALS_128[tile.piece_type] + pst_value.first;
+        score.endgame = PIECE_VALS_ENDGAME_128[tile.piece_type] + pst_value.endgame;
+        return (tile.piece_color == WHITE) ? score : pair_neg(score);
     endfunction : signed_piece_score
 
     // Apply registered move overlays once before both king-safety scans.
@@ -835,26 +862,26 @@ module board_update_pipeline #(
                 automatic logic next_has_ep;
                 automatic BoardFile next_ep_file = get_file(to_pos);
                 automatic HalfmoveClock next_halfmove;
-                automatic EvalScore mover_delta =
-                    signed_piece_score(placed_tile, pst_destination_out)
-                    - signed_piece_score(moving_tile, pst_source_out);
-                automatic EvalScore capture_delta = (is_ep || is_castle)
-                    ? EvalScore'(0) : -signed_piece_score(destination_tile, pst_captured_out);
+                automatic PstEvalPair mover_delta = pair_sub(
+                    signed_piece_score(placed_tile, pst_destination_out),
+                    signed_piece_score(moving_tile, pst_source_out));
+                automatic PstEvalPair capture_delta = (is_ep || is_castle)
+                    ? PstEvalPair'('0) : pair_neg(signed_piece_score(destination_tile, pst_captured_out));
                 automatic Tile auxiliary_tile = is_ep
                     ? Tile'({Color'(~moved_color), PAWN})
                     : Tile'({moved_color, ROOK});
-                automatic EvalScore auxiliary_remove_delta = (is_ep || is_castle)
-                    ? -signed_piece_score(auxiliary_tile, pst_captured_out)
-                    : EvalScore'(0);
-                automatic EvalScore rook_place_delta = is_castle
+                automatic PstEvalPair auxiliary_remove_delta = (is_ep || is_castle)
+                    ? pair_neg(signed_piece_score(auxiliary_tile, pst_captured_out))
+                    : PstEvalPair'('0);
+                automatic PstEvalPair rook_place_delta = is_castle
                     ? signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out)
-                    : EvalScore'(0);
+                    : PstEvalPair'('0);
 
                 // Balance the independent tile-score deltas so a synchronous
                 // PST ROM output crosses two adders rather than a serial task chain.
-                out.pst_eval = in.pst_eval
-                    + EvalScore'(mover_delta + capture_delta)
-                    + EvalScore'(auxiliary_remove_delta + rook_place_delta);
+                out.pst_eval = pair_add(in.pst_eval,
+                    pair_add(pair_add(mover_delta, capture_delta),
+                             pair_add(auxiliary_remove_delta, rook_place_delta)));
 
                 replace_tile(out.board, out.piece_count,
                     from_pos, moving_tile, EMPTY_TILE);
@@ -911,24 +938,24 @@ module board_update_pipeline #(
                 automatic Position ep_capture_pos = effects.ep_capture_pos;
                 automatic Position rook_from = effects.rook_from;
                 automatic Position rook_to = effects.rook_to;
-                automatic EvalScore mover_delta =
+                automatic PstEvalPair mover_delta =
                     signed_piece_score(restored_mover, pst_source_out);
-                automatic EvalScore capture_delta =
+                automatic PstEvalPair capture_delta = pair_sub(
                     signed_piece_score(restored_capture,
-                        is_ep ? EvalScore'(0) : pst_captured_out)
-                    - signed_piece_score(effects.destination_tile, pst_destination_out);
-                automatic EvalScore ep_restore_delta = is_ep
+                        is_ep ? PstEvalPair'('0) : pst_captured_out),
+                    signed_piece_score(effects.destination_tile, pst_destination_out));
+                automatic PstEvalPair ep_restore_delta = is_ep
                     ? signed_piece_score(Tile'({captured_color, PAWN}), pst_captured_out)
-                    : EvalScore'(0);
-                automatic EvalScore castle_rook_delta = is_castle
-                    ? signed_piece_score(Tile'({moved_color, ROOK}), pst_captured_out)
-                        - signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out)
-                    : EvalScore'(0);
+                    : PstEvalPair'('0);
+                automatic PstEvalPair castle_rook_delta = is_castle
+                    ? pair_sub(signed_piece_score(Tile'({moved_color, ROOK}), pst_captured_out),
+                        signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out))
+                    : PstEvalPair'('0);
 
                 if (!is_null_record(rec)) begin
-                    out.pst_eval = in.pst_eval
-                        + EvalScore'(mover_delta + capture_delta)
-                        + EvalScore'(ep_restore_delta + castle_rook_delta);
+                    out.pst_eval = pair_add(in.pst_eval,
+                        pair_add(pair_add(mover_delta, capture_delta),
+                                 pair_add(ep_restore_delta, castle_rook_delta)));
                     replace_tile(out.board, out.piece_count,
                         from_pos, EMPTY_TILE, restored_mover);
                     replace_tile(out.board, out.piece_count,
@@ -979,9 +1006,9 @@ module board_update_pipeline #(
                 automatic Position to_pos = in.move.to_pos;
                 automatic Tile new_tile = Tile'(in.set_data[3:0]);
 
-                out.pst_eval = in.pst_eval
-                    + signed_piece_score(new_tile, pst_destination_out)
-                    - signed_piece_score(in.board.tiles[to_pos], pst_captured_out);
+                out.pst_eval = pair_add(in.pst_eval,
+                    pair_sub(signed_piece_score(new_tile, pst_destination_out),
+                             signed_piece_score(in.board.tiles[to_pos], pst_captured_out)));
                 replace_tile(out.board, out.piece_count,
                     to_pos, in.board.tiles[to_pos], new_tile);
                 out.board.has_ep = zobrist_new_ep_valid_q;

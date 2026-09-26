@@ -16,7 +16,9 @@ module tb_nnue_evaluator;
     ThreadID eval_thread_id;
     Color eval_turn;
     PieceCount eval_piece_count;
+    PstEvalPair eval_pst;
     EvalScore result;
+    EvalScore result_pst;
     logic single_update_valid, single_update_ready, single_update_idle;
     NnueUpdateRequest single_update_req;
     logic single_eval_valid, single_eval_ready, single_result_valid;
@@ -30,7 +32,7 @@ module tb_nnue_evaluator;
         .clk, .rst_n, .clear, .update_valid, .update_ready, .update_idle, .update_req,
         .update_done_valid, .update_done_thread, .update_done_ply,
         .eval_valid, .eval_ready, .eval_thread_id, .eval_turn, .eval_piece_count,
-        .result_valid, .result
+        .eval_pst, .result_valid, .result, .result_pst
     );
 
     // Exercise the single-thread state path used by the DE1-SoC build.
@@ -42,6 +44,7 @@ module tb_nnue_evaluator;
         .eval_valid(single_eval_valid), .eval_ready(single_eval_ready),
         .eval_thread_id(ThreadID'(0)), .eval_turn(WHITE),
         .eval_piece_count(PieceCount'(2)),
+        .eval_pst(PstEvalPair'('0)),
         .result_valid(single_result_valid), .result(single_result)
     );
 
@@ -117,6 +120,7 @@ module tb_nnue_evaluator;
         eval_thread_id = 0;
         eval_turn = WHITE;
         eval_piece_count = PieceCount'(2);
+        eval_pst = '{first: EvalScore'(300), endgame: EvalScore'(-300)};
         single_update_valid = 0;
         single_update_req = '0;
         single_eval_valid = 0;
@@ -180,6 +184,14 @@ module tb_nnue_evaluator;
         wait (update_idle);
         eval_thread_id = ThreadID'(8);
         evaluate(EvalScore'(256), "state memory supports thread IDs above seven");
+        check(result_pst == EvalScore'(-300), "two-piece position uses endgame PST");
+        eval_piece_count = PieceCount'(17);
+        evaluate(EvalScore'(256), "midpoint PST blend runs alongside NNUE");
+        check(result_pst == EvalScore'(0), "seventeen pieces blend both PST sets equally");
+        eval_piece_count = PieceCount'(32);
+        evaluate(EvalScore'(256), "full-board PST blend runs alongside NNUE");
+        check(result_pst == EvalScore'(300), "full board uses first PST set");
+        eval_piece_count = PieceCount'(2);
         dut.output_weight_rows[0] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
         dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
         dut.output_weight_rows[2] = {NNUE_OUTPUT_MAC_LANES{3'h7}};

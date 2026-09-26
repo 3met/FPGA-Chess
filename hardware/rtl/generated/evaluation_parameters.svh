@@ -3,3 +3,6 @@
 localparam EvalScore PIECE_VALS_128[8] = '{
 	'd0, 'd128, 'd347, 'd376, 'd514, 'd1115, 'd0, 'dx
 };
+localparam EvalScore PIECE_VALS_ENDGAME_128[8] = '{
+	'd0, 'd128, 'd347, 'd376, 'd514, 'd1115, 'd0, 'dx
+};

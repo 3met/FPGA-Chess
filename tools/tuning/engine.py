@@ -26,6 +26,7 @@ from .model import (
 
 GENERATED_PATHS = (
     REPO_ROOT / "hardware/data/pst_values/pst_values.hex",
+    REPO_ROOT / "hardware/data/pst_values/pst_values_endgame.hex",
     REPO_ROOT / "hardware/rtl/generated/evaluation_parameters.svh",
 )
 NNUE_FEATURE_PATH = REPO_ROOT / "hardware/data/nnue/feature_transformer.hex"
@@ -84,24 +85,29 @@ def decompose(combined_cp: list[list[float]]) -> tuple[list[int], dict[str, list
     return material, pst
 
 
-def export_values(parameters: dict) -> tuple[list[int], dict[str, list[int]]]:
+def export_values(parameters: dict, suffix: str = "") -> tuple[list[int], dict[str, list[int]]]:
     """Convert explicit or legacy run parameters to signed engine units."""
-    if "material" not in parameters or "pst" not in parameters:
+    material_key, pst_key = f"material{suffix}", f"pst{suffix}"
+    if suffix and (material_key in parameters) != (pst_key in parameters):
+        raise ValueError("endgame parameters must contain both material and PST")
+    if suffix and material_key not in parameters:
+        material_key, pst_key = "material", "pst"
+    if material_key not in parameters or pst_key not in parameters:
         return decompose(parameters["combined_pst"])
     if (
-        set(parameters["material"]) != set(PIECE_ORDER)
-        or set(parameters["pst"]) != set(PIECE_ORDER)
+        set(parameters[material_key]) != set(PIECE_ORDER)
+        or set(parameters[pst_key]) != set(PIECE_ORDER)
     ):
         raise ValueError("parameters must define material and PST values for all six pieces")
     material = [
-        round_half_away(float(parameters["material"][piece]) * 128.0 / 100.0)
+        round_half_away(float(parameters[material_key][piece]) * 128.0 / 100.0)
         for piece in PIECE_ORDER
     ]
     material[0] = FIXED_MATERIAL_128["pawn"]
     material[5] = FIXED_MATERIAL_128["king"]
     pst = {}
     for piece in PIECE_ORDER:
-        table = parameters["pst"][piece]
+        table = parameters[pst_key][piece]
         if len(table) != 64:
             raise ValueError(f"PST for {piece} must contain 64 entries")
         pst[piece] = [round_half_away(float(value) * 128.0 / 100.0) for value in table]
@@ -132,15 +138,28 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
         }, "legacy best checkpoint"
     output_buckets = int(state["output_weights"].shape[0])
     model = EvaluationModel(output_buckets=output_buckets)
+    for name in ("material", "pst"):
+        old_key = f"terms.{name}"
+        new_key = f"terms.{name}_endgame"
+        if new_key not in state and old_key in state:
+            state[new_key] = state[old_key].clone()
     model.load_state_dict(state)
     model.project_parameters()
     material = model.material_cp().detach().cpu()
     pst = model.pst_cp().detach().cpu()
+    endgame_material = model.material_endgame_cp().detach().cpu()
+    endgame_pst = model.pst_endgame_cp().detach().cpu()
     return {
         "units": "centipawns",
         "piece_order": list(PIECE_ORDER),
         "material": {piece: float(material[index]) for index, piece in enumerate(PIECE_ORDER)},
         "pst": {piece: pst[index].tolist() for index, piece in enumerate(PIECE_ORDER)},
+        "material_endgame": {
+            piece: float(endgame_material[index]) for index, piece in enumerate(PIECE_ORDER)
+        },
+        "pst_endgame": {
+            piece: endgame_pst[index].tolist() for index, piece in enumerate(PIECE_ORDER)
+        },
         "combined_pst": model.combined_cp().detach().cpu().tolist(),
         "nnue": {
             "encoding": "relative-2x6x64",
@@ -247,9 +266,13 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
 def commit_parameters(run: Path, dry_run: bool = False) -> None:
     parameters, source = load_run_parameters(run)
     material, pst = export_values(parameters)
+    endgame_material, endgame_pst = export_values(parameters, "_endgame")
     print(f"Run: {run.name} ({source})")
     print("Material (pawn/128): " + ", ".join(
         f"{piece}={value}" for piece, value in zip(PIECE_ORDER, material)
+    ))
+    print("Endgame material (pawn/128): " + ", ".join(
+        f"{piece}={value}" for piece, value in zip(PIECE_ORDER, endgame_material)
     ))
     if dry_run:
         if "nnue" in parameters:
@@ -259,6 +282,8 @@ def commit_parameters(run: Path, dry_run: bool = False) -> None:
     pst_document = json.loads(PST_PATH.read_text(encoding="utf-8"))
     pst_document["material"] = dict(zip(PIECE_ORDER, material))
     pst_document["pst"] = pst
+    pst_document["material_endgame"] = dict(zip(PIECE_ORDER, endgame_material))
+    pst_document["pst_endgame"] = endgame_pst
     new_pst = json.dumps(pst_document, indent=2) + "\n"
     nnue_feature, nnue_output, nnue_output_bias, nnue_bias = export_nnue(parameters)
     paths = (

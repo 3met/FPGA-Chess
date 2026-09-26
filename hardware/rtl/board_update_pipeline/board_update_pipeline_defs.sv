@@ -50,7 +50,7 @@ package board_update_pipeline_defs;
         BoardOp board_op;
         FullBoard board;
         ZobristKey zobrist_key;
-        EvalScore pst_eval;
+        PstEvalPair pst_eval;
         PieceCount piece_count;
         Move move;
         logic [6:0] set_data; // Tile, turn, castling rights, en passant, or halfmove data for a SET operation

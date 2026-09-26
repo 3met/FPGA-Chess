@@ -159,7 +159,7 @@ The total packed width is 284 bits.
 
 ### Evaluation Scores
 
-`EvalScore` is a signed 16-bit value. Incremental PST/material state is White-relative: positive scores are good for White and negative scores are good for Black. Search converts it to side-to-move point of view before adding the side-to-move-relative NNUE correction.
+`EvalScore` is a signed 16-bit value. `PstEvalPair` carries two White-relative incremental PST/material sums: positive scores are good for White and negative scores are good for Black. The NNUE pipeline blends them by piece count, then search converts the result to side-to-move point of view before adding the side-to-move-relative NNUE correction.
 
 `PstScore` is the signed 10-bit ROM-entry type used by the generated piece-square tables. Board update sign-extends entries to `EvalScore` before applying incremental deltas.
 

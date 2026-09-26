@@ -41,11 +41,13 @@ from tools.tuning.model import (
     EvaluationModel,
     engine_combined_cp,
     nnue_output_bucket,
+    pst_opening_phase,
 )
 from tools.tuning.quantization import analyze_quantization, signed_bits
 from tools.tuning.reporting import atomic_json, print_report, resolve_run
 from tools.tuning.training import (
     _initialize_model,
+    _reset_pst_from_engine,
     _loss,
     _microbatches,
     _scheduler,
@@ -175,6 +177,7 @@ class TuningDataTests(unittest.TestCase):
         model = EvaluationModel()
         self.assertEqual(model.material_cp().tolist(), [100.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertTrue(torch.equal(model.pst_cp(), torch.zeros((6, 64))))
+        self.assertTrue(torch.equal(model.pst_endgame_cp(), model.pst_cp()))
 
     def test_orientation_and_white_relative_signs(self):
         board = chess.Board("8/8/8/8/8/8/p7/N6k w - -")
@@ -483,7 +486,9 @@ class TuningModelAndExportTests(unittest.TestCase):
 
     def test_model_has_identifiable_material_and_pst_groups(self):
         model = EvaluationModel(engine_combined_cp())
-        self.assertEqual(set(model.terms), {"material", "pst"})
+        self.assertEqual(set(model.terms), {
+            "material", "pst", "material_endgame", "pst_endgame",
+        })
         self.assertEqual(model.material_cp()[0].item(), 100.0)
         self.assertEqual(model.material_cp()[5].item(), 0.0)
         pst = model.pst_cp().detach()
@@ -495,6 +500,30 @@ class TuningModelAndExportTests(unittest.TestCase):
                 0.0,
                 places=4,
             )
+
+    def test_piece_count_interpolates_the_two_pst_sets(self):
+        model = EvaluationModel()
+        with torch.no_grad():
+            model.terms["pst"][64] = 30.0
+            model.terms["pst_endgame"][64] = -30.0
+        for count, expected in ((2, -30.0), (17, 0.0), (32, 30.0)):
+            codes = torch.zeros((1, 32), dtype=torch.int16)
+            codes[0, 0] = 65
+            codes[0, 1:count] = 321
+            self.assertEqual(pst_opening_phase(codes).item(), count - 2)
+            self.assertAlmostEqual(model(codes, torch.tensor([True])).item(), expected)
+
+    def test_old_checkpoint_nnue_load_keeps_exact_engine_pst_start(self):
+        previous = EvaluationModel()
+        old_state = {
+            key: value for key, value in previous.state_dict().items()
+            if not key.endswith("_endgame")
+        }
+        current = EvaluationModel()
+        _initialize_model(current, {"model": old_state})
+        _reset_pst_from_engine(current)
+        self.assertTrue(torch.equal(current.combined_cp(), engine_combined_cp().reshape(6, 64)))
+        self.assertTrue(torch.equal(current.combined_endgame_cp(), current.combined_cp()))
 
     def test_rounding_and_integer_decomposition(self):
         self.assertEqual(round_half_away(1.5), 2)
@@ -530,6 +559,15 @@ class TuningModelAndExportTests(unittest.TestCase):
         self.assertEqual(material[1], round_half_away(301.0 * 128.0 / 100.0))
         self.assertEqual(material[5], 0)
         self.assertEqual(pst["knight"][0], -pst["knight"][1])
+        endgame_material, endgame_pst = export_values(parameters, "_endgame")
+        self.assertEqual(endgame_material, material)
+        self.assertEqual(endgame_pst, pst)
+        parameters["material_endgame"] = dict(parameters["material"])
+        parameters["pst_endgame"] = {piece: list(table) for piece, table in parameters["pst"].items()}
+        parameters["pst_endgame"]["knight"][0] = 7.0
+        _, endgame_pst = export_values(parameters, "_endgame")
+        self.assertEqual(endgame_pst["knight"][0], round_half_away(7.0 * 128.0 / 100.0))
+        self.assertNotEqual(endgame_pst["knight"][0], pst["knight"][0])
 
     def test_interrupted_run_recovers_its_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:

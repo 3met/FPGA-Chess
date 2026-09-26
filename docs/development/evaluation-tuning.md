@@ -13,11 +13,13 @@ Install the optional dependencies with `python -m pip install -r requirements-tu
 
 Training reads the configured Lichess JSONL or JSONL.ZST dataset and writes caches, checkpoints, metrics, parameters, and reports under `work/tuning/`. Training settings live in the configuration file; `--initialize <run>` starts from another model without reusing its optimizer state.
 
-`engine-commit` exports a completed run, validates the deployed widths, updates `hardware/data/pst_values/pst_values.json`, and regenerates the tracked hardware data. Pass `--run <id>` to select a specific run.
+`engine-commit` exports a completed run, validates the deployed widths, updates both material/PST sets in `hardware/data/pst_values/pst_values.json`, and regenerates the tracked hardware data. Pass `--run <id>` to select a specific run.
 
 ## Model Constraints
 
-Material and PST use separate parameter groups. Pawn and king material are fixed; other material values and reachable PST entries are learned. Symmetry and centering constraints remove redundant offsets, and unreachable pawn squares remain zero.
+Opening and endgame material/PST sets use separate parameter groups. Pawn and king material are fixed in both sets; other material values and reachable PST entries are learned. The opening weight is `(piece_count - 2) / 30`, using the same piece count as the NNUE output bucket. Symmetry and centering constraints remove redundant offsets, and unreachable pawn squares remain zero.
+
+With `initialize_material_pst_from_engine` enabled, both material/PST sets start from the checked-in engine table, including when `--initialize <run>` loads NNUE values from an earlier checkpoint. This preserves the initial deployed evaluation when the two sets are identical.
 
 The NNUE model matches the hardware's direct piece-square encoding, accumulator arithmetic, clipped activation, perspective ordering, piece-count output buckets, and quantized output layer. Quantization-aware training uses the deployed integer ranges and modular behavior so exported weights require no rescaling.
 

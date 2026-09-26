@@ -6,13 +6,13 @@ Incremental material plus PST evaluation is White-relative: positive scores favo
 
 ## Material Valuation
 
-Material values are maintained incrementally in units of 1/128 pawn. The canonical material and piece-square parameters are generated from the evaluation-parameter JSON.
+Material values are maintained incrementally in units of 1/128 pawn. The canonical material and piece-square parameters for both phases are generated from the evaluation-parameter JSON.
 
 ## Piece-Square Tables
 
 Piece-square-table scoring is White-relative. White pieces add their table value; Black pieces subtract the mirrored-square table value.
 
-The board update pipeline updates material, PST state, and total occupied-piece count together with every board operation.
+The board update pipeline updates two material/PST sums and the total occupied-piece count together with every board operation.
 
 ## NNUE Correction
 
@@ -20,4 +20,4 @@ The NNUE uses direct piece-square features for White and Black perspectives. Bla
 
 The output orders the side-to-move perspective before the opposing perspective and produces a side-to-move-relative correction. The incrementally tracked piece count selects one of eight four-piece phase buckets without scanning the board; the final bucket covers the three reachable counts 30-32. Model widths, packing, update behavior, and generated files are defined in [nnue-evaluator.md](../modules/nnue-evaluator.md).
 
-Final search evaluation is `side_to_move(material + PST) + NNUE correction`. Material and PST remain independently trainable and continue to be maintained incrementally.
+The NNUE evaluation pipeline blends the two White-relative sums using the occupied-piece count: 32 pieces select the first set, two kings select the endgame set, and intermediate counts use linear interpolation with signed truncation. This blend runs alongside the NNUE forward pass. Final search evaluation is `side_to_move(blended material + PST) + NNUE correction`. Material and PST remain independently trainable in both sets.

@@ -4,7 +4,7 @@ The chip is a hardware chess engine controlled by a minimal host-side Python pro
 
 The FPGA maintains the active game/search state between commands and performs the search work. Once a search command begins, the FPGA does not require further host communication until it finishes, except for in-band kill, UART BREAK remote reset, or output backpressure.
 
-The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, incremental piece-square-table score, material information, search stack records, transposition-table metadata, and per-thread control state.
+The internal design passes explicit board-state values through shared pipelines. A board position is represented as `FullBoard` plus side data such as a Zobrist key, two incremental material/PST scores, material information, search stack records, transposition-table metadata, and per-thread control state.
 
 The number of search threads and search stack depth are build parameters. Perft, Zobrist hashing, the transposition table, and incremental evaluation use the same core datapaths as normal search.
 
@@ -41,9 +41,9 @@ The FPGA maintains active game state between commands. The host can send setup, 
 
 Search owns per-thread state. Each thread keeps an active search stack and move records for reverse traversal rather than storing a full `FullBoard` at every ply. The board update pipeline transforms board states and move records but does not own the engine position.
 
-Zobrist hashes and material plus piece-square-table evaluation are maintained incrementally by board update. NNUE root state is built once per thread and child states are maintained through reversible feature deltas.
+Zobrist hashes and both material/PST scores are maintained incrementally by board update. NNUE root state is built once per thread and child states are maintained through reversible feature deltas.
 
-Raw evaluation and incremental PST/material state are White-relative. Search normalizes scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
+Raw evaluation and both incremental PST/material scores are White-relative. Search normalizes scores to point-of-view format at search boundaries. This keeps evaluation modules simple while allowing the search controller to use a conventional side-to-move alpha/beta convention.
 
 ## Transposition Table
 

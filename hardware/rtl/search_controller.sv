@@ -292,7 +292,7 @@ module search_controller #(
     FullBoard active_board;
     logic active_board_in_check;
     ZobristKey active_zobrist_key;
-    EvalScore active_pst_eval;
+    PstEvalPair active_pst_eval;
     PieceCount active_piece_count;
     logic [6:0] new_setup_index;
 
@@ -351,7 +351,7 @@ module search_controller #(
     // not put the round-robin board mux in front of the full attack scan.
     logic search_board_in_check[0:SEARCH_THREAD_COUNT-1];
     ZobristKey search_zobrist_key[0:SEARCH_THREAD_COUNT-1];
-    EvalScore search_pst_eval[0:SEARCH_THREAD_COUNT-1];
+    PstEvalPair search_pst_eval[0:SEARCH_THREAD_COUNT-1];
     PieceCount search_piece_count[0:SEARCH_THREAD_COUNT-1];
     SearchStackEntry search_stack_top[0:SEARCH_THREAD_COUNT-1];
     SearchStackEntry search_stack_parent_q[0:SEARCH_THREAD_COUNT-1];
@@ -428,7 +428,7 @@ module search_controller #(
     BoardOp board_update_op;
     FullBoard board_update_in;
     ZobristKey board_update_zobrist_in;
-    EvalScore board_update_pst_in;
+    PstEvalPair board_update_pst_in;
     PieceCount board_update_piece_count_in;
     Move board_update_move;
     logic [6:0] board_update_set_data;
@@ -436,7 +436,7 @@ module search_controller #(
     PlyIndex board_update_ply;
     FullBoard board_update_out;
     ZobristKey board_update_zobrist_out;
-    EvalScore board_update_pst_out;
+    PstEvalPair board_update_pst_out;
     PieceCount board_update_piece_count_out;
     logic board_update_mover_in_check;
     // Evaluate a completed board once, then retain its check status with the
@@ -541,6 +541,7 @@ module search_controller #(
     PlyIndex nnue_update_done_ply;
     logic nnue_eval_valid, nnue_eval_ready, nnue_result_valid;
     EvalScore nnue_result;
+    EvalScore nnue_result_pst;
     ThreadID nnue_eval_tag_thread[2];
     PlyIndex nnue_eval_tag_ply[2];
     logic nnue_eval_tag_read_ptr, nnue_eval_tag_write_ptr;
@@ -1088,8 +1089,10 @@ module search_controller #(
         .eval_thread_id(nnue_build_thread),
         .eval_turn(search_board[nnue_build_thread].turn),
         .eval_piece_count(search_piece_count[nnue_build_thread]),
+        .eval_pst(search_pst_eval[nnue_build_thread]),
         .result_valid(nnue_result_valid),
-        .result(nnue_result)
+        .result(nnue_result),
+        .result_pst(nnue_result_pst)
     );
 
     // Accumulator contents need not be erased because validity is tracked per
@@ -2621,7 +2624,7 @@ module search_controller #(
             active_board <= FullBoard'('0);
             active_board_in_check <= 1'b0;
             active_zobrist_key <= ZobristKey'(0);
-            active_pst_eval <= EvalScore'(0);
+            active_pst_eval <= PstEvalPair'('0);
             active_piece_count <= PieceCount'(0);
             repetition_epoch <= '0;
             repetition_init_start <= 1'b0;
@@ -2745,7 +2748,7 @@ module search_controller #(
                 search_board[tid] <= FullBoard'('0);
                 search_board_in_check[tid] <= 1'b0;
                 search_zobrist_key[tid] <= ZobristKey'(0);
-                search_pst_eval[tid] <= EvalScore'(0);
+                search_pst_eval[tid] <= PstEvalPair'('0);
                 search_piece_count[tid] <= PieceCount'(0);
                 search_ply[tid] <= PlyIndex'(0);
                 search_return_score[tid] <= EvalScore'(0);
@@ -4428,7 +4431,7 @@ module search_controller #(
                             search_eval_result_valid <= 1'b1;
                             eval_score = add_nnue_correction(
                                 pov_eval(search_board[eval_thread_id],
-                                    search_pst_eval[eval_thread_id]),
+                                    nnue_result_pst),
                                 nnue_result);
                             nnue_state_valid[eval_thread_id] <= 1'b1;
                             search_eval_is_stand_pat[eval_thread_id] <= 1'b0;

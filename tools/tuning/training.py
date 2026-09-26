@@ -207,18 +207,45 @@ def _parameter_report(model) -> dict:
     for index, piece in enumerate(PIECE_ORDER):
         values = pst[index, 8:56] if piece == "pawn" else pst[index]
         pst_ranges[piece] = [float(values.min()), float(values.max())]
+    endgame_material = model.material_endgame_cp().detach().cpu()
+    endgame_pst = model.pst_endgame_cp().detach().cpu()
+    endgame_pst_ranges = {}
+    for index, piece in enumerate(PIECE_ORDER):
+        values = endgame_pst[index, 8:56] if piece == "pawn" else endgame_pst[index]
+        endgame_pst_ranges[piece] = [float(values.min()), float(values.max())]
     return {
         "parameter_ranges_cp": _ranges(model.combined_cp()),
         "material_values_cp": {
             piece: float(material[index]) for index, piece in enumerate(PIECE_ORDER)
         },
         "pst_ranges_cp": pst_ranges,
+        "endgame_parameter_ranges_cp": _ranges(model.combined_endgame_cp()),
+        "endgame_material_values_cp": {
+            piece: float(endgame_material[index]) for index, piece in enumerate(PIECE_ORDER)
+        },
+        "endgame_pst_ranges_cp": endgame_pst_ranges,
     }
 
 
 def _initialize_model(model, checkpoint: dict) -> None:
-    """Load model tensors from a checkpoint; state shape enforces compatibility."""
-    model.load_state_dict(checkpoint["model"])
+    """Load a checkpoint, duplicating one-set PST terms when necessary."""
+    state = dict(checkpoint["model"])
+    for name in ("material", "pst"):
+        old_key = f"terms.{name}"
+        new_key = f"terms.{name}_endgame"
+        if new_key not in state and old_key in state:
+            state[new_key] = state[old_key].clone()
+    model.load_state_dict(state)
+
+
+def _reset_pst_from_engine(model) -> None:
+    """Restore both PST sets to the checked-in engine's exact starting table."""
+    import torch
+
+    reference = EvaluationModel(engine_combined_cp(), output_buckets=model.output_buckets)
+    with torch.no_grad():
+        for name in ("material", "pst", "material_endgame", "pst_endgame"):
+            model.terms[name].copy_(reference.terms[name].to(model.terms[name].device))
 
 
 def train(
@@ -285,12 +312,14 @@ def train(
                 raise ValueError(f"initialization run has no best checkpoint: {initialize_run.name}")
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
             _initialize_model(model, checkpoint)
+            if initialize_engine_pst:
+                _reset_pst_from_engine(model)
             model.project_parameters()
             report["initialized_from"] = initialize_run.name
             atomic_json(run / "report.json", report)
             print(
                 f"Initialized from {initialize_run.name} best checkpoint; "
-                "optimizer state was reset."
+                "optimizer state was reset; PST sets follow the engine initialization setting."
             )
         optimizer = _optimizer(torch, model, settings, device)
         steps_per_epoch = max(math.ceil(len(train_data) / settings["batch_size"]), 1)
@@ -508,6 +537,8 @@ def train(
             best_material = best_model.material_cp().detach().cpu()
             best_pst = best_model.pst_cp().detach().cpu()
             best_weights = best_model.combined_cp().detach().cpu()
+            best_endgame_material = best_model.material_endgame_cp().detach().cpu()
+            best_endgame_pst = best_model.pst_endgame_cp().detach().cpu()
             parameters = {
                 "units": "centipawns",
                 "piece_order": list(PIECE_ORDER),
@@ -520,6 +551,14 @@ def train(
                     for index, piece in enumerate(PIECE_ORDER)
                 },
                 "combined_pst": best_weights.tolist(),
+                "material_endgame": {
+                    piece: float(best_endgame_material[index])
+                    for index, piece in enumerate(PIECE_ORDER)
+                },
+                "pst_endgame": {
+                    piece: best_endgame_pst[index].tolist()
+                    for index, piece in enumerate(PIECE_ORDER)
+                },
                 "nnue": {
                     "encoding": "relative-2x6x64",
                     "output_units": "pawn/128",

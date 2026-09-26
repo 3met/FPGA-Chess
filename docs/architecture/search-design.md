@@ -4,7 +4,7 @@
 
 Each hardware search thread runs an independent iterative-deepening alpha/beta search. Threads use Lazy SMP and cooperate through the transposition table; they do not synchronize at iteration boundaries. The primary thread publishes the engine result, while helper threads contribute TT information without delaying it.
 
-Thread count, stack depth, search policy, and optional instrumentation are build parameters selected through layered per-FPGA engine and reusable search profiles. Search uses side-to-move point-of-view scores internally. White-relative material/PST values are negated when Black is to move before the side-to-move-relative NNUE correction is added.
+Thread count, stack depth, search policy, and optional instrumentation are build parameters selected through layered per-FPGA engine and reusable search profiles. Search uses side-to-move point-of-view scores internally. The NNUE pipeline blends the two White-relative material/PST sums by total piece count; search negates the blend when Black is to move before adding the side-to-move-relative NNUE correction.
 
 ## Search Algorithm
 
