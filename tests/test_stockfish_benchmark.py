@@ -35,6 +35,8 @@ class BenchmarkTests(unittest.TestCase):
             command = benchmark._fresh_command(config, Path("results"), "test")
         self.assertIn("option.UCI_LimitStrength=false", command)
         self.assertIn("option.Hash=64", command)
+        self.assertIn("order=random", command)
+        self.assertEqual(command[command.index("-srand") + 1], str(benchmark.OPENING_SEED))
         self.assertFalse(any("UCI_Elo" in value or "Skill Level" in value for value in command))
 
     def test_run_returns_standings_and_protects_existing_name(self) -> None:

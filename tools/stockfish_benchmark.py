@@ -27,6 +27,7 @@ DEFAULT_BOOK = REPO_ROOT.parent / "fastchess" / "books" / "UHO_Lichess_4852_v1.e
 BOOK_URL = "https://github.com/official-stockfish/books/raw/master/UHO_Lichess_4852_v1.epd.zip"
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "work" / "benchmark-results"
 DEFAULT_STOCKFISH_NODES = 2000
+OPENING_SEED = 1
 ERROR_CHECK_MATCHES = 10
 MAX_ADAPTIVE_MATCHES = 500000
 INTERRUPT_GRACE_SECONDS = 15
@@ -170,8 +171,8 @@ def _fresh_command(config: BenchmarkConfig, run_dir: Path, name: str, rounds: in
         f"nodes={config.stockfish_nodes}", "option.UCI_LimitStrength=false",
         f"option.Threads={config.stockfish_threads}", f"option.Hash={config.stockfish_hash_mb}",
         "option.Ponder=false",
-        "-openings", f"file={_book_path(config.book)}", "format=epd", "order=sequential",
-        f"start={config.opening_start}", *sprt,
+        "-openings", f"file={_book_path(config.book)}", "format=epd", "order=random",
+        f"start={config.opening_start}", "-srand", str(OPENING_SEED), *sprt,
         "-rounds", str(rounds if rounds is not None else (config.matches or 500)),
         "-repeat", "-concurrency", "1", "-recover",
         "-report", "penta=true", "-ratinginterval", "10", "-autosaveinterval", "10",
