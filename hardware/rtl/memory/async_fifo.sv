@@ -37,7 +37,10 @@ module async_fifo #(
     logic [PTR_WIDTH-1:0] rd_bin, rd_bin_next;
     logic [PTR_WIDTH-1:0] rd_gray, rd_gray_next;
 
+    // Keep both synchronizer stages together in either vendor's placement flow.
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic [PTR_WIDTH-1:0] rd_gray_wrclk_meta, rd_gray_wrclk_sync;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic [PTR_WIDTH-1:0] wr_gray_rdclk_meta, wr_gray_rdclk_sync;
     logic [PTR_WIDTH-1:0] full_compare_gray;
 

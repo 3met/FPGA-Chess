@@ -4,7 +4,7 @@ The SDR SDRAM controller adapts the vendor-neutral 16-bit burst protocol in [tt-
 
 ## Configuration
 
-The controller is parameterized by clock frequency, accessible entry count, TT words per entry, and CAS latency. JEDEC timing intervals are converted to conservative integer clock counts from the configured frequency.
+The controller is parameterized by clock frequency, accessible entry count, TT words per entry, and CAS latency of two or three cycles. The mode register and read timing use the same CAS setting. JEDEC timing intervals are converted to conservative integer clock counts from the configured frequency.
 
 The physical interface uses a 16-bit data bus, four banks, 13 row-address bits, and the standard SDR SDRAM command and byte-mask signals. A board wrapper supplies the memory clocking and pin assignments.
 
@@ -12,7 +12,7 @@ The physical interface uses a 16-bit data bus, four banks, 13 row-address bits, 
 
 After reset, the controller observes the power-up delay, precharges all banks, performs the required refresh commands, programs sequential full-page burst mode and the configured CAS latency, and initializes TT validity storage before asserting `ready`.
 
-Refresh is scheduled early enough to allow precharge and command latency without exceeding the device refresh interval. New requests are held off when refresh is due. Refresh closes all tracked open rows.
+Refresh is scheduled early enough to allow precharge and command latency without exceeding the device refresh interval. New requests are held off when refresh is due; a stalled write collection, read response, or completion also yields the command bus to refresh. Read and completion responses remain valid while refresh runs. Refresh closes all tracked open rows.
 
 Initialization and refresh timing are properties of the memory device and controller clock, not of a particular FPGA vendor.
 

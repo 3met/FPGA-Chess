@@ -14,6 +14,9 @@
     "async-fifo": [
       "hardware/rtl/memory/async_fifo.sv"
     ],
+    "synchronous-fifo": [
+      "hardware/rtl/memory/synchronous_fifo.sv"
+    ],
     "reset-control": [
       "hardware/rtl/reset_release.sv"
     ],
@@ -173,10 +176,20 @@
       "testbench": "hardware/tb/tt/tb_sdr_sdram_controller.sv",
       "top": "tb_sdr_sdram_controller"
     },
+    "tt-sdram-controller-cas3": {
+      "source_set": "tt-sdram-controller",
+      "testbench": "hardware/tb/tt/tb_sdr_sdram_controller.sv",
+      "top": "tb_sdr_sdram_controller_cas3"
+    },
     "async-fifo": {
       "source_set": "async-fifo",
       "testbench": "hardware/tb/tb_async_fifo.sv",
       "top": "tb_async_fifo"
+    },
+    "synchronous-fifo": {
+      "source_set": "synchronous-fifo",
+      "testbench": "hardware/tb/tb_synchronous_fifo.sv",
+      "top": "tb_synchronous_fifo"
     },
     "reset-control": {
       "source_set": "reset-control",

@@ -27,7 +27,7 @@ Every request produces exactly one completion, including reads. Read data preced
 
 ## Clock-Domain Crossing
 
-When the search and memory controllers use different clocks, a bridge transfers commands, write words, read words, and completions through separate asynchronous FIFOs. Packet boundaries are carried with the data rather than reconstructed from clock timing.
+When the search and memory controllers use different clocks, a bridge transfers commands, write words, read words, and completions through separate asynchronous FIFOs. Packet boundaries are carried with the data rather than reconstructed from clock timing. Gray-pointer paths require bounded skew and delay in board timing constraints.
 
 The read-data FIFO holds at least one maximum-length physical burst because an SDR SDRAM device cannot pause after a read burst has begun. Backend readiness and persistent error status are synchronized into the request clock domain.
 

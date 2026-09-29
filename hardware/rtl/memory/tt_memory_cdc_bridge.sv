@@ -59,7 +59,11 @@ module tt_memory_cdc_bridge #(
     logic [WORD_PACKET_BITS-1:0] read_fifo_data;
     logic done_full, done_empty;
     logic done_fifo_data;
-    logic ready_meta, error_meta;
+    // Keep both stages of each status synchronizer adjacent in the destination domain.
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
+    logic ready_meta, ready_sync;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
+    logic error_meta, error_sync;
 
     async_fifo #(.DATA_WIDTH(CMD_BITS), .DEPTH(COMMAND_FIFO_DEPTH)) command_fifo (
         .wr_clk(req_clk), .wr_rst_n(req_rst_n), .wr_en(req_valid && req_ready),
@@ -94,18 +98,20 @@ module tt_memory_cdc_bridge #(
     assign write_pop = backend_write_valid && backend_write_ready;
     assign backend_read_ready = !read_full;
     assign backend_done_ready = !done_full;
+    assign req_memory_ready = ready_sync;
+    assign req_memory_error = error_sync;
 
     always_ff @(posedge req_clk) begin
         if (!req_rst_n) begin
             ready_meta <= 1'b0;
-            req_memory_ready <= 1'b0;
+            ready_sync <= 1'b0;
             error_meta <= 1'b0;
-            req_memory_error <= 1'b0;
+            error_sync <= 1'b0;
         end else begin
             ready_meta <= backend_ready;
-            req_memory_ready <= ready_meta;
+            ready_sync <= ready_meta;
             error_meta <= backend_error;
-            req_memory_error <= error_meta;
+            error_sync <= error_meta;
         end
     end
 endmodule

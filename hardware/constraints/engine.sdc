@@ -15,6 +15,33 @@ if {[get_collection_size $engine_clock] > 0} {
     }
 }
 
+# Bound each Gray bus separately, including paths cut by asynchronous clock
+# groups. Bounding every bit below a source period also bounds bus skew.
+set fifo_prefixes {}
+foreach_in_collection fifo_reg [get_registers -no_duplicates {*|wr_gray[*]}] {
+    set fifo_name [get_object_info -name $fifo_reg]
+    if {[regexp {^(.*)\|wr_gray\[[0-9]+\]$} $fifo_name unused fifo_prefix]} {
+        lappend fifo_prefixes $fifo_prefix
+    }
+}
+set fifo_prefixes [lsort -unique $fifo_prefixes]
+if {[llength $fifo_prefixes] == 0} {
+    error "No async_fifo Gray-pointer registers found for CDC constraints"
+}
+foreach fifo_prefix $fifo_prefixes {
+    foreach {source_name destination_name} {
+        wr_gray wr_gray_rdclk_meta
+        rd_gray rd_gray_wrclk_meta
+    } {
+        set fifo_source [get_registers -nowarn [format {%s|%s[*]} $fifo_prefix $source_name]]
+        set fifo_destination [get_registers -nowarn [format {%s|%s[*]} $fifo_prefix $destination_name]]
+        if {[get_collection_size $fifo_source] == 0 || [get_collection_size $fifo_destination] == 0} {
+            error "Missing Gray-pointer CDC registers in $fifo_prefix"
+        }
+        set_net_delay -from $fifo_source -to $fifo_destination -max -get_value_from_clock_period src_clock_period -value_multiplier 0.8
+    }
+}
+
 # The DE1 SDRAM samples commands and write data on the phase-shifted memory
 # clock. The pin clock leads the controller by 2.5 ns, while the read register
 # captures 7.5 ns after the SDRAM edge. These values cover the SDRAM setup/hold

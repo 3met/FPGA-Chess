@@ -2,7 +2,9 @@
 
 import tt_defs::*;
 
-module tb_sdr_sdram_controller;
+module tb_sdr_sdram_controller #(
+    parameter int TEST_CAS_LATENCY = 2
+);
 
     logic clk = 1'b0;
     logic rst_n = 1'b0;
@@ -22,6 +24,7 @@ module tb_sdr_sdram_controller;
     logic read_last;
     logic [15:0] read_data;
     logic done_valid;
+    logic done_ready;
     logic done_error;
     logic [12:0] dram_addr;
     logic [1:0] dram_ba;
@@ -57,7 +60,8 @@ module tb_sdr_sdram_controller;
 
     sdr_sdram_controller #(
         .CLOCK_FREQ(10_000_000),
-        .ENTRY_COUNT(2)
+        .ENTRY_COUNT(2),
+        .CAS_LATENCY(TEST_CAS_LATENCY)
     ) dut (
         .clk,
         .read_capture_clk(clk),
@@ -78,7 +82,7 @@ module tb_sdr_sdram_controller;
         .read_data,
         .read_last,
         .done_valid,
-        .done_ready(1'b1),
+        .done_ready,
         .done_error,
         .dram_addr,
         .dram_ba,
@@ -126,7 +130,7 @@ module tb_sdr_sdram_controller;
             end
 
             if ({dram_ras_n, dram_cas_n, dram_we_n} == 3'b101) begin
-                read_delay <= 1;
+                read_delay <= TEST_CAS_LATENCY - 1;
                 read_drive_count <= 0;
             end
         end
@@ -166,6 +170,7 @@ module tb_sdr_sdram_controller;
         write_data = '0;
         write_last = 1'b0;
         read_ready = 1'b1;
+        done_ready = 1'b1;
         precharge_count = 0;
         single_precharge_count = 0;
         refresh_count = 0;
@@ -237,8 +242,8 @@ module tb_sdr_sdram_controller;
         check(precharge_count >= 1, "initialization precharged SDRAM");
         check(refresh_count >= 2, "initialization issued refreshes");
         check(mode_count == 1, "mode register programmed once");
-        check(mode_address == 13'b000_0_00_010_0_111,
-            "mode register selected full-page sequential CAS-2 bursts");
+        check(mode_address == 13'((TEST_CAS_LATENCY << 4) | 7),
+            "mode register selected the configured CAS latency");
         check(write_count >= 2, "metadata sweep invalidated every test entry");
     endtask : test_initialization
 
@@ -317,6 +322,47 @@ module tb_sdr_sdram_controller;
         check(error && done_error, "zero-length request reports a persistent protocol error");
     endtask : test_invalid_length
 
+    // A stalled protocol channel must not prevent periodic physical refresh.
+    task automatic test_refresh_during_stalls();
+        int refresh_base;
+
+        issue_request(1'b1, TTWordAddress'(80), 4'd2);
+        refresh_base = refresh_count;
+        repeat (180) @(negedge clk);
+        check(refresh_count > refresh_base, "refresh continued while collecting write data");
+        send_write_word(16'h3333, 1'b0);
+        send_write_word(16'h4444, 1'b1);
+        wait_for_completion();
+        while (!req_ready) @(negedge clk);
+
+        read_ready = 1'b0;
+        issue_request(1'b0, TTWordAddress'(80), 4'd2);
+        while (!read_valid) @(negedge clk);
+        refresh_base = refresh_count;
+        repeat (180) @(negedge clk);
+        check(refresh_count > refresh_base, "refresh continued during read backpressure");
+        check(read_valid && read_data == 16'h9abc && !read_last,
+            "first read word survived refresh without a handshake");
+        while (!dut.refreshing) @(negedge clk);
+        read_ready = 1'b1;
+        @(negedge clk);
+        check(read_valid && read_data == 16'hdef0 && read_last,
+            "read handshake advanced during refresh");
+        wait_for_completion();
+        while (!req_ready) @(negedge clk);
+
+        done_ready = 1'b0;
+        issue_request(1'b0, TTWordAddress'(80), 4'd1);
+        while (!done_valid) @(negedge clk);
+        refresh_base = refresh_count;
+        repeat (180) @(negedge clk);
+        check(refresh_count > refresh_base, "refresh continued during completion backpressure");
+        check(done_valid && !done_error, "completion remained valid across refresh");
+        while (!dut.refreshing) @(negedge clk);
+        done_ready = 1'b1;
+        while (!req_ready) @(negedge clk);
+    endtask : test_refresh_during_stalls
+
     initial begin
         reset_dut();
         test_initialization();
@@ -324,6 +370,7 @@ module tb_sdr_sdram_controller;
         test_read_backpressure();
         test_queued_request_preserves_row();
         test_row_crossing_write();
+        test_refresh_during_stalls();
         repeat (20) @(posedge clk);
         check(refresh_count >= 3, "distributed refresh continued after initialization");
         test_invalid_length();
@@ -340,3 +387,8 @@ module tb_sdr_sdram_controller;
     end
 
 endmodule : tb_sdr_sdram_controller
+
+// Reuse the transaction suite with the other supported SDRAM CAS setting.
+module tb_sdr_sdram_controller_cas3;
+    tb_sdr_sdram_controller #(.TEST_CAS_LATENCY(3)) test();
+endmodule : tb_sdr_sdram_controller_cas3

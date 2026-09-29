@@ -6,8 +6,8 @@ module sync_read_dual_port_rom #(
     parameter MEM_INIT_FILE = ""
 ) (
     input logic clock,
-    input logic [$clog2(NUM_WORDS)-1:0] address_a,
-    input logic [$clog2(NUM_WORDS)-1:0] address_b,
+    input logic [(NUM_WORDS > 1 ? $clog2(NUM_WORDS) : 1)-1:0] address_a,
+    input logic [(NUM_WORDS > 1 ? $clog2(NUM_WORDS) : 1)-1:0] address_b,
     input logic rden_a,
     input logic rden_b,
     output logic [WORD_SIZE-1:0] q_a,
