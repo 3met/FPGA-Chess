@@ -59,112 +59,114 @@ def run_status(run: Path) -> str | None:
     return _read_report(run).get("status")
 
 
+def format_table(headers: tuple[str, ...], rows: list[tuple[str, ...]],
+                 left_columns: tuple[int, ...] = (0,)) -> str:
+    """Align plain-text report columns without terminal-specific formatting."""
+    widths = [max(len(value) for value in column) for column in zip(headers, *rows)]
+
+    def line(values: tuple[str, ...]) -> str:
+        return "  ".join(
+            value.ljust(width) if index in left_columns else value.rjust(width)
+            for index, (value, width) in enumerate(zip(values, widths))
+        ).rstrip()
+
+    return "\n".join((line(headers), line(tuple("-" * width for width in widths)),
+                      *(line(row) for row in rows)))
+
+
+def _cp(value: float) -> str:
+    """Avoid displaying tiny negative values as negative zero centipawns."""
+    return f"{0.0 if round(value, 1) == 0 else value:.1f}"
+
+
+def _cp_range(low: float, high: float) -> str:
+    """Format a reachable piece-square range in centipawns."""
+    return f"{_cp(low)}..{_cp(high)}"
+
+
+def _piece_rows(material: dict, pst: dict, endgame_material: dict,
+                endgame_pst: dict, label: str) -> list[tuple[str, ...]]:
+    """Put material and reachable PST ranges under one piece-column header."""
+    from .model import PIECE_ORDER
+
+    def ranges(tables: dict) -> tuple[str, ...]:
+        cells = []
+        for piece in PIECE_ORDER:
+            values = tables[piece][8:56] if piece == "pawn" else tables[piece]
+            cells.append(_cp_range(min(values), max(values)))
+        return tuple(cells)
+
+    return [
+        (f"{label} opening material", *(_cp(material[piece]) for piece in PIECE_ORDER)),
+        (f"{label} opening PST", *ranges(pst)),
+        (f"{label} endgame material", *(_cp(endgame_material[piece]) for piece in PIECE_ORDER)),
+        (f"{label} endgame PST", *ranges(endgame_pst)),
+    ]
+
+
 def print_report(run: Path) -> None:
+    """Show latest metrics and selected weights without conflating the two."""
     report = _read_report(run)
     if not report:
         raise ValueError(f"run has no readable report: {run}")
-    print(f"Run: {run.name}")
-    print(f"Status: {report['status']}")
-    if "max_steps" in report:
-        print(f"Step: {report.get('step', 0):,}/{report['max_steps']:,}")
-    else:
-        print(f"Epoch: {report.get('epoch', 0)}/{report.get('epochs', 0)}")
+    print(f"Run: {run.name}  Status: {report['status']}")
+    print(f"Progress: {report.get('step', 0):,}/{report['max_steps']:,} steps")
+    if report.get("initialized_from"):
+        print(f"Initialized from: {report['initialized_from']}")
+    best_path = run / "best.pt"
+    best = None
+    if best_path.is_file():
+        import torch
+
+        best = torch.load(best_path, map_location="cpu", weights_only=True)
+        print(f"Selected checkpoint: step {best['step']:,} (lowest validation loss)")
+    if "validation_loss" in report:
+        metric_rows = [
+            ("Validation loss", f"{report['validation_loss']:.6f}",
+             f"{best['validation_loss']:.6f}" if best else "-"),
+            ("Validation MAE (cp)", f"{report['validation_mae']:.2f}",
+             f"{best['validation_mae']:.2f}" if best else "-"),
+            ("Validation RMSE (cp)", f"{report['validation_rmse']:.2f}",
+             f"{best['validation_rmse']:.2f}" if best else "-"),
+        ]
+        print("\nValidation")
+        print(format_table(("Metric", "Latest", "Selected"), metric_rows))
     if "train_loss" in report:
-        best_location = (
-            f"step {report['best_step']:,}" if "best_step" in report
-            else f"epoch {report['best_epoch']}"
-        )
-        print(
-            f"Loss: train={report['train_loss']:.4f}, "
-            f"validation={report['validation_loss']:.4f}, "
-            f"best={report['best_validation_loss']:.4f} ({best_location})"
-        )
-        print(
-            f"Validation: MAE={report['validation_mae']:.2f} cp, "
-            f"RMSE={report['validation_rmse']:.2f} cp"
-        )
+        print(f"\nLast training interval: data={report['train_data_loss']:.6f}, "
+              f"total={report['train_loss']:.6f}")
+        if "train_accumulator_overflow_penalty" in report:
+            config_path = run / "config.json"
+            weight = (json.loads(config_path.read_text(encoding="utf-8"))["training"].get(
+                "accumulator_overflow_penalty", 0.0
+            ) if config_path.is_file() else 0.0)
+            raw = report["train_accumulator_overflow_penalty"]
+            print(f"Overflow penalty: raw={raw:.6f}, weighted={raw * weight:.8f}")
     if "positions_per_second" in report:
         print(f"Throughput: {report['positions_per_second']:,.0f} positions/s")
     counts = report.get("filter_counts", {})
     if counts:
-        summary = ", ".join(f"{key}={value:,}" for key, value in sorted(counts.items()))
-        print(f"Dataset: {summary}")
-    ranges = report.get("parameter_ranges_cp")
-    if ranges:
+        print(f"\nDataset: {report.get('train_positions', 0):,} training, "
+              f"{report.get('validation_positions', 0):,} validation positions")
+        print(format_table(("Cache count", "Positions"), [
+            (name.replace("_", " "), f"{count:,}") for name, count in sorted(counts.items())
+        ]))
+    if "material_values_cp" in report:
         from .model import PIECE_ORDER
 
-        range_label = "Current combined parameter ranges" if report["status"] != "complete" else "Combined parameter ranges"
-        print(f"{range_label} (cp): " + ", ".join(
-            f"{piece}={ranges[piece][0]:.1f}..{ranges[piece][1]:.1f}"
-            for piece in PIECE_ORDER if piece in ranges
-        ))
-    parameters_path = run / "parameters.json"
-    if report["status"] != "complete" and (run / "best.pt").is_file():
-        from .engine import load_run_parameters
+        label = "Selected" if report["status"] == "complete" else "Latest"
+        rows = [
+            (f"{label} opening material", *(_cp(report['material_values_cp'][piece]) for piece in PIECE_ORDER)),
+            (f"{label} opening PST", *(_cp_range(*report['pst_ranges_cp'][piece]) for piece in PIECE_ORDER)),
+            (f"{label} endgame material", *(_cp(report['endgame_material_values_cp'][piece]) for piece in PIECE_ORDER)),
+            (f"{label} endgame PST", *(_cp_range(*report['endgame_pst_ranges_cp'][piece]) for piece in PIECE_ORDER)),
+        ]
+        if report["status"] != "complete" and best is not None:
+            from .engine import load_run_parameters
 
-        parameters, source = load_run_parameters(run)
-        best_step = parameters.get("best_step") or report.get("best_step", 0)
-        print(f"Export candidate: {source} at best step {best_step:,}")
-        _print_parameter_values(parameters, "Best ")
-    elif "material_values_cp" in report and "pst_ranges_cp" in report:
-        from .model import PIECE_ORDER
-
-        material_cp = ", ".join(
-            f"{piece}={report['material_values_cp'][piece]:.1f}"
-            for piece in PIECE_ORDER
-        )
-        print(f"Material values (cp): {material_cp}")
-        print("Normalized PST ranges (cp): " + ", ".join(
-            f"{piece}={report['pst_ranges_cp'][piece][0]:.1f}.."
-            f"{report['pst_ranges_cp'][piece][1]:.1f}"
-            for piece in PIECE_ORDER
-        ))
-        if "endgame_material_values_cp" in report and "endgame_pst_ranges_cp" in report:
-            print("Endgame material values (cp): " + ", ".join(
-                f"{piece}={report['endgame_material_values_cp'][piece]:.1f}"
-                for piece in PIECE_ORDER
+            parameters, _ = load_run_parameters(run)
+            rows.extend(_piece_rows(
+                parameters["material"], parameters["pst"],
+                parameters["material_endgame"], parameters["pst_endgame"], "Selected"
             ))
-            print("Endgame normalized PST ranges (cp): " + ", ".join(
-                f"{piece}={report['endgame_pst_ranges_cp'][piece][0]:.1f}.."
-                f"{report['endgame_pst_ranges_cp'][piece][1]:.1f}"
-                for piece in PIECE_ORDER
-            ))
-    elif parameters_path.is_file():
-        parameters = json.loads(parameters_path.read_text(encoding="utf-8"))
-        _print_parameter_values(parameters)
-
-
-def _print_parameter_values(parameters: dict, prefix: str = "") -> None:
-    """Print parameter values in their unrounded training representation."""
-    from .engine import export_values
-    from .model import PIECE_ORDER
-
-    if "material" in parameters and "pst" in parameters:
-        material = [float(parameters["material"][piece]) for piece in PIECE_ORDER]
-        pst = parameters["pst"]
-    else:
-        material_units, pst_units = export_values(parameters)
-        material = [value * 100.0 / 128.0 for value in material_units]
-        pst = {
-            piece: [value * 100.0 / 128.0 for value in table]
-            for piece, table in pst_units.items()
-        }
-    print(f"{prefix}Material values (cp): " + ", ".join(
-        f"{piece}={value:.1f}" for piece, value in zip(PIECE_ORDER, material)
-    ))
-    print(f"{prefix}Normalized PST ranges (cp): " + ", ".join(
-        f"{piece}={min(pst[piece][8:56] if piece == 'pawn' else pst[piece]):.1f}.."
-        f"{max(pst[piece][8:56] if piece == 'pawn' else pst[piece]):.1f}"
-        for piece in PIECE_ORDER
-    ))
-    if "material_endgame" in parameters and "pst_endgame" in parameters:
-        print(f"{prefix}Endgame material values (cp): " + ", ".join(
-            f"{piece}={float(parameters['material_endgame'][piece]):.1f}"
-            for piece in PIECE_ORDER
-        ))
-        endgame_pst = parameters["pst_endgame"]
-        print(f"{prefix}Endgame normalized PST ranges (cp): " + ", ".join(
-            f"{piece}={min(endgame_pst[piece][8:56] if piece == 'pawn' else endgame_pst[piece]):.1f}.."
-            f"{max(endgame_pst[piece][8:56] if piece == 'pawn' else endgame_pst[piece]):.1f}"
-            for piece in PIECE_ORDER
-        ))
+        print("\nMaterial and PST ranges (cp; reachable squares)")
+        print(format_table(("Parameter", *(piece.title() for piece in PIECE_ORDER)), rows))

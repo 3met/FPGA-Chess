@@ -44,6 +44,8 @@ package engine_defs;
     localparam logic [7:0] ENGINE_STAT_MOVE_OVERFLOW    = 8'd182;
     localparam logic [7:0] ENGINE_STAT_BUCKET_COUNT_BASE = 8'd200;
     localparam logic [7:0] ENGINE_STAT_BUCKET_HIGH_BASE = 8'd208;
+    localparam logic [7:0] ENGINE_STAT_ACTIVE_PST_FIRST = 8'd240;
+    localparam logic [7:0] ENGINE_STAT_ACTIVE_PST_ENDGAME = 8'd241;
     localparam int ENGINE_STAT_PHASE_COUNT_VALUE = 10;
 
     localparam logic [7:0] ENGINE_ERR_NONE              = 8'd0;

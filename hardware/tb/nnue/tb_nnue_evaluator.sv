@@ -112,6 +112,21 @@ module tb_nnue_evaluator;
         check(product_exact, "output product is exact over its reachable domain");
     endtask
 
+    // Check every signed accumulator code against the training-side integer SCReLU.
+    task automatic test_screlu();
+        automatic bit activation_exact = 1'b1;
+
+        for (int accumulator = -(1 << (NNUE_ACCUMULATOR_BITS - 1));
+                accumulator < (1 << (NNUE_ACCUMULATOR_BITS - 1)); accumulator++) begin
+            automatic int clipped = accumulator < 0 ? 0 : accumulator;
+            automatic int expected = (clipped * clipped) / 8;
+            if (expected > 7) expected = 7;
+            activation_exact &= $signed(dut.screlu(NnueAccumulator'(accumulator)))
+                == expected;
+        end
+        check(activation_exact, "SCReLU matches the quantized model for every accumulator");
+    endtask
+
     initial begin
         clear = 0;
         update_valid = 0;
@@ -132,7 +147,7 @@ module tb_nnue_evaluator;
         for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++)
             dut.output_bias[bucket] = 0;
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 0;
+            dut.accumulator_bias[lane] = 4'd2;
         single_dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
         single_dut.feature_rom[1] = '0;
         for (int row = 0; row < NNUE_OUTPUT_WEIGHT_ROW_COUNT; row++)
@@ -140,7 +155,7 @@ module tb_nnue_evaluator;
         for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++)
             single_dut.output_bias[bucket] = 0;
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            single_dut.accumulator_bias[lane] = 0;
+            single_dut.accumulator_bias[lane] = 4'd2;
 
         repeat (2) @(negedge clk);
         rst_n = 1;
@@ -171,6 +186,7 @@ module tb_nnue_evaluator;
             "accumulator memory allocates one logical word per thread");
 
         test_output_products();
+        test_screlu();
         test_single_thread_state_path();
 
         update_req.thread_id = ThreadID'(8);
@@ -191,6 +207,17 @@ module tb_nnue_evaluator;
         eval_piece_count = PieceCount'(32);
         evaluate(EvalScore'(256), "full-board PST blend runs alongside NNUE");
         check(result_pst == EvalScore'(300), "full board uses first PST set");
+        // Preserve signed truncation and the full input range through the
+        // pipelined reciprocal used by synthesized hardware.
+        eval_pst = '{first: EvalScore'(0), endgame: EvalScore'(-1)};
+        eval_piece_count = PieceCount'(3);
+        evaluate(EvalScore'(256), "negative fractional PST blend keeps NNUE result");
+        check(result_pst == EvalScore'(0), "negative fractional PST blend truncates toward zero");
+        eval_pst = '{first: EvalScore'(-32768), endgame: EvalScore'(-32768)};
+        eval_piece_count = PieceCount'(2);
+        evaluate(EvalScore'(256), "minimum PST blend keeps NNUE result");
+        check(result_pst == EvalScore'(-32768), "minimum PST blend retains signed range");
+        eval_pst = '{first: EvalScore'(300), endgame: EvalScore'(-300)};
         eval_piece_count = PieceCount'(2);
         dut.output_weight_rows[0] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
         dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
@@ -200,8 +227,12 @@ module tb_nnue_evaluator;
         eval_turn = BLACK;
         evaluate(EvalScore'(-256), "opponent perspective moves to the second half");
         eval_turn = WHITE;
-        dut.output_bias[0] = 8'h17;
-        evaluate(EvalScore'(247), "signed output bias is added once");
+        dut.output_bias[0] = {NNUE_OUTPUT_BIAS_BITS{1'b1}};
+        evaluate(EvalScore'(256 + ((1 << NNUE_OUTPUT_BIAS_BITS) - 1)),
+            "unsigned output bias is added once");
+        dut.output_bias[0] = 8'(1 << (NNUE_OUTPUT_BIAS_BITS - 1));
+        evaluate(EvalScore'(256 + (1 << (NNUE_OUTPUT_BIAS_BITS - 1))),
+            "highest output-bias bit reaches the result");
         dut.output_bias[0] = 0;
         for (int row = NNUE_OUTPUT_MAC_CYCLES;
                 row < 2 * NNUE_OUTPUT_MAC_CYCLES; row++)
@@ -339,8 +370,35 @@ module tb_nnue_evaluator;
         evaluate(EvalScore'(768),
             "full-width update pipeline commits back-to-back same-thread rows");
 
+        // The maximum unsigned bias must survive the clear without sign extension.
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 3'd3;
+            dut.accumulator_bias[lane] = {NNUE_ACCUMULATOR_BIAS_BITS{1'b1}};
+        dut.feature_rom[0] = '0;
+        eval_thread_id = ThreadID'(0);
+        update_req = '0;
+        update_req.white_feature = 0;
+        update_req.black_feature = 1;
+        update_req.apply = 1;
+        update_req.add = 1;
+        update_req.clear = 1;
+        enqueue(update_req);
+        wait (update_idle);
+        check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
+                == NnueAccumulator'((1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1),
+            "unsigned accumulator bias is zero-extended on clear");
+        evaluate(EvalScore'(NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT * 7),
+            "unsigned bias activates both perspectives");
+        dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
+        enqueue(update_req);
+        wait (update_idle);
+        check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
+                == NnueAccumulator'(-(1 << (NNUE_ACCUMULATOR_BITS - 1))),
+            "maximum bias plus a feature wraps the signed accumulator");
+        evaluate(EvalScore'(NNUE_ACCUMULATOR_COUNT * 7),
+            "wrapped perspective contributes zero after SCReLU");
+
+        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
+            dut.accumulator_bias[lane] = 4'd3;
         eval_thread_id = ThreadID'(0);
         update_req = '0;
         update_req.ply = PlyIndex'(2);
@@ -356,7 +414,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(15),
             "five-bit accumulators retain the trained positive range");
-        evaluate(EvalScore'(2560), "concatenated perspective activations reach the output");
+        evaluate(EvalScore'(2048), "concatenated perspective activations reach the output");
         update_req.add = 0;
         repeat (12)
             enqueue(update_req);
@@ -364,7 +422,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(3),
             "modular inverse deltas exactly restore the accumulator bias");
-        evaluate(EvalScore'(1536), "both biased perspectives remain in the concatenated output");
+        evaluate(EvalScore'(512), "both biased perspectives remain in the concatenated output");
 
         // Flush an accepted evaluation and queued update together, then prove
         // that no result or update survives and a fresh rebuild still works.
@@ -395,7 +453,7 @@ module tb_nnue_evaluator;
             check(!stale_result_seen, "clear suppresses stale evaluation results");
         end
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 0;
+            dut.accumulator_bias[lane] = 4'd2;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
@@ -406,7 +464,7 @@ module tb_nnue_evaluator;
         // multiply produces a non-clipped value with this model.
         dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 3'd3;
+            dut.accumulator_bias[lane] = 4'd3;
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h4}};
         update_req.ply = PlyIndex'(1);
@@ -420,7 +478,7 @@ module tb_nnue_evaluator;
         wait (update_idle);
         evaluate(EvalScore'(-14336), "signed activation products retain their full width");
         dut.output_bias[0] = 8'h10;
-        evaluate(EvalScore'(-14352), "minimum MAC sum and output bias retain their full width");
+        evaluate(EvalScore'(-14320), "negative MAC sum and unsigned bias retain their full width");
         dut.output_bias[0] = 0;
 
         begin
@@ -428,6 +486,7 @@ module tb_nnue_evaluator;
             automatic int stream_results = 0;
 
             @(negedge clk);
+            eval_pst = '{first: EvalScore'(0), endgame: EvalScore'(137)};
             first_issue = $time;
             eval_valid = 1;
             @(negedge clk);
@@ -435,6 +494,7 @@ module tb_nnue_evaluator;
             while (!eval_ready)
                 @(negedge clk);
             second_issue = $time;
+            eval_pst = '{first: EvalScore'(0), endgame: EvalScore'(-83)};
             eval_valid = 1;
             @(negedge clk);
             eval_valid = 0;
@@ -446,6 +506,9 @@ module tb_nnue_evaluator;
                 if (result_valid) begin
                     check(result == EvalScore'(-14336),
                         "pipelined evaluation preserves result ordering");
+                    check(result_pst == (stream_results == 0
+                            ? EvalScore'(137) : EvalScore'(-83)),
+                        "pipelined PST blend preserves result ordering");
                     stream_results++;
                 end
             end

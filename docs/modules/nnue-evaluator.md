@@ -10,7 +10,7 @@ Transformer rows contain 256 signed two-bit weights packed four per byte. Each p
 
 ## Accumulator Updates
 
-Each thread owns White and Black accumulator vectors. A clear starts a perspective from the trained bias, while add and remove requests apply one transformer row. Accumulator arithmetic is modular and matches quantization-aware training, so removing a feature exactly reverses adding it even across a wrap.
+Each thread owns White and Black accumulator vectors. A clear starts a perspective from its unsigned four-bit trained bias, while add and remove requests apply one transformer row. Accumulator arithmetic is modular and matches quantization-aware training, so removing a feature exactly reverses adding it even across a wrap.
 
 Before search, the controller builds the root accumulator for every thread. An ordinary move applies compact feature deltas to the live child state, stores the reversible delta with the ply record, and applies its inverse after board reversal. Castling updates the king and rook features; a null child keeps the parent accumulator unchanged.
 
@@ -20,7 +20,7 @@ Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumul
 
 ## Output Layer
 
-Evaluation clips each biased accumulator value to the trained activation range, places the side-to-move perspective before the opposing perspective, and applies the quantized output layer and bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The result is clipped to the finite search-score range. In parallel, the evaluator blends the two incoming material/PST sums linearly from the two-king position through the full 32-piece position, using signed truncation. The blended result is aligned with the NNUE output.
+Evaluation maps each signed five-bit accumulator to the three-bit SCReLU code `min(7, floor(max(0, accumulator)² / 8))`, places the side-to-move perspective before the opposing perspective, and applies the three-bit signed output weights and six-bit unsigned output bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The result is clipped to the finite search-score range. In parallel, the evaluator blends the two incoming material/PST sums linearly from the two-king position through the full 32-piece position, using signed truncation. The blended result is aligned with the NNUE output.
 
 Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
 
@@ -42,9 +42,9 @@ The tuning and export workflow is described in [evaluation-tuning.md](../develop
 | Parameter | Shape and Width | Logical Size |
 | --------- | --------------- | ------------ |
 | Feature transformer | `768 * 256 * 2` bits | 48 KiB |
-| Accumulator bias | `256 * 3` bits | 96 B |
+| Accumulator bias | `256 * 4` bits | 128 B |
 | Output weights | `8 * 512 * 3` bits | 1.5 KiB |
-| Output biases | `8 * 5` bits | 5 B |
-| Total trained parameters |  | 50,789 B (49.6 KiB) |
+| Output biases | `8 * 6` bits | 6 B |
+| Total trained parameters |  | 50,822 B (49.6 KiB) |
 
 Runtime accumulator storage is separate from trained parameter memory. Each thread has two 256-lane signed-five-bit perspectives.

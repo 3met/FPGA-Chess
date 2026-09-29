@@ -10,7 +10,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path(__file__).with_name("default_config.json")
-CACHE_RECORD_FORMAT = "32-piece-turn-target"
+CACHE_RECORD_FORMAT = "32-piece-turn-target-symmetry-group-split"
 
 
 class ConfigError(ValueError):
@@ -48,21 +48,15 @@ def _validate(config: dict[str, Any]) -> None:
             raise ConfigError(f"dataset.{key} is required")
     for key in (
         "seed", "batch_size", "validation_size", "learning_rate", "max_steps",
-        "optimizer", "loss", "device", "shuffle_buffer", "cpu_threads",
+        "device", "shuffle_buffer", "cpu_threads",
         "validation_interval_steps", "checkpoint_interval_steps", "early_stopping_patience",
     ):
         if key not in training:
             raise ConfigError(f"training.{key} is required")
-    buckets = training.get("nnue_output_buckets", 8)
-    if not isinstance(buckets, int) or buckets < 1 or buckets > 32 or 32 % buckets:
-        raise ConfigError("training.nnue_output_buckets must be a positive divisor of 32")
-    warmup = training.get("pst_warmup_steps", 0)
-    if not isinstance(warmup, int) or warmup < 0 or warmup >= training["max_steps"]:
-        raise ConfigError("training.pst_warmup_steps must be nonnegative and below max_steps")
-    if not isinstance(training.get("initialize_material_pst_from_engine", True), bool):
-        raise ConfigError("training.initialize_material_pst_from_engine must be boolean")
-    if "bucket_loss_weights" in training:
-        raise ConfigError("training.bucket_loss_weights is no longer supported")
+    defaults = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    unknown_training = set(training) - set(defaults["training"])
+    if unknown_training:
+        raise ConfigError(f"unknown training settings: {', '.join(sorted(unknown_training))}")
     overflow_penalty = training.get("accumulator_overflow_penalty", 0.0)
     if not isinstance(overflow_penalty, (int, float)) or overflow_penalty < 0:
         raise ConfigError("training.accumulator_overflow_penalty must be nonnegative")
@@ -82,6 +76,8 @@ def _validate(config: dict[str, Any]) -> None:
     for key in positive:
         if training[key] <= 0:
             raise ConfigError(f"training.{key} must be positive")
+    if training["max_steps"] < 2:
+        raise ConfigError("training.max_steps must be at least 2")
     patience = training["early_stopping_patience"]
     if patience is not None and (not isinstance(patience, int) or patience <= 0):
         raise ConfigError("training.early_stopping_patience must be a positive integer or null")
@@ -97,37 +93,34 @@ def _validate(config: dict[str, Any]) -> None:
             raise ConfigError(f"{name} must be 'auto' or a {qualifier} integer")
     if dataset.get("progress_interval_seconds", 5) <= 0:
         raise ConfigError("dataset.progress_interval_seconds must be positive")
-    if dataset["max_positions"] is not None and dataset["max_positions"] <= training["validation_size"]:
+    if (
+        isinstance(dataset["max_positions"], bool)
+        or not isinstance(dataset["max_positions"], int)
+        or dataset["max_positions"] <= training["validation_size"]
+    ):
         raise ConfigError("dataset.max_positions must exceed training.validation_size")
-    if training["loss"] != "score_probability_mse":
-        raise ConfigError("training.loss must be 'score_probability_mse'")
-    if training["optimizer"] not in {"adamw", "adam", "sgd"}:
-        raise ConfigError("training.optimizer must be adamw, adam, or sgd")
-    if training.get("scheduler", "none") not in {"none", "warmup_exponential"}:
-        raise ConfigError("training.scheduler must be none or warmup_exponential")
     for name in ("score_probability_offset", "score_probability_scale"):
         if not isinstance(training.get(name), (int, float)) or training[name] <= 0:
             raise ConfigError(f"training.{name} must be positive")
-    warmup_fraction = training.get("warmup_fraction", 0.015)
-    if not isinstance(warmup_fraction, (int, float)) or not 0.01 <= warmup_fraction <= 0.02:
-        raise ConfigError("training.warmup_fraction must be between 0.01 and 0.02")
-    warmup_start = training.get("warmup_start_factor", 0.1)
-    if not isinstance(warmup_start, (int, float)) or not 0 < warmup_start <= 1:
-        raise ConfigError("training.warmup_start_factor must be in (0, 1]")
-    epoch_decay = training.get("exponential_decay_per_epoch", 0.992)
-    if not isinstance(epoch_decay, (int, float)) or not 0 < epoch_decay <= 1:
-        raise ConfigError("training.exponential_decay_per_epoch must be in (0, 1]")
+    final_factor = training.get("cosine_final_factor", 0.1)
+    if not isinstance(final_factor, (int, float)) or not 0 < final_factor < 1:
+        raise ConfigError("training.cosine_final_factor must be in (0, 1)")
     weight_decay = training.get("weight_decay", 0.0)
     if not isinstance(weight_decay, (int, float)) or weight_decay < 0:
         raise ConfigError("training.weight_decay must be nonnegative")
     for key in (
-        "remove_mates", "remove_in_check", "remove_captures", "remove_checks",
+        "remove_in_check", "remove_captures", "remove_checks",
     ):
         if not isinstance(filters.get(key), bool):
             raise ConfigError(f"filters.{key} must be boolean")
-    for key in ("minimum_depth", "mate_score_cp"):
-        if key not in filters or filters[key] < 0:
-            raise ConfigError(f"filters.{key} must be nonnegative")
+    if "minimum_depth" not in filters or filters["minimum_depth"] < 0:
+        raise ConfigError("filters.minimum_depth must be nonnegative")
+    unknown_filters = set(filters) - set(defaults["filters"])
+    if unknown_filters:
+        raise ConfigError(f"unknown filters: {', '.join(sorted(unknown_filters))}")
+    unknown_dataset = set(dataset) - set(defaults["dataset"])
+    if unknown_dataset:
+        raise ConfigError(f"unknown dataset settings: {', '.join(sorted(unknown_dataset))}")
     if filters.get("max_evaluation_cp") is not None and filters["max_evaluation_cp"] <= 0:
         raise ConfigError("filters.max_evaluation_cp must be positive or null")
 
@@ -144,10 +137,8 @@ def cache_key(config: dict[str, Any]) -> str:
         "dataset": {
             "path": config["dataset"]["path"],
             "max_positions": config["dataset"]["max_positions"],
-            "rebuild_cache": config["dataset"].get("rebuild_cache", False),
         },
         "filters": config["filters"],
-        "seed": config["training"]["seed"],
         "validation_size": config["training"]["validation_size"],
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,

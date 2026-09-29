@@ -16,6 +16,11 @@ from .config import public_config
 from .data import CacheBatchLoader, available_cpus, cache_datasets
 from .model import (
     EvaluationModel,
+    NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_OUTPUT_WEIGHT_MAX,
+    NNUE_OUTPUT_WEIGHT_MIN,
+    NNUE_OUTPUT_BUCKETS,
+    NNUE_OUTPUT_BIAS_MAX,
     PIECE_ORDER,
     engine_combined_cp,
 )
@@ -51,43 +56,64 @@ def _device(torch, requested: str):
 
 
 def _optimizer(torch, model, settings, device):
+    """Use AdamW, decaying NNUE weights but not sparse biases or PSTs."""
     kwargs = {
         "lr": settings["learning_rate"],
-        "weight_decay": settings.get("weight_decay", 0.0),
     }
-    kind = settings["optimizer"]
-    cls = {"adamw": torch.optim.AdamW, "adam": torch.optim.Adam, "sgd": torch.optim.SGD}[kind]
-    if device.type == "cuda" and kind in {"adamw", "adam"}:
+    decay = float(settings.get("weight_decay", 0.0))
+    groups = [
+        {"params": [model.feature_weights, model.output_weights], "weight_decay": decay},
+        {"params": [model.accumulator_bias, model.output_bias, *model.terms.values()],
+         "weight_decay": 0.0},
+    ]
+    if device.type == "cuda":
         try:
-            return cls(model.parameters(), fused=True, **kwargs)
+            return torch.optim.AdamW(groups, fused=True, **kwargs)
         except (TypeError, RuntimeError):
             pass
-    return cls(model.parameters(), **kwargs)
+    return torch.optim.AdamW(groups, **kwargs)
 
 
-def _scheduler(torch, optimizer, settings, steps_per_epoch: int):
-    """Apply a short linear warmup then slow epoch-calibrated exponential decay."""
-    if settings.get("scheduler", "none") == "warmup_exponential":
-        warmup_steps = max(1, round(
-            settings["max_steps"] * settings.get("warmup_fraction", 0.015)
-        ))
-        warmup = torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=settings.get("warmup_start_factor", 0.1),
-            end_factor=1.0,
-            total_iters=warmup_steps,
+def _repair_boundary_momentum(torch, model, optimizer):
+    """Discard momentum that would repeatedly push a shadow beyond its code range."""
+    bounds = (
+        (model.feature_weights, -2.0, 1.0),
+        (model.accumulator_bias, 0.0, float(NNUE_ACCUMULATOR_BIAS_MAX)),
+        (model.output_weights, float(NNUE_OUTPUT_WEIGHT_MIN), float(NNUE_OUTPUT_WEIGHT_MAX)),
+        (model.output_bias, 0.0, float(NNUE_OUTPUT_BIAS_MAX)),
+    )
+    with torch.no_grad():
+        for parameter, low, high in bounds:
+            state = optimizer.state.get(parameter)
+            if not state:
+                continue
+            moment = state.get("exp_avg", state.get("momentum_buffer"))
+            if moment is None:
+                continue
+            outward = ((parameter <= low) & (moment > 0)) | (
+                (parameter >= high) & (moment < 0)
+            )
+            moment.masked_fill_(outward, 0)
+
+
+def _scheduler(torch, optimizer, settings):
+    """Warm up to the peak rate, then anneal smoothly for quantized settling."""
+    max_steps = settings["max_steps"]
+    warmup_steps = max(1, round(max_steps * 0.015))
+    start_factor = 0.1
+    final_factor = settings.get("cosine_final_factor", 0.1)
+
+    def multiplier(step: int) -> float:
+        if step < warmup_steps:
+            return start_factor + (1.0 - start_factor) * step / warmup_steps
+        progress = (step - warmup_steps) / (max_steps - warmup_steps)
+        return final_factor + 0.5 * (1.0 - final_factor) * (
+            1.0 + math.cos(math.pi * min(progress, 1.0))
         )
-        decay = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer,
-            gamma=settings.get("exponential_decay_per_epoch", 0.992)
-                ** (1.0 / max(steps_per_epoch, 1)),
-        )
-        return torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup, decay],
-            milestones=[warmup_steps],
-        )
-    return None
+
+    # The closed form naturally adopts a new endpoint when an interrupted run
+    # is deliberately extended, without retaining stale cosine duration state.
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
 
 
 def _score_probability(values, offset: float, scale: float):
@@ -99,9 +125,8 @@ def _score_probability(values, offset: float, scale: float):
     )
 
 
-def _loss(_torch, prediction, target, settings, codes=None):
+def _loss(prediction, target, settings):
     """Compare bounded score probabilities without phase-dependent weighting."""
-    del codes
     offset = float(settings.get("score_probability_offset", 270.0))
     scale = float(settings.get("score_probability_scale", 380.0))
     difference = (
@@ -118,7 +143,6 @@ def _cpu_threads(settings) -> int:
 
 
 def _loader(
-    _torch,
     dataset,
     settings,
     shuffle: bool,
@@ -158,6 +182,49 @@ def _microbatches(codes, white_to_move, target, settings):
         yield codes[start:stop], white_to_move[start:stop], target[start:stop]
 
 
+def _training_objective(model, codes, white_to_move, target, settings):
+    """Keep the QAT forward and probability loss in one compilable graph."""
+    prediction, overflow_penalty = model(codes, white_to_move, True)
+    data_loss = _loss(prediction, target, settings)
+    loss = data_loss + float(settings.get("accumulator_overflow_penalty", 0.0)) * overflow_penalty
+    return loss, data_loss, overflow_penalty
+
+
+def _train_batch(torch, model, objective, optimizer, scaler, settings, device, batch):
+    """Run the same complete optimizer step for training and throughput benchmarks."""
+    codes, white_to_move, target = _move_batch(*batch, device)
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    batch_metrics = target.new_zeros(3)
+    batch_size = target.numel()
+    amp_enabled = scaler.is_enabled()
+    for chunk_codes, chunk_stm, chunk_target in _microbatches(
+        codes, white_to_move, target, settings
+    ):
+        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+            loss, data_loss, overflow_penalty = objective(
+                chunk_codes, chunk_stm, chunk_target
+            )
+            chunk_weight = chunk_target.numel() / batch_size
+            weighted_loss = loss * chunk_weight
+        scaler.scale(weighted_loss).backward()
+        batch_metrics.add_(torch.stack((
+            weighted_loss.detach(),
+            data_loss.detach() * chunk_weight,
+            overflow_penalty.detach() * chunk_weight,
+        )))
+    clip = settings.get("gradient_clip")
+    if clip is not None:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+    scaler.step(optimizer)
+    scaler.update()
+    model.project_parameters()
+    _repair_boundary_momentum(torch, model, optimizer)
+    batch_metrics.mul_(batch_size)
+    return batch_metrics, batch_size
+
+
 def _evaluate(torch, model, loader, settings, device):
     model.eval()
     totals = None
@@ -171,7 +238,7 @@ def _evaluate(torch, model, loader, settings, device):
                 codes, white_to_move, target, settings
             ):
                 prediction = model(chunk_codes, chunk_stm)
-                loss = _loss(torch, prediction, chunk_target, settings)
+                loss = _loss(prediction, chunk_target, settings)
                 error = prediction - chunk_target
                 size = chunk_target.numel()
                 chunk_totals = torch.stack((
@@ -228,24 +295,8 @@ def _parameter_report(model) -> dict:
 
 
 def _initialize_model(model, checkpoint: dict) -> None:
-    """Load a checkpoint, duplicating one-set PST terms when necessary."""
-    state = dict(checkpoint["model"])
-    for name in ("material", "pst"):
-        old_key = f"terms.{name}"
-        new_key = f"terms.{name}_endgame"
-        if new_key not in state and old_key in state:
-            state[new_key] = state[old_key].clone()
-    model.load_state_dict(state)
-
-
-def _reset_pst_from_engine(model) -> None:
-    """Restore both PST sets to the checked-in engine's exact starting table."""
-    import torch
-
-    reference = EvaluationModel(engine_combined_cp(), output_buckets=model.output_buckets)
-    with torch.no_grad():
-        for name in ("material", "pst", "material_endgame", "pst_endgame"):
-            model.terms[name].copy_(reference.terms[name].to(model.terms[name].device))
+    """Warm-start the fixed deployable model from a compatible checkpoint."""
+    model.load_state_dict(checkpoint["model"])
 
 
 def train(
@@ -297,71 +348,54 @@ def train(
             f"device={device}, vectorized_cache=true, cpu_threads={torch.get_num_threads()}."
         )
         wandb_run = _start_wandb(config, run)
-        output_buckets = int(settings.get("nnue_output_buckets", 8))
-        warmup_steps = int(settings.get("pst_warmup_steps", 0))
-        initialize_engine_pst = bool(settings.get("initialize_material_pst_from_engine", True))
-        model = EvaluationModel(
-            engine_combined_cp() if initialize_engine_pst else None,
-            output_buckets=output_buckets,
-        ).to(device)
-        if initialize_engine_pst:
-            print("Initialized material and PST parameters from the checked-in engine tables.")
+        model = EvaluationModel(engine_combined_cp()).to(device)
+        print("Initialized material and PST parameters from the checked-in engine tables.")
         if initialize_run is not None:
             checkpoint_path = initialize_run / "best.pt"
             if not checkpoint_path.exists():
                 raise ValueError(f"initialization run has no best checkpoint: {initialize_run.name}")
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
             _initialize_model(model, checkpoint)
-            if initialize_engine_pst:
-                _reset_pst_from_engine(model)
             model.project_parameters()
             report["initialized_from"] = initialize_run.name
             atomic_json(run / "report.json", report)
             print(
                 f"Initialized from {initialize_run.name} best checkpoint; "
-                "optimizer state was reset; PST sets follow the engine initialization setting."
+                "all compatible parameters were preserved and optimizer state was reset."
             )
         optimizer = _optimizer(torch, model, settings, device)
-        steps_per_epoch = max(math.ceil(len(train_data) / settings["batch_size"]), 1)
-        scheduler = _scheduler(torch, optimizer, settings, steps_per_epoch)
-        if warmup_steps:
-            print(
-                f"PST/material-only warmup enabled for the first {warmup_steps:,} optimizer steps."
-            )
+        scheduler = _scheduler(torch, optimizer, settings)
         start_step = 0
         if resume_run is not None:
             checkpoint_path = run / "latest.pt"
             if not checkpoint_path.exists():
                 raise ValueError(f"run has no resumable checkpoint: {run.name}")
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-            try:
-                model.load_state_dict(checkpoint["model"])
-            except RuntimeError as exc:
-                raise ValueError(
-                    "checkpoint uses the former combined material/PST model and cannot be resumed"
-                ) from exc
+            model.load_state_dict(checkpoint["model"])
             optimizer.load_state_dict(checkpoint["optimizer"])
             start_step = int(checkpoint["step"])
             if start_step >= settings["max_steps"]:
                 raise ValueError("resume step is already at or beyond configured training.max_steps")
-            if scheduler is not None and checkpoint.get("scheduler") is not None:
-                scheduler.load_state_dict(checkpoint["scheduler"])
+            scheduler.load_state_dict(checkpoint["scheduler"])
             print(f"Resuming {run.name} after step {start_step:,}.")
         compiled = model
+        train_objective = lambda codes, stm, target: _training_objective(
+            model, codes, stm, target, settings
+        )
         if settings.get("compile", True) and hasattr(torch, "compile"):
             try:
                 compiled = torch.compile(model)
+                train_objective = torch.compile(train_objective)
                 print("PyTorch compilation enabled.")
             except Exception as exc:  # Backend availability varies by platform.
                 print(f"PyTorch compilation unavailable: {exc}")
         amp_enabled = bool(settings.get("amp", True) and device.type == "cuda")
         scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-        train_loader = _loader(torch, train_data, settings, shuffle=True)
+        train_loader = _loader(train_data, settings, shuffle=True)
         train_loader.iteration = start_step // max(len(train_loader), 1)
         # Validation uses one randomized but fixed permutation so source order
         # cannot bias sampling and floating-point reduction stays reproducible.
         validation_loader = _loader(
-            torch,
             validation_data,
             settings,
             shuffle=True,
@@ -400,6 +434,7 @@ def train(
                 raise
         stale_validations = 0
         metrics_path = run / "metrics.jsonl"
+        overflow_weight = float(settings.get("accumulator_overflow_penalty", 0.0))
         start_time = time.monotonic()
         try:
             step = start_step
@@ -411,46 +446,11 @@ def train(
                 for codes, white_to_move, target in train_loader:
                     if step >= settings["max_steps"]:
                         break
-                    model.train()
-                    codes, white_to_move, target = _move_batch(
-                        codes, white_to_move, target, device
+                    batch_metrics, size = _train_batch(
+                        torch, model, train_objective, optimizer, scaler, settings,
+                        device, (codes, white_to_move, target),
                     )
-                    optimizer.zero_grad(set_to_none=True)
-                    batch_metrics = target.new_zeros(3)
-                    batch_size = target.numel()
-                    for chunk_codes, chunk_stm, chunk_target in _microbatches(
-                        codes, white_to_move, target, settings
-                    ):
-                        with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                            prediction, overflow_penalty = compiled(
-                                chunk_codes, chunk_stm, True
-                            )
-                            data_loss = _loss(torch, prediction, chunk_target, settings)
-                            loss = data_loss + float(
-                                settings.get("accumulator_overflow_penalty", 0.0)
-                            ) * overflow_penalty
-                            chunk_weight = chunk_target.numel() / batch_size
-                            weighted_loss = loss * chunk_weight
-                        scaler.scale(weighted_loss).backward()
-                        batch_metrics.add_(torch.stack((
-                            weighted_loss.detach(),
-                            data_loss.detach() * chunk_weight,
-                            overflow_penalty.detach() * chunk_weight,
-                        )))
-                    if step < warmup_steps:
-                        for parameter in model.nnue_parameters():
-                            parameter.grad = None
-                    clip = settings.get("gradient_clip")
-                    if clip is not None:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    model.project_parameters()
-                    if scheduler is not None:
-                        scheduler.step()
-                    size = target.numel()
-                    batch_metrics.mul_(size)
+                    scheduler.step()
                     if interval_metrics is None:
                         interval_metrics = batch_metrics
                     else:
@@ -490,7 +490,7 @@ def train(
                     checkpoint = {
                         "model": model.state_dict(),
                         "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+                        "scheduler": scheduler.state_dict(),
                         **metric,
                     }
                     torch.save(checkpoint, run / "latest.pt")
@@ -518,7 +518,8 @@ def train(
                         f"Step {step:,}/{settings['max_steps']:,}: "
                         f"train={metric['train_loss']:.4f} "
                         f"(data={metric['train_data_loss']:.4f}, "
-                        f"overflow={metric['train_accumulator_overflow_penalty']:.4f}), "
+                        f"overflow contribution="
+                        f"{overflow_weight * metric['train_accumulator_overflow_penalty']:.8f}), "
                         f"validation={validation_loss:.4f}, "
                         f"MAE={validation_mae:.2f} cp, {metric['positions_per_second']:,.0f} positions/s."
                     )
@@ -531,12 +532,11 @@ def train(
                         stop_early = True
                         break
             checkpoint = torch.load(run / "best.pt", map_location="cpu", weights_only=True)
-            best_model = EvaluationModel(output_buckets=output_buckets)
+            best_model = EvaluationModel()
             best_model.load_state_dict(checkpoint["model"])
             best_model.project_parameters()
             best_material = best_model.material_cp().detach().cpu()
             best_pst = best_model.pst_cp().detach().cpu()
-            best_weights = best_model.combined_cp().detach().cpu()
             best_endgame_material = best_model.material_endgame_cp().detach().cpu()
             best_endgame_pst = best_model.pst_endgame_cp().detach().cpu()
             parameters = {
@@ -550,7 +550,6 @@ def train(
                     piece: best_pst[index].tolist()
                     for index, piece in enumerate(PIECE_ORDER)
                 },
-                "combined_pst": best_weights.tolist(),
                 "material_endgame": {
                     piece: float(best_endgame_material[index])
                     for index, piece in enumerate(PIECE_ORDER)
@@ -562,7 +561,7 @@ def train(
                 "nnue": {
                     "encoding": "relative-2x6x64",
                     "output_units": "pawn/128",
-                    "output_buckets": output_buckets,
+                    "output_buckets": NNUE_OUTPUT_BUCKETS,
                     "accumulator_bias": best_model.accumulator_bias.detach().cpu().tolist(),
                     "feature_weights": best_model.feature_weights.detach().cpu().round()
                         .clamp(-2, 1).to(torch.int8).tolist(),
@@ -582,8 +581,8 @@ def train(
                 wandb_run.summary.update(report)
                 wandb_run.finish()
             print(f"Training complete; best validation loss {best_loss:.4f} at step {best_step:,}.")
-        except BaseException:
-            report["status"] = "interrupted" if isinstance(sys.exc_info()[1], KeyboardInterrupt) else "failed"
+        except BaseException as exc:
+            report["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
             atomic_json(run / "report.json", report)
             if wandb_run is not None:
                 wandb_run.finish(exit_code=1)

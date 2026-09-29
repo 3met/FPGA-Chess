@@ -14,7 +14,7 @@ package nnue_defs;
     localparam int NNUE_OUTPUT_INPUT_COUNT =
         NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT;
     localparam int NNUE_OUTPUT_WEIGHT_BITS = 3;
-    localparam int NNUE_OUTPUT_BIAS_BITS = 5;
+    localparam int NNUE_OUTPUT_BIAS_BITS = 6;
     localparam int NNUE_OUTPUT_MAC_LANES = 128;
     localparam int NNUE_OUTPUT_MAC_CYCLES =
         (NNUE_OUTPUT_INPUT_COUNT + NNUE_OUTPUT_MAC_LANES - 1) / NNUE_OUTPUT_MAC_LANES;
@@ -34,7 +34,7 @@ package nnue_defs;
     // Training penalizes values outside signed five-bit state. Modular updates
     // preserve exact inverse deltas if an extreme still wraps.
     localparam int NNUE_ACCUMULATOR_BITS = 5;
-    localparam int NNUE_ACCUMULATOR_BIAS_BITS = 3;
+    localparam int NNUE_ACCUMULATOR_BIAS_BITS = 4;
     typedef logic signed [NNUE_ACCUMULATOR_BITS-1:0] NnueAccumulator;
     // Each perspective sees its own pieces first, followed by enemy pieces,
     // over six piece types and 64 vertically oriented squares: 2*6*64 rows.

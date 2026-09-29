@@ -71,19 +71,26 @@ module nnue_evaluator #(
     OutputSum eval_sum;
     OutputSum result_sum;
     EvalScore pst_blend_active, pst_blend_pending;
+    logic [5:0] pst_first_weight;
+    EvalScore pst_first_q, pst_endgame_q;
+    logic [5:0] pst_weight_q;
+    logic signed [20:0] pst_numerator_q;
+    logic [19:0] pst_magnitude;
+    logic [40:0] pst_reciprocal_product_q;
+    logic pst_negative_q;
+    EvalScore pst_quotient;
 
     // The legal endpoints are two kings and the 32-piece initial position.
-    // Signed division truncates toward zero, matching the training model.
-    function automatic EvalScore blend_pst(input PstEvalPair scores, input PieceCount count);
-        automatic int signed first_weight;
-        automatic int signed numerator;
-        if (count <= PieceCount'(2)) first_weight = 0;
-        else if (count >= PieceCount'(32)) first_weight = 30;
-        else first_weight = int'(count) - 2;
-        numerator = int'(scores.first) * first_weight
-            + int'(scores.endgame) * (30 - first_weight);
-        return EvalScore'(numerator / 30);
-    endfunction
+    // Compute the phase outside a function so Quartus preserves the PST data
+    // path. The reciprocal is exact for the signed-16-bit score range.
+    always_comb begin
+        if (eval_piece_count <= PieceCount'(2)) pst_first_weight = 6'd0;
+        else if (eval_piece_count >= PieceCount'(32)) pst_first_weight = 6'd30;
+        else pst_first_weight = 6'(eval_piece_count - PieceCount'(2));
+    end
+    assign pst_magnitude = pst_numerator_q[20]
+        ? 20'(-pst_numerator_q) : 20'(pst_numerator_q);
+    assign pst_quotient = $signed(pst_reciprocal_product_q[40:25]);
 
     (* ram_style = "block" *)
     logic [NNUE_ROW_BYTES * 8-1:0] feature_rom[NNUE_FEATURE_COUNT];
@@ -94,11 +101,10 @@ module nnue_evaluator #(
         output_weight_rows[NNUE_OUTPUT_WEIGHT_ROW_COUNT];
     OutputWeightRowAddress output_weight_row_address;
     logic [OUTPUT_WEIGHT_ROW_BITS-1:0] output_weight_row_q;
-    // Keep byte-wide loader storage while only the signed low five bits enter
+    // Keep byte-wide loader storage while only the unsigned low six bits enter
     // the datapath.
     logic [7:0] output_bias[NNUE_OUTPUT_BUCKET_COUNT];
-    // Hex files have nibble granularity; only the signed low three bits enter
-    // the datapath, avoiding loader truncation warnings without widening it.
+    // A hex digit holds the full unsigned four-bit bias.
     logic [3:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
 `ifdef FPGA_CHESS_PROFILE
     longint unsigned profile_accumulator_wrap_lanes;
@@ -123,6 +129,21 @@ module nnue_evaluator #(
         input logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight
     );
         return activation * weight;
+    endfunction
+
+    // Decode floor(min(15, max(0, acc))^2 / 8), capped at seven, without
+    // putting a squaring multiplier on every output MAC lane.
+    function automatic logic signed [3:0] screlu(input NnueAccumulator accumulator);
+        if (accumulator < 0) return 4'sd0;
+        if (accumulator >= NnueAccumulator'(8)) return 4'sd7;
+        case (accumulator)
+            NnueAccumulator'(3): return 4'sd1;
+            NnueAccumulator'(4): return 4'sd2;
+            NnueAccumulator'(5): return 4'sd3;
+            NnueAccumulator'(6): return 4'sd4;
+            NnueAccumulator'(7): return 4'sd6;
+            default: return 4'sd0;
+        endcase
     endfunction
 
     // The full-width update pipeline accepts one transformer row per cycle.
@@ -169,6 +190,15 @@ module nnue_evaluator #(
             result_valid <= 1'b0;
             update_done_valid <= 1'b0;
 
+            // Divide the phase-weighted PST sum over existing MAC cycles.
+            // For magnitude <= 30*32768, ceil(2^25/30) gives exact truncation.
+            pst_numerator_q <= 21'(
+                int'(pst_first_q) * int'(pst_weight_q)
+                + int'(pst_endgame_q) * (30 - int'(pst_weight_q)));
+            pst_reciprocal_product_q <= pst_magnitude * 21'd1118482;
+            pst_negative_q <= pst_numerator_q[20];
+            pst_blend_active <= pst_negative_q ? -pst_quotient : pst_quotient;
+
             if (update_valid) begin
                 active_update <= update_req;
                 feature_row_white <= feature_rom[update_req.white_feature];
@@ -192,8 +222,9 @@ module nnue_evaluator #(
                                 (perspective * NNUE_ACCUMULATOR_COUNT + lane)
                                     * NNUE_ACCUMULATOR_BITS;
                             automatic NnueAccumulator old_value = active_update.clear
-                                ? NnueAccumulator'($signed(accumulator_bias[lane][
-                                    NNUE_ACCUMULATOR_BIAS_BITS-1:0]))
+                                ? NnueAccumulator'({{
+                                    (NNUE_ACCUMULATOR_BITS-NNUE_ACCUMULATOR_BIAS_BITS){1'b0}},
+                                    accumulator_bias[lane][NNUE_ACCUMULATOR_BIAS_BITS-1:0]})
                                 : $signed(accumulator_update_memory[
                                     destination_address][
                                     source_bit_offset +: NNUE_ACCUMULATOR_BITS]);
@@ -274,10 +305,7 @@ module nnue_evaluator #(
                         $signed(eval_accumulators[
                             lane * NNUE_ACCUMULATOR_BITS
                                 +: NNUE_ACCUMULATOR_BITS]);
-                    automatic logic signed [3:0] activation =
-                        accumulator < 0 ? 4'sd0
-                            : accumulator > NnueAccumulator'(7) ? 4'sd7
-                            : {1'b0, accumulator[2:0]};
+                    automatic logic signed [3:0] activation = screlu(accumulator);
                     automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight =
                         $signed(output_weight_row_q[
                             lane * NNUE_OUTPUT_WEIGHT_BITS
@@ -323,9 +351,10 @@ module nnue_evaluator #(
                         result_pending <= 1'b1;
                         if (eval_valid && eval_ready) begin
                             eval_cycle <= '0;
-                            eval_sum <= OutputSum'($signed(output_bias[
-                                nnue_output_bucket(eval_piece_count)][
-                                NNUE_OUTPUT_BIAS_BITS-1:0]));
+                            eval_sum <= OutputSum'({{
+                                ($bits(OutputSum)-NNUE_OUTPUT_BIAS_BITS){1'b0}},
+                                output_bias[nnue_output_bucket(eval_piece_count)][
+                                    NNUE_OUTPUT_BIAS_BITS-1:0]});
                             partial_pending <= 1'b0;
                         end else begin
                             eval_busy <= 1'b0;
@@ -337,9 +366,10 @@ module nnue_evaluator #(
                 end
             end else if (eval_valid && eval_ready) begin
                 eval_cycle <= '0;
-                eval_sum <= OutputSum'($signed(output_bias[
-                    nnue_output_bucket(eval_piece_count)][
-                    NNUE_OUTPUT_BIAS_BITS-1:0]));
+                eval_sum <= OutputSum'({{
+                    ($bits(OutputSum)-NNUE_OUTPUT_BIAS_BITS){1'b0}},
+                    output_bias[nnue_output_bucket(eval_piece_count)][
+                        NNUE_OUTPUT_BIAS_BITS-1:0]});
                 partial_pending <= 1'b0;
                 eval_busy <= 1'b1;
             end
@@ -349,7 +379,9 @@ module nnue_evaluator #(
             // the two perspectives once, then shift one MAC row per cycle.
             if (eval_valid && eval_ready) begin
                 automatic logic [ACCUMULATOR_WORD_BITS-1:0] selected_state;
-                pst_blend_active <= blend_pst(eval_pst, eval_piece_count);
+                pst_first_q <= eval_pst.first;
+                pst_endgame_q <= eval_pst.endgame;
+                pst_weight_q <= pst_first_weight;
 
                 // A single-thread build has no other state to update while it
                 // evaluates, so reuse the update mirror and avoid a very wide,

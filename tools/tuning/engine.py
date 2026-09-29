@@ -14,11 +14,17 @@ from .config import REPO_ROOT
 from .model import (
     EvaluationModel,
     NNUE_ACCUMULATORS,
+    NNUE_ACCUMULATOR_BITS,
+    NNUE_ACCUMULATOR_BIAS_BITS,
+    NNUE_ACCUMULATOR_BIAS_MAX,
     NNUE_FEATURE_COUNT,
     NNUE_OUTPUT_BIAS_BITS,
+    NNUE_OUTPUT_BIAS_MAX,
     NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
     NNUE_OUTPUT_WEIGHT_BITS,
+    NNUE_OUTPUT_WEIGHT_MAX,
+    NNUE_OUTPUT_WEIGHT_MIN,
     PIECE_ORDER,
     PST_PATH,
 )
@@ -58,42 +64,11 @@ def validate_export_ranges(material: list[int], pst: dict[str, list[int]]) -> No
         raise ValueError(f"exported PST exceeds signed {PST_WORD_BITS}-bit range")
 
 
-def decompose(combined_cp: list[list[float]]) -> tuple[list[int], dict[str, list[int]]]:
-    """Split legacy combined values without changing any reachable square score."""
-    if len(combined_cp) != 6 or any(len(table) != 64 for table in combined_cp):
-        raise ValueError("combined_pst must contain six 64-entry tables")
-    combined = [[round_half_away(value * 128.0 / 100.0) for value in table] for table in combined_cp]
-    material: list[int] = []
-    pst: dict[str, list[int]] = {}
-    for piece_index, piece in enumerate(PIECE_ORDER):
-        reachable = list(range(8, 56)) if piece == "pawn" else list(range(64))
-        midpoint = FIXED_MATERIAL_128.get(piece)
-        if midpoint is None:
-            low = min(combined[piece_index][square] for square in reachable)
-            high = max(combined[piece_index][square] for square in reachable)
-            midpoint = (low + high + 1) // 2
-        offsets = [value - midpoint for value in combined[piece_index]]
-        if piece == "pawn":
-            for square in (*range(8), *range(56, 64)):
-                offsets[square] = 0
-        material.append(midpoint)
-        pst[piece] = offsets
-        for square in reachable:
-            if midpoint + offsets[square] != combined[piece_index][square]:
-                raise AssertionError("combined evaluation changed during decomposition")
-    validate_export_ranges(material, pst)
-    return material, pst
-
-
 def export_values(parameters: dict, suffix: str = "") -> tuple[list[int], dict[str, list[int]]]:
-    """Convert explicit or legacy run parameters to signed engine units."""
+    """Convert separate material and PST parameters to signed engine units."""
     material_key, pst_key = f"material{suffix}", f"pst{suffix}"
-    if suffix and (material_key in parameters) != (pst_key in parameters):
-        raise ValueError("endgame parameters must contain both material and PST")
-    if suffix and material_key not in parameters:
-        material_key, pst_key = "material", "pst"
     if material_key not in parameters or pst_key not in parameters:
-        return decompose(parameters["combined_pst"])
+        raise ValueError(f"parameters must contain {material_key} and {pst_key} tables")
     if (
         set(parameters[material_key]) != set(PIECE_ORDER)
         or set(parameters[pst_key]) != set(PIECE_ORDER)
@@ -129,20 +104,8 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state = checkpoint["model"]
-    if "terms.material_pst" in state:
-        return {
-            "units": "centipawns",
-            "piece_order": list(PIECE_ORDER),
-            "combined_pst": state["terms.material_pst"].reshape(6, 64).tolist(),
-            "best_step": checkpoint.get("step"),
-        }, "legacy best checkpoint"
     output_buckets = int(state["output_weights"].shape[0])
     model = EvaluationModel(output_buckets=output_buckets)
-    for name in ("material", "pst"):
-        old_key = f"terms.{name}"
-        new_key = f"terms.{name}_endgame"
-        if new_key not in state and old_key in state:
-            state[new_key] = state[old_key].clone()
     model.load_state_dict(state)
     model.project_parameters()
     material = model.material_cp().detach().cpu()
@@ -160,7 +123,6 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
         "pst_endgame": {
             piece: endgame_pst[index].tolist() for index, piece in enumerate(PIECE_ORDER)
         },
-        "combined_pst": model.combined_cp().detach().cpu().tolist(),
         "nnue": {
             "encoding": "relative-2x6x64",
             "output_units": "pawn/128",
@@ -176,16 +138,18 @@ def load_run_parameters(run: Path) -> tuple[dict, str]:
 
 
 def _clamp_output_weight(value: float) -> int:
-    return max(-4, min(3, round_ties_to_even(value)))
+    return max(NNUE_OUTPUT_WEIGHT_MIN, min(NNUE_OUTPUT_WEIGHT_MAX, round_ties_to_even(value)))
 
 
 def _pack_output_row(row: list[float]) -> str:
-    """Pack one 128-lane signed-three-bit output row least-significant lane first."""
+    """Pack one output row with the training target's signed weight width."""
     if len(row) != NNUE_OUTPUT_MAC_LANES:
         raise ValueError(f"each NNUE output row must contain {NNUE_OUTPUT_MAC_LANES} weights")
     packed = 0
     for lane, weight in enumerate(row):
-        packed |= (_clamp_output_weight(weight) & 0x7) << (lane * NNUE_OUTPUT_WEIGHT_BITS)
+        packed |= (_clamp_output_weight(weight) & ((1 << NNUE_OUTPUT_WEIGHT_BITS) - 1)) << (
+            lane * NNUE_OUTPUT_WEIGHT_BITS
+        )
     digits = (NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS + 3) // 4
     return f"{packed:0{digits}x}"
 
@@ -211,13 +175,7 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
     """Create packed feature, output, and accumulator-bias ROM images."""
     nnue = parameters.get("nnue")
     if nnue is None:
-        return (
-            ("00" * (NNUE_ACCUMULATORS // 4) + "\n") * NNUE_FEATURE_COUNT,
-            ("0" * ((NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS + 3) // 4) + "\n")
-                * (NNUE_OUTPUT_INPUTS // NNUE_OUTPUT_MAC_LANES) * NNUE_OUTPUT_BUCKETS,
-            "00\n" * NNUE_OUTPUT_BUCKETS,
-            "0\n" * NNUE_ACCUMULATORS,
-        )
+        raise ValueError("parameters must contain NNUE weights and biases")
     rows = nnue["feature_weights"]
     if len(rows) != NNUE_FEATURE_COUNT:
         raise ValueError(
@@ -245,28 +203,39 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
     if len(biases) != NNUE_ACCUMULATORS:
         raise ValueError(f"NNUE accumulator bias must contain {NNUE_ACCUMULATORS} values")
     bias_text = "\n".join(
-        f"{max(-4, min(3, round_ties_to_even(value))) & 0x7:x}" for value in biases
+        f"{max(0, min(NNUE_ACCUMULATOR_BIAS_MAX, round_ties_to_even(value))):x}"
+        for value in biases
     ) + "\n"
-    output_bias = nnue.get("output_bias", [0.0] * NNUE_OUTPUT_BUCKETS)
+    output_bias = nnue["output_bias"]
     if len(output_bias) != NNUE_OUTPUT_BUCKETS:
         raise ValueError(f"NNUE output bias must contain {NNUE_OUTPUT_BUCKETS} values")
-    output_bias_min = -(1 << (NNUE_OUTPUT_BIAS_BITS - 1))
-    output_bias_max = (1 << (NNUE_OUTPUT_BIAS_BITS - 1)) - 1
     output_bias_values = [
-        max(output_bias_min, min(output_bias_max, round_ties_to_even(value)))
+        max(0, min(NNUE_OUTPUT_BIAS_MAX, round_ties_to_even(value)))
         for value in output_bias
     ]
     output_bias_text = "".join(
-        f"{value & ((1 << NNUE_OUTPUT_BIAS_BITS) - 1):02x}\n"
+        f"{value:02x}\n"
         for value in output_bias_values
     )
     return feature_text, "\n".join(output_lines) + "\n", output_bias_text, bias_text
+
+
+def _require_matching_rtl() -> None:
+    """Reject ROM export if the training widths diverge from deployed RTL."""
+    if (
+        NNUE_ACCUMULATOR_BITS,
+        NNUE_ACCUMULATOR_BIAS_BITS,
+        NNUE_OUTPUT_WEIGHT_BITS,
+        NNUE_OUTPUT_BIAS_BITS,
+    ) != (5, 4, 3, 6):
+        raise RuntimeError("NNUE training widths differ from RTL; update RTL before engine-commit")
 
 
 def commit_parameters(run: Path, dry_run: bool = False) -> None:
     parameters, source = load_run_parameters(run)
     material, pst = export_values(parameters)
     endgame_material, endgame_pst = export_values(parameters, "_endgame")
+    nnue_feature, nnue_output, nnue_output_bias, nnue_bias = export_nnue(parameters)
     print(f"Run: {run.name} ({source})")
     print("Material (pawn/128): " + ", ".join(
         f"{piece}={value}" for piece, value in zip(PIECE_ORDER, material)
@@ -275,17 +244,15 @@ def commit_parameters(run: Path, dry_run: bool = False) -> None:
         f"{piece}={value}" for piece, value in zip(PIECE_ORDER, endgame_material)
     ))
     if dry_run:
-        if "nnue" in parameters:
-            export_nnue(parameters)
         print("Dry run; engine files were not changed.")
         return
+    _require_matching_rtl()
     pst_document = json.loads(PST_PATH.read_text(encoding="utf-8"))
     pst_document["material"] = dict(zip(PIECE_ORDER, material))
     pst_document["pst"] = pst
     pst_document["material_endgame"] = dict(zip(PIECE_ORDER, endgame_material))
     pst_document["pst_endgame"] = endgame_pst
     new_pst = json.dumps(pst_document, indent=2) + "\n"
-    nnue_feature, nnue_output, nnue_output_bias, nnue_bias = export_nnue(parameters)
     paths = (
         PST_PATH, *GENERATED_PATHS, NNUE_FEATURE_PATH, NNUE_OUTPUT_PATH,
         NNUE_OUTPUT_BIAS_PATH, NNUE_BIAS_PATH,

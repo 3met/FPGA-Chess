@@ -35,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
                 "--initialize",
                 help="Start a new run from another run's best model with a fresh optimizer",
             )
+            subparser.add_argument(
+                "--rebuild-cache", action="store_true",
+                help="Rebuild the dataset cache even when a matching cache exists",
+            )
         if name == "engine-commit":
             subparser.add_argument("--dry-run", action="store_true", help="Show exported material without changing files")
         if name == "quantization-report":
@@ -52,9 +56,9 @@ def main(argv: list[str] | None = None) -> int:
         root = Path(config["output"]["root"])
         if args.command == "train":
             os.environ.setdefault("WANDB_SILENT", "true")
-            cache = build_cache(config)
             resume_run = resolve_run(root, args.resume) if args.resume else None
             initialize_run = resolve_run(root, args.initialize) if args.initialize else None
+            cache = build_cache(config, rebuild=args.rebuild_cache)
             train(config, cache, resume_run=resume_run, initialize_run=initialize_run)
             return 0
         if args.command == "view-report":

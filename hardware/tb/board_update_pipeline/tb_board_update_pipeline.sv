@@ -27,6 +27,7 @@ module tb_board_update_pipeline;
     logic side_in_check_out;
 
     PstScore pst_values[0:(6 * 64)-1];
+    PstScore pst_values_endgame[0:(6 * 64)-1];
     ZobristKey zobrist_tile_values[0:ZOBRIST_TILE_ENTRY_CNT-1];
     ZobristKey zobrist_ep_values[0:ZOBRIST_EP_ENTRY_CNT-1];
 
@@ -34,6 +35,7 @@ module tb_board_update_pipeline;
     MoveRecord ref_history[0:MAX_PLY_COUNT-1];
     PlyIndex ref_ply;
     EvalScore ref_pst;
+    EvalScore ref_pst_endgame;
     ZobristKey ref_zobrist;
 
     int pass_count = 0;
@@ -103,7 +105,10 @@ module tb_board_update_pipeline;
         endcase
     endfunction
 
-    function automatic EvalScore ref_tile_score(input Tile tile, input Position pos);
+    // Use the selected material and PST table for one signed piece score.
+    function automatic EvalScore ref_tile_score(
+        input Tile tile, input Position pos, input bit endgame = 1'b0
+    );
         automatic Position pst_pos;
         automatic int pst_idx;
         automatic EvalScore score;
@@ -115,15 +120,20 @@ module tb_board_update_pipeline;
 
         pst_pos = (normalized.piece_color == BLACK) ? mirror_position(pos) : pos;
         pst_idx = (int'(normalized.piece_type) - 1) * 64 + int'(pst_pos);
-        score = PIECE_VALS_128[normalized.piece_type] + EvalScore'(pst_values[pst_idx]);
+        if (endgame)
+            score = PIECE_VALS_ENDGAME_128[normalized.piece_type]
+                + EvalScore'(pst_values_endgame[pst_idx]);
+        else
+            score = PIECE_VALS_128[normalized.piece_type]
+                + EvalScore'(pst_values[pst_idx]);
         return (normalized.piece_color == WHITE) ? score : -score;
     endfunction
 
-    function automatic EvalScore ref_eval(input FullBoard board);
+    function automatic EvalScore ref_eval(input FullBoard board, input bit endgame = 1'b0);
         automatic int signed total = 0;
 
         for (int pos = 0; pos < 64; pos++) begin
-            total += ref_tile_score(board.tiles[pos], Position'(pos));
+            total += ref_tile_score(board.tiles[pos], Position'(pos), endgame);
         end
 
         return EvalScore'(total);
@@ -200,6 +210,7 @@ module tb_board_update_pipeline;
 
     task automatic refresh_ref_scores();
         ref_pst = ref_eval(ref_board);
+        ref_pst_endgame = ref_eval(ref_board, 1'b1);
         ref_zobrist = ref_zobrist_full(ref_board);
     endtask
 
@@ -243,12 +254,16 @@ module tb_board_update_pipeline;
 
     task automatic expect_state(input FullBoard expected_board, input string test_name);
         automatic EvalScore expected_pst = ref_eval(expected_board);
+        automatic EvalScore expected_pst_endgame = ref_eval(expected_board, 1'b1);
         automatic ZobristKey expected_zobrist = ref_zobrist_full(expected_board);
 
         expect_equal(board_out === expected_board,
             $sformatf("%s board mismatch expected=%s found=%s", test_name, to_fen(expected_board), to_fen(board_out)));
-        expect_equal(pst_eval_out.first === expected_pst && pst_eval_out.endgame === expected_pst,
-            $sformatf("%s PST mismatch expected=%0d found=%0d", test_name, expected_pst, pst_eval_out.first));
+        expect_equal(pst_eval_out.first === expected_pst
+                && pst_eval_out.endgame === expected_pst_endgame,
+            $sformatf("%s PST mismatch expected=(%0d,%0d) found=(%0d,%0d)",
+                test_name, expected_pst, expected_pst_endgame,
+                pst_eval_out.first, pst_eval_out.endgame));
         expect_equal(piece_count_out === ref_piece_count(expected_board),
             $sformatf("%s piece-count mismatch expected=%0d found=%0d",
                 test_name, ref_piece_count(expected_board), piece_count_out));
@@ -448,13 +463,14 @@ module tb_board_update_pipeline;
         automatic FullBoard old_board = ref_board;
         automatic ZobristKey old_zobrist = ref_zobrist;
         automatic EvalScore old_pst = ref_pst;
+        automatic EvalScore old_pst_endgame = ref_pst_endgame;
         automatic PlyIndex old_ply = ref_ply;
 
         apply_ref_op(op, move, data);
 
         board_in = old_board;
         zobrist_key_in = old_zobrist;
-        pst_eval_in = { old_pst, old_pst };
+        pst_eval_in = '{first: old_pst, endgame: old_pst_endgame};
         piece_count_in = ref_piece_count(old_board);
         move_in = move;
         set_data = data;
@@ -988,6 +1004,7 @@ module tb_board_update_pipeline;
 
     initial begin
         $readmemh("hardware/data/pst_values/pst_values.hex", pst_values);
+        $readmemh("hardware/data/pst_values/pst_values_endgame.hex", pst_values_endgame);
         $readmemh(ZOBRIST_TILE_MEM_INIT_FILE, zobrist_tile_values);
         $readmemh(ZOBRIST_EP_MEM_INIT_FILE, zobrist_ep_values);
 

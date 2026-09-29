@@ -56,6 +56,8 @@ The pipeline always maintains the cached king squares, Zobrist key, both increme
 
 Both material and piece-square parameter sets are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces a ROM and material definitions for each set. Both ROMs receive the same square addresses, and their entries are sign-extended to separate `EvalScore` sums.
 
+The opening-phase score delta uses the raw ROM outputs through a scalar path. Quartus can prune the upper half of a packed-pair helper result even when simulation passes, so the synthesized ROM connectivity must be checked when changing this path.
+
 ## Move History
 
 Push Move records the move effects and previous side data needed to reverse it. Push Null uses a reserved history encoding and records the same restorable side data. Reverse Move reads the prior ply record for the selected thread and restores either operation.

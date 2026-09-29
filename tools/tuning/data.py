@@ -6,15 +6,17 @@ import io
 import json
 import mmap
 import os
-import random
+import re
+import shutil
 import struct
 import time
+import zlib
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
 
 from tools.common.files import atomic_write_json
 
@@ -35,6 +37,11 @@ FEN_PIECES = {
     "p": (0, False), "n": (1, False), "b": (2, False),
     "r": (3, False), "q": (4, False), "k": (5, False),
 }
+STANDARD_CASTLING = frozenset(
+    "".join(letter for index, letter in enumerate("KQkq") if mask & (1 << index))
+    for mask in range(16)
+) | {"-"}
+NONSTANDARD_PLACEMENT = re.compile(r"[1-8][1-8]|~")
 
 
 @dataclass(frozen=True)
@@ -107,42 +114,131 @@ def select_evaluation(record: dict) -> tuple[dict, dict]:
     return selected, selected["pvs"][0]
 
 
+def _obvious_capture(fen: str, uci: str) -> bool:
+    """Detect ordinary captures from the destination FEN rank before building a board."""
+    if not isinstance(fen, str) or len(uci) < 4 or not (
+        "a" <= uci[2] <= "h" and "1" <= uci[3] <= "8"
+    ):
+        return False
+    fields = fen.split(" ", 2)
+    if len(fields) < 2 or fields[1] not in {"w", "b"}:
+        return False
+    ranks = fields[0].split("/")
+    if len(ranks) != 8:
+        return False
+    rank = ranks[8 - int(uci[3])]
+    target_file = ord(uci[2]) - ord("a")
+    file_index = 0
+    for symbol in rank:
+        if "1" <= symbol <= "8":
+            file_index += ord(symbol) - ord("0")
+        else:
+            if file_index == target_file:
+                return symbol in FEN_PIECES and symbol.isupper() != (fields[1] == "w")
+            file_index += 1
+        if file_index > target_file:
+            break
+    return False
+
+
+def _board_and_codes(fen: str):
+    """Decode ordinary four-field FENs once for both legality and training features."""
+    import chess
+
+    if not isinstance(fen, str):
+        return chess.Board(fen), None
+    fields = fen.split()
+    if (
+        len(fields) != 4 or fen.count(" ") != 3
+        or fields[1] not in {"w", "b"} or fields[2] not in STANDARD_CASTLING
+        or NONSTANDARD_PLACEMENT.search(fields[0])
+    ):
+        return chess.Board(fen), None
+    ep = fields[3]
+    if ep != "-" and (
+        len(ep) != 2 or not ("a" <= ep[0] <= "h" and "1" <= ep[1] <= "8")
+    ):
+        return chess.Board(fen), None
+    try:
+        codes = encode_fen(fen)
+    except ValueError:
+        return chess.Board(fen), None
+    board = chess.Board(None)
+    masks = [0] * PIECE_COUNT
+    white = black = 0
+    for code in codes:
+        if not code:
+            break
+        value = abs(code) - 1
+        piece, oriented_square = divmod(value, SQUARE_COUNT)
+        square = oriented_square if code > 0 else oriented_square ^ 56
+        bit = 1 << square
+        masks[piece] |= bit
+        if code > 0:
+            white |= bit
+        else:
+            black |= bit
+    board.pawns, board.knights, board.bishops, board.rooks, board.queens, board.kings = masks
+    board.occupied_co[chess.WHITE] = white
+    board.occupied_co[chess.BLACK] = black
+    board.occupied = white | black
+    board.turn = fields[1] == "w"
+    board.castling_rights = sum(
+        1 << square for letter, square in (("K", 7), ("Q", 0), ("k", 63), ("q", 56))
+        if letter in fields[2]
+    )
+    board.ep_square = None if ep == "-" else (ord(ep[0]) - ord("a")) + 8 * (ord(ep[1]) - ord("1"))
+    return board, codes
+
+
 def parse_record(record: dict, filters: dict) -> tuple[Sample | None, str | None]:
     """Validate and filter one Lichess record, returning a compact sample."""
     try:
         selected, pv = select_evaluation(record)
         if selected["depth"] < filters["minimum_depth"]:
             return None, "minimum_depth"
-        is_mate = "mate" in pv
-        if is_mate and filters["remove_mates"]:
+        if "mate" in pv:
             return None, "mate"
-        if is_mate:
-            mate = int(pv["mate"])
-            target = float(filters["mate_score_cp"] if mate > 0 else -filters["mate_score_cp"])
-        else:
-            target = float(pv["cp"])
+        target = float(pv["cp"])
         limit = filters.get("max_evaluation_cp")
         if limit is not None and abs(target) > limit:
             return None, "evaluation_magnitude"
 
+        fen = record["fen"]
+        moves = str(pv.get("line", "")).split()
+        if filters["remove_captures"] and moves and _obvious_capture(fen, moves[0]):
+            return None, "capture"
+
         import chess
 
-        board = chess.Board(record["fen"])
+        board, codes = _board_and_codes(fen)
         if not board.is_valid():
             return None, "invalid_position"
-        if board.is_game_over(claim_draw=False):
-            return None, "terminal_position"
-        moves = str(pv.get("line", "")).split()
         if not moves:
+            if board.is_game_over(claim_draw=False):
+                return None, "terminal_position"
             return None, "missing_pv_move"
-        first = board.parse_uci(moves[0])
+        try:
+            first = board.parse_uci(moves[0])
+        except ValueError:
+            if board.is_game_over(claim_draw=False):
+                return None, "terminal_position"
+            raise
+        # A legal PV move proves this position is neither mate nor stalemate.
+        # FEN has no move history, so only the material and 75-move automatic
+        # draws remain to be checked here.
+        if not first:
+            if board.is_game_over(claim_draw=False):
+                return None, "terminal_position"
+        elif board.is_insufficient_material() or board.halfmove_clock >= 150:
+            return None, "terminal_position"
         if filters["remove_in_check"] and board.is_check():
             return None, "in_check"
         if filters["remove_captures"] and board.is_capture(first):
             return None, "capture"
         if filters["remove_checks"] and board.gives_check(first):
             return None, "check"
-        return Sample(encode_fen(record["fen"]), board.turn == chess.WHITE, target), None
+        return Sample(codes if codes is not None else encode_fen(fen), board.turn == chess.WHITE, target), None
     except (KeyError, TypeError, ValueError, IndexError):
         return None, "malformed"
 
@@ -166,6 +262,24 @@ def _packed_sample(sample: Sample) -> bytes:
 
 def _write_sample(handle: BinaryIO, sample: Sample | bytes) -> None:
     handle.write(sample if isinstance(sample, bytes) else _packed_sample(sample))
+
+
+def _validation_group(sample: Sample | bytes, split_denominator: int) -> int:
+    """Hash a color-flip-invariant, model-visible position into a split group."""
+    if isinstance(sample, bytes):
+        unpacked = RECORD.unpack(sample)
+        codes, white_to_move = unpacked[:MAX_PIECES], unpacked[-2]
+    else:
+        codes, white_to_move = sample.codes, sample.white_to_move
+    ordered = sorted(codes)
+    # Negation reverses numeric order, so the flipped codes need no second sort.
+    flipped = [-code for code in reversed(ordered)]
+    direct_is_canonical = (ordered, white_to_move) <= (flipped, not white_to_move)
+    payload = struct.pack(
+        "<32h?", *(ordered if direct_is_canonical else flipped),
+        white_to_move if direct_is_canonical else not white_to_move,
+    )
+    return zlib.crc32(payload) % split_denominator
 
 
 def available_cpus() -> int:
@@ -196,14 +310,14 @@ def _parse_line(line: str) -> tuple[bytes | None, str | None]:
         return None, "malformed"
 
 
-def build_cache(config: dict, print_fn=print) -> Path:
-    """Create or reuse a compact cache with an exact reservoir validation set."""
+def build_cache(config: dict, print_fn=print, *, rebuild: bool = False) -> Path:
+    """Create or reuse a compact cache with a leakage-free grouped split."""
     dataset = Path(config["dataset"]["path"])
     root = Path(config["output"]["root"]) / "cache"
     key = cache_key(config)
     cache = root / key
     meta_path = cache / META_NAME
-    if meta_path.exists() and not config["dataset"].get("rebuild_cache", False):
+    if meta_path.exists() and not rebuild:
         return cache
     cache.mkdir(parents=True, exist_ok=True)
     build_log = cache / "build.log"
@@ -213,15 +327,15 @@ def build_cache(config: dict, print_fn=print) -> Path:
         with build_log.open("a", encoding="utf-8") as handle:
             handle.write(message + "\n")
 
-    temporary = cache / (DATA_NAME + ".tmp")
+    train_temporary = cache / (DATA_NAME + ".train.tmp")
+    validation_temporary = cache / (DATA_NAME + ".validation.tmp")
     counts: Counter[str] = Counter()
-    reservoir: list[bytes] = []
-    rng = random.Random(config["training"]["seed"])
     validation_size = config["training"]["validation_size"]
     max_positions = config["dataset"]["max_positions"]
+    train_size = max_positions - validation_size
     workers = resolve_cache_workers(config["dataset"].get("num_workers", "auto"))
     progress_interval = config["dataset"].get("progress_interval_seconds", 5)
-    accepted = 0
+    validation_count = 0
     train_count = 0
     started = last_progress = time.monotonic()
     status(f"Building dataset cache with {workers} parser worker{'s' if workers != 1 else ''}...")
@@ -237,7 +351,11 @@ def build_cache(config: dict, print_fn=print) -> Path:
         )
         if workers == 1:
             _init_worker(config["filters"])
-        with temporary.open("wb") as output, executor_context as executor:
+        with (
+            train_temporary.open("wb") as train_output,
+            validation_temporary.open("wb") as validation_output,
+            executor_context as executor,
+        ):
             finished = False
             while not finished:
                 batch = []
@@ -256,46 +374,57 @@ def build_cache(config: dict, print_fn=print) -> Path:
                     if sample is None:
                         counts[reason or "malformed"] += 1
                     else:
-                        accepted += 1
-                        if len(reservoir) < validation_size:
-                            reservoir.append(sample)
-                        else:
-                            choice = rng.randrange(accepted)
-                            if choice < validation_size:
-                                _write_sample(output, reservoir[choice])
-                                reservoir[choice] = sample
+                        packed = sample
+                        if _validation_group(sample, max_positions) < validation_size:
+                            if validation_count < validation_size:
+                                _write_sample(validation_output, packed)
+                                validation_count += 1
                             else:
-                                _write_sample(output, sample)
-                            train_count += 1
-                    now = time.monotonic()
-                    if now - last_progress >= progress_interval:
-                        rate = counts["read"] / max(now - started, 1e-9)
-                        status(
-                            f"Cache: read {counts['read']:,}, accepted {accepted:,}, "
-                            f"{rate:,.0f} positions/s."
-                        )
-                        last_progress = now
-                    if max_positions is not None and accepted >= max_positions:
+                                counts["validation_quota"] += 1
+                        else:
+                            if train_count < train_size:
+                                _write_sample(train_output, packed)
+                                train_count += 1
+                            else:
+                                counts["training_quota"] += 1
+                    if train_count >= train_size and validation_count >= validation_size:
                         finished = True
                         break
-            for sample in reservoir:
-                _write_sample(output, sample)
+                # Progress intervals are far longer than one source batch; avoid
+                # asking the clock once for every position in the dataset.
+                now = time.monotonic()
+                if now - last_progress >= progress_interval:
+                    rate = counts["read"] / max(now - started, 1e-9)
+                    status(
+                        f"Cache: read {counts['read']:,}, cached "
+                        f"{train_count + validation_count:,}, "
+                        f"{rate:,.0f} positions/s."
+                    )
+                    last_progress = now
     finally:
         lines.close()
         raw.close()
-    if accepted <= validation_size:
-        temporary.unlink(missing_ok=True)
-        raise ValueError(f"only {accepted} positions passed filters; need more than {validation_size}")
-    temporary.replace(cache / DATA_NAME)
+    if train_count < train_size or validation_count < validation_size:
+        train_temporary.unlink(missing_ok=True)
+        validation_temporary.unlink(missing_ok=True)
+        raise ValueError(
+            f"dataset ended after caching {train_count} training and "
+            f"{validation_count} validation positions"
+        )
+    with train_temporary.open("ab") as output, validation_temporary.open("rb") as validation:
+        shutil.copyfileobj(validation, output)
+    validation_temporary.unlink()
+    train_temporary.replace(cache / DATA_NAME)
     metadata = {
         "record_size": RECORD.size,
         "train_count": train_count,
-        "validation_count": len(reservoir),
+        "validation_count": validation_count,
         "counts": dict(sorted(counts.items())),
         "validation_offset": train_count,
+        "split": "model-visible color-flip symmetry class",
     }
     atomic_write_json(meta_path, metadata)
-    status(f"Cached {train_count:,} training and {len(reservoir):,} validation positions ({key}).")
+    status(f"Cached {train_count:,} training and {validation_count:,} validation positions ({key}).")
     return cache
 
 
@@ -401,32 +530,6 @@ class CacheBatchLoader:
                 )
                 target = torch.from_numpy(numpy.array(batch["target"], copy=True))
                 yield codes, white_to_move, target
-
-
-class BufferedShuffleSampler:
-    """Shuffle a large cache with bounded memory and deterministic seeds."""
-
-    def __init__(self, count: int, buffer_size: int, seed: int):
-        self.count = count
-        self.buffer_size = min(count, buffer_size)
-        self.seed = seed
-        self.iteration = 0
-
-    def __len__(self) -> int:
-        return self.count
-
-    def __iter__(self) -> Iterator[int]:
-        rng = random.Random(self.seed + self.iteration)
-        self.iteration += 1
-        buffer = list(range(self.buffer_size))
-        next_index = self.buffer_size
-        while next_index < self.count:
-            slot = rng.randrange(len(buffer))
-            yield buffer[slot]
-            buffer[slot] = next_index
-            next_index += 1
-        rng.shuffle(buffer)
-        yield from buffer
 
 
 def cache_datasets(cache: Path) -> tuple[CacheDataset, CacheDataset, dict]:

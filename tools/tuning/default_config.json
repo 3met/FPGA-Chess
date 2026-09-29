@@ -1,41 +1,30 @@
 {
   "dataset": {
     "path": "training-data/lichess_db_eval.jsonl.zst",
-    "max_positions": 150000000,
-    "rebuild_cache": false,
+    "max_positions": 235000000,
     "num_workers": "auto",
     "progress_interval_seconds": 60
   },
   "filters": {
-    "remove_mates": true,
-    "minimum_depth": 20,
-    "max_evaluation_cp": 1500,
+    "minimum_depth": 12,
+    "max_evaluation_cp": 1700,
     "remove_in_check": true,
     "remove_captures": true,
-    "remove_checks": false,
-    "mate_score_cp": 30000
+    "remove_checks": false
   },
   "training": {
     "seed": 1,
-    "nnue_output_buckets": 8,
     "accumulator_overflow_penalty": 0.0001,
-    "pst_warmup_steps": 0,
-    "initialize_material_pst_from_engine": true,
     "batch_size": 8192,
     "microbatch_size": "auto",
     "validation_size": 1000000,
-    "learning_rate": 0.01,
-    "scheduler": "warmup_exponential",
-    "warmup_fraction": 0.015,
-    "warmup_start_factor": 0.1,
-    "exponential_decay_per_epoch": 0.992,
-    "max_steps": 150000,
-    "optimizer": "adamw",
-    "loss": "score_probability_mse",
+    "learning_rate": 0.005,
+    "cosine_final_factor": 0.01,
+    "max_steps": 350000,
     "score_probability_offset": 270.0,
     "score_probability_scale": 380.0,
-    "weight_decay": 0.00001,
-    "gradient_clip": 1000.0,
+    "weight_decay": 0.0,
+    "gradient_clip": 1.0,
     "device": "auto",
     "cpu_threads": "auto",
     "shuffle_buffer": 262144,
@@ -43,7 +32,7 @@
     "amp": true,
     "validation_interval_steps": 5000,
     "checkpoint_interval_steps": 5000,
-    "early_stopping_patience": 10
+    "early_stopping_patience": 20
   },
   "output": {
     "root": "work/tuning"

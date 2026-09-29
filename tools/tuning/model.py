@@ -21,8 +21,19 @@ NNUE_ACCUMULATORS = 256
 NNUE_OUTPUT_INPUTS = NNUE_SIDES * NNUE_ACCUMULATORS
 NNUE_OUTPUT_BUCKETS = 8
 NNUE_ACCUMULATOR_BITS = 5
+NNUE_ACCUMULATOR_BIAS_BITS = 4
+NNUE_ACCUMULATOR_BIAS_MAX = (1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1
+NNUE_CLIPPED_ACCUMULATOR_BITS = NNUE_ACCUMULATOR_BITS - 1
+NNUE_CLIPPED_ACCUMULATOR_MAX = (1 << NNUE_CLIPPED_ACCUMULATOR_BITS) - 1
+NNUE_ACTIVATION_BITS = 3
+NNUE_ACTIVATION_MAX = (1 << NNUE_ACTIVATION_BITS) - 1
+NNUE_SCRELU_DIVISOR = 1 << NNUE_ACTIVATION_BITS
+NNUE_SCRELU_TOP_CODE = NNUE_ACTIVATION_MAX
 NNUE_OUTPUT_WEIGHT_BITS = 3
-NNUE_OUTPUT_BIAS_BITS = 5
+NNUE_OUTPUT_WEIGHT_MIN = -(1 << (NNUE_OUTPUT_WEIGHT_BITS - 1))
+NNUE_OUTPUT_WEIGHT_MAX = (1 << (NNUE_OUTPUT_WEIGHT_BITS - 1)) - 1
+NNUE_OUTPUT_BIAS_BITS = 6
+NNUE_OUTPUT_BIAS_MAX = (1 << NNUE_OUTPUT_BIAS_BITS) - 1
 NNUE_ENGINE_UNIT_CP = 100.0 / 128.0
 NNUE_MAX_ENGINE_UNITS = 0x3FFF
 
@@ -40,6 +51,28 @@ def nnue_output_bucket(codes: torch.Tensor, bucket_count: int = NNUE_OUTPUT_BUCK
 def pst_opening_phase(codes: torch.Tensor) -> torch.Tensor:
     """Return the legal two-to-32-piece interpolation numerator."""
     return codes.ne(0).sum(dim=1).sub(2).clamp(0, 30)
+
+
+def _accumulator_overflow_penalty(accumulators: torch.Tensor) -> torch.Tensor:
+    """Penalize wrapped lanes with a quadratic boundary and linear tail."""
+    limit = 1 << (NNUE_ACCUMULATOR_BITS - 1)
+    excess = (accumulators - accumulators.clamp(-limit, limit - 1)).abs()
+    # Twice the unit-width Huber loss matches the old penalty at one code of
+    # overflow, while deep wraps cannot dominate quadratically.
+    return torch.where(excess <= 1, excess.square(), 2 * excess - 1).mean()
+
+
+def _wrap_accumulators(accumulators: torch.Tensor) -> torch.Tensor:
+    """Wrap accumulator sums using floor arithmetic with a unit straight-through gradient."""
+    modulus = 1 << NNUE_ACCUMULATOR_BITS
+    return accumulators - modulus * torch.floor((accumulators + modulus // 2) / modulus)
+
+
+def _squared_clipped_activation(accumulators: torch.Tensor) -> torch.Tensor:
+    """Apply the integer SCReLU lookup while retaining a useful QAT gradient."""
+    clipped = accumulators.clamp(0, NNUE_CLIPPED_ACCUMULATOR_MAX)
+    scaled = clipped.square().div(NNUE_SCRELU_DIVISOR).clamp_max(NNUE_ACTIVATION_MAX)
+    return scaled + (scaled.floor() - scaled).detach()
 
 
 def engine_parameters_cp() -> tuple[torch.Tensor, torch.Tensor]:
@@ -104,9 +137,9 @@ class EvaluationModel(nn.Module):
         pair_weights = torch.where(pair_codes == 0, 1.0,
             torch.where(pair_codes == 1, -1.0, 0.0))
         self.feature_weights = nn.Parameter(pair_weights.repeat_interleave(2, dim=1))
-        # A positive activation and alternating nonzero output lanes preserve
-        # an exact zero correction while avoiding dead quantized parameters.
-        self.accumulator_bias = nn.Parameter(torch.ones(NNUE_ACCUMULATORS))
+        # Center most sparse sums inside the clipped activation's live range;
+        # alternating nonzero output lanes still give an exact zero correction.
+        self.accumulator_bias = nn.Parameter(torch.full((NNUE_ACCUMULATORS,), 2.0))
         initial_output = torch.tensor([1.0, -1.0]).repeat(NNUE_OUTPUT_INPUTS // 2)
         self.output_weights = nn.Parameter(initial_output.repeat(output_buckets, 1))
         self.output_bias = nn.Parameter(torch.zeros(output_buckets))
@@ -114,16 +147,12 @@ class EvaluationModel(nn.Module):
         pst_mask[0, :8] = 0
         pst_mask[0, 56:] = 0
         self.register_buffer("_pst_mask", pst_mask)
+        # Decode direct piece-square codes once; this table moves with the model
+        # and is derived data rather than a checkpoint parameter.
+        codes = torch.arange(-FEATURE_COUNT, FEATURE_COUNT + 1, dtype=torch.int16)
+        index_lut = self.nnue_indices(codes[:, None])[0][:, :, 0]
+        self.register_buffer("_nnue_index_lut", index_lut, persistent=False)
         self.project_parameters()
-
-    def nnue_parameters(self) -> tuple[nn.Parameter, ...]:
-        """Return the parameters held fixed during optional PST warmup."""
-        return (
-            self.feature_weights,
-            self.accumulator_bias,
-            self.output_weights,
-            self.output_bias,
-        )
 
     def material_cp(self) -> torch.Tensor:
         """Return all six material values, including fixed pawn and king."""
@@ -175,9 +204,9 @@ class EvaluationModel(nn.Module):
         # Projecting the latent values prevents straight-through gradients from
         # stranding parameters far beyond a deployable quantization bin.
         self.feature_weights.clamp_(-2, 1)
-        self.accumulator_bias.clamp_(-4, 3)
-        self.output_weights.clamp_(-4, 3)
-        self.output_bias.clamp_(-16, 15)
+        self.accumulator_bias.clamp_(0, NNUE_ACCUMULATOR_BIAS_MAX)
+        self.output_weights.clamp_(NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX)
+        self.output_bias.clamp_(0, NNUE_OUTPUT_BIAS_MAX)
 
     @staticmethod
     def _feature_int2(values: torch.Tensor) -> torch.Tensor:
@@ -186,22 +215,29 @@ class EvaluationModel(nn.Module):
         return values + (quantized - values).detach()
 
     @staticmethod
-    def _int3(values: torch.Tensor) -> torch.Tensor:
-        """Quantize output weights to the deployed signed three-bit representation."""
-        quantized = values.round().clamp(-4, 3)
+    def _output_weight_quantized(values: torch.Tensor) -> torch.Tensor:
+        """Quantize output weights to the target signed range."""
+        quantized = values.round().clamp(NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX)
         return values + (quantized - values).detach()
 
     @staticmethod
-    def _accumulator_bias_int3(values: torch.Tensor) -> torch.Tensor:
-        """Quantize the trained bias to its deployed signed three-bit range."""
-        quantized = values.round().clamp(-4, 3)
+    def _accumulator_bias_quantized(values: torch.Tensor) -> torch.Tensor:
+        """Quantize the trained accumulator bias to its target unsigned range."""
+        quantized = values.round().clamp(0, NNUE_ACCUMULATOR_BIAS_MAX)
         return values + (quantized - values).detach()
 
     @staticmethod
-    def _output_bias_int5(value: torch.Tensor) -> torch.Tensor:
-        """Quantize the output bias to its deployed signed five-bit range."""
-        quantized = value.round().clamp(-16, 15)
+    def _output_bias_quantized(value: torch.Tensor) -> torch.Tensor:
+        """Quantize the output bias to its deployed unsigned range."""
+        quantized = value.round().clamp(0, NNUE_OUTPUT_BIAS_MAX)
         return value + (quantized - value).detach()
+
+    @staticmethod
+    def _engine_units(values: torch.Tensor) -> torch.Tensor:
+        """Round material/PST shadows as export does, retaining their gradients."""
+        scaled = values / NNUE_ENGINE_UNIT_CP
+        quantized = scaled.sign() * torch.floor(scaled.abs() + 0.5)
+        return scaled + (quantized - scaled).detach()
 
     @staticmethod
     def nnue_indices(codes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -224,9 +260,13 @@ class EvaluationModel(nn.Module):
         self,
         codes: torch.Tensor,
         white_to_move: torch.Tensor,
+        phase: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate the correction and a differentiable five-bit overflow penalty."""
-        indices, valid, _ = self.nnue_indices(codes)
+        """Evaluate the correction and a differentiable accumulator overflow penalty."""
+        indices = self._nnue_index_lut[
+            codes.to(torch.long) + FEATURE_COUNT
+        ].permute(0, 2, 1)
+        valid = codes.ne(0)[:, None, :]
         feature_weights = self._feature_int2(self.feature_weights)
         # Embedding-bag fuses the feature gather and 32-piece reduction, avoiding
         # a batch-by-perspective-by-piece-by-channel temporary tensor.
@@ -236,35 +276,25 @@ class EvaluationModel(nn.Module):
         bag_indices = torch.where(valid, indices + 1, torch.zeros_like(indices))
         accumulators = torch.nn.functional.embedding_bag(
             bag_indices.reshape(-1, bag_indices.shape[-1]), padded_weights, mode="sum"
-        ).reshape(codes.shape[0], 2, NNUE_ACCUMULATORS) + self._accumulator_bias_int3(
+        ).reshape(codes.shape[0], 2, NNUE_ACCUMULATORS) + self._accumulator_bias_quantized(
             self.accumulator_bias
         )
-        # Hardware retains the low five bits so add/remove deltas remain exact
-        # inverses even in the rare event of an overflow.
-        accumulator_modulus = 1 << NNUE_ACCUMULATOR_BITS
-        # Distance to the deployable interval gives the same squared overflow
-        # penalty without materializing separate lower- and upper-bound tensors.
-        deployable = accumulators.clamp(
-            -accumulator_modulus // 2, accumulator_modulus // 2 - 1
-        )
-        overflow_penalty = (accumulators - deployable).square().mean()
-        accumulators = torch.remainder(
-            accumulators + accumulator_modulus // 2, accumulator_modulus
-        ) - accumulator_modulus // 2
-        activations = accumulators.clamp(0, 7)
+        # Modular add/remove deltas remain exact inverses even across a wrap.
+        overflow_penalty = _accumulator_overflow_penalty(accumulators)
+        accumulators = _wrap_accumulators(accumulators)
+        activations = _squared_clipped_activation(accumulators)
         white_to_move = white_to_move.to(device=codes.device, dtype=torch.bool)
-        perspective_order = torch.stack(
-            (~white_to_move, white_to_move), dim=1
-        ).to(torch.long)
-        ordered_activations = activations.gather(
-            1,
-            perspective_order[:, :, None].expand(-1, -1, NNUE_ACCUMULATORS),
-        ).flatten(1)
-        buckets = nnue_output_bucket(codes, self.output_buckets)
-        weights = self._int3(self.output_weights)[buckets]
+        first = torch.where(white_to_move[:, None], activations[:, 0], activations[:, 1])
+        second = torch.where(white_to_move[:, None], activations[:, 1], activations[:, 0])
+        ordered_activations = torch.cat((first, second), dim=1)
+        if phase is None:
+            phase = pst_opening_phase(codes)
+        buckets = phase.div(32 // self.output_buckets, rounding_mode="floor")
+        buckets = buckets.clamp_max(self.output_buckets - 1).to(torch.long)
+        weights = self._output_weight_quantized(self.output_weights)[buckets]
         # Ordering by side to move makes color-flipped positions share exactly
         # the same output without constraining the two halves of the head.
-        output_bias = self._output_bias_int5(self.output_bias)[buckets]
+        output_bias = self._output_bias_quantized(self.output_bias)[buckets]
         engine_units = (ordered_activations * weights).sum(dim=1) + output_bias
         correction = engine_units.clamp(
             -NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS
@@ -286,22 +316,33 @@ class EvaluationModel(nn.Module):
         return_overflow_penalty: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a position and optionally return the QAT overflow penalty."""
-        mask = codes != 0
-        indices = codes.abs().to(torch.long).sub(1).clamp_min(0)
+        # Zero codes may index the final table entry: their zero sign removes
+        # both the value and its gradient without a separate mask operation.
+        indices = codes.abs().to(torch.long).sub(1)
         signs = codes.sign().to(self.terms["pst"].dtype)
-        opening = self.combined_cp().reshape(FEATURE_COUNT)[indices] * signs * mask
-        endgame = self.combined_endgame_cp().reshape(FEATURE_COUNT)[indices] * signs * mask
+        opening_table = (
+            self._engine_units(self.material_cp())[:, None]
+            + self._engine_units(self.pst_cp())
+        ).reshape(FEATURE_COUNT)
+        endgame_table = (
+            self._engine_units(self.material_endgame_cp())[:, None]
+            + self._engine_units(self.pst_endgame_cp())
+        ).reshape(FEATURE_COUNT)
+        opening = opening_table[indices] * signs
+        endgame = endgame_table[indices] * signs
         opening_sum = opening.sum(dim=1)
         endgame_sum = endgame.sum(dim=1)
         phase = pst_opening_phase(codes).to(opening_sum.dtype)
-        white_relative = endgame_sum + (opening_sum - endgame_sum) * (phase / 30.0)
+        blended = (opening_sum * phase + endgame_sum * (30.0 - phase)) / 30.0
+        # RTL truncates the signed blend toward zero after accumulating integer scores.
+        white_relative = blended + (torch.trunc(blended) - blended).detach()
         stm_sign = torch.where(
             white_to_move.to(device=codes.device, dtype=torch.bool),
             white_relative.new_tensor(1.0),
             white_relative.new_tensor(-1.0),
         )
-        correction, overflow_penalty = self._nnue_correction(codes, white_to_move)
-        prediction = white_relative + stm_sign * correction
+        correction, overflow_penalty = self._nnue_correction(codes, white_to_move, phase)
+        prediction = white_relative * NNUE_ENGINE_UNIT_CP + stm_sign * correction
         if return_overflow_penalty:
             return prediction, overflow_penalty
         return prediction

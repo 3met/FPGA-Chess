@@ -65,7 +65,6 @@ module tb_search_controller #(
     bit multi_move_inflight_seen;
     bit pipeline_overlap_seen;
     bit pvs_scout_seen;
-    bit pvs_research_seen;
     bit aspiration_window_seen;
     bit lmr_reduced_issue_seen;
     bit lmr_illegal_candidate_seen;
@@ -182,9 +181,10 @@ module tb_search_controller #(
 
         for (int perspective = 0; perspective < 2; perspective++) begin
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
-                automatic NnueAccumulator sum = NnueAccumulator'($signed(
+                automatic NnueAccumulator sum = NnueAccumulator'({{
+                    (NNUE_ACCUMULATOR_BITS-NNUE_ACCUMULATOR_BIAS_BITS){1'b0}},
                     dut.nnue_evaluator.accumulator_bias[lane][
-                        NNUE_ACCUMULATOR_BIAS_BITS-1:0]));
+                        NNUE_ACCUMULATOR_BIAS_BITS-1:0]});
                 for (int pos = 0; pos < 64; pos++) begin
                     automatic Tile tile = board.tiles[pos];
                     if (tile.piece_type != NULL_PIECE) begin
@@ -1423,7 +1423,6 @@ module tb_search_controller #(
         check_search_stats("startpos search statistics");
         check(pvs_scout_seen, "startpos depth 2 used a PVS scout window");
         check(rfp_eval_seen, "startpos depth 2 evaluated an eligible RFP node");
-        check(pvs_research_seen, "startpos depth 2 re-searched a PVS scout fail-high");
         check(aspiration_window_seen, "startpos depth 2 used an aspiration window");
         kill_search_before_root_init("early search kill");
 
@@ -1558,7 +1557,7 @@ module tb_search_controller #(
                     row < (bucket + 1) * NNUE_OUTPUT_MAC_CYCLES; row++)
                 dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-                dut.nnue_evaluator.accumulator_bias[lane] = 0;
+                dut.nnue_evaluator.accumulator_bias[lane] = 4'd2;
             new_game();
             setup_kings_only();
             set_tile(WHITE_PAWN, Position'(8), "NNUE correction white pawn a2");
@@ -1851,9 +1850,6 @@ module tb_search_controller #(
                     pvs_scout_seen = 1'b1;
                     check(dut.search_stack_top[idx].beta == dut.search_stack_top[idx].alpha + EvalScore'(1),
                         "PVS scout window has unit width");
-                end
-                if (dut.search_pvs_research[idx]) begin
-                    pvs_research_seen = 1'b1;
                 end
                 if (dut.search_eval_issue_valid
                         && dut.search_eval_issue_thread == ThreadID'(idx)

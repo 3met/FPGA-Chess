@@ -1011,6 +1011,8 @@ module search_controller #(
             ENGINE_STAT_HISTORY_LOOKUPS:  debug_stat_value = move_stat_history_lookup_count;
             ENGINE_STAT_MOVE_GEN_CYCLES:  debug_stat_value = move_stat_generation_cycles;
             ENGINE_STAT_MOVE_OVERFLOW:   debug_stat_value = 40'(move_overflow_sticky);
+            ENGINE_STAT_ACTIVE_PST_FIRST: debug_stat_value = {24'd0, active_pst_eval.first};
+            ENGINE_STAT_ACTIVE_PST_ENDGAME: debug_stat_value = {24'd0, active_pst_eval.endgame};
             default: begin
                 for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                     for (int phase = 0; phase < ENGINE_STAT_PHASE_COUNT_VALUE; phase++) begin
