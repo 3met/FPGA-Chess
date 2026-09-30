@@ -485,10 +485,17 @@ module tb_search_controller #(
         automatic NodeCountType nodes;
 
         new_game();
-        check(!dut.tt_score_cutoff_eligible(PlyIndex'(0)),
+        check(!dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " root score is cutoff-ineligible"});
-        check(dut.tt_score_cutoff_eligible(PlyIndex'(1)),
+        dut.search_ply[0] = PlyIndex'(1);
+        dut.search_repetition_seen_before[0] = 1'b0;
+        check(dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " child score remains cutoff-eligible"});
+        dut.search_repetition_seen_before[0] = 1'b1;
+        check(!dut.tt_score_cutoff_eligible(ThreadID'(0)),
+            {label, " repeated child rejects TT score cutoffs"});
+        dut.search_ply[0] = PlyIndex'(0);
+        dut.search_repetition_seen_before[0] = 1'b0;
         preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
         run_search_depth_record(8'd1, {label, " root hit"},
             best_move, score, nodes);

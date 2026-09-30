@@ -42,7 +42,7 @@ Host-supplied positions and moves are assumed legal because the host validates U
 
 The TT shares results between Lazy SMP threads and provides move-ordering hints. Root hits do not terminate a search from a cached score; the cached move is ordered first and the legal root children are compared normally. Lookup, score, and replacement rules are defined in [transposition-table.md](../modules/transposition-table.md); physical storage is defined in [tt-memory.md](../modules/tt-memory.md).
 
-Repetition history is not part of the Zobrist key, so a stored score may be unsafe after the reversible history changes. The controller conservatively validates history-sensitive TT cutoffs and may retain a rejected entry's move only as an ordering hint. Repetition storage and lookup behavior are defined in [repetition-checker.md](../modules/repetition-checker.md).
+Repetition history is not part of the Zobrist key, so a stored score may be unsafe after the reversible history changes. A position already seen in the current reversible history cannot use a TT score cutoff at any depth; its TT move remains an ordering hint. Other history-sensitive cutoffs retain the existing selective child validation. Repetition storage and lookup behavior are defined in [repetition-checker.md](../modules/repetition-checker.md).
 
 ## Mate and Draw Scores
 

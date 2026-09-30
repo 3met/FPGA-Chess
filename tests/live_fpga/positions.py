@@ -121,8 +121,8 @@ SANITY_POSITIONS: tuple[SearchCase, ...] = (
 # the root once primes the TT without a draw; another complete cycle makes the draw
 # line repeat it for the third time. Winning cases avoid it, while losing cases take it.
 REPETITION_CASES: tuple[RepetitionCase, ...] = (
-    # Five real games where the FPGA side was winning but repeated an earlier
-    # choice after the same root returned with additional game history.
+    # Real-game regressions where the FPGA side repeated an earlier choice
+    # after the same root returned with additional game history.
     RepetitionCase(
         "lichess-t9ujrjwq-black-winning",
         "1k6/pbN4p/8/8/BP1q3p/8/P1P5/5QK1 w - - 5 38",
@@ -145,13 +145,15 @@ REPETITION_CASES: tuple[RepetitionCase, ...] = (
         False,
         ("e5c7",),
     ),
+    # Color mirror of the black-winning game above checks the same delayed
+    # draw with White to move and a clear winning alternative.
     RepetitionCase(
-        "lichess-xyrmg14b-white-winning",
-        "2b4R/4rk2/2p5/r1NpP1R1/1p4p1/1P4K1/P6P/8 w - - 11 48",
-        ("h8h7", "f7f8"),
-        "h7h8",
+        "lichess-9f9ubkjf-white-mirror",
+        "2kr4/p1pp1Q1p/b1p5/1r6/5NP1/7P/PBq2P2/1R2R1K1 w - - 7 34",
+        ("e1c1", "c2e4"),
+        "c1e1",
         False,
-        ("f8f7",),
+        ("e4c2",),
     ),
     RepetitionCase(
         "lichess-pgjvtdii-white-winning",

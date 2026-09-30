@@ -34,6 +34,7 @@ from software.engine.host import (
     _input_lines,
 )
 from software.engine.transport import SerialTimeoutError
+from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS
 
 
 @unittest.skipIf(importlib.util.find_spec("chess") is None, "python-chess is required for the UCI host")
@@ -60,10 +61,11 @@ class UCIHostSpecTests(unittest.TestCase):
     def test_clock_command_uses_the_current_board_turn(self):
         host = self.make_host()
         args = ["wtime", "1000", "btime", "2000", "winc", "10", "binc", "20"]
-        self.assertEqual(host._build_go_command(args).command, bytes.fromhex("12e803000a000000000a0000"))
+        overhead = DEFAULT_MOVE_OVERHEAD_MS.to_bytes(3, "little")
+        self.assertEqual(host._build_go_command(args).command, bytes.fromhex("12e803000a00000000") + overhead)
 
         host.board.turn = False
-        self.assertEqual(host._build_go_command(args).command, bytes.fromhex("12d0070014000000000a0000"))
+        self.assertEqual(host._build_go_command(args).command, bytes.fromhex("12d007001400000000") + overhead)
 
     def test_input_lines_uses_editable_input_for_a_terminal(self):
         stream = mock.Mock()
@@ -317,7 +319,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
                 "id name FPGA Chess",
                 "id author Emet Behrendt",
                 "option name Ponder type check default false",
-                "option name Move Overhead type spin default 10 min 0 max 16777215",
+                f"option name Move Overhead type spin default {DEFAULT_MOVE_OVERHEAD_MS} min 0 max 16777215",
                 "uciok",
             ],
         )
@@ -335,7 +337,7 @@ class UCIHostDiagnosticTests(unittest.TestCase):
             "id name FPGA Chess",
             "id author Emet Behrendt",
             "option name Ponder type check default false",
-            "option name Move Overhead type spin default 10 min 0 max 16777215",
+            f"option name Move Overhead type spin default {DEFAULT_MOVE_OVERHEAD_MS} min 0 max 16777215",
             "uciok",
         ])
 

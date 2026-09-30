@@ -322,6 +322,9 @@ module search_controller #(
     logic search_repetition_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_done[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_draw[0:SEARCH_THREAD_COUNT-1];
+    // A node probes TT once before descending, so its history flag needs no
+    // stack copy when a child temporarily replaces the thread's live state.
+    logic search_repetition_seen_before[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_validation_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_validation_passed[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_validation_forced[0:SEARCH_THREAD_COUNT-1];
@@ -1877,6 +1880,7 @@ module search_controller #(
         search_pst_eval[thread_index] <= active_pst_eval;
         search_piece_count[thread_index] <= active_piece_count;
         search_ply[thread_index] <= PlyIndex'(0);
+        search_repetition_seen_before[thread_index] <= 1'b0;
         search_best_move[thread_index] <= NULL_MOVE;
         search_ponder_move[thread_index] <= NULL_MOVE;
         search_root_best_score[thread_index] <= -SEARCH_INF;
@@ -1958,10 +1962,11 @@ module search_controller #(
         return TTDepth'(search_stack_top[thread].remaining_depth);
     endfunction : search_remaining_depth
 
-    // Root TT hits are ordering hints only. A fresh root search must compare
-    // legal moves rather than publishing a cached score/move pair directly.
-    function automatic logic tt_score_cutoff_eligible(input PlyIndex ply);
-        return ply != PlyIndex'(0);
+    // Root and previously seen nodes use TT hits for ordering only; their
+    // scores depend on the current search or repetition history.
+    function automatic logic tt_score_cutoff_eligible(input ThreadID thread);
+        return search_ply[thread] != PlyIndex'(0)
+            && !search_repetition_seen_before[thread];
     endfunction : tt_score_cutoff_eligible
 
     // Repetition history can affect a TT score only after enough reversible
@@ -2741,6 +2746,7 @@ module search_controller #(
                 search_repetition_pending[tid] <= 1'b0;
                 search_repetition_done[tid] <= 1'b0;
                 search_repetition_draw[tid] <= 1'b0;
+                search_repetition_seen_before[tid] <= 1'b0;
                 search_tt_validation_pending[tid] <= 1'b0;
                 search_tt_validation_passed[tid] <= 1'b0;
                 search_tt_validation_forced[tid] <= 1'b0;
@@ -2881,14 +2887,20 @@ module search_controller #(
                         search_tt_response_pending[repetition_resp_thread] <= 1'b1;
                         search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_TT_WAIT;
                     end
-                end else if (!nnue_plan_pending[repetition_resp_thread] || nnue_completes_now) begin
-                    if (repetition_resp_is_draw) begin
-                        search_return_score[repetition_resp_thread] <= DRAW_EVAL_SCORE;
-                        search_return_valid[repetition_resp_thread] <= 1'b1;
-                        search_thread_phase[repetition_resp_thread]
-                            <= SEARCH_PHASE_REVERSE_WAIT;
-                    end else begin
-                        search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_READY;
+                end else begin
+                    // A real node with one prior occurrence can have a
+                    // different value from the same board in another history.
+                    search_repetition_seen_before[repetition_resp_thread]
+                        <= repetition_resp_count != 2'd0;
+                    if (!nnue_plan_pending[repetition_resp_thread] || nnue_completes_now) begin
+                        if (repetition_resp_is_draw) begin
+                            search_return_score[repetition_resp_thread] <= DRAW_EVAL_SCORE;
+                            search_return_valid[repetition_resp_thread] <= 1'b1;
+                            search_thread_phase[repetition_resp_thread]
+                                <= SEARCH_PHASE_REVERSE_WAIT;
+                        end else begin
+                            search_thread_phase[repetition_resp_thread] <= SEARCH_PHASE_READY;
+                        end
                     end
                 end
             end
@@ -2953,6 +2965,7 @@ module search_controller #(
                     search_repetition_pending[tid] <= 1'b0;
                     search_repetition_done[tid] <= 1'b0;
                     search_repetition_draw[tid] <= 1'b0;
+                    search_repetition_seen_before[tid] <= 1'b0;
                     search_tt_validation_pending[tid] <= 1'b0;
                     search_tt_validation_passed[tid] <= 1'b0;
                     search_tt_validation_forced[tid] <= 1'b0;
@@ -3013,6 +3026,7 @@ module search_controller #(
                                     search_repetition_pending[tid] <= 1'b0;
                                     search_repetition_done[tid] <= 1'b0;
                                     search_repetition_draw[tid] <= 1'b0;
+                                    search_repetition_seen_before[tid] <= 1'b0;
                                     search_tt_validation_pending[tid] <= 1'b0;
                                     search_tt_validation_passed[tid] <= 1'b0;
                                     search_tt_validation_forced[tid] <= 1'b0;
@@ -3140,6 +3154,7 @@ module search_controller #(
                                         search_repetition_pending[tid] <= 1'b0;
                                         search_repetition_done[tid] <= 1'b0;
                                         search_repetition_draw[tid] <= 1'b0;
+                                        search_repetition_seen_before[tid] <= 1'b0;
                                         search_tt_validation_pending[tid] <= 1'b0;
                                         search_tt_validation_passed[tid] <= 1'b0;
                                         search_tt_validation_forced[tid] <= 1'b0;
@@ -3432,6 +3447,7 @@ module search_controller #(
                         search_pst_eval[tid] <= active_pst_eval;
                         search_piece_count[tid] <= active_piece_count;
                         search_ply[tid] <= PlyIndex'(0);
+                        search_repetition_seen_before[tid] <= 1'b0;
                         search_best_move[tid] <= NULL_MOVE;
                         search_ponder_move[tid] <= NULL_MOVE;
                         search_root_best_score[tid] <= -SEARCH_INF;
@@ -4072,6 +4088,7 @@ module search_controller #(
                                 search_board[board_thread_id] <= board_update_out;
                                 search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
+                                search_repetition_seen_before[board_thread_id] <= 1'b0;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 search_stack_top[board_thread_id].move <= NULL_MOVE;
@@ -4236,6 +4253,7 @@ module search_controller #(
                                 search_board[board_thread_id] <= board_update_out;
                                 search_board_in_check[board_thread_id] <= board_update_side_in_check;
                                 search_zobrist_key[board_thread_id] <= board_update_zobrist_out;
+                                search_repetition_seen_before[board_thread_id] <= 1'b0;
                                 search_pst_eval[board_thread_id] <= board_update_pst_out;
                                 search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 repetition_line_write_valid <= 1'b1;
@@ -4542,7 +4560,7 @@ module search_controller #(
                             tt_score_usable = lookup_resp.hit
                                 && lookup_resp.depth >= search_remaining_depth(lookup_thread_id);
                             tt_cutoff_eligible = tt_score_usable
-                                && tt_score_cutoff_eligible(lookup_ply);
+                                && tt_score_cutoff_eligible(lookup_thread_id);
                             tt_validation_required = tt_cutoff_eligible
                                 && search_tt_history_required[lookup_thread_id]
                                 && !search_tt_validation_passed[lookup_thread_id];

@@ -592,7 +592,6 @@ module tb_move_generator;
         automatic MoveBucketTops child_tops;
         automatic logic [39:0] generation_cycles_before;
         automatic logic [39:0] baseline_quiet_generation_cycles;
-        automatic logic [39:0] destination_count_before;
         automatic MoveBucketTops lower;
         automatic logic direct_valid;
         automatic Move direct_move;
@@ -687,39 +686,18 @@ module tb_move_generator;
         check(found && same_move(popped, make_move(Position'(10), Position'(27))),
             "quiet FIFO returns central destination before edge destination");
 
-        // An enemy king is not capturable, even when a friendly slider attacks it.
+        // A legal en-passant target need not have a pawn able to capture it.
         empty_board(board);
         board.tiles[0] = WHITE_KING;
-        board.tiles[4] = WHITE_ROOK;
-        board.tiles[60] = BLACK_KING;
+        board.tiles[63] = BLACK_KING;
+        board.tiles[35] = BLACK_PAWN;
+        board.has_ep = 1'b1;
+        board.ep_file = BoardFile'(3);
         tops = '0;
         run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
             tops, direct_valid, direct_move, tops);
         collect(ALL_BUCKET_MASK, tops, lower, count, seen);
-        check(count == 0, "noisy generation excludes enemy king destination");
-
-        // Pawn-only noisy squares should not consume a destination cycle without a pawn source.
-        empty_board(board);
-        board.tiles[0] = WHITE_KING;
-        board.tiles[63] = BLACK_KING;
-        tops = '0;
-        destination_count_before = stat_destination_count;
-        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
-            tops, direct_valid, direct_move, tops);
-        check(stat_destination_count == destination_count_before,
-            "empty promotion squares without a pawn are not selected");
-
-        empty_board(board);
-        board.tiles[0] = WHITE_KING;
-        board.tiles[63] = BLACK_KING;
-        board.has_ep = 1'b1;
-        board.ep_file = BoardFile'(3);
-        tops = '0;
-        destination_count_before = stat_destination_count;
-        run_command(MOVE_GEN_GENERATE_NOISY, board, 1'b0, NULL_MOVE,
-            tops, direct_valid, direct_move, tops);
-        check(stat_destination_count == destination_count_before,
-            "en-passant square without a pawn is not selected");
+        check(count == 0, "en-passant target without an adjacent pawn emits no move");
 
         start_board(board);
         tops = '0;

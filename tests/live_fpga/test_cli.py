@@ -22,6 +22,7 @@ from tests.live_fpga.cli import (
     run_sanity,
 )
 from software.engine.protocol import encode_fen
+from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS
 
 
 class LiveFPGAPositionTests(unittest.TestCase):
@@ -83,6 +84,7 @@ class LiveFPGAPositionTests(unittest.TestCase):
             with self.subTest(case=case.name):
                 self.assertEqual(len(encode_fen(case.base_fen)), 36)
                 prime = chess.Board(case.base_fen)
+                self.assertTrue(prime.is_valid(), "repetition base position must be legal")
                 for move in case.moves_to_candidate_root:
                     prime.push_uci(move)
                 primed_child = prime.copy()
@@ -118,6 +120,7 @@ class SanitySuiteTests(unittest.TestCase):
     def test_sanity_resets_before_each_movetime_search(self):
         calls = []
         events = []
+        expected_seconds = (SANITY_MOVETIME_MS - DEFAULT_MOVE_OVERHEAD_MS) / 1000
 
         class Engine:
             def __init__(self, **_kwargs):
@@ -143,7 +146,7 @@ class SanitySuiteTests(unittest.TestCase):
         def search(_engine, fen, go, timeout):
             calls.append((fen, go, timeout))
             events.append(("search", fen, go, timeout))
-            return 100 + len(calls), "e2e4", 0.240
+            return 100 + len(calls), "e2e4", expected_seconds
 
         with patch("tests.live_fpga.cli.FPGAUCISession", return_value=engine), \
                 patch("tests.live_fpga.cli._search", side_effect=search), \
@@ -178,8 +181,10 @@ class SanitySuiteTests(unittest.TestCase):
     def test_sanity_rejects_search_outside_movetime_tolerance(self):
         engine = MagicMock()
         engine.__enter__.return_value = engine
+        expected_ms = SANITY_MOVETIME_MS - DEFAULT_MOVE_OVERHEAD_MS
+        late_ms = expected_ms + SANITY_MOVETIME_TOLERANCE_MS + 1
         results = [
-            (100 + case_index, "e2e4", 0.246 if case_index == 0 else 0.240)
+            (100 + case_index, "e2e4", (late_ms if case_index == 0 else expected_ms) / 1000)
             for case_index in range(len(SANITY_POSITIONS))
         ]
         output = io.StringIO()
@@ -191,8 +196,12 @@ class SanitySuiteTests(unittest.TestCase):
             status = run_sanity(SANITY_DEPTH, 10.0, 120.0, False)
 
         self.assertEqual(status, 1)
-        self.assertIn("FAIL movetime open-game: 246.0 ms (expected 240 +/- 5 ms)", output.getvalue())
-        self.assertIn("movetime 15/16 passed", output.getvalue())
+        self.assertIn(
+            f"FAIL movetime {SANITY_POSITIONS[0].name}: {late_ms:.1f} ms "
+            f"(expected {expected_ms} +/- {SANITY_MOVETIME_TOLERANCE_MS} ms)",
+            output.getvalue(),
+        )
+        self.assertIn(f"movetime {len(SANITY_POSITIONS) - 1}/{len(SANITY_POSITIONS)} passed", output.getvalue())
 
 
 @unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for repetition validation")

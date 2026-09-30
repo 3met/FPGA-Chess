@@ -226,8 +226,6 @@ module move_generator_lane #(
         mask = '0;
         for (int pos = 0; pos < 64; pos++) begin
             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY) begin
-                // Capturing a king is never a chess move; check detection
-                // determines mate without presenting its square as a capture.
                 if ((board.tiles[pos].piece_type != NULL_PIECE
                         && board.tiles[pos].piece_color != board.turn)
                         || (board.tiles[pos].piece_type == NULL_PIECE

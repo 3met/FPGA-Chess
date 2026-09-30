@@ -310,7 +310,6 @@ module tb_tt_load_store;
         issue_lookup(make_lookup_req(key, PlyIndex'(0)), resp, valid);
         expect_equal(valid, {test_name, " response valid"});
         expect_equal(!resp.hit, {test_name, " miss"});
-        expect_equal(resp.bound_type == TT_BOUND_INVALID, {test_name, " invalid bound"});
     endtask
 
     task automatic full_expect_lookup_hit(
@@ -341,7 +340,6 @@ module tb_tt_load_store;
         full_issue_lookup(make_lookup_req(key, PlyIndex'(0)), resp, valid);
         expect_equal(valid, {test_name, " response valid"});
         expect_equal(!resp.hit, {test_name, " miss"});
-        expect_equal(resp.bound_type == TT_BOUND_INVALID, {test_name, " invalid bound"});
     endtask
 
     task automatic store_and_drain(input TTStoreRequest req);

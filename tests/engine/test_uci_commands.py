@@ -1,7 +1,7 @@
 import unittest
 
 from software.engine.protocol import Command, ProtocolError, STARTPOS_FEN
-from software.engine.uci_commands import parse_go_command, parse_position_args, split_command_line
+from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS, parse_go_command, parse_position_args, split_command_line
 
 
 class UCICommandParsingTests(unittest.TestCase):
@@ -54,10 +54,10 @@ class UCICommandParsingTests(unittest.TestCase):
 
     def test_clock_search_accepts_one_remaining_clock(self):
         white = parse_go_command(["wtime", "1000", "winc", "10"], True)
-        self.assertEqual(white.command, bytes.fromhex("12e803000a000000000a0000"))
+        self.assertEqual(white.command, bytes.fromhex("12e803000a00000000") + DEFAULT_MOVE_OVERHEAD_MS.to_bytes(3, "little"))
 
         black = parse_go_command(["btime", "2000", "binc", "20"], False)
-        self.assertEqual(black.command, bytes.fromhex("12d0070014000000000a0000"))
+        self.assertEqual(black.command, bytes.fromhex("12d007001400000000") + DEFAULT_MOVE_OVERHEAD_MS.to_bytes(3, "little"))
 
     def test_movetime_carries_move_overhead(self):
         parsed = parse_go_command(["movetime", "250"], True, move_overhead_ms=10)
@@ -94,7 +94,7 @@ class UCICommandParsingTests(unittest.TestCase):
         self.assertFalse(parsed.wait_for_stop)
         self.assertEqual(
             parsed.resume_command,
-            bytes.fromhex("12e803000a000000000a0000"),
+            bytes.fromhex("12e803000a00000000") + DEFAULT_MOVE_OVERHEAD_MS.to_bytes(3, "little"),
         )
 
 
