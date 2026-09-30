@@ -5,16 +5,19 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from tests.live_fpga.positions import (
+    FIFTY_MOVE_CASES,
     PERFT_POSITIONS,
     REPETITION_CASES,
     SANITY_POSITIONS,
 )
 from tests.live_fpga.cli import (
     SANITY_DEPTH,
+    SANITY_FIFTY_MOVE_TIME_MS,
     SANITY_MOVETIME_MS,
     SANITY_MOVETIME_TOLERANCE_MS,
     SANITY_REPETITION_DEPTH,
     _is_legal_repetition_move,
+    _run_fifty_move_checks,
     _repetition_position,
     _run_repetition_checks,
     _uci_score,
@@ -57,6 +60,24 @@ class LiveFPGAPositionTests(unittest.TestCase):
             self.assertTrue(case.name)
             self.assertEqual(len(case.fen.split()), 6)
             self.assertEqual(len(encode_fen(case.fen)), 36)
+
+    @unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for position validation")
+    def test_fifty_move_positions_and_expected_moves_are_legal(self):
+        import chess
+
+        self.assertEqual(len({case.name for case in FIFTY_MOVE_CASES}), len(FIFTY_MOVE_CASES))
+        self.assertEqual(len({case.fen for case in FIFTY_MOVE_CASES}), len(FIFTY_MOVE_CASES))
+        for case in FIFTY_MOVE_CASES:
+            with self.subTest(case=case.name):
+                board = chess.Board(case.fen)
+                self.assertTrue(board.is_valid(), f"invalid position status: {board.status()}")
+                self.assertEqual(len(encode_fen(case.fen)), 36)
+                self.assertLess(board.halfmove_clock, 100)
+                self.assertTrue(case.expected_score)
+                self.assertFalse(case.required_move and case.forbidden_move)
+                for move in (case.required_move, case.forbidden_move):
+                    if move is not None:
+                        self.assertIn(chess.Move.from_uci(move), board.legal_moves)
 
     def test_uci_score_uses_the_last_cp_or_mate_score(self):
         self.assertEqual(_uci_score(["info depth 1 score cp -12", "info depth 2 score cp 34 nodes 8"]), "cp 34")
@@ -151,6 +172,7 @@ class SanitySuiteTests(unittest.TestCase):
         with patch("tests.live_fpga.cli.FPGAUCISession", return_value=engine), \
                 patch("tests.live_fpga.cli._search", side_effect=search), \
                 patch("tests.live_fpga.cli._run_repetition_checks", return_value=[]) as repetition, \
+                patch("tests.live_fpga.cli._run_fifty_move_checks", return_value=[]) as fifty_move, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             status = run_sanity(SANITY_DEPTH, 10.0, 120.0, False)
 
@@ -159,6 +181,7 @@ class SanitySuiteTests(unittest.TestCase):
         self.assertEqual(engine.new_game_calls, [10.0] * len(SANITY_POSITIONS))
         self.assertEqual(len(calls), len(SANITY_POSITIONS))
         repetition.assert_called_once_with(engine, SANITY_REPETITION_DEPTH, 10.0, 120.0)
+        fifty_move.assert_called_once_with(engine, SANITY_FIFTY_MOVE_TIME_MS, 10.0, 120.0)
         self.assertEqual(events[0], ("initialize", 10.0))
         for index, case in enumerate(SANITY_POSITIONS):
             timed = calls[index]
@@ -192,6 +215,7 @@ class SanitySuiteTests(unittest.TestCase):
         with patch("tests.live_fpga.cli.FPGAUCISession", return_value=engine), \
                 patch("tests.live_fpga.cli._search", side_effect=results), \
                 patch("tests.live_fpga.cli._run_repetition_checks", return_value=[]), \
+                patch("tests.live_fpga.cli._run_fifty_move_checks", return_value=[]), \
                 contextlib.redirect_stdout(output):
             status = run_sanity(SANITY_DEPTH, 10.0, 120.0, False)
 
@@ -202,6 +226,48 @@ class SanitySuiteTests(unittest.TestCase):
             output.getvalue(),
         )
         self.assertIn(f"movetime {len(SANITY_POSITIONS) - 1}/{len(SANITY_POSITIONS)} passed", output.getvalue())
+
+
+@unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for move validation")
+class FiftyMoveSanityTests(unittest.TestCase):
+    @staticmethod
+    def _passing_results():
+        import chess
+
+        results = []
+        for case in FIFTY_MOVE_CASES:
+            board = chess.Board(case.fen)
+            move = case.required_move or next(
+                candidate.uci()
+                for candidate in board.legal_moves
+                if candidate.uci() != case.forbidden_move
+            )
+            results.append((100, move, 0.0, case.expected_score))
+        return results
+
+    def test_fifty_move_checks_search_each_position(self):
+        engine = MagicMock()
+        with patch("tests.live_fpga.cli._search_position", side_effect=self._passing_results()) as search:
+            failures = _run_fifty_move_checks(engine, SANITY_FIFTY_MOVE_TIME_MS, 10.0, 120.0)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(engine.new_game.call_count, len(FIFTY_MOVE_CASES))
+        for case, call in zip(FIFTY_MOVE_CASES, search.call_args_list):
+            self.assertEqual(call.args, (engine, "fen " + case.fen, f"go movetime {SANITY_FIFTY_MOVE_TIME_MS}", 120.0))
+
+    def test_fifty_move_checks_report_wrong_score_and_move(self):
+        results = self._passing_results()
+        first = results[0]
+        results[0] = (first[0], first[1], first[2], "cp 0")
+        last = results[-1]
+        results[-1] = (last[0], FIFTY_MOVE_CASES[-1].forbidden_move, last[2], last[3])
+
+        with patch("tests.live_fpga.cli._search_position", side_effect=results):
+            failures = _run_fifty_move_checks(MagicMock(), SANITY_FIFTY_MOVE_TIME_MS, 10.0, 120.0)
+
+        self.assertEqual([case for case, _ in failures], [FIFTY_MOVE_CASES[0], FIFTY_MOVE_CASES[-1]])
+        self.assertIn("expected score", failures[0][1])
+        self.assertIn("must avoid", failures[1][1])
 
 
 @unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for repetition validation")

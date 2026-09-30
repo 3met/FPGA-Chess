@@ -24,6 +24,17 @@ class SearchCase:
 
 
 @dataclass(frozen=True)
+class FiftyMoveCase:
+    """A near-50-move position with a required score and move policy."""
+
+    name: str
+    fen: str
+    expected_score: str
+    required_move: str | None = None
+    forbidden_move: str | None = None
+
+
+@dataclass(frozen=True)
 class RepetitionCase:
     """A root move whose line changes from playable to a threefold draw."""
 
@@ -115,6 +126,19 @@ SANITY_POSITIONS: tuple[SearchCase, ...] = (
     SearchCase("dutch", "r1bq1rk1/ppp1p1bp/3p1np1/3Pnp2/2P5/2N2NP1/PP2PPBP/R1BQ1RK1 w - - 1 9"),
     SearchCase("pirc", "r2q1rk1/ppp1ppbp/2np1np1/8/3PPPb1/2NB1N2/PPP3PP/R1BQ1RK1 w - - 7 8"),
     SearchCase("queens-indian", "rn1q1rk1/p1p1bppp/bp2pn2/3p4/2PP4/1P3NP1/P2BPPBP/RN1Q1RK1 w - - 0 9"),
+)
+
+# The pawn pair resets the halfmove clock before mating. The losing pair at 96
+# falls just short of the draw; the corresponding positions at 97 can draw.
+FIFTY_MOVE_CASES: tuple[FiftyMoveCase, ...] = (
+    FiftyMoveCase("pawn-before-mate-white", "8/k7/6R1/7R/8/7P/8/3K4 w - - 98 1", "mate 3", required_move="h3h4"),
+    FiftyMoveCase("pawn-before-mate-black", "3k4/8/7p/8/7r/6r1/K7/8 b - - 98 1", "mate 3", required_move="h6h5"),
+    FiftyMoveCase("knight-defends-draw-white", "8/k7/7R/6R1/8/8/3n4/7K w - - 98 1", "cp 0"),
+    FiftyMoveCase("knight-defends-draw-black", "7k/3N4/8/8/6r1/7r/K7/8 b - - 98 1", "cp 0"),
+    FiftyMoveCase("mate-before-draw-white-losing", "5q2/3N3k/8/8/6r1/7r/K7/8 w - - 96 1", "mate -3"),
+    FiftyMoveCase("mate-before-draw-black-losing", "8/k7/7R/6R1/8/8/3n3K/5Q2 b - - 96 1", "mate -3"),
+    FiftyMoveCase("avoid-queen-capture-white", "5q2/3N3k/8/8/6r1/7r/K7/8 w - - 97 1", "cp 0", forbidden_move="d7f8"),
+    FiftyMoveCase("avoid-queen-capture-black", "8/k7/7R/6R1/8/8/3n3K/5Q2 b - - 97 1", "cp 0", forbidden_move="d2f1"),
 )
 
 # Each base is the position immediately after the complete draw line. Returning to

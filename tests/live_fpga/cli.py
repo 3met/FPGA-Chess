@@ -8,9 +8,11 @@ import sys
 from typing import Iterable, Sequence
 
 from tests.live_fpga.positions import (
+    FIFTY_MOVE_CASES,
     PERFT_POSITIONS,
     REPETITION_CASES,
     SANITY_POSITIONS,
+    FiftyMoveCase,
     RepetitionCase,
 )
 from tests.live_fpga.session import FPGAUCISession, FPGAUCIError
@@ -25,9 +27,12 @@ MOVE_RE = re.compile(r"^(?:[a-h][1-8][a-h][1-8][qrbn]?|0000)$")
 FAST_PERFT = PERFT_POSITIONS
 SANITY_DEPTH = 6
 SANITY_REPETITION_DEPTH = 8
+SANITY_FIFTY_MOVE_TIME_MS = 100
 SANITY_MOVETIME_MS = 250
 SANITY_EXPECTED_SEARCH_MS = SANITY_MOVETIME_MS - DEFAULT_MOVE_OVERHEAD_MS
 SANITY_MOVETIME_TOLERANCE_MS = 5
+
+
 def _node_count(lines: Iterable[str]) -> int | None:
     result = None
     for line in lines:
@@ -88,6 +93,43 @@ def _is_legal_repetition_move(case: RepetitionCase, moves: Sequence[str], move: 
         return chess.Move.from_uci(move) in board.legal_moves
     except ValueError:
         return False
+
+
+def _is_legal_fen_move(fen: str, move: str) -> bool:
+    """Check a reported best move against the standalone test position."""
+    import chess
+
+    if move == "0000":
+        return False
+    try:
+        return chess.Move.from_uci(move) in chess.Board(fen).legal_moves
+    except ValueError:
+        return False
+
+
+def _run_fifty_move_checks(
+    engine: FPGAUCISession,
+    movetime_ms: int,
+    startup_timeout: float,
+    search_timeout: float,
+) -> list[tuple[FiftyMoveCase, str]]:
+    """Check mate and draw decisions near the 50-move boundary."""
+    failures: list[tuple[FiftyMoveCase, str]] = []
+    for case in FIFTY_MOVE_CASES:
+        engine.new_game(startup_timeout)
+        nodes, move, _, score = _search_position(
+            engine, "fen " + case.fen, f"go movetime {movetime_ms}", search_timeout
+        )
+        result = f"move={move} score={score} nodes={nodes}"
+        if not _is_legal_fen_move(case.fen, move):
+            failures.append((case, f"{result}, best move is not legal"))
+        elif score != case.expected_score:
+            failures.append((case, f"{result}, expected score {case.expected_score}"))
+        elif case.required_move is not None and move != case.required_move:
+            failures.append((case, f"{result}, expected move {case.required_move}"))
+        elif case.forbidden_move is not None and move == case.forbidden_move:
+            failures.append((case, f"{result}, must avoid {case.forbidden_move}"))
+    return failures
 
 
 def _run_repetition_checks(
@@ -189,12 +231,21 @@ def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbos
             startup_timeout,
             search_timeout,
         )
+        fifty_move_failures = _run_fifty_move_checks(
+            engine,
+            SANITY_FIFTY_MOVE_TIME_MS,
+            startup_timeout,
+            search_timeout,
+        )
     for failure in timing_failures:
         print(f"FAIL movetime {failure}")
     for case, detail in repetition_failures:
         print(f"FAIL repetition {case.name}: {detail}")
+    for case, detail in fifty_move_failures:
+        print(f"FAIL fifty-move {case.name}: {detail}")
     timing_passes = len(SANITY_POSITIONS) - len(timing_failures)
     repetition_failure_names = {case.name for case, _ in repetition_failures}
+    fifty_move_failure_names = {case.name for case, _ in fifty_move_failures}
     winning_cases = [case for case in REPETITION_CASES if not case.should_choose_draw]
     losing_cases = [case for case in REPETITION_CASES if case.should_choose_draw]
     winning_passes = sum(case.name not in repetition_failure_names for case in winning_cases)
@@ -203,9 +254,10 @@ def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbos
         f"sanity: movetime {timing_passes}/{len(SANITY_POSITIONS)} passed; "
         f"repetition avoid {winning_passes}/{len(winning_cases)} passed; "
         f"repetition take {losing_passes}/{len(losing_cases)} passed; "
+        f"fifty-move {len(FIFTY_MOVE_CASES) - len(fifty_move_failure_names)}/{len(FIFTY_MOVE_CASES)} passed; "
         "reset determinism disabled"
     )
-    return 1 if timing_failures or repetition_failures else 0
+    return 1 if timing_failures or repetition_failures or fifty_move_failures else 0
 
 
 def run_perft(startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
