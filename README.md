@@ -93,4 +93,4 @@ When `--port` is omitted, the host uses `FPGA_CHESS_PORT` or attempts to identif
 
 Cycle-accurate simulation profiling is documented in [Engine Runtime Profiling](docs/development/engine-profiling.md). Evaluation training is documented in [Evaluation Tuning](docs/development/evaluation-tuning.md).
 
-`python -m tests.live_fpga sanity` runs opt-in search checks against a connected FPGA; `python -m tests.live_fpga perft` checks move-generation counts. These hardware-dependent commands are not part of the normal `check` workflow. Each command accepts `--port <serial-port>`; when it is omitted, the host uses `FPGA_CHESS_PORT` or USB-UART auto-detection.
+`python -m tests.live_fpga` runs timing, repetition, fifty-move rule, and perft checks against a connected FPGA. This hardware-dependent command is not part of the normal `check` workflow. It accepts `--port <serial-port>`; when it is omitted, the host uses `FPGA_CHESS_PORT` or USB-UART auto-detection.

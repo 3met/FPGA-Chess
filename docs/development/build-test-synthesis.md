@@ -42,6 +42,8 @@ Synthesis and runtime profiling resolve profiles through the same path so they u
 
 Test and check commands accept `--jobs <count>` and an RTL `--timeout <seconds>`. `check` runs Python tests under `tests/engine/`, `tests/live_fpga/`, and `tests/hardware_build/` before the RTL tests; the live FPGA tests mock the device. `check --tuning` also includes the optional tuning tests when `requirements-tuning.txt` is installed.
 
+Run `python -m tests.live_fpga` to execute the complete timing, repetition, fifty-move rule, and perft suite against a connected FPGA. Connection and diagnostic options include `--port`, `--startup-timeout`, `--search-timeout`, and `--verbose`; `--depth` controls repetition search depth subject to the suite's minimum. Live hardware checks are separate from `check`.
+
 Synthesis verifies generated data before invoking the vendor flow. Quartus targets use Smart Recompile to determine the earliest invalid stage, preserve valid upstream results, and skip compilation entirely when all outputs are current; `--clean` intentionally discards that state and forces a full build. Common options include `--clean`, `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Results and timing metadata are stored beside the vendor reports for `synth-report`.
 
 Targets with an engine profile also accept `--engine-config <path>` to synthesize an isolated profile without modifying the manifest target. This is used by search-parameter tuning and records the resolved override in normal synthesis metadata.

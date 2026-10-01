@@ -195,12 +195,6 @@ class SanitySuiteTests(unittest.TestCase):
             )
         self.assertIn("reset determinism disabled", output.getvalue())
 
-    def test_sanity_cli_uses_configured_defaults(self):
-        with patch("tests.live_fpga.cli.run_sanity", return_value=0) as sanity:
-            self.assertEqual(main(["sanity"]), 0)
-
-        sanity.assert_called_once_with(SANITY_DEPTH, 10.0, 120.0, False, None)
-
     def test_sanity_rejects_search_outside_movetime_tolerance(self):
         engine = MagicMock()
         engine.__enter__.return_value = engine
@@ -226,6 +220,30 @@ class SanitySuiteTests(unittest.TestCase):
             output.getvalue(),
         )
         self.assertIn(f"movetime {len(SANITY_POSITIONS) - 1}/{len(SANITY_POSITIONS)} passed", output.getvalue())
+
+
+class LiveFPGACliTests(unittest.TestCase):
+    def test_default_runs_both_suites_and_reports_either_failure(self):
+        for sanity_status, perft_status in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            with self.subTest(sanity=sanity_status, perft=perft_status), \
+                    patch("tests.live_fpga.cli.run_sanity", return_value=sanity_status) as sanity, \
+                    patch("tests.live_fpga.cli.run_perft", return_value=perft_status) as perft:
+                self.assertEqual(main([]), int(bool(sanity_status or perft_status)))
+
+            sanity.assert_called_once()
+            perft.assert_called_once_with(*sanity.call_args.args[1:])
+
+    def test_options_apply_to_both_suites(self):
+        with patch("tests.live_fpga.cli.run_sanity", return_value=0) as sanity, \
+                patch("tests.live_fpga.cli.run_perft", return_value=0) as perft:
+            status = main([
+                "--depth", "12", "--port", "COM5", "--startup-timeout", "7",
+                "--search-timeout", "45", "--verbose",
+            ])
+
+        self.assertEqual(status, 0)
+        sanity.assert_called_once_with(12, 7.0, 45.0, True, "COM5")
+        perft.assert_called_once_with(7.0, 45.0, True, "COM5")
 
 
 @unittest.skipUnless(importlib.util.find_spec("chess"), "python-chess is required for move validation")

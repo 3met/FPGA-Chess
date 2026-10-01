@@ -24,7 +24,6 @@ PERFT_RE = re.compile(r"(?:Nodes searched:\s*|\bnodes\s+)(\d+)\b", re.IGNORECASE
 MOVE_RE = re.compile(r"^(?:[a-h][1-8][a-h][1-8][qrbn]?|0000)$")
 
 
-FAST_PERFT = PERFT_POSITIONS
 SANITY_DEPTH = 6
 SANITY_REPETITION_DEPTH = 8
 SANITY_FIFTY_MOVE_TIME_MS = 100
@@ -261,10 +260,11 @@ def run_sanity(depth: int, startup_timeout: float, search_timeout: float, verbos
 
 
 def run_perft(startup_timeout: float, search_timeout: float, verbose: bool, port: str | None = None) -> int:
+    """Check move-generation counts against the connected FPGA."""
     failures = 0
     with FPGAUCISession(port=port, verbose=verbose) as engine:
         engine.initialize(startup_timeout)
-        for case in FAST_PERFT:
+        for case in PERFT_POSITIONS:
             engine.send("position fen " + case.fen)
             engine.send(f"go perft {case.depth}")
             result = engine.wait_for(lambda line: line.lower().startswith("nodes searched:"), search_timeout, f"perft {case.name}")
@@ -277,44 +277,22 @@ def run_perft(startup_timeout: float, search_timeout: float, verbose: bool, port
             if not passed:
                 print(f"FAIL {case.name}: got {actual}, expected {case.nodes}")
             failures += not passed
-    print(f"perft: {len(FAST_PERFT) - failures}/{len(FAST_PERFT)} passed")
+    print(f"perft: {len(PERFT_POSITIONS) - failures}/{len(PERFT_POSITIONS)} passed")
     return 1 if failures else 0
 
 
-def _add_common(parser: argparse.ArgumentParser) -> None:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run all live hardware checks with shared connection and timeout options."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--depth", type=int, default=SANITY_DEPTH)
     parser.add_argument("--port", help="Serial port, for example COM5 or /dev/ttyUSB0. Defaults to FPGA_CHESS_PORT or USB UART auto-detection.")
     parser.add_argument("--startup-timeout", type=float, default=10.0)
     parser.add_argument("--search-timeout", type=float, default=120.0)
     parser.add_argument("--verbose", action="store_true")
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="suite", required=True)
-
-    sanity = sub.add_parser("sanity")
-    sanity.add_argument("--depth", type=int, default=SANITY_DEPTH)
-    _add_common(sanity)
-
-    perft = sub.add_parser("perft")
-    perft.add_argument("--profile", choices=["fast"], default="fast")
-    perft.add_argument("--list", action="store_true", help="Print named FEN/depth/node cases without contacting the FPGA.")
-    _add_common(perft)
-
-    all_suite = sub.add_parser("all")
-    all_suite.add_argument("--depth", type=int, default=SANITY_DEPTH)
-    _add_common(all_suite)
     args = parser.parse_args(argv)
     if args.startup_timeout <= 0 or args.search_timeout <= 0:
         parser.error("timeouts must be positive")
     try:
-        if args.suite == "sanity": return run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose, args.port)
-        if args.suite == "perft":
-            if args.list:
-                for case in FAST_PERFT:
-                    print(f"{case.name}: FEN={case.fen}; depth={case.depth}; nodes={case.nodes}")
-                return 0
-            return run_perft(args.startup_timeout, args.search_timeout, args.verbose, args.port)
         sanity_status = run_sanity(args.depth, args.startup_timeout, args.search_timeout, args.verbose, args.port)
         perft_status = run_perft(args.startup_timeout, args.search_timeout, args.verbose, args.port)
         return 1 if sanity_status or perft_status else 0
