@@ -236,14 +236,21 @@ module tb_tt_external_load_store;
             EvalScore'(123), PlyIndex'(0), "post-clear lookup");
         check(mem_req_address < 80 && mem_req_length == 5, "bounded aligned burst mapping");
 
-        // An old-generation result survives a much shallower publication. This
-        // must match the inferred-RAM backend's shared depth/age policy.
+        // A previous game's unusable entry must not block current results,
+        // even when the new search has only reached a shallower depth.
         do_store(64'h3456_789a_bcde_f012, TTDepth'(12), EvalScore'(321));
         clear = 1; @(posedge clk); clear = 0;
         do @(posedge clk); while (dut.clear_busy);
         request_count = 0;
         do_store(64'h3456_789a_bcde_f012, TTDepth'(1), EvalScore'(111));
-        check(request_count == 1, "stale deep entry read but rejected shallow replacement write");
+        do_lookup(64'h3456_789a_bcde_f012, 1'b1, ThreadID'(0),
+            EvalScore'(111), PlyIndex'(0), "new game shallow publication");
+
+        // Current-generation depth protection still preserves a deeper score.
+        do_store(64'h3456_789a_bcde_f012, TTDepth'(8), EvalScore'(222));
+        do_store(64'h3456_789a_bcde_f012, TTDepth'(1), EvalScore'(333));
+        do_lookup(64'h3456_789a_bcde_f012, 1'b1, ThreadID'(0),
+            EvalScore'(222), PlyIndex'(0), "current game deep result preserved");
 
         // At equal depth, an exact result replaces a non-exact bound.
         do_store(64'h4567_89ab_cdef_0123, TTDepth'(8), EvalScore'(210), TT_BOUND_UPPER);

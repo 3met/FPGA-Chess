@@ -87,6 +87,7 @@ module move_generator_read_pipeline #(
     logic generation_active_q[2];
     ThreadID generation_thread_q[2];
     PlyIndex generation_ply_q[2];
+    logic generation_owns_cache_q[THREAD_COUNT][2];
 
     // Retain accepted generator ownership locally so lane-state decode does not
     // sit on the pointer-stack RAM write-data path. Release is registered after
@@ -107,6 +108,37 @@ module move_generator_read_pipeline #(
                 end else if (!live_active[lane]) begin
                     generation_active_q[lane] <= 1'b0;
                 end
+            end
+        end
+    end
+
+    // Register ownership against the cache state that will be live next cycle.
+    // This keeps ply comparisons ahead of FIFO selection and pointer increments
+    // without delaying a generator's first write or a restored parent's reads.
+    always_ff @(posedge clk) begin
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            automatic logic next_cache_valid = cache_valid[tid];
+            automatic PlyIndex next_cache_ply = cache_ply[tid];
+            if (pointer_load_pending[tid] && !pointer_load_issue[tid]) begin
+                next_cache_valid = 1'b1;
+                next_cache_ply = pointer_load_tag[tid];
+            end
+            if (state_update[tid]) begin
+                next_cache_valid = 1'b1;
+                next_cache_ply = state_update_ply[tid];
+            end
+            for (int lane = 0; lane < 2; lane++) begin
+                if (!rst_n || clear || flush)
+                    generation_owns_cache_q[tid][lane] <= 1'b0;
+                else if (generation_start_valid[lane])
+                    generation_owns_cache_q[tid][lane] <= next_cache_valid
+                        && generation_start_thread[lane] == ThreadID'(tid)
+                        && generation_start_ply[lane] == next_cache_ply;
+                else
+                    generation_owns_cache_q[tid][lane] <= next_cache_valid
+                        && generation_active_q[lane] && live_active[lane]
+                        && generation_thread_q[lane] == ThreadID'(tid)
+                        && generation_ply_q[lane] == next_cache_ply;
             end
         end
     end
@@ -182,9 +214,7 @@ module move_generator_read_pipeline #(
             incoming = MoveBucketMask'(0);
 
             for (int lane = 0; lane < 2; lane++) begin
-                if (generation_active_q[lane]
-                        && generation_thread_q[lane] == ThreadID'(tid)
-                        && cache_valid[tid] && generation_ply_q[lane] == cache_ply[tid]) begin
+                if (generation_owns_cache_q[tid][lane]) begin
                     generating |= lane == 0
                         ? GOOD_NOISY_BUCKET_MASK | BAD_NOISY_BUCKET_MASK
                         : QUIET_BUCKET_MASK;

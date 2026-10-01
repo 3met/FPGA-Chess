@@ -63,4 +63,6 @@ A write beyond its bucket partition sets a sticky overflow error bit but is not 
 
 Move RAM and pointer-stack contents need not be cleared because node initialization defines the live range. Reset and New Game clear quiet-history state; Kill and New Game cancel active generation and pop work.
 
+Generator ownership of each thread's cached node is registered alongside cache changes and generation starts, keeping ply comparisons out of FIFO selection and pointer-stack write-data paths without delaying writes or pops.
+
 Optional counters expose generation work, history lookups, bucket traffic, high-water marks, and overflow information without affecting search semantics.

@@ -170,8 +170,10 @@ module tt_external_load_store #(
     endfunction
 
     function automatic logic should_replace(input CompactEntry old_entry, input TTStoreRequest req);
+        // New Game makes older generations unusable. Treat those slots as
+        // empty so a previous game's depth cannot suppress current results.
         return tt_should_replace(
-            old_entry.bound_type != TT_BOUND_INVALID,
+            old_entry.bound_type != TT_BOUND_INVALID && old_entry.age == generation,
             old_entry.tag == entry_tag(req.zobrist_key),
             old_entry.age,
             old_entry.depth,

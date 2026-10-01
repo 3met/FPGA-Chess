@@ -8,7 +8,8 @@ import tt_defs::*;
 
 module tb_search_controller #(
     parameter int THREAD_COUNT = 1,
-    parameter bit EARLY_ONLY = 0
+    parameter bit EARLY_ONLY = 0,
+    parameter bit MATE_ONLY = 0
 );
 
     // Run the same acceptance checks with serial and concurrent dispatch.
@@ -134,7 +135,9 @@ module tb_search_controller #(
 
     search_controller #(
         .CLOCK_FREQ(1_000_000),
-        .TT_INDEX_BITS(4),
+        // Full mating searches use a larger table; the shallow acceptance
+        // cases retain their tiny table to exercise replacement and misses.
+        .TT_INDEX_BITS(MATE_ONLY ? 10 : 4),
         .SEARCH_THREAD_COUNT(THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         // The focused variant puts ordinary quiets in bucket 5 without
@@ -304,10 +307,10 @@ module tb_search_controller #(
         req = zero_request();
     endtask : pulse_request
 
-    task automatic wait_response(input string label);
+    task automatic wait_response(input string label, input int maximum_cycles = 200000);
         automatic int wait_cycles = 0;
 
-        while (!resp_valid && wait_cycles < 200000) begin
+        while (!resp_valid && wait_cycles < maximum_cycles) begin
             do_clock(1);
             wait_cycles += 1;
         end
@@ -1013,6 +1016,41 @@ module tb_search_controller #(
         set_turn(BLACK, "checkmate black to move");
     endtask : setup_checkmate_position
 
+    // Near the fifty-move boundary, quiet mates and clock-resetting captures
+    // must compete normally: White can delay Black's mate until the third move.
+    task automatic setup_fifty_move_mate_position();
+        clear_start_position("fifty-move mate regression");
+        set_tile(WHITE_KING, Position'(8), "white king a2");
+        set_tile(WHITE_KNIGHT, Position'(51), "white knight d7");
+        set_tile(BLACK_KING, Position'(55), "black king h7");
+        set_tile(BLACK_QUEEN, Position'(61), "black queen f8");
+        set_tile(BLACK_ROOK, Position'(30), "black rook g4");
+        set_tile(BLACK_ROOK, Position'(23), "black rook h3");
+        set_turn(WHITE, "white to move");
+        set_halfmove_clock(HalfmoveClock'(96), "near fifty-move threshold");
+    endtask : setup_fifty_move_mate_position
+
+    // Require the exact six-ply losing mate after a complete search, including
+    // a second search that reuses the table populated by the first one.
+    task automatic run_fifty_move_mate_search(input string label);
+        automatic EngineControllerRequest request = zero_request();
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        // Selective reductions can defer the six-ply mate beyond nominal depth six.
+        request.depth_limit = 8'd8;
+        pulse_request(request, label);
+        wait_response(label, 2000000);
+        $display("Mate regression %s: score=%0d depth=%0d move=%0d-%0d nodes=%0d",
+            label, resp.score, resp.completed_depth, resp.best_move.from_pos,
+            resp.best_move.to_pos, resp.nodes_count);
+        check(!resp.error, {label, " no error"});
+        check(resp.score == -MATE_SCORE + EvalScore'(6), {label, " mate in three for Black"});
+        check(resp.best_move.from_pos == Position'(51)
+                && (resp.best_move.to_pos == Position'(61)
+                    || resp.best_move.to_pos == Position'(45)),
+            {label, " White chooses a move that delays mate"});
+        check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
+    endtask : run_fifty_move_mate_search
+
     task automatic setup_qsearch_quiet_evasion_position();
         clear_start_position("qsearch quiet evasion");
         set_tile(WHITE_KING, Position'(0), "qsearch quiet evasion white king a1");
@@ -1213,6 +1251,16 @@ module tb_search_controller #(
 
     initial begin
         reset_dut();
+        if (MATE_ONLY) begin
+            new_game();
+            setup_fifty_move_mate_position();
+            run_fifty_move_mate_search("fifty-move mate cold TT");
+            run_fifty_move_mate_search("fifty-move mate warm TT");
+            $display("Pass Count: %0d", pass_count);
+            $display("Fail Count: %0d", fail_count);
+            if (fail_count != 0) $fatal(1, "fifty-move mate regression failed");
+            $finish;
+        end
         if (EARLY_ONLY) begin
             new_game();
             run_search_depth(8'd2, "early quiet search");
@@ -1522,6 +1570,26 @@ module tb_search_controller #(
         run_halfmove_draw_search("50-move draw search");
 
         new_game();
+        setup_checkmate_position();
+        set_halfmove_clock(HalfmoveClock'(100), "checkmate at fifty-move threshold");
+        run_checkmate_search("checkmate precedes fifty-move draw");
+        run_qsearch_checkmate_test("qsearch mate precedes fifty-move draw");
+
+        new_game();
+        setup_qsearch_quiet_evasion_position();
+        set_halfmove_clock(HalfmoveClock'(100), "checked draw threshold");
+        run_halfmove_draw_search("checked position with evasion is drawn");
+
+        new_game();
+        clear_start_position("checked draw with only a capturing evasion");
+        set_tile(WHITE_KING, Position'(53), "white king f7");
+        set_tile(WHITE_ROOK, Position'(55), "white rook h7");
+        set_tile(BLACK_KING, Position'(63), "black king h8");
+        set_turn(BLACK, "black to move");
+        set_halfmove_clock(HalfmoveClock'(100), "capture evasion draw threshold");
+        run_halfmove_draw_search("capturing evasion still permits a draw claim");
+
+        new_game();
         repeat_knight_shuffle_once("first repetition cycle");
         repeat_knight_shuffle_once("second repetition cycle");
         run_repetition_draw_search("threefold root search");
@@ -1690,7 +1758,8 @@ module tb_search_controller #(
     end
 
     initial begin
-        #5_000_000;
+        // Full mating regressions have a separate budget from shallow checks.
+        #(MATE_ONLY ? 30_000_000 : 5_000_000);
         fail_count += 1;
         $error("[FAIL] tb_search_controller timeout");
         $display("Pass Count: %0d", pass_count);
@@ -2072,7 +2141,9 @@ module tb_search_controller #(
                 tt_store_depth_correct &= dut.tt_store_req.depth
                     == dut.search_stack_top[int'(dut.search_tt_store_issue_thread)].remaining_depth;
             end
-            if (dut.search_board_issue_valid
+            // Null children use their own reduction and must not be checked
+            // against the real-move LMR depth calculation.
+            if (dut.search_board_issue_valid && !dut.search_board_issue_is_null
                     && dut.search_thread_phase[int'(dut.search_board_issue_thread)] != dut.SEARCH_PHASE_REVERSE_WAIT) begin
                 automatic int lmr_tid;
                 lmr_tid = int'(dut.search_board_issue_thread);
@@ -2195,6 +2266,15 @@ endmodule : tb_search_controller
 module tb_search_controller_multithread;
     tb_search_controller #(.THREAD_COUNT(2)) bench();
 endmodule : tb_search_controller_multithread
+
+// Verify exact mate distance with both serial and shared-table search.
+module tb_search_controller_fifty_move_mate;
+    tb_search_controller #(.MATE_ONLY(1)) bench();
+endmodule : tb_search_controller_fifty_move_mate
+
+module tb_search_controller_fifty_move_mate_multithread;
+    tb_search_controller #(.THREAD_COUNT(2), .MATE_ONLY(1)) bench();
+endmodule : tb_search_controller_fifty_move_mate_multithread
 
 // Force only the ordering thresholds, retaining real generation and search.
 module tb_search_controller_early_reads;

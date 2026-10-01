@@ -63,7 +63,7 @@ Parent-only futility and quiescence delta checks are registered during speculati
 
 A main-search node follows this logical order:
 
-1. Check terminal draw state and probe the TT.
+1. Check terminal draw state, ruling out checkmate before a checked fifty-move draw, and probe the TT.
 2. Try eligible RFP and null-move pruning operations, then direct ordering moves.
 3. Generate and search noisy moves.
 4. Generate quiet moves and futility-prune eligible late quiets before committing their children.

@@ -17,7 +17,7 @@ Only positions with the same side-to-move parity can repeat. Active history is p
 
 Before search begins, the checker builds a compact static table from the reversible portion of active-game history. Each entry contains a full key and a count saturated at two.
 
-The table uses a programmable hash seed. If two distinct active-history keys collide, initialization retries with another seed. Search begins only after initialization succeeds. Failure to find a collision-free seed is reported to the controller as an initialization failure rather than allowing an ambiguous repetition result.
+The table uses a programmable hash seed. If two distinct active-history keys collide, initialization retries with another seed. If no seed can represent the history, the checker scans full keys in the existing active-history RAM instead, so a legal history cannot fail initialization because of hash collisions. This path queues one request per search thread, reads only matching side-to-move parity, and combines the result with the normal line-history count.
 
 The per-thread line history is banked by ply so all prior same-parity positions for one request can be read in parallel. Stale data need not be cleared because the request ply and reversible boundary mask entries that are not part of the active line.
 
@@ -27,7 +27,7 @@ A request identifies the thread, current ply, reversible-history boundary, reque
 
 The epoch distinguishes a valid response from work invalidated by a search restart or flush. The controller accepts `resp_is_draw` only for the matching live request.
 
-The checker accepts one request per cycle after initialization. Its response latency is fixed so requests from different threads may occupy the pipeline concurrently.
+Normal table lookups accept one request per cycle with fixed response latency. The exact RAM-scan path has variable latency and supports one outstanding request per search thread; the controller waits for its tagged response. Flush and history changes discard pending scans.
 
 ## Active-Game Updates
 

@@ -1,8 +1,10 @@
 # Stockfish Benchmark
 
-Run `python -m tools.stockfish_benchmark` from the repository root to play the FPGA engine against full-strength Stockfish. By default, it uses 500 paired openings (1,000 games), a `2+0.02` FPGA clock, one Stockfish thread, and 32 MB of hash. Fastchess and Stockfish must be available on `PATH`; the FPGA UCI host uses the current Python interpreter. Set `FPGA_CHESS_PORT` or use the host's serial-port autodetection.
+Run `python -m tools.stockfish_benchmark` from the repository root to play the FPGA engine against Stockfish with a fixed node budget. By default, it uses 500 paired openings (1,000 games), a `2+0.02` FPGA clock, 2,000 Stockfish nodes per move, one Stockfish thread, and 32 MB of hash. The `Stockfish-unlimited` engine label refers to disabled strength limiting; the node cap still applies. Fastchess and Stockfish must be available on `PATH`; the FPGA UCI host uses the current Python interpreter. Set `FPGA_CHESS_PORT` or use the host's serial-port autodetection.
 
 The default opening book is `../fastchess/books/UHO_Lichess_4852_v1.epd`. Fastchess shuffles its positions with a fixed seed and plays each selected position with both colors. The same seed keeps opening selection consistent across runs and resumes. If the book is absent, the tool downloads the official Stockfish opening suite into `work/books/`. Pass `--book PATH` to use another local book. Use `--fastchess` and `--stockfish` to select other executables.
+
+Matching openings does not guarantee identical search results: threads share TT publications, and memory timing can change the search tree even with a fixed node limit. Compare matched opening pairs when estimating rating differences, and record the flashed image identity separately because the tournament metadata does not identify it.
 
 ```text
 python -m tools.stockfish_benchmark

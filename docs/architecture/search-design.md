@@ -51,3 +51,5 @@ Repetition history is not part of the Zobrist key, so a stored score may be unsa
 A winning mate at root-relative ply `ply` is encoded as `MATE_SCORE - ply`; a losing mate is `-MATE_SCORE + ply`. TT stores normalize mate scores relative to the stored node and restore them relative to the current root.
 
 Draw scores are zero. The controller detects checkmate, stalemate, the 50-move rule, and threefold repetition. It does not detect insufficient material, avoiding a separate full-board material scan. The halfmove clock is part of `FullBoard`; repetition uses a separate history of full 64-bit Zobrist keys.
+
+Checkmate takes precedence over the 50-move rule. At the draw threshold, an unchecked node returns zero immediately; a checked node bypasses TT scores and evaluation and tests evasions until one legal move establishes a draw or exhaustion establishes checkmate. The legal evasion is only a proof that the current position is not mate; it is not played, even if it would reset the halfmove clock.

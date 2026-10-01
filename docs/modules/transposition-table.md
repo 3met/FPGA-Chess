@@ -78,8 +78,8 @@ The TT stores one logical entry at each index. A store replaces the indexed entr
 
 | Condition | Reason |
 | --------- | ------ |
-| Entry is invalid or belongs to another key | The slot contains no result for this position. |
-| Entry belongs to an older generation and the new depth is at least `old_depth - 4` | Prefer fresh search information without discarding a substantially deeper result. |
+| Entry is invalid, belongs to another key, or is unavailable after New Game | The slot contains no usable result for this position. |
+| A usable inferred-RAM entry has an older age and falls within the configured depth tolerance | Prefer fresh search information without discarding a substantially deeper result. |
 | New depth exceeds the stored depth | Preserve the deepest available result. |
 | Depths are equal and the stored result is not exact | Allow bounds to refresh peers and exact scores to replace bounds. |
 | Depths are equal and both results are exact | Allow the incoming exact score and move to refresh the entry. |
@@ -88,4 +88,4 @@ Skipping a store is not an error. Generation comparison uses equality with the c
 
 ## Clearing
 
-New Game makes older entries unavailable by advancing the five-bit generation and clears queued stores. On-chip storage may invalidate entries sequentially. External storage performs a physical validity sweep only when required at reset or when New Game arrives at generation 31, then restarts at generation 1. Requests remain unavailable while an invalidation pass is active.
+New Game makes older entries unavailable by advancing the five-bit generation and clears queued stores. Unavailable external entries cannot block current-generation publications, regardless of their stored depth. On-chip storage may invalidate entries sequentially. External storage performs a physical validity sweep only when required at reset or when New Game arrives at generation 31, then restarts at generation 1. Requests remain unavailable while an invalidation pass is active.

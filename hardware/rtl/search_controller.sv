@@ -1655,9 +1655,13 @@ module search_controller #(
         return !(ply == PlyIndex'(0) && thread != ThreadID'(0));
     endfunction : should_probe_search_tt
 
+    // A checked position at the draw threshold must first prove an evasion
+    // exists: checkmate ends the game before a fifty-move draw can be claimed.
     function automatic logic search_thread_terminal_ready(input int thread_index);
         return search_thread_ready(thread_index)
-            && (search_board[thread_index].halfmove_clock >= HalfmoveClock'(100)
+            && ((search_board[thread_index].halfmove_clock >= HalfmoveClock'(100)
+                    && (!search_board_in_check[thread_index]
+                        || search_stack_top[thread_index].has_legal))
                 || search_stack_top[thread_index].move_order_state == MOVE_ORDER_DONE);
     endfunction : search_thread_terminal_ready
 
@@ -1666,6 +1670,7 @@ module search_controller #(
     function automatic logic search_thread_tt_lookup_ready(input int thread_index);
         return search_thread_ready(thread_index)
             && !search_thread_terminal_ready(thread_index)
+            && search_board[thread_index].halfmove_clock < HalfmoveClock'(100)
             && !search_in_qsearch(ThreadID'(thread_index))
             && !search_stack_top[thread_index].tt_checked
             && should_probe_search_tt(
@@ -1777,6 +1782,7 @@ module search_controller #(
     function automatic logic search_thread_eval_ready(input int thread_index);
         return search_thread_ready(thread_index)
             && !search_thread_terminal_ready(thread_index)
+            && search_board[thread_index].halfmove_clock < HalfmoveClock'(100)
             && !search_thread_tt_lookup_ready(thread_index)
             && (search_thread_rfp_ready(thread_index)
                 || (!search_thread_null_ready(thread_index)
@@ -2104,7 +2110,9 @@ module search_controller #(
                 && !search_node_init_request[idx];
             search_terminal_mask[idx] = search_thread_terminal_ready(idx);
             search_terminal_no_move_mask[idx] = search_terminal_mask[idx]
-                && search_stack_top[idx].move_order_state == MOVE_ORDER_DONE;
+                && search_stack_top[idx].move_order_state == MOVE_ORDER_DONE
+                && !(search_board[idx].halfmove_clock >= HalfmoveClock'(100)
+                    && search_stack_top[idx].has_legal);
         end
         // Always consume a registered response. Keeping backend response
         // routing separate from score/window decisions breaks the bypass path
@@ -4159,6 +4167,13 @@ module search_controller #(
                                 // The board pipeline is stateless. Ignore the
                                 // speculative result; its history entry will be
                                 // overwritten by the next candidate at this ply.
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                            end else if (search_board[board_thread_id].halfmove_clock
+                                    >= HalfmoveClock'(100)) begin
+                                // This legal evasion rules out checkmate in the
+                                // unchanged parent. Claim its draw without entering
+                                // a child, even if the evasion would reset the clock.
+                                search_stack_top[board_thread_id].has_legal <= 1'b1;
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
                             end else if (parent_qdelta_prunes_q
                                     && !board_update_side_in_check) begin

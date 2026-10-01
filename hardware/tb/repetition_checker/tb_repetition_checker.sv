@@ -113,6 +113,45 @@ module tb_repetition_checker;
         join
     endtask
 
+    // Exercise the terminal retry directly instead of spending the test on
+    // every seed: these distinct keys collide under every byte rotation.
+    task automatic initialize_exhausted_hash;
+        @(negedge clk); init_start = 1;
+        @(negedge clk); init_start = 0;
+        wait (dut.init_state == dut.INIT_RETRY);
+        @(negedge clk); force dut.init_seed = '1;
+        @(negedge clk); release dut.init_seed;
+        wait (init_done || init_failed);
+        check(init_done && !init_failed, "exhausted hash still initializes exact history lookup");
+    endtask
+
+    // Different threads can queue lookups while a history RAM scan is active.
+    task automatic scan_request_pair;
+        int received = 0;
+        logic [1:0] seen = '0;
+        fork
+            begin
+                @(negedge clk); req_valid = 1; req_thread = 0; req_ply = 0;
+                req_start_ply = 0; req_key = 64'hffff00000000; req_epoch = 1;
+                @(negedge clk); req_thread = 1; req_ply = 1;
+                req_key = 64'hffff0000; req_epoch = 2;
+                @(negedge clk); req_valid = 0;
+            end
+            begin
+                while (received < 2) begin
+                    @(negedge clk);
+                    if (resp_valid && resp_epoch >= 1 && resp_epoch <= 2) begin
+                        check(resp_epoch == resp_thread + 1, "scan response retains queued tag");
+                        check(!seen[resp_thread], "scan responds once per queued thread");
+                        seen[resp_thread] = 1'b1;
+                        check(resp_previous_count == (resp_thread == 0 ? 2 : 1), "scan concurrent count");
+                        received++;
+                    end
+                end
+            end
+        join
+    endtask
+
     initial begin
         history_reset = 1'b0;
         history_write = 1'b0;
@@ -160,6 +199,41 @@ module tb_repetition_checker;
         @(negedge clk); flush = 0; req_valid = 0;
         repeat (7) @(negedge clk);
         check(!resp_valid, "flush discards in-flight response");
+
+        // The even-parity keys share every hash index but must remain distinct.
+        // X,Y,Z,Y,X,Y(root) also checks duplicate counts and root exclusion.
+        history_sample(64'hffff, 1);
+        history_sample(64'hffff00000000, 0);
+        history_sample(64'hffff0000, 0);
+        history_sample(64'hffff00000000, 0);
+        history_sample(64'hffff, 0);
+        history_sample(64'hffff00000000, 0);
+        initialize_exhausted_hash();
+        request(0, 0, 0, 64'hffff00000000, 2, "scan excludes current root");
+        request(1, 1, 0, 64'hffff, 2, "scan counts repeated even-parity key");
+        request(0, 1, 0, 64'hffff0000, 1, "scan distinguishes colliding full keys");
+        request(1, 1, 0, 64'hffff00000000, 0, "scan respects side parity");
+        request(0, 1, 1, 64'hffff, 0, "scan excludes irreversible active history");
+        scan_request_pair();
+        line_sample(0, 1, 64'hffff0000);
+        line_sample(0, 3, 64'hffff0000);
+        request(0, 5, 0, 64'hffff0000, 2, "scan combines static and line occurrences");
+        request(0, 5, 4, 64'hffff0000, 0, "scan masks earlier line occurrences");
+
+        // Cancel a queued miss before it finishes scanning the active history.
+        @(negedge clk); req_valid = 1; req_ply = 1; req_start_ply = 0; req_key = 64'h1234;
+        @(negedge clk); req_valid = 0;
+        repeat (3) @(negedge clk);
+        flush = 1;
+        @(negedge clk); flush = 0;
+        repeat (2 * dut.ACTIVE_HISTORY_DEPTH + 8) begin
+            @(negedge clk);
+            check(!resp_valid, "flush discards queued history scans");
+        end
+
+        history_sample(64'h7777, 1);
+        initialize();
+        request(0, 0, 0, 64'h7777, 0, "new history restores normal table lookup");
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);

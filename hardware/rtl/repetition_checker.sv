@@ -82,6 +82,27 @@ module repetition_checker #(
     logic request_suppress_static;
     logic request_is_root;
     logic [1:0] line_count, static_count;
+    logic request_odd_parity;
+
+    // A history outside the programmable hash family is still searchable. Keep
+    // one pending lookup per search thread and scan the existing history RAM.
+    logic history_scan_mode;
+    logic history_scan_pending [SEARCH_THREAD_COUNT];
+    ZobristKey history_scan_key [SEARCH_THREAD_COUNT];
+    logic [1:0] history_scan_line_count [SEARCH_THREAD_COUNT];
+    logic [EPOCH_BITS-1:0] history_scan_epoch [SEARCH_THREAD_COUNT];
+    logic history_scan_root [SEARCH_THREAD_COUNT];
+    logic history_scan_suppress [SEARCH_THREAD_COUNT];
+    logic history_scan_parity [SEARCH_THREAD_COUNT];
+    typedef enum logic [1:0] {SCAN_IDLE, SCAN_READ, SCAN_CHECK} ScanState;
+    ScanState history_scan_state;
+    ThreadID history_scan_thread;
+    logic [HISTORY_COUNT_BITS-1:0] history_scan_index;
+    logic [1:0] history_scan_count;
+    logic history_scan_resp_valid;
+    ThreadID history_scan_resp_thread;
+    logic [EPOCH_BITS-1:0] history_scan_resp_epoch;
+    logic [1:0] history_scan_resp_count;
 
     // Four fixed rotations per byte provide a cheap programmable index fold;
     // full-key comparison remains authoritative.
@@ -112,16 +133,22 @@ module repetition_checker #(
         || init_state == INIT_STATIC_READ || init_state == INIT_STATIC_CHECK || init_state == INIT_RETRY;
     assign init_done = init_state == INIT_READY;
     assign init_failed = init_state == INIT_FAIL;
-    assign resp_valid = valid_pipe[1];
-    assign resp_thread = thread_pipe[1];
-    assign resp_epoch = epoch_pipe[1];
-    assign resp_previous_count = sat_add(line_count, static_count);
+    assign resp_valid = history_scan_mode ? history_scan_resp_valid : valid_pipe[1];
+    assign resp_thread = history_scan_mode ? history_scan_resp_thread : thread_pipe[1];
+    assign resp_epoch = history_scan_mode ? history_scan_resp_epoch : epoch_pipe[1];
+    assign resp_previous_count = history_scan_mode ? history_scan_resp_count : sat_add(line_count, static_count);
     assign resp_is_draw = resp_previous_count >= 2;
 
     always_comb begin
         active_history_rden = init_state == INIT_HISTORY_READ
             && scan_index < active_history_count;
         active_history_rdaddr = HISTORY_ADDR_BITS'(scan_index);
+        if (history_scan_mode && init_done) begin
+            active_history_rden = history_scan_state == SCAN_READ
+                && !history_scan_suppress[history_scan_thread]
+                && history_scan_count < 2 && history_scan_index < active_history_count;
+            active_history_rdaddr = HISTORY_ADDR_BITS'(history_scan_index);
+        end
         active_history_wren = active_history_reset || (active_history_write && active_history_count < ACTIVE_HISTORY_DEPTH);
         active_history_wraddr = active_history_reset ? '0 : HISTORY_ADDR_BITS'(active_history_count);
 
@@ -174,11 +201,99 @@ module repetition_checker #(
         end
     endgenerate
 
+    // The fast table retains its two-cycle pipeline. Only seed exhaustion uses
+    // this bounded, same-parity RAM scan; full keys and line counts remain exact.
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            history_scan_state <= SCAN_IDLE;
+            history_scan_resp_valid <= 1'b0;
+            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                history_scan_pending[tid] <= 1'b0;
+        end else begin
+            history_scan_resp_valid <= 1'b0;
+            if (history_scan_mode && init_done) begin
+                if (valid_pipe[0]) begin
+                    automatic logic [1:0] reduced_count = 2'd0;
+                    for (int bank = 0; bank < LINE_BANK_COUNT; bank++)
+                        if (request_mask[bank] && line_read_data[bank] == request_key)
+                            reduced_count = sat_add(reduced_count, 2'd1);
+                    history_scan_pending[thread_pipe[0]] <= 1'b1;
+                    history_scan_key[thread_pipe[0]] <= request_key;
+                    history_scan_line_count[thread_pipe[0]] <= reduced_count;
+                    history_scan_epoch[thread_pipe[0]] <= epoch_pipe[0];
+                    history_scan_root[thread_pipe[0]] <= request_is_root;
+                    history_scan_suppress[thread_pipe[0]] <= request_suppress_static;
+                    history_scan_parity[thread_pipe[0]] <= request_odd_parity;
+`ifndef SYNTHESIS
+                    assert (!history_scan_pending[thread_pipe[0]])
+                        else $fatal(1, "repetition scan received overlapping requests for one thread");
+`endif
+                end
+                case (history_scan_state)
+                    SCAN_IDLE: begin
+                        for (int tid = SEARCH_THREAD_COUNT-1; tid >= 0; tid--) begin
+                            if (history_scan_pending[tid]) begin
+                                history_scan_thread <= ThreadID'(tid);
+                                history_scan_index <= active_history_count[0] == history_scan_parity[tid]
+                                    ? HISTORY_COUNT_BITS'(1) : '0;
+                                history_scan_count <= history_scan_line_count[tid];
+                                history_scan_state <= SCAN_READ;
+                            end
+                        end
+                    end
+                    SCAN_READ: begin
+                        if (history_scan_suppress[history_scan_thread]
+                                || history_scan_count >= 2
+                                || history_scan_index >= active_history_count) begin
+                            history_scan_resp_valid <= 1'b1;
+                            history_scan_resp_thread <= history_scan_thread;
+                            history_scan_resp_epoch <= history_scan_epoch[history_scan_thread];
+                            history_scan_resp_count <= history_scan_count;
+                            history_scan_pending[history_scan_thread] <= 1'b0;
+                            history_scan_state <= SCAN_IDLE;
+                        end else history_scan_state <= SCAN_CHECK;
+                    end
+                    SCAN_CHECK: begin
+                        automatic logic [1:0] next_count;
+                        // The last active-history entry is the current root,
+                        // which a root request must exclude from previous hits.
+                        next_count = sat_add(history_scan_count,
+                            (active_history_q == history_scan_key[history_scan_thread]
+                                && !(history_scan_root[history_scan_thread]
+                                    && history_scan_index == active_history_count - 1'b1))
+                            ? 2'd1 : 2'd0);
+                        if (history_scan_index + HISTORY_COUNT_BITS'(2) >= active_history_count
+                                || next_count >= 2) begin
+                            history_scan_resp_valid <= 1'b1;
+                            history_scan_resp_thread <= history_scan_thread;
+                            history_scan_resp_epoch <= history_scan_epoch[history_scan_thread];
+                            history_scan_resp_count <= next_count;
+                            history_scan_pending[history_scan_thread] <= 1'b0;
+                            history_scan_state <= SCAN_IDLE;
+                        end else begin
+                            history_scan_count <= next_count;
+                            history_scan_index <= history_scan_index + HISTORY_COUNT_BITS'(2);
+                            history_scan_state <= SCAN_READ;
+                        end
+                    end
+                    default: history_scan_state <= SCAN_IDLE;
+                endcase
+            end
+            if (flush || active_history_reset || active_history_write || init_start) begin
+                history_scan_state <= SCAN_IDLE;
+                history_scan_resp_valid <= 1'b0;
+                for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+                    history_scan_pending[tid] <= 1'b0;
+            end
+        end
+    end
+
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             active_history_count <= '0;
             init_state <= INIT_IDLE;
             init_seed <= 16'h1;
+            history_scan_mode <= 1'b0;
             clear_index <= '0;
             scan_index <= '0;
             for (int stage = 0; stage < 2; stage++) begin
@@ -195,6 +310,7 @@ module repetition_checker #(
                 INIT_IDLE: if (init_start) begin
                     clear_index <= '0;
                     init_seed <= 16'h1;
+                    history_scan_mode <= 1'b0;
                     init_state <= INIT_CLEAR;
                 end
                 INIT_CLEAR: begin
@@ -218,7 +334,11 @@ module repetition_checker #(
                     end else init_state <= INIT_RETRY;
                 end
                 INIT_RETRY: begin
-                    if (init_seed == 16'hffff) init_state <= INIT_FAIL;
+                    if (init_seed == 16'hffff) begin
+                        // Exhausting hash seeds cannot invalidate a legal game.
+                        history_scan_mode <= 1'b1;
+                        init_state <= INIT_READY;
+                    end
                     else begin
                         init_seed <= init_seed + 1'b1;
                         clear_index <= '0;
@@ -228,6 +348,7 @@ module repetition_checker #(
                 INIT_READY: if (init_start) begin
                     clear_index <= '0;
                     init_seed <= 16'h1;
+                    history_scan_mode <= 1'b0;
                     init_state <= INIT_CLEAR;
                 end
                 default: init_state <= INIT_FAIL;
@@ -240,6 +361,7 @@ module repetition_checker #(
             request_key <= req_key;
             request_suppress_static <= req_start_ply != 0;
             request_is_root <= req_ply == 0;
+            request_odd_parity <= req_ply[0];
             request_mask <= '0;
             if (req_valid && req_ply != 0) begin
                 automatic PlyIndex current_bank = (req_ply - PlyIndex'(1)) >> 1;
