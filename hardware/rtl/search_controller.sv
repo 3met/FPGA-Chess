@@ -236,9 +236,6 @@ module search_controller #(
         ST_DIRECT_DONE,
         ST_NEW_CLEAR_START,
         ST_NEW_CLEAR_WAIT,
-        ST_NEW_SETUP_ISSUE,
-        ST_NEW_SETUP_WAIT,
-        ST_NEW_DONE,
         ST_PERFT_GEN_ISSUE,
         ST_PERFT_GEN_WAIT,
         ST_PERFT_PUSH_ISSUE,
@@ -2215,11 +2212,14 @@ module search_controller #(
         board_update_ply = PlyIndex'(0);
 
         if (state == ST_BOARD_ISSUE) begin
-            board_update_op = active_req.board_op;
-        end else if (state == ST_NEW_SETUP_ISSUE) begin
-            board_update_op = setup_req_comb.board_op;
-            board_update_move = setup_req_comb.move;
-            board_update_set_data = setup_req_comb.board_wr_data;
+            // New Game uses the same issue and writeback path as direct board updates.
+            if (active_req.operation == ENGINE_CTRL_NEW_GAME) begin
+                board_update_op = setup_req_comb.board_op;
+                board_update_move = setup_req_comb.move;
+                board_update_set_data = setup_req_comb.board_wr_data;
+            end else begin
+                board_update_op = active_req.board_op;
+            end
         end else if (state == ST_PERFT_GEN_WAIT
                 && move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)
                 && move_pop_resp_found) begin
@@ -3234,20 +3234,33 @@ module search_controller #(
                         active_zobrist_key <= board_update_zobrist_out;
                         active_pst_eval <= board_update_pst_out;
                         active_piece_count <= board_update_piece_count_out;
-                        if (active_req.board_op == BOARD_COMMIT_MOVE_OP) begin
-                            if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
+                        // Setup advances only after the shared pipeline result is committed.
+                        if (active_req.operation == ENGINE_CTRL_NEW_GAME) begin
+                            if (new_setup_index == 7'd67) begin
                                 repetition_history_reset <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
+                                resp_reg <= EngineControllerResponse'('0);
+                                state <= ST_DIRECT_DONE;
                             end else begin
-                                repetition_history_write <= 1'b1;
+                                new_setup_index <= new_setup_index + 7'd1;
+                                state <= ST_BOARD_ISSUE;
+                            end
+                        end else begin
+                            if (active_req.board_op == BOARD_COMMIT_MOVE_OP) begin
+                                if (committed_move_is_irreversible(active_board, board_update_out, active_req.move)) begin
+                                    repetition_history_reset <= 1'b1;
+                                    repetition_history_key <= board_update_zobrist_out;
+                                end else begin
+                                    repetition_history_write <= 1'b1;
+                                    repetition_history_key <= board_update_zobrist_out;
+                                end
+                            end else if (is_setup_op(active_req.board_op)) begin
+                                repetition_history_reset <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
                             end
-                        end else if (is_setup_op(active_req.board_op)) begin
-                            repetition_history_reset <= 1'b1;
-                            repetition_history_key <= board_update_zobrist_out;
+                            resp_reg <= EngineControllerResponse'('0);
+                            state <= ST_DIRECT_DONE;
                         end
-                        resp_reg <= EngineControllerResponse'('0);
-                        state <= ST_DIRECT_DONE;
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
                     end
@@ -3263,41 +3276,10 @@ module search_controller #(
                 end
 
                 ST_NEW_CLEAR_WAIT: begin
-                if (!tt_clear_busy && !move_init_busy) begin
+                    if (!tt_clear_busy && !move_init_busy) begin
                         new_setup_index <= 7'd0;
-                        state <= ST_NEW_SETUP_ISSUE;
+                        state <= ST_BOARD_ISSUE;
                     end
-                end
-
-                ST_NEW_SETUP_ISSUE: begin
-                    board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-                    state <= ST_NEW_SETUP_WAIT;
-                end
-
-                ST_NEW_SETUP_WAIT: begin
-                    if (board_wait_count == BoardWaitCount'(0)) begin
-                        active_board <= board_update_out;
-                        active_board_in_check <= board_update_side_in_check;
-                        active_zobrist_key <= board_update_zobrist_out;
-                        active_pst_eval <= board_update_pst_out;
-                        active_piece_count <= board_update_piece_count_out;
-                        if (new_setup_index == 7'd67) begin
-                            repetition_history_reset <= 1'b1;
-                            repetition_history_key <= board_update_zobrist_out;
-                            resp_reg <= EngineControllerResponse'('0);
-                            state <= ST_NEW_DONE;
-                        end else begin
-                            new_setup_index <= new_setup_index + 7'd1;
-                            state <= ST_NEW_SETUP_ISSUE;
-                        end
-                    end else begin
-                        board_wait_count <= board_wait_count - BoardWaitCount'(1);
-                    end
-                end
-
-                ST_NEW_DONE: begin
-                    resp_valid <= 1'b1;
-                    state <= ST_IDLE;
                 end
 
                 ST_PERFT_GEN_ISSUE: begin

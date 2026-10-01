@@ -30,6 +30,8 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 
 ## State Ownership
 
+New Game restores the starting position through the same board-update issue, wait, writeback, and completion states used by direct board operations. A setup index selects each tile and side-data update; repetition history is reset after the final update.
+
 The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`, including its cached king squares; shared pipelines do not retain canonical positions.
 
 Each search thread owns its current board and incremental state, alpha/beta window, iterative-deepening state, node count, lifecycle phase, and block-RAM search stack. Stack records hold enough state to reverse a child and resume its parent instead of storing a complete board at every ply. Each node records actual remaining depth because reductions and quiescence entry make it independent of ply.
