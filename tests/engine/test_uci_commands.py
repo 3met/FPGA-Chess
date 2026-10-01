@@ -1,7 +1,12 @@
 import unittest
 
 from software.engine.protocol import Command, ProtocolError, STARTPOS_FEN
-from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS, parse_go_command, parse_position_args, split_command_line
+from software.engine.uci_commands import (
+    DEFAULT_MOVE_OVERHEAD_MS,
+    parse_go_command,
+    parse_position_args,
+    split_command_line,
+)
 
 
 class UCICommandParsingTests(unittest.TestCase):
@@ -17,8 +22,17 @@ class UCICommandParsingTests(unittest.TestCase):
         )
         self.assertEqual(
             parse_position_args(["fen", "8/8/8/8/8/8/8/8", "w", "-", "-", "moves", "a1a2"]),
-            ("8/8/8/8/8/8/8/8 w - -", ["a1a2"]),
+            ("8/8/8/8/8/8/8/8 w - - 0 1", ["a1a2"]),
         )
+
+    def test_position_accepts_five_field_fen_with_and_without_moves(self):
+        fen = "5q2/3N3k/8/8/6r1/7r/K7/8 w - - 96"
+        for moves in ([], ["moves", "d7f6"]):
+            with self.subTest(moves=moves):
+                self.assertEqual(
+                    parse_position_args(["fen", *fen.split(), *moves]),
+                    (fen + " 1", moves[1:]),
+                )
 
     def test_go_parsing_encodes_supported_limit_and_reports_ignored_constraints(self):
         parsed = parse_go_command(["searchmoves", "e2e4", "depth", "3"], True)

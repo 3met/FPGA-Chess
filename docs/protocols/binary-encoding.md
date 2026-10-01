@@ -66,6 +66,8 @@ En passant is encoded in a 4-bit field as `{ep_file[2:0], has_ep}`.
 
 The fullmove number is not stored in `FullBoard` and is not sent to the FPGA.
 
+The FEN encoder accepts four through six fields, defaulting an omitted halfmove clock to `0` and an omitted fullmove number to `1`. It validates standard FEN syntax, including nonnegative halfmove clocks and positive fullmove numbers; legal board validation belongs to the UCI host. The host retains the original counters, while the transmitted halfmove clock is capped at the engine's fifty-move draw threshold of `100`.
+
 ## Time and Node Count Encoding
 
 `TimeType` is a 24-bit unsigned millisecond value and is encoded as 3 little-endian bytes.

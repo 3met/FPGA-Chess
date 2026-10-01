@@ -13,6 +13,7 @@ from software.engine.protocol import (
     cmd_search_fixed_time,
     cmd_search_nodes,
     cmd_search_on_clock,
+    normalize_fen,
 )
 
 
@@ -79,16 +80,9 @@ def parse_position_args(args: list[str]) -> tuple[str, list[str]]:
         base_fen = STARTPOS_FEN
         rest = args[1:]
     elif args[0] == "fen":
-        if "moves" in args:
-            moves_idx = args.index("moves")
-            fen_fields = args[1:moves_idx]
-            rest = args[moves_idx:]
-        else:
-            fen_fields = args[1:]
-            rest = []
-        if len(fen_fields) not in (4, 6):
-            raise ValueError("position fen requires 4 or 6 FEN fields")
-        base_fen = " ".join(fen_fields)
+        moves_idx = args.index("moves") if "moves" in args else len(args)
+        base_fen = normalize_fen(" ".join(args[1:moves_idx]))
+        rest = args[moves_idx:]
     else:
         raise ValueError("position must use startpos or fen")
 

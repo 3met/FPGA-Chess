@@ -279,19 +279,19 @@ def move_to_uci(move: Move, promote: bool = False) -> str:
     return f"{square_index_to_name(move.from_square)}{square_index_to_name(move.to_square)}{suffix}"
 
 
-def _parse_fen_fields(fen: str) -> list[str]:
-    fields = fen.strip().split()
+def _parse_fen(fen: str) -> tuple[list[str], list[int]]:
+    """Validate standard FEN syntax and fill omitted move counters."""
+    fields = fen.split()
+    if not 4 <= len(fields) <= 6:
+        raise ProtocolError(
+            f"FEN requires 4 to 6 fields (got {len(fields)}): "
+            "board, turn, castling, en passant, optional halfmove clock and fullmove number"
+        )
     if len(fields) == 4:
-        fields += ["0", "1"]
-    if len(fields) != 6:
-        raise ProtocolError("FEN must have 4 or 6 fields")
-    return fields
-
-
-def encode_fen(fen: str) -> bytes:
-    """Encode a FEN position as the documented 36-byte FullBoard payload."""
-
-    board_part, turn, castling, en_passant, halfmove_clock, _fullmove = _parse_fen_fields(fen)
+        fields.append("0")
+    if len(fields) == 5:
+        fields.append("1")
+    board_part, turn, castling, en_passant, halfmove_clock, fullmove = fields
     tiles = [0] * 64
     ranks = board_part.split("/")
     if len(ranks) != 8:
@@ -300,13 +300,15 @@ def encode_fen(fen: str) -> bytes:
     for fen_rank_index, rank_text in enumerate(ranks):
         rank = 7 - fen_rank_index
         file_index = 0
+        previous_empty = False
         for ch in rank_text:
-            if ch.isdigit():
-                empty_count = int(ch)
-                if empty_count < 1 or empty_count > 8:
-                    raise ProtocolError(f"Invalid empty-square count '{ch}'")
-                file_index += empty_count
+            if ch in "12345678":
+                if previous_empty:
+                    raise ProtocolError("FEN rank has consecutive empty-square counts")
+                file_index += int(ch)
+                previous_empty = True
                 continue
+            previous_empty = False
             if ch not in PIECE_TO_TILE:
                 raise ProtocolError(f"Invalid FEN piece '{ch}'")
             if file_index >= 8:
@@ -326,19 +328,45 @@ def encode_fen(fen: str) -> bytes:
                 raise ProtocolError(f"Invalid castling rights '{castling}'")
             seen.add(ch)
 
-    if en_passant == "-":
-        ep_byte = 0
-    else:
-        if len(en_passant) != 2 or en_passant[0] < "a" or en_passant[0] > "h" or en_passant[1] not in "36":
+    if en_passant != "-":
+        if (
+            len(en_passant) != 2
+            or not "a" <= en_passant[0] <= "h"
+            or en_passant[1] not in "36"
+        ):
             raise ProtocolError(f"Invalid en passant square '{en_passant}'")
-        ep_byte = ((ord(en_passant[0]) - ord("a")) << 1) | 0x1
+        if en_passant[1] != ("6" if turn == "w" else "3"):
+            raise ProtocolError("FEN en passant square disagrees with side to move")
 
-    try:
-        halfmove = int(halfmove_clock)
-    except ValueError as exc:
-        raise ProtocolError("Halfmove clock must be an integer") from exc
-    if not 0 <= halfmove <= 127:
-        raise ProtocolError("Halfmove clock must fit in 7 bits")
+    for index, value, name, minimum in (
+        (4, halfmove_clock, "Halfmove clock", 0),
+        (5, fullmove, "Fullmove number", 1),
+    ):
+        if not value.isascii() or not value.isdecimal():
+            raise ProtocolError(f"{name} must be a decimal integer >= {minimum}")
+        try:
+            counter = int(value)
+        except ValueError as exc:
+            raise ProtocolError(f"{name} is too large") from exc
+        if counter < minimum:
+            raise ProtocolError(f"{name} must be >= {minimum}")
+        fields[index] = str(counter)
+    return fields, tiles
+
+
+def normalize_fen(fen: str) -> str:
+    """Return six FEN fields after syntax validation, without requiring a legal board."""
+    fields, _ = _parse_fen(fen)
+    return " ".join(fields)
+
+
+def encode_fen(fen: str) -> bytes:
+    """Encode a FEN position as the documented 36-byte FullBoard payload."""
+    fields, tiles = _parse_fen(fen)
+    _, turn, castling, en_passant, halfmove_clock, _ = fields
+    ep_byte = 0 if en_passant == "-" else ((ord(en_passant[0]) - ord("a")) << 1) | 0x1
+    # The FPGA adjudicates draws at 100; larger clocks need no extra state.
+    halfmove = min(int(halfmove_clock), 100)
 
     payload = bytearray(FULL_BOARD_BYTES)
     for idx in range(32):

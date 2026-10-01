@@ -201,6 +201,37 @@ class UCIHostSpecTests(unittest.TestCase):
 
         client.request.assert_not_called()
 
+    def test_position_fen_counters_survive_validation_and_moves(self):
+        host = self.make_host()
+        base = "5q2/3N3k/8/8/6r1/7r/K7/8 w - -"
+        cases = (("", 0, 1), (" 96", 96, 1), (" 150 42", 150, 42))
+        for suffix, clock, fullmove in cases:
+            with self.subTest(suffix=suffix):
+                canonical, moves, board = host._validate_position(
+                    ["fen", *(base + suffix).split(), "moves", "d7f6"]
+                )
+                self.assertEqual(int(canonical.split()[4]), clock)
+                self.assertEqual(board.halfmove_clock, clock + 1)
+                self.assertEqual(moves, ("d7f6",))
+                self.assertEqual(board.fullmove_number, fullmove)
+
+    def test_invalid_fen_reports_reason_without_changing_position_or_contacting_hardware(self):
+        host = self.make_host()
+        original_board = host.board
+        host.connect = mock.Mock()
+        cases = (
+            ("8/8/8/8/8/8/8/K7 w - -", "no black king"),
+            ("8/8/8/8/8/8/8/K6k w K -", "bad castling rights"),
+            ("8/8/8/8/8/8/8/K6k w - - 0 nope", "Fullmove number"),
+            ("8/8/8/8/8/8/8/K6k w - e3", "side to move"),
+        )
+        for fen, reason in cases:
+            with self.subTest(fen=fen):
+                with self.assertRaisesRegex(HostError, reason):
+                    host._handle_position(["fen", *fen.split()])
+                self.assertIs(host.board, original_board)
+                host.connect.assert_not_called()
+
     def test_position_skips_identical_history_and_sends_only_extensions(self):
         host = self.make_host()
         client = mock.Mock()

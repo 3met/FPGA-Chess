@@ -651,12 +651,16 @@ class FPGAUCIHost:
         """Validate and canonicalize a complete UCI position without hardware I/O."""
         try:
             base_fen, move_tokens = parse_position_args(args)
+            base_board = self.chess.Board(base_fen)
         except ValueError as exc:
             raise HostError(str(exc)) from exc
-        base_board = self.chess.Board(base_fen)
         status = base_board.status()
         if status != self.chess.STATUS_VALID:
-            raise HostError(f"Invalid FEN status 0x{status:x}")
+            reasons = ", ".join(
+                flag.lower().replace("_", " ")
+                for flag in self.chess.Status(status).name.split("|")
+            )
+            raise HostError(f"Invalid FEN: {reasons}")
         board = base_board.copy(stack=False)
         canonical_moves = []
         for move_token in move_tokens:

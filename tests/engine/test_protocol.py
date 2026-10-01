@@ -18,6 +18,7 @@ from software.engine.protocol import (
     encode_move,
     encode_time_ms,
     move_to_uci,
+    normalize_fen,
     parse_uci_move,
 )
 
@@ -49,12 +50,40 @@ class ProtocolEncodingTests(unittest.TestCase):
             ("8/8/8/8/8/8/8/8 x - - 0 1", "turn"),
             ("8/8/8/8/8/8/8/8 w KK - 0 1", "castling rights"),
             ("8/8/8/8/8/8/8/8 w - e4 0 1", "en passant square"),
-            ("8/8/8/8/8/8/8/8 w - - 128 1", "Halfmove clock"),
+            ("8/8/8/8/8/8/8/8 w - - -1 1", "Halfmove clock"),
+            ("8/8/8/8/8/8/8/8 w - - 0 0", "Fullmove number"),
+            ("8/8/8/8/8/8/8/8 w - - 0 nope", "Fullmove number"),
+            ("8/8/8/8/8/8/8/8 w - e3 0 1", "side to move"),
+            ("44/8/8/8/8/8/8/8 w - -", "consecutive"),
+            ("⁸/8/8/8/8/8/8/8 w - -", "piece"),
+            ("8/8/8/8/8/8/8/8 w - - ² 1", "Halfmove clock"),
+            ("8/8/8/8/8/8/8/8 w - - +1 1", "Halfmove clock"),
+            ("8/8/8/8/8/8/8/8 w -", "got 3"),
+            ("8/8/8/8/8/8/8/8 w - - 0 1 extra", "got 7"),
         )
         for fen, message in cases:
             with self.subTest(fen=fen):
                 with self.assertRaisesRegex(ProtocolError, message):
                     encode_fen(fen)
+                with self.assertRaisesRegex(ProtocolError, message):
+                    normalize_fen(fen)
+
+    def test_missing_counters_and_whitespace_are_normalized(self):
+        base = "5q2/3N3k/8/8/6r1/7r/K7/8 w - -"
+        for suffix, expected in (("", "0 1"), (" 96", "96 1"), (" 096 002", "96 2")):
+            with self.subTest(suffix=suffix):
+                fen = "\t " + (base + suffix).replace(" ", "  ") + "\n"
+                expected_fen = f"{base} {expected}"
+                self.assertEqual(normalize_fen(fen), expected_fen)
+                self.assertEqual(encode_fen(fen), encode_fen(expected_fen))
+
+    def test_large_halfmove_clocks_preserve_host_value_and_encode_draw_threshold(self):
+        base = "8/8/8/8/8/8/8/K6k w - -"
+        for clock in (100, 127, 128, 150, 1000):
+            with self.subTest(clock=clock):
+                fen = f"{base} {clock} 1"
+                self.assertEqual(normalize_fen(fen), fen)
+                self.assertEqual(encode_fen(fen), encode_fen(base + " 100 1"))
 
     def test_move_encoding_matches_rtl_layout(self):
         self.assertEqual(cmd_make_move("e2e4"), bytes.fromhex("02700c"))
