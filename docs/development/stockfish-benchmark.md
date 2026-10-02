@@ -1,6 +1,6 @@
 # Stockfish Benchmark
 
-Run `python -m tools.stockfish_benchmark` from the repository root to play the FPGA engine against Stockfish with a fixed node budget. By default, it uses 500 paired openings (1,000 games), a `2+0.02` FPGA clock, 2,000 Stockfish nodes per move, one Stockfish thread, and 32 MB of hash. The `Stockfish-unlimited` engine label refers to disabled strength limiting; the node cap still applies. Fastchess and Stockfish must be available on `PATH`; the FPGA UCI host uses the current Python interpreter. Set `FPGA_CHESS_PORT` or use the host's serial-port autodetection.
+Run `python -m tools.stockfish_benchmark` from the repository root to play the FPGA engine against Stockfish with a fixed node budget. Fastchess and Stockfish must be on `PATH`; set `FPGA_CHESS_PORT` or use serial-port autodetection. Use `--help` for match, clock, and Stockfish settings. The `Stockfish-unlimited` label means strength limiting is disabled; the node cap still applies.
 
 The default opening book is `../fastchess/books/UHO_Lichess_4852_v1.epd`. Fastchess shuffles its positions with a fixed seed and plays each selected position with both colors. The same seed keeps opening selection consistent across runs and resumes. If the book is absent, the tool downloads the official Stockfish opening suite into `work/books/`. Pass `--book PATH` to use another local book. Use `--fastchess` and `--stockfish` to select other executables.
 
@@ -20,5 +20,3 @@ The optional name defaults to a local timestamp. Results go to `work/benchmark-r
 Ctrl+C asks Fastchess to stop and save its tournament state, then cleans up any remaining engine processes. The command exits with status 130 and prints the resume command when an autosave exists. An abrupt kill resumes from the last saved checkpoint, so games played after that checkpoint may be replayed. A run cannot resume before its first checkpoint exists.
 
 Use `--elo-error ELO` instead of a match count to stop when Fastchess reports a finite Elo confidence half-width of at most `ELO` (the number after `+/-` in its standings). The tool checks after every batch of paired openings and extends the same saved tournament while keeping earlier games. Use `--max-matches` to set a safety cap; reaching the cap without meeting the target is an error. Elo-error stopping cannot be combined with SPRT.
-
-Other Python tools can import `BenchmarkConfig`, `run_tournament`, `continue_tournament`, `resume_tournament`, and `read_result` from `tools.stockfish_benchmark`. Successful runs return a `TournamentResult` containing FPGA wins, losses, draws, points, Elo, confidence interval, pentanomial counts, and any SPRT decision. An incomplete or failed tournament raises `BenchmarkError`.

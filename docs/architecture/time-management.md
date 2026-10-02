@@ -1,48 +1,19 @@
 # Time Management
 
-The UCI host selects the time and increment for the side to move from `wtime`/`winc` or `btime`/`binc` and sends only those values, `movestogo`, and the current `Move Overhead` option to the FPGA. A clock search is selected when either side's remaining time is supplied; an omitted time or increment for the side to move is treated as zero. The option defaults to 2 ms. Fixed `movetime` searches also carry the overhead; fixed-depth, fixed-node, and perft commands do not use time management.
+A clock search is selected when either side's remaining time is supplied. The UCI host sends the side-to-move clock, increment, `movestogo`, and `Move Overhead` to the FPGA. Missing side-to-move time or increment is treated as zero. Fixed `movetime` searches also use overhead; depth, node, and perft limits do not use time management.
 
-All time values use the 24-bit millisecond `TimeType`; representable durations must be less than `16,777,216 ms`, about 4.66 hours. The main policy constants are centralized in `hardware/config/search/default.json`.
+Time values are milliseconds using `TimeType`. Allocation policy is selected by the engine's search profile under `hardware/config/search/`.
 
 ## Initial Budgets
 
-For the side to move, usable time `T` excludes overhead. A positive `movestogo` uses the first base formula; zero means the sudden-death formula.
+Clock allocation reserves move overhead and derives a base budget from usable time, increment, and moves to go. A zero `movestogo` selects sudden-death allocation. The hard budget is capped by usable time and shared by all search threads.
 
-```text
-T = max(0, remaining_time - move_overhead)
+A hard timeout interrupts active search and returns the primary thread's last completed iteration. Fixed `movetime` bypasses adaptive allocation and uses the requested duration minus overhead, clamped at zero.
 
-if moves_to_go > 0:
-    base = T / (moves_to_go + 2) + 4 * increment / 5
-else:
-    base = T / 20 + 4 * increment / 5
+## Adaptive Stopping
 
-hard = min(4 * base, 4 * T / 5)
-```
+After a completed primary iteration, the soft budget adjusts according to the best move's share of root nodes, move stability, and score drops. A single legal root move receives a shorter soft budget. The soft budget never exceeds the hard deadline.
 
-The hard budget is shared by every Lazy-SMP thread and is checked continuously during search. A hard timeout aborts the active passes and returns only the primary thread's last completed iteration. `movetime` bypasses adaptive allocation and uses `max(0, movetime - move_overhead)` as its fixed hard deadline.
+The primary thread stops at a completed iteration when the soft deadline is reached, and avoids starting another depth when too little of that budget remains. Helper threads do not control soft stopping or the published result.
 
-## Adaptive Soft Budget
-
-After each completed primary-thread depth, the controller adjusts the base budget using only the best move's share of root nodes, best-move stability, and a significant score drop.
-
-```text
-factor = 4
-
-if best_move_nodes * 2 < total_root_nodes:
-    factor += 1
-else if best_move_nodes * 4 > total_root_nodes * 3:
-    factor -= 1
-
-if best_move != previous_depth_best_move:
-    factor += 1
-else if best_move_stable_depths >= 3:
-    factor -= 1
-
-if score < previous_depth_score - 64 evaluation units:
-    factor += 2
-
-factor = clamp(factor, 2, 8)
-soft = min(hard, base * factor / 4)
-```
-
-Sixty-four evaluation units are 50 centipawns in the engine's 1/128-pawn score scale. The `time_management` module owns elapsed-time measurement and all budget arithmetic. Initial allocation, soft scaling, and the next-depth threshold share one iterative divider because setup latency is negligible and arbitrary tuned denominators must not create combinational timing paths. In particular, `moves_to_go + moves_to_go_buffer` is a runtime divisor, so it cannot be replaced by one compile-time reciprocal without approximation; the shared divider preserves exact floor semantics with less area than a reciprocal generator or lookup table. If the root has exactly one legal move, `soft` is capped at 10 ms. The primary thread stops after a completed depth once the soft deadline is reached and does not start another depth after three fifths of the soft budget has elapsed. Helper threads do not control the result or soft stopping.
+The [time-management module](../modules/time-management.md) measures elapsed time and computes budgets; the [search controller](../modules/search-controller.md) enforces stopping and selects the result.

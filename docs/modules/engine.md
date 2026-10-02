@@ -20,13 +20,13 @@ The typed `EngineControllerRequest` and `EngineControllerResponse` boundary is i
 | Input | `tt_memory_ready`, `tt_memory_error` | 1 each | Status of the selected TT memory backend. |
 | Request/response | `tt_mem_*` | See `tt_defs.sv` | Vendor-neutral TT memory command, write-data, read-data, and completion channels. |
 
-Parameters configure the engine clock, thread count, stack depth, search policy, move-history policy and storage geometry, TT backend, build metadata, and optional statistics. Engine profiles own hardware-resource settings such as the quiet-history entry count and bit width, while search profiles own history rewards, maluses, and ordering thresholds; the build validates that the policy fits the selected signed entry width. Profiles supply these values through the board wrapper without adding target-specific logic to the portable core.
+Engine profiles configure hardware resources, clocks, and instrumentation. Search profiles configure search and move-ordering policy. The build validates that the selected policy fits the hardware configuration.
 
 ## Commands
 
 The engine command byte and payload formats are defined in [host-fpga-protocol.md](../protocols/host-fpga-protocol.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
-The external protocol exposes `Set board` as a single fixed-size command. The engine decomposes it into board-update operations internally; this keeps host setup atomic and avoids command-stream overhead from 64 separate tile writes.
+`Set board` replaces the position atomically; the engine translates it into board-update operations.
 
 ## New Game Semantics
 

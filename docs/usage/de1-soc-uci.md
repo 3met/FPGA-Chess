@@ -51,9 +51,9 @@ The port may instead be set through `FPGA_CHESS_PORT`. When neither an argument 
 
 ## Connection Behavior
 
-`position fen` accepts the four required position fields followed by optional halfmove and fullmove counters. Missing counters default to `0` and `1`, respectively; a five-field FEN preserves its halfmove clock. For example, `position fen 5q2/3N3k/8/8/6r1/7r/K7/8 w - - 96` uses fullmove number `1`. FEN syntax, board validity, and all supplied moves are checked before contacting the FPGA or changing the current position. Errors identify the malformed field or invalid board condition.
+`position fen` accepts four through six fields. Omitted halfmove and fullmove counters default to `0` and `1`. The host validates FEN syntax, board legality, and supplied moves before changing the position.
 
-The `uci` handshake is hardware-independent and advertises the `Ponder` and `Move Overhead` runtime options. `Move Overhead` defaults to 2 ms and is subtracted from fixed `movetime` and normal clock deadlines. The first `isready` establishes the serial connection, resets the protocol with UART BREAK, waits for board initialization, verifies clean status, and starts a new game. Physical connection settings remain host arguments: use `--port`, `FPGA_CHESS_PORT`, and `--baud` rather than UCI options.
+The `uci` handshake is hardware-independent and advertises `Ponder` and `Move Overhead`. Overhead is subtracted from fixed-time and clock-search deadlines. The first `isready` connects, resets the protocol, waits for initialization, and starts a new game. Connection settings use `--port`, `FPGA_CHESS_PORT`, and `--baud`.
 
 The host advertises the standard UCI `Ponder` option. `go ponder` searches the speculative position to the hardware depth ceiling without consuming the normal clock budget, and `ponderhit` restarts the saved search limit on the same transposition-table-warmed position.
 

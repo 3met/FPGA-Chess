@@ -10,13 +10,13 @@ Thread count, stack depth, search policy, and optional instrumentation are build
 
 Search combines iterative deepening, aspiration windows, principal variation search (PVS), reverse and ordinary futility pruning, null-move pruning, late-move reductions (LMR), transposition-table cutoffs, and quiescence search.
 
-Each depth after the first starts with a narrow aspiration window centered on the previous completed score. A thread's initial delta is the configured starting delta plus its zero-based thread ID modulo eight, and fail-low or fail-high retries multiply that thread-specific delta while widening the window around the fail-soft score.
+Each depth after the first starts with an aspiration window around the previous completed score. Fail-low and fail-high results widen the window and retry.
 
 If a budget expires during an incomplete pass, the active root child is discarded because its score is not complete. A hard time limit always rolls back to the primary thread's last completed depth. Node limits and explicit kills may publish an exact resolved root candidate from the partial pass; bounds, aborted losing-mate results, and candidates that weaken a completed mate roll back to the preceding completed move, score, and principal-variation prefix. A fully resolved legal root move from a partial first iteration may be used for those non-time stops when no completed result exists. Completed results may include the second principal-variation move for UCI pondering.
 
 PVS searches the first legal move with the full window and later moves with a scout window, repeating a scout at full window when needed. LMR may first search eligible later moves at reduced depth; an alpha-raising reduced result is verified at full depth before it can affect the parent. The reduction policy is parameterized and computed without changing the search semantics.
 
-Ordinary futility pruning applies only to non-checking, non-root main-search nodes after one legal move has completed. It may skip a quiet non-promotion that is neither the direct ordering move nor a checking move when the static evaluation plus the configured margin cannot raise alpha. The margin and maximum depth use the move's predicted child depth after LMR; the default policy is 150 centipawns plus 150 centipawns per predicted ply through depth three. A node obtains and retains a static evaluation lazily when its first otherwise-eligible quiet reaches this test. Pruned legal moves still advance the legal-move ordinal used by later LMR decisions.
+Ordinary futility pruning may skip late quiet moves at shallow, non-root nodes outside check when static evaluation plus a depth-scaled margin cannot raise alpha. Promotions, checking moves, and the direct ordering move are exempt. At least one legal move must complete before pruning applies.
 
 RFP evaluates eligible non-checking main-search nodes after the TT probe and before null-move pruning. At a shallow zero-window node with a finite non-mate beta bound, it returns the fail-soft static evaluation when the configured depth-scaled margin proves a beta cutoff.
 
@@ -46,7 +46,7 @@ Repetition history is not part of the Zobrist key, so a stored score may be unsa
 
 ## Mate and Draw Scores
 
-`MATE_THRESHOLD` is `0x4000`, `MATE_SCORE` is `0x4100`, and search infinity is `0x7fff`. Non-mate evaluations are clamped inside `[-0x3fff, 0x3fff]`, so bit 14 separates every finite score from the mate interval. The `0x100` gap from the threshold to `MATE_SCORE` supports mate distances through 256 plies, or mate in 128 moves.
+Finite evaluations are clamped below the mate-score range. Mate scores encode distance in plies, and search infinity lies outside that range. Constants are defined in `hardware/rtl/chess_defs.sv`.
 
 A winning mate at root-relative ply `ply` is encoded as `MATE_SCORE - ply`; a losing mate is `-MATE_SCORE + ply`. TT stores normalize mate scores relative to the stored node and restore them relative to the current root.
 

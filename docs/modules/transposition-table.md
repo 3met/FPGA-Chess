@@ -28,7 +28,7 @@ Lookup requests take priority over queued stores because a requesting thread can
 
 A store request contains the full key, completed search depth, score, bound type, best move, generation, and root-relative ply. Stores are best-effort: search correctness never depends on a publication reaching memory.
 
-The TT frontend accepts stores into a parameterized FIFO. A publication is dropped if that FIFO is full, allowing the search thread to continue without memory backpressure. Queued stores drain only when they do not delay a lookup. A dequeued external-table store is staged with its reduced index before probing the cache, keeping the FIFO BRAM, range reducer, and cache BRAM out of one timing path without changing blocking lookup latency.
+Stores are queued and drain when they do not delay lookups. A full queue drops new publications without blocking search.
 
 ## Score and Bound Semantics
 
@@ -43,24 +43,9 @@ TT scores use the search controller's side-to-move point of view. Bound types ar
 
 Mate scores are normalized when stored so they are relative to the stored node rather than the original root. Lookup restores them relative to the current root ply. This preserves mate-distance ordering when the same position is reached at another ply.
 
-## Logical Entry Formats
+## Entry Storage
 
-The live Zobrist key remains 64 bits. `TT_TAG_BITS` selects the low key bits stored as the compact entry tag. Every remaining high key bit participates in a shared XOR-fold and xorshift index hash; power-of-two tables fold that hash into their address width, while non-power-of-two tables use multiply-high range reduction. Configurations with fewer index-hash entropy bits than address bits are invalid, and configurations with less than eight bits of entropy margin emit a simulation warning.
-
-The compact entry fields are:
-
-| Width | Field |
-| ----- | ----- |
-| `TT_TAG_BITS` | Low Zobrist-key tag. |
-| 14 | Encoded best move. |
-| 16 | Side-to-move score. |
-| `ceil(log2(search stack depth))` | Search depth; six bits in the DE1-SoC profile. |
-| 2 | Bound type. |
-| 5 | Age/generation. |
-
-The DE1-SoC profile uses a 32-bit tag, producing a 75-bit logical entry padded to five 16-bit words and fitting 6,710,886 entries in 64 MiB. Changing `TT_TAG_BITS` changes the compact width, physical alignment, burst length, and entry count together.
-
-The on-chip full-key format stores the complete 64-bit key, best move, score, depth, bound, age, and auxiliary bits.
+Entries contain a position key or compact tag, best move, score, searched depth, bound, and generation. On-chip storage retains the full key; external storage uses a configurable compact tag and hashes the remaining key bits into the table index. Capacity and physical alignment derive from the selected storage profile.
 
 ## Hit Verification
 
@@ -88,4 +73,4 @@ Skipping a store is not an error. Generation comparison uses equality with the c
 
 ## Clearing
 
-New Game makes older entries unavailable by advancing the five-bit generation and clears queued stores. Unavailable external entries cannot block current-generation publications, regardless of their stored depth. On-chip storage may invalidate entries sequentially. External storage performs a physical validity sweep only when required at reset or when New Game arrives at generation 31, then restarts at generation 1. Requests remain unavailable while an invalidation pass is active.
+New Game advances the generation and discards queued stores. Reset or generation wrap may require a physical invalidation pass; requests remain unavailable until it finishes.

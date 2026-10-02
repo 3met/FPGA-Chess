@@ -15,19 +15,17 @@ python -m tools.hardware_build profile --nodes 10000 --threads 4 --stack-depth 3
 python -m tools.hardware_build profile-position --fen "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1" --depth 4
 ```
 
-At most one of `--depth`, `--nodes`, or `--time-ms` selects the search limit; the default is 50 ms of simulated search. `--timeout` sets a wall-clock limit per position and is disabled by default. `--target` selects the engine profile, while `--engine-config`, `--threads`, `--stack-depth`, and `--engine-clock-hz` override it. `--simulator` selects the backend, `--jobs` controls suite concurrency, and `--output` selects the artifact directory. Use `--event-trace` or `--waveform` only when the additional diagnostic output is needed.
-
-Verilator and ModelSim must produce the same engine result and measurement events, although clock-edge scheduling may attribute an occasional sample to an adjacent internal state.
+Use at most one of `--depth`, `--nodes`, or `--time-ms` to override the search limit. `--timeout` sets a wall-clock limit per position. `--target` selects the engine profile; `--engine-config`, `--threads`, `--stack-depth`, and `--engine-clock-hz` override it. `--simulator` selects the backend, `--jobs` controls concurrency, and `--output` selects the artifact directory. Use `--event-trace` or `--waveform` for additional diagnostics.
 
 ## Artifacts and Measurements
 
 Reports, machine-readable metrics, simulator logs, and optional traces are written under `work/build/profile/`. Suite runs include an aggregate report and per-position artifacts.
 
-Search measurements begin when the controller accepts the search request and end when it presents the response. Setup, response serialization, and post-search TT-store drain are labeled separately. Per-thread phase totals and other exclusive state totals are checked against the measured window so instrumentation drift fails loudly.
+Search measurements cover request acceptance through response presentation. Setup, response serialization, and post-search TT-store drain are reported separately.
 
-The reports cover search throughput, pipeline stalls, thread activity, move ordering and pruning, TT and cache behavior, SDRAM traffic, and simulator speed. Move-order metrics include early noisy and quiet reads, generation overlap, peak unread bucket occupancy, and the highest arena address reached. Per-depth data follows the primary thread's target depth; helper threads may be searching another depth during the same interval.
+Reports cover search throughput, pipeline stalls, thread activity, move ordering, pruning, TT/cache behavior, SDRAM traffic, and simulator speed. Per-depth data follows the primary thread; helpers may be searching another depth.
 
-Profiler counters are 64-bit testbench state and do not exist in synthesis builds. The smaller optional `ENABLE_SEARCH_STATS` counters remain the hardware-visible diagnostic interface.
+Profiler instrumentation is testbench-only. Optional hardware search statistics are a separate diagnostic interface.
 
 ## Interpretation
 

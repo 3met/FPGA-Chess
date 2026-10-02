@@ -30,15 +30,13 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 
 ## State Ownership
 
-New Game restores the starting position through the same board-update issue, wait, writeback, and completion states used by direct board operations. A setup index selects each tile and side-data update; repetition history is reset after the final update.
+The active board is canonical controller state between commands. Board operations use [board_update_pipeline](board-update-pipeline.md) to update it and its incremental state. New Game restores the starting position and clears repetition history.
 
-The active board is canonical controller state between commands. Direct-board operations transform it through `board_update_pipeline`, including its cached king squares; shared pipelines do not retain canonical positions.
+Each search thread owns its current position, search stack, alpha/beta window, iterative-deepening state, and node count. The stack retains the state needed to reverse a child and resume its parent.
 
-Each search thread owns its current board and incremental state, alpha/beta window, iterative-deepening state, node count, lifecycle phase, and block-RAM search stack. Stack records hold enough state to reverse a child and resume its parent instead of storing a complete board at every ply. Each node records actual remaining depth because reductions and quiescence entry make it independent of ply.
+The primary thread owns the published result and last completed iteration. Helper threads cooperate through the TT and never delay or overwrite the primary result. Threads advance through iterative deepening independently.
 
-The primary thread owns the last atomic completed-iteration move, score, principal-variation prefix, and depth. For the active iteration it separately records whether any root child's complete logical search has returned and whether the best such result is exact inside the aspiration window. These two bits permit safe interrupted-iteration selection without a root-move table or per-node bookkeeping. Helpers cooperate only through the TT and never delay or overwrite the primary result. Threads retry aspiration failures or begin new iterations independently.
-
-After a completed primary clock-search iteration, adaptive stopping crosses registered phase boundaries: root-node statistics select the small scale factor, then the dedicated `time_management` child scales and clamps the soft budget and derives the next-depth threshold before the final comparison. The same child performs initial normal-clock allocation. Only registered soft and threshold values control stopping or root-state reloads, so request handshakes and wide node-share or budget arithmetic do not feed board-register enables. Helper contexts continue running while allocation completes, and the shared hard deadline remains active.
+The controller uses [time_management](time-management.md) to allocate clock budgets and adjust stopping decisions after completed primary iterations. The hard deadline remains active during allocation.
 
 ## Shared-Pipeline Scheduling
 
@@ -53,42 +51,31 @@ The controller schedules work across:
 
 A thread has at most one in-flight request in each subsystem, with generation and move reads tracked independently. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
-TT responses are buffered per thread before score and window classification. The board-history and depth condition for TT validation is captured when the lookup is issued and retained through response replay, keeping those comparisons out of response dispatch. The selected thread's board and depth remain unchanged during this validation.
+Before search, NNUE builds a root accumulator for every thread. Legal child preparation completes NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator.
 
-Before search, NNUE builds a valid root accumulator for every thread. Legal child preparation joins NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator. Reset, New Game, Kill, and search restart invalidate tags and pending returns so late responses cannot mutate a later operation.
-
-Parent-only futility and quiescence delta checks are registered during speculative board update, aligned with its routing tags. Child commitment combines those results with the returned king-safety and check flags, so move decoding and pruning arithmetic do not share its state-update path.
+Reset, New Game, Kill, and search restart prevent outstanding responses from changing a later operation.
 
 ## Node Lifecycle
 
-A main-search node follows this logical order:
+The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent.
 
-1. Check terminal draw state, ruling out checkmate before a checked fifty-move draw, and probe the TT.
-2. Try eligible RFP and null-move pruning operations, then direct ordering moves.
-3. Generate and search noisy moves.
-4. Generate quiet moves and futility-prune eligible late quiets before committing their children.
-5. Search deferred unfavorable captures.
-6. Return checkmate, stalemate, or the completed alpha/beta result.
+Move generation produces pseudo-legal candidates. The controller applies each candidate speculatively and rejects it if the moving side remains in check. Accepted children update repetition and NNUE state; returning from a child restores the parent position and folds the child score into its result.
 
-Generation and move reads are scheduled independently. Per-thread pop channels allow concurrent reads, while returned moves wait for the shared board scheduler. A thread advances only after its request is accepted.
+Generation and move reads can overlap. The controller initializes a node's move storage before descent and waits for parent generation to complete before a child can allocate move storage, descend, or reverse the parent. Cancellation covers both generation and reads. Bucket ordering and storage ownership are defined in [move-generator.md](move-generator.md).
 
-Move memory owns bucket eligibility and FIFO state, so pop requests carry only thread and ply. A node's move range is initialized before any descent, including direct and null moves that precede generation. Move memory may return high-priority noisy or quiet moves before generation completes while preserving strict bucket order. Early results may begin child preparation, but the child cannot allocate move storage, descend, or reverse the parent until that generation completes. Cancellation invalidates both generation and read work.
+TT moves pass through the same legality checks as generated moves. The controller enforces the root and repetition-sensitive cutoff restrictions described in [transposition-table.md](transposition-table.md).
 
-Move generation is pseudo-legal. The controller speculatively applies each candidate and rejects it if the moving side remains in check. A legal child is recorded in repetition history and prepares its NNUE state before TT lookup, evaluation, or deeper search. On return, the controller reverses the board and accumulator changes and folds the child score into the saved parent.
-
-History-sensitive TT scores are validated according to [transposition-table.md](transposition-table.md). A rejected score may still supply a legal ordering move. Root TT scores never cause a cutoff; only their moves are retained for ordering before the controller searches and compares legal root children. Null children bypass ordinary legality, repetition, legal-node counting, best-move selection, and move-history updates.
-
-Quiescence omits quiet generation and both bad-noisy buckets except for legal evasions while in check. Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
+Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. Hard time limits return the last completed primary iteration. For node limits and explicit kills, an exact best root candidate whose complete logical search returned may replace the preceding move and score without advancing the reported completed depth. An active PVS or LMR recovery search is never counted, aspiration bounds and aborted losing mates roll back, and a previously completed mate is retained unless the partial candidate proves an equal or stronger winning mate. When no iteration has completed, any fully resolved root child may provide a legal fallback for those non-time stops. Completed primary iterations retain the best root move and its searched child reply as the two-move principal-variation prefix returned for UCI pondering.
+Depth, node, and time limits are checked at safe search boundaries. Hard time limits return the last completed primary iteration. Node limits and explicit kills may use a fully resolved root candidate from the interrupted iteration when it satisfies the result-selection rules in [search-design.md](../architecture/search-design.md); otherwise they return the completed result. A partial result does not advance the reported completed depth.
 
-Kill stops new work and completes only after outstanding responses have been invalidated or can no longer change the active operation. A killed search applies the same exact-partial-or-completed-fallback policy before snapshotting the result and retiring.
+Completed primary iterations retain the best root move and its searched child reply as a two-move principal-variation prefix for UCI pondering.
 
-Node and time budget comparisons are registered before stopping the scheduler. A reached budget is observed one clock later; node-limited search can therefore commit at most one additional node beyond its requested count.
+Kill stops new work and completes only after outstanding responses can no longer change the active operation. A killed search selects and snapshots its result before completing.
 
-Checkmate, stalemate, the 50-move rule, and threefold repetition are terminal. Score representation and mate-distance handling follow [search-design.md](../architecture/search-design.md).
+Node-limited search can commit at most one additional node beyond its requested count.
 
 ## Configuration and Instrumentation
 

@@ -1,6 +1,6 @@
 # Board Update Pipeline (`board_update_pipeline`)
 
-The board update pipeline is a pipelined board-state transformer. It accepts a complete `FullBoard`, side data, and an operation, then outputs the transformed board and updated side data after fixed latency. It does not own long-term active board state.
+The board update pipeline is a pipelined board-state transformer. It accepts a complete `FullBoard`, side data, and an operation, then outputs the transformed board and updated side data after three pipeline stages. It does not own long-term active board state.
 
 ## Ports
 
@@ -40,7 +40,7 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 ## Pipeline
 
-The fixed three-stage pipeline decodes the operation, starts table reads, and registers complete special-move overlay masks; aligns synchronous table results while checking both kings against one shared masked board; then registers the transformed board and aligned check flags. Registering the masks keeps en passant and castling decode out of the attack-scan timing paths, while the check flags keep attack scans out of the search controller's state-update muxes.
+The pipeline returns the transformed board, incremental side data, and aligned check flags after three pipeline stages.
 
 ## Board Setup
 
@@ -50,13 +50,11 @@ The engine sets up a board through Set Tile, Set Castling Rights, Set Turn, Set 
 
 Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king safety is checked through the normal move path. Deterministic generated data supplies the piece-square, en passant, turn, and castling keys.
 
-The pipeline always maintains the cached king squares, Zobrist key, both incremental material/PST sums, and six-bit piece count. The shared tile-replacement path increments the count only for empty-to-piece changes and decrements it only for piece-to-empty changes, so ordinary captures, en passant, setup, and reversal need no board scan. Set Tile derives king squares during position setup; king moves and their reversals update the applicable square through the same tile-replacement path.
+The pipeline maintains cached king squares, the Zobrist key, both material/PST sums, and piece count for setup, moves, and reversal.
 
 ## PST Tables
 
 Both material and piece-square parameter sets are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces a ROM and material definitions for each set. Both ROMs receive the same square addresses, and their entries are sign-extended to separate `EvalScore` sums.
-
-The opening-phase score delta uses the raw ROM outputs through a scalar path. Quartus can prune the upper half of a packed-pair helper result even when simulation passes, so the synthesized ROM connectivity must be checked when changing this path.
 
 ## Move History
 

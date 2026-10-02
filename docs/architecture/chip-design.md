@@ -47,7 +47,7 @@ Raw evaluation and both incremental PST/material scores are White-relative. Sear
 
 ## Transposition Table
 
-The transposition table used to store previously computed information is required for Lazy SMP multithreading. The DE1 implementation stores the primary TT in its FPGA-side SDR SDRAM behind a vendor-neutral burst interface and uses a small direct-mapped BRAM cache. Other targets can connect a different memory controller to the same logical interface or retain the inferred-BRAM fallback.
+The transposition table shares search results between Lazy SMP threads. The DE1-SoC target uses external SDR SDRAM with an on-chip cache. Other targets may connect another memory controller through the same interface or use inferred on-chip RAM.
 
 TT lookups are more latency-sensitive than stores and receive priority when memory bandwidth conflicts. Stores are best-effort and may be dropped under pressure so publication never blocks search.
 

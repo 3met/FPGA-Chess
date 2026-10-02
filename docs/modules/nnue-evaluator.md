@@ -6,7 +6,7 @@ The NNUE evaluator produces a side-to-move-relative correction and a blended Whi
 
 Each perspective uses 768 direct piece-square features: six friendly and six opposing piece types over 64 vertically oriented squares. The Black perspective flips ranks before indexing, so both perspectives share one transformer. Kings are ordinary features; there are no king buckets or horizontal mirroring.
 
-Transformer rows contain 256 signed two-bit weights packed four per byte. Each perspective therefore has 256 accumulator lanes. Each feature addition or removal updates both perspectives together. Direct features make every legal board change incremental, including castling; null moves require no feature change.
+Each feature addition or removal updates both perspectives. All legal board changes are incremental, including castling; null moves require no feature change.
 
 ## Accumulator Updates
 
@@ -26,25 +26,13 @@ Swapping every piece color, flipping the board vertically, and flipping the turn
 
 ## Model Data
 
-Generated parameters live under `hardware/data/nnue/`:
+Generated parameters live under `hardware/data/nnue/`. Model dimensions and packing are defined in [`nnue_defs`](../../hardware/rtl/nnue/defs.sv):
 
 | File | Contents |
 | ---- | -------- |
-| `feature_transformer.hex` | Packed transformer rows. |
+| `feature_transformer.hex` | Transformer rows with signed two-bit weights packed four per byte. |
 | `accumulator_bias.hex` | Per-lane accumulator bias. |
 | `output_weights.hex` | Packed output-layer weights. |
 | `output_bias.hex` | Output bias. |
 
 The tuning and export workflow is described in [evaluation-tuning.md](../development/evaluation-tuning.md). `python hardware/scripts/generate_nnue_defaults.py` creates a legal zero-correction model for development and tests.
-
-## Parameter Memory
-
-| Parameter | Shape and Width | Logical Size |
-| --------- | --------------- | ------------ |
-| Feature transformer | `768 * 256 * 2` bits | 48 KiB |
-| Accumulator bias | `256 * 4` bits | 128 B |
-| Output weights | `8 * 512 * 3` bits | 1.5 KiB |
-| Output biases | `8 * 6` bits | 6 B |
-| Total trained parameters |  | 50,822 B (49.6 KiB) |
-
-Runtime accumulator storage is separate from trained parameter memory. Each thread has two 256-lane signed-five-bit perspectives.

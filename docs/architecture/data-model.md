@@ -144,24 +144,19 @@ The canonical internal representation is two fields:
 | `ep_file` | 3 | En passant file if available. |
 | `halfmove_clock` | 7 | Halfmove clock for the 50-move rule. |
 
-The total packed width is 284 bits.
-
 `FullBoard` does not include the fullmove number, Zobrist key, PST score, total piece count, search history, or repetition history. Those values are tracked separately when needed. King squares are derived while a position is loaded and are not separate NNUE inputs or features.
 
 ## Search, Evaluation, and Metric Types
 
 ### Search Depth
 
-| Name | Value | Description                                                |
-| ---- | ----- | ----------- |
-| `MAX_PLY_COUNT` | `64` | Supported ply-index capacity and width source for ply-indexed structures. |
-| `PlyIndex` | `log2(MAX_PLY_COUNT)` bits | Search ply index.                                          |
+`PlyIndex` identifies a search ply. Engine profiles select the allocated stack depth; shared type capacities are defined in `chess_defs`.
 
 ### Evaluation Scores
 
 `EvalScore` is a signed 16-bit value. `PstEvalPair` carries two White-relative incremental PST/material sums: positive scores are good for White and negative scores are good for Black. The NNUE pipeline blends them by piece count, then search converts the result to side-to-move point of view before adding the side-to-move-relative NNUE correction.
 
-`PstScore` is the signed 10-bit ROM-entry type used by the generated piece-square tables. Board update sign-extends entries to `EvalScore` before applying incremental deltas.
+`PstScore` is the signed 10-bit ROM-entry type used by the generated piece-square tables. Board update maintains the incremental sums as `EvalScore` values.
 
 | Name | Value | Description |
 | ---- | ----- | ----------- |
@@ -180,25 +175,16 @@ Material values are available in two forms:
 | ----- | ---- | -------------------- |
 | `PIECE_VALS_128` | 1/128 pawn | Generated canonical material values indexed by piece type. |
 
-### Time and Node Counts
+### Time, Nodes, Hashes, and Threads
 
-| Name              | Value     | Description                                                                                                     |
-| ----------------- | --------- | --------------------------------------------------------------------------------------------------------------- |
-| `TIME_BITS`       | `24`      | Number of bits used to store milliseconds. Maximum representable duration is `16,777,215 ms`, about 4.66 hours. |
-| `TimeType`        | `24` bits | Time value in milliseconds.                                                                                     |
-| `NODE_COUNT_BITS` | `40`      | Number of bits used to count searched nodes.                                                                    |
-| `NodeCountType`   | `40` bits | Node count value.                                                                                               |
+| Type | Meaning |
+| ---- | ------- |
+| `TimeType` | Unsigned time in milliseconds; wire width is defined in [binary-encoding.md](../protocols/binary-encoding.md). |
+| `NodeCountType` | Unsigned search or perft node count. |
+| `ZobristKey` | Full 64-bit position key. |
+| `ThreadID` | Search-thread routing identity. |
 
-### Hashes and Threads
-
-| Name               | Value                         | Description                                                                                             |
-| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `ZobristKey`       | `64` bits                     | Zobrist-style position key.                                                                             |
-| `THREAD_COUNT`     | `16`                          | Supported thread-ID capacity and width source. |
-| `SEARCH_THREAD_COUNT` | Controller parameter       | Number of active search contexts in a controller instance. |
-| `SEARCH_STACK_DEPTH` | Controller parameter       | Number of plies allocated in a controller instance. |
-| `THREAD_ID_BITS`   | `max(1, clog2(THREAD_COUNT))` | Width of `ThreadID`. Kept at least 1 bit even when `THREAD_COUNT` is 1.                                 |
-| `ThreadID`         | `THREAD_ID_BITS` bits         | Hardware search thread identifier.                                                                      |
+Engine profiles select the active thread count and stack depth within the shared type capacities. Derived widths and capacity constants belong to `chess_defs`.
 
 ## Directions
 

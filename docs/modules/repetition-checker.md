@@ -17,9 +17,9 @@ Only positions with the same side-to-move parity can repeat. Active history is p
 
 Before search begins, the checker builds a compact static table from the reversible portion of active-game history. Each entry contains a full key and a count saturated at two.
 
-The table uses a programmable hash seed. If two distinct active-history keys collide, initialization retries with another seed. If no seed can represent the history, the checker scans full keys in the existing active-history RAM instead, so a legal history cannot fail initialization because of hash collisions. This path queues one request per search thread, reads only matching side-to-move parity, and combines the result with the normal line-history count.
+If hash collisions prevent building the table, the checker scans active-history keys instead; hash collisions cannot change repetition results or prevent legal history from being searched.
 
-The per-thread line history is banked by ply so all prior same-parity positions for one request can be read in parallel. Stale data need not be cleared because the request ply and reversible boundary mask entries that are not part of the active line.
+Line-history lookup considers only entries in the active line and reversible range, so stale storage does not affect results.
 
 ## Request and Response
 

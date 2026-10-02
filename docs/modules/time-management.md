@@ -22,4 +22,4 @@ The time-management module is a direct child of `search_controller`. It counts e
 | Output | `base_ms`, `soft_ms`, `next_depth_ms`, `hard_ms` | Various | Registered search deadlines. |
 | Output | `elapsed_ms` | `TIME_BITS` | Saturating elapsed time in milliseconds. |
 
-`TIME_BITS = 24` limits representable elapsed time to `16,777,215 ms`, about 4.66 hours. A single iterative restoring divider is private to this module. It is intentionally shared by all allocation steps because division occurs only during setup or between completed depths, and the moves-to-go divisor is runtime-variable.
+Budget arithmetic is shared across allocation operations to minimize area. Type definitions are described in [data-model.md](../architecture/data-model.md).

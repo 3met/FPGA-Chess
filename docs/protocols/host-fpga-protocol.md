@@ -2,7 +2,7 @@
 
 The host communicates with the FPGA as a single in-order byte stream. The host is responsible for UCI parsing, chess legality of incoming position and move commands, command serialization, and avoiding FIFO overflow.
 
-The FPGA command protocol uses a command byte followed by an implicit fixed-size payload determined by the command. There is no request ID, payload length field, or checksum. This keeps RTL parsing small and deterministic; the host must not issue a second synchronous command until the previous command completes or is canceled with Kill.
+Each command has an opcode and a fixed-size payload. Packets contain no request ID, payload length, or checksum. The host must serialize synchronous commands until completion or cancellation with Kill.
 
 ## UART Configuration
 
@@ -24,7 +24,7 @@ The engine asserts `ready` when it can accept the next command byte. During fixe
 
 The host should send no normal command while the engine is searching. The expected mid-search communication is the in-band Kill command, UART BREAK for remote reset, or output-flow control.
 
-The Python host validates an entire UCI `position` command before changing hardware state. It caches the synchronized base position and move history, skips identical commands, and sends only appended moves when the requested history extends the cached history. Before a full or incremental update it marks the position unsynchronized and restores that state only after every acknowledged operation succeeds.
+The host validates an entire UCI position command before changing hardware state. Position synchronization is complete only after all required operations are acknowledged.
 
 Kill stops an active search and produces one Status response after the controller retires. A Kill byte received while no search is active is ignored without a response; this prevents a late or repeated UCI `stop` from leaving a stale packet ahead of the next synchronous response.
 
@@ -61,8 +61,6 @@ UART BREAK, defined as RX held low for at least 20 bit times, is the out-of-band
 The host must leave RX high for at least two bit times after BREAK before transmitting another byte and must wait for board memory to initialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream because the same values may appear inside payloads.
 
 Every Python host connection clears queued output, sends BREAK, waits for board initialization, verifies idle status, and starts a new game. A failed reset sequence is retried as a complete unit.
-
-The serial transport queues each command with `write()` and then waits for its response; it does not separately flush the operating-system transmit queue. `debug latency [count]` measures end-to-end Get Status transaction time on connected hardware.
 
 Because packets have no request ID, length field, or checksum, a timeout, partial response, malformed response, or response of the wrong type makes the byte-stream position unknowable. The host marks that connection unusable, closes it, and requires the next connection to complete the BREAK sequence before sending normal commands. It never retries an ambiguous command in place. Repeated UCI `stop` commands produce at most one in-band Kill byte for a search.
 

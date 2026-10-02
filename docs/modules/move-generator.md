@@ -22,7 +22,7 @@ An attempted direct move is suppressed from later generation only after successf
 
 ## Generation
 
-Generation is destination-centric and visits central squares before moving outward. Each class lane selects relevant destination squares, captures the ray and knight context from a registered scan address, then derives an exact source mask from those registered tiles. Source expansion constructs moves from that mask without repeating geometry checks. The next destination address is prefetched during source preparation, allowing its context to replace the current context as the final source enters writeback; board lookup and source eligibility remain in separate timing stages without a second context bank. Empty or unproductive destinations are skipped without producing a move. Promotions are generated in queen, knight, rook, bishop order.
+Generation visits central destinations first. Noisy and quiet lanes produce candidates independently; promotions are generated in queen, knight, rook, bishop order.
 
 Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 
@@ -43,9 +43,9 @@ Candidates are divided into eight global-priority buckets:
 | 1 | Unfavorable captures of rooks or queens. |
 | 0 | Other unfavorable captures. |
 
-Capture classification uses a bounded visible static-exchange approximation. Quiet ordering uses one signed history RAM indexed by a wiring-only XOR-fold hash of `{thread, color, origin, destination}`; collisions are intentionally untagged. The engine profile configures the power-of-two entry count and signed entry width, with 8,192 eight-bit entries by default. Beta cutoffs update the successful quiet and a small number of earlier failed quiets with depth-scaled gravity updates whose limit and arithmetic widths derive from the entry width.
+Capture classification uses a bounded static-exchange approximation. Quiet ordering uses shared history scores updated by quiet beta-cutoff moves and earlier failed quiets. Storage is configured by the engine profile and update policy by the search profile.
 
-History lookups have unconditional priority over the update pipeline's read port. Incoming updates are best-effort: an update presented while the pipeline is occupied is dropped, an update read waits behind lookups, and a write colliding with a lookup is dropped so generation never stalls or observes ambiguous read-during-write data.
+History lookups take priority over best-effort updates, so history maintenance does not stall generation.
 
 Move memory tracks each node's progress through good noisy, quiet, and bad noisy buckets. Noisy generation enables buckets 7–6. After they are exhausted, search may stop or generate quiet moves in buckets 5–2; exhausting quiet moves enables buckets 1–0. Search issues `pop(thread, ply)` without supplying bucket state, and each pop consumes the returned move even if later legality checks reject it.
 
@@ -53,7 +53,7 @@ Only the encoded `Move` is stored. Ordering within a bucket is deterministic FIF
 
 ## Bucket Storage
 
-Each thread has its own move RAM and pointer stack. Fixed unequal bucket partitions derive from the per-device `move_memory.entries_per_thread` and `move_memory.bucket_ratios_descending` settings. Defaults are 2,048 entries per thread and ratios 32/64/32/64/64/192/16/48 for buckets 7 through 0. Ratios must be positive, their sum must divide the memory size, and every resulting partition must fit its pointer type; invalid settings fail build validation and synthesis elaboration.
+Each thread has separate move storage and a per-ply pointer stack. Engine profiles configure storage capacity and bucket partitions; invalid partitions are rejected during build validation and elaboration.
 
 Each pointer-stack entry records the FIFO bounds and bucket progress for one ply. A child begins at its parent's write tails, preventing it from reading or overwriting unsearched ancestor moves. Restoring a parent restores its unread moves, while later siblings may reuse descendant storage.
 
@@ -62,7 +62,5 @@ A write beyond its bucket partition sets a sticky overflow error bit but is not 
 ## Lifecycle and Instrumentation
 
 Move RAM and pointer-stack contents need not be cleared because node initialization defines the live range. Reset and New Game clear quiet-history state; Kill and New Game cancel active generation and pop work.
-
-Generator ownership of each thread's cached node is registered alongside cache changes and generation starts, keeping ply comparisons out of FIFO selection and pointer-stack write-data paths without delaying writes or pops.
 
 Optional counters expose generation work, history lookups, bucket traffic, high-water marks, and overflow information without affecting search semantics.

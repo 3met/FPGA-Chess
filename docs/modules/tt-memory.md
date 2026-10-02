@@ -37,9 +37,7 @@ Each clock domain has its own reset. The subsystem does not report memory ready 
 
 Lookups take priority over queued stores. One lookup probe or miss may be buffered independently from the external-memory state machine. Stores are buffered and consumed only when no lookup is waiting; a full store queue drops new publications while still accepting them from search.
 
-On a cache miss, the frontend reads the existing external entry before responding to a lookup or deciding whether a store may replace it. A replacement write is held separately after the store read, allowing a waiting lookup miss to use external memory before the low-priority write. Accepted replacements update the cache and external memory. The cache is therefore a write-through performance layer, not an independent source of TT state.
-
-Each direct-mapped cache line stores entry data, the complete external-index tag, and validity. Lookup and store probes are arbitrated through the cache without changing the logical TT semantics.
+On a cache miss, the frontend reads the external entry before responding or applying replacement policy. Accepted replacements update both cache and external memory; waiting lookups take priority over replacement writes.
 
 ## Clearing
 
