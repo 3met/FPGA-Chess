@@ -346,6 +346,8 @@ module search_controller #(
 `endif
     // Position and stack state owned by each search context.
     Move search_pending_move[0:SEARCH_THREAD_COUNT-1];
+    // Preserve ordering evidence when a popped move waits for board issue.
+    MoveBucketIndex search_pending_move_bucket[0:SEARCH_THREAD_COUNT-1];
     FullBoard search_board[0:SEARCH_THREAD_COUNT-1];
     // Cache the side-to-move check status with each board so move dispatch does
     // not put the round-robin board mux in front of the full attack scan.
@@ -633,6 +635,7 @@ module search_controller #(
     logic move_board_bypass_valid;
     ThreadID move_board_bypass_thread;
     Move move_board_bypass_move;
+    MoveBucketIndex search_board_issue_bucket;
     MoveFollowupAction move_followup_action;
     ThreadID move_followup_thread;
     logic move_followup_uses_move;
@@ -1581,7 +1584,28 @@ module search_controller #(
         end
     endgenerate
 
-    function automatic SearchDepth lmr_child_depth(input ThreadID thread);
+    // Apply bucket confidence before the depth clamp, with a carry bit for +1.
+    function automatic SearchDepth lmr_bucket_reduction(
+        input SearchDepth base_reduction,
+        input SearchDepth depth,
+        input MoveBucketIndex bucket
+    );
+        automatic logic [SEARCH_DEPTH_BITS:0] adjusted = {1'b0, base_reduction};
+        case (bucket)
+            GOOD_NOISY_HIGH_BUCKET, GOOD_NOISY_LOW_BUCKET, QUIET_HIGHEST_BUCKET:
+                if (adjusted != 0) adjusted = adjusted - 1'b1;
+            QUIET_LOW_BUCKET: adjusted = adjusted + 1'b1;
+            default: begin end
+        endcase
+        if (depth == SearchDepth'(0)) return SearchDepth'(0);
+        if (adjusted >= {1'b0, depth}) return depth - SearchDepth'(1);
+        return SearchDepth'(adjusted);
+    endfunction : lmr_bucket_reduction
+
+    function automatic SearchDepth lmr_child_depth(
+        input ThreadID thread,
+        input MoveBucketIndex bucket
+    );
         automatic SearchDepth depth;
         automatic logic [7:0] move_index;
         automatic SearchDepth reduction;
@@ -1591,12 +1615,11 @@ module search_controller #(
             ? 8'hff : search_stack_top[thread].legal_move_count + 8'd1;
         depth_bucket = floor_log2_8(depth);
         reduction = lmr_reduction(depth_bucket, floor_log2_8(move_index));
-        if (reduction >= depth) reduction = depth - SearchDepth'(1);
+        reduction = lmr_bucket_reduction(reduction, depth, bucket);
         return depth - SearchDepth'(1) - reduction;
     endfunction : lmr_child_depth
 
-    // LMR deliberately has no tactical move classification: every main-search
-    // move follows the same eligibility policy.
+    // Bucket confidence changes reduction size, not main-search eligibility.
     function automatic logic lmr_eligible(
         input PlyIndex ply,
         input SearchDepth remaining_depth,
@@ -1890,6 +1913,7 @@ module search_controller #(
         search_root_has_completed_move[thread_index] <= 1'b0;
         search_root_best_exact[thread_index] <= 1'b0;
         search_pending_move[thread_index] <= NULL_MOVE;
+        search_pending_move_bucket[thread_index] <= QUIET_MEDIUM_BUCKET;
         search_return_score[thread_index] <= EvalScore'(0);
         search_return_valid[thread_index] <= 1'b0;
         search_return_was_scout[thread_index] <= 1'b0;
@@ -2190,6 +2214,12 @@ module search_controller #(
             ? move_board_bypass_thread
             : |search_board_mask
             ? search_board_work_thread : search_null_issue_thread;
+        // Forward live pop metadata on immediate issue; pending registers update
+        // on the same edge and still describe the previous candidate here.
+        search_board_issue_bucket = move_board_bypass_valid
+            ? (move_pop_resp_valid && move_pop_resp_found
+                ? move_pop_resp_bucket : QUIET_MEDIUM_BUCKET)
+            : search_pending_move_bucket[search_board_issue_thread];
         // Derive the operation kind from the selected source so this remains
         // correct if the null-request valid qualification is later refactored.
         search_board_issue_is_null = !move_board_bypass_valid
@@ -2761,6 +2791,7 @@ module search_controller #(
                 search_tt_history_required[tid] <= 1'b0;
                 search_tt_response[tid] <= TTLookupResponse'('0);
                 search_pending_move[tid] <= NULL_MOVE;
+                search_pending_move_bucket[tid] <= QUIET_MEDIUM_BUCKET;
                 search_board[tid] <= FullBoard'('0);
                 search_board_in_check[tid] <= 1'b0;
                 search_zobrist_key[tid] <= ZobristKey'(0);
@@ -3444,6 +3475,7 @@ module search_controller #(
                         search_root_has_completed_move[tid] <= 1'b0;
                         search_root_best_exact[tid] <= 1'b0;
                         search_pending_move[tid] <= NULL_MOVE;
+                        search_pending_move_bucket[tid] <= QUIET_MEDIUM_BUCKET;
                         search_return_score[tid] <= EvalScore'(0);
                         search_return_valid[tid] <= 1'b0;
                         search_return_was_scout[tid] <= 1'b0;
@@ -4394,6 +4426,7 @@ module search_controller #(
                                 search_stack_top[move_thread_id].direct_attempted <= 1'b1;
                                 search_stack_top[move_thread_id].tt_move <= move_cmd_resp_direct_move;
                                 search_pending_move[move_thread_id] <= move_cmd_resp_direct_move;
+                                search_pending_move_bucket[move_thread_id] <= QUIET_MEDIUM_BUCKET;
                                 search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
                                 search_tt_validation_pending[move_thread_id] <= 1'b0;
@@ -4410,6 +4443,7 @@ module search_controller #(
                                     && move_followup_thread == move_thread_id;
                             if (move_pop_resp_found) begin
                                 search_pending_move[move_thread_id] <= move_pop_resp_move;
+                                search_pending_move_bucket[move_thread_id] <= move_pop_resp_bucket;
                                 search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
                                 case (search_stack_top[move_thread_id].move_order_state)
@@ -4989,11 +5023,11 @@ module search_controller #(
                                         search_stack_top[search_board_issue_thread].remaining_depth,
                                         search_stack_top[search_board_issue_thread].legal_move_count,
                                         search_pvs_research[search_board_issue_thread])) begin
-                                    search_pending_child_depth[search_board_issue_thread] <= lmr_child_depth(search_board_issue_thread);
+                                    search_pending_child_depth[search_board_issue_thread] <= lmr_child_depth(search_board_issue_thread, search_board_issue_bucket);
 `ifndef SYNTHESIS
                                     assert (floor_log2_8(8'(search_stack_top[search_board_issue_thread].remaining_depth))
                                             < LMR_DEPTH_BUCKETS);
-                                    assert (lmr_child_depth(search_board_issue_thread)
+                                    assert (lmr_child_depth(search_board_issue_thread, search_board_issue_bucket)
                                             < search_stack_top[search_board_issue_thread].remaining_depth);
 `endif
                                 end else begin

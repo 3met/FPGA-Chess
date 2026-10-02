@@ -97,6 +97,8 @@ module tb_search_controller #(
     bit nnue_null_state_correct = 1'b1;
     int nnue_root_rebuild_count[0:THREAD_COUNT-1];
     int nnue_castle_request_count[0:THREAD_COUNT-1];
+    bit lmr_bucket_check_pending[0:THREAD_COUNT-1];
+    move_generator_defs::MoveBucketIndex lmr_expected_bucket[0:THREAD_COUNT-1];
     bit lmr_depth_check_pending[0:THREAD_COUNT-1];
     bit lmr_recovery_check_pending[0:THREAD_COUNT-1];
     bit lmr_full_tt_pending[0:THREAD_COUNT-1];
@@ -1313,6 +1315,23 @@ module tb_search_controller #(
             "LMR move/depth bucket upper boundaries");
         check(dut.floor_log2_8(8'd127) == 3'd6 && dut.floor_log2_8(8'd128) == 3'd7,
             "LMR 8-bit saturation bucket boundary");
+        // Exercise bucket confidence independently of the configured base curve.
+        for (int bucket = 0; bucket < move_generator_defs::MOVE_BUCKET_COUNT; bucket++) begin
+            automatic int expected = bucket >= 5 ? 1 : bucket == 2 ? 3 : 2;
+            check(dut.lmr_bucket_reduction(8'(2), 8'(6),
+                    move_generator_defs::MoveBucketIndex'(bucket)) == 8'(expected),
+                $sformatf("LMR confidence adjustment for bucket %0d", bucket));
+            check(dut.lmr_bucket_reduction(8'(0), 8'(6),
+                    move_generator_defs::MoveBucketIndex'(bucket))
+                    == 8'(bucket == 2 ? 1 : 0),
+                $sformatf("LMR zero reduction cannot underflow for bucket %0d", bucket));
+        end
+        check(dut.lmr_bucket_reduction(8'(3), 8'(3),
+                move_generator_defs::QUIET_HIGHEST_BUCKET) == 8'(2),
+            "LMR applies confidence before clamping to remaining depth");
+        check(dut.lmr_bucket_reduction(8'((1 << dut.SEARCH_DEPTH_BITS) - 1), 8'(6),
+                move_generator_defs::QUIET_LOW_BUCKET) == 8'(5),
+            "LMR increment carries before depth clamp without wrapping");
         dut.search_completed_depth = 5'd2;
         dut.previous_depth_best_move = make_move(Position'(8), Position'(16), PROMO_QUEEN);
         dut.previous_depth_score = EvalScore'(100);
@@ -1452,7 +1471,7 @@ module tb_search_controller #(
         release dut.search_stack_top[0].remaining_depth;
         force dut.search_stack_top[0].remaining_depth = 5'd3;
         force dut.search_stack_top[0].legal_move_count = 8'hff;
-        check(dut.lmr_child_depth(ThreadID'(0)) <= 8'd2, "LMR clamps reduction to d-1 at saturated move count");
+        check(dut.lmr_child_depth(ThreadID'(0), move_generator_defs::QUIET_MEDIUM_BUCKET) <= 8'd2, "LMR clamps reduction to d-1 at saturated move count");
         release dut.search_stack_top[0].remaining_depth;
         release dut.search_stack_top[0].legal_move_count;
         for (int depth_bucket = 0; depth_bucket < dut.LMR_DEPTH_BUCKETS; depth_bucket++) begin
@@ -1492,8 +1511,24 @@ module tb_search_controller #(
         new_game();
         setup_kings_only();
         run_perft(8'd1, NodeCountType'(5), "kings-only perft depth 1");
-        run_search_depth(8'd4, "kings-only LMR search depth 4");
-        check(null_push_seen, "depth-4 scout search issued a null move");
+        // Choose enough depth for a weak quiet's reduced child to remain in
+        // main search, where TT depth propagation can actually be observed.
+        begin
+            automatic int parent_depth = dut.LMR_MINIMUM_DEPTH;
+            automatic int move_number = dut.LMR_MINIMUM_MOVE_NUMBER;
+            automatic int reduction;
+            if (move_number < 2) move_number = 2;
+            while (parent_depth < SEARCH_STACK_DEPTH - 1) begin
+                reduction = int'(dut.lmr_bucket_reduction(
+                    dut.lmr_reduction(dut.floor_log2_8(8'(parent_depth)),
+                        dut.floor_log2_8(8'(move_number))),
+                    8'(parent_depth), move_generator_defs::QUIET_LOW_BUCKET));
+                if (reduction > 0 && parent_depth - 1 - reduction > 0) break;
+                parent_depth++;
+            end
+            run_search_depth(8'(parent_depth + 1), "kings-only LMR and TT depth search");
+        end
+        check(null_push_seen, "LMR scout search issued a null move");
         check(null_reverse_seen, "null child was reversed through board history");
         check(lmr_reduced_issue_seen, "LMR controller reduces an eligible third-or-later move");
         check(lmr_recovery_issue_seen, "LMR alpha-raising scout is issued again at full depth");
@@ -1679,6 +1714,23 @@ module tb_search_controller #(
 
     // Observe actual handshakes: no forced responses or bypassed generators.
     always @(posedge clk) begin
+        // Check the prior pop's metadata after its pending register has updated.
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            if (rst_n && lmr_bucket_check_pending[tid]) begin
+                assert (dut.search_pending_move_bucket[tid] == lmr_expected_bucket[tid])
+                    else $fatal(1, "LMR pending move lost its bucket tag");
+            end
+            lmr_bucket_check_pending[tid] = 1'b0;
+        end
+        if (rst_n && dut.state == dut.ST_SEARCH_RUN && !dut.search_stop_requested()
+                && dut.move_pop_resp_valid && dut.move_pop_resp_found) begin
+            lmr_bucket_check_pending[dut.move_pop_resp_thread] = 1'b1;
+            lmr_expected_bucket[dut.move_pop_resp_thread] = dut.move_pop_resp_bucket;
+            if (dut.search_board_issue_valid && dut.move_board_bypass_valid) begin
+                assert (dut.search_board_issue_bucket == dut.move_pop_resp_bucket)
+                    else $fatal(1, "LMR immediate board issue used a stale bucket tag");
+            end
+        end
         if (direct_reject_followup_check_pending) begin
             check(dut.search_generation_inflight[direct_reject_followup_thread],
                 "direct rejection preserves noisy generation tracking");
@@ -2161,7 +2213,7 @@ module tb_search_controller #(
                         dut.search_stack_top[lmr_tid].legal_move_count,
                         dut.search_pvs_research[lmr_tid])) begin
                     lmr_reduced_issue_seen = 1'b1;
-                    lmr_expected_child_depth[lmr_tid] = 8'(dut.lmr_child_depth(dut.search_board_issue_thread));
+                    lmr_expected_child_depth[lmr_tid] = 8'(dut.lmr_child_depth(dut.search_board_issue_thread, dut.search_board_issue_bucket));
                     lmr_depth_check_pending[lmr_tid] = 1'b1;
                 end
             end
