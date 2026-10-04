@@ -807,7 +807,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(float(first["SPRT_ALPHA"]), 0.1)
             self.assertEqual(first["SPRT_BETA"], "0.02")
             self.assertNotIn("SPRT_ELO0", validation)
-            self.assertEqual(validation["OPENING_START"], "501")
+            self.assertEqual(validation["OPENING_START"], first["OPENING_START"])
 
     def test_h0_is_stored_as_a_conservative_censored_observation(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "work") as temp:

@@ -775,10 +775,8 @@ class Runner:
             )
         with book.open(encoding="utf-8", errors="replace") as handle:
             available_openings = sum(1 for line in handle if line.strip())
-        required_openings = (
-            self.config["opening_start"] - 1
-            + self.config["paired_openings"] * (1 + self.config["validation"]["maximum_blocks"])
-        )
+        # Every trial reuses one fixed opening block for directly comparable results.
+        required_openings = self.config["opening_start"] - 1 + self.config["paired_openings"]
         if required_openings > available_openings:
             raise TuningError(
                 f"opening book has {available_openings} positions but validation may require "
@@ -881,9 +879,9 @@ class Runner:
         return tournament.resolve() if tournament.is_dir() else None
 
     def _sprt_environment(self, state: dict, repeat: int) -> dict[str, str]:
-        """Return dynamic absolute-Elo bounds for an ordinary challenger."""
+        """Return dynamic Elo bounds while keeping every repeat on the same openings."""
         environment = os.environ.copy()
-        environment["OPENING_START"] = str(self.config["opening_start"] + repeat * self.config["paired_openings"])
+        environment["OPENING_START"] = str(self.config["opening_start"])
         early = self.config["early_stopping"]
         if (
             early["enabled"]

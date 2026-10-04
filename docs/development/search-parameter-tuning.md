@@ -30,6 +30,6 @@ The tuner leaves the tracked search and engine profiles unchanged. Interrupted b
 
 ## Evaluation
 
-Candidate selection accounts for noisy Elo estimates. Promising candidates are validated against the baseline on matched openings; `best.json` changes only when the configured promotion criterion is met. Validation games are separate from exploration trials.
+Candidate selection accounts for noisy Elo estimates. Every tournament uses the same shuffled opening block, and promising candidates are validated against the baseline on those matched openings; `best.json` changes only when the configured promotion criterion is met. Validation games are separate from exploration trials.
 
 The `early_stopping` setting can reject inferior exploration candidates before a full match. Validation matches run to their configured length. Synthesis failures and tournaments exceeding the configured runtime-failure limit are excluded from playing-strength estimates. Repeated synthesis rejection stops the run at the configured limit.
