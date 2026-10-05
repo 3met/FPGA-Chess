@@ -7,6 +7,7 @@ module reset_release #(
     output logic reset_n
 );
 
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic [SYNC_STAGES-1:0] release_pipe = '0;
 
     initial begin
@@ -53,7 +54,9 @@ module pll_startup_controller #(
     PllStartupState state = PLL_HOLD_RESET;
     logic [DELAY_BITS-1:0] delay_lfsr = DELAY_SEED;
     logic [DELAY_BITS-1:0] delay_lfsr_next;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic pll_locked_meta = 1'b0;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic pll_locked_sync = 1'b0;
     logic delay_done;
 

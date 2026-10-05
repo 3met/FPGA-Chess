@@ -20,10 +20,10 @@ The number of search threads and search stack depth are build parameters. Perft,
 | Board update pipeline      | Applies push move, commit move, reverse move, and board setup operations.                                                                   |
 | Move generation pipeline   | Produces ordered pseudo-legal candidates for later king-safety validation.                                                                  |
 | NNUE evaluator             | Maintains per-thread incremental accumulators and computes a learned evaluation correction.                                               |
-| TT lookup pipeline         | Performs transposition-table lookup requests against external RAM and any internal cache.                                                   |
-| TT store pipeline          | Performs transposition-table writes; stores may be stalled or deprioritized when memory bandwidth is needed by lookups.                     |
+| TT lookup pipeline         | Probes the two engine-clock cache banks and queues complete external-entry reads on misses.                                                |
+| TT store pipeline          | Selects replacements through one shared datapath and publishes best-effort single-way writes.                                              |
 | External RAM interface     | Provides storage for the transposition table through a vendor-neutral wrapper around the selected SDRAM, DDR, or board memory interface.    |
-| FPGA platform wrappers     | Isolate vendor-specific RAM, ROM, PLL, FIFO, UART, and external-memory IP so Intel/Altera and Xilinx builds can share the same logical RTL. |
+| FPGA platform wrappers     | Isolate device clocks, pins, constraints, and memory connections while Intel/Altera and Xilinx flows share portable inferred RTL.            |
 
 ## Search Pipelines
 
@@ -47,7 +47,7 @@ Raw evaluation and both incremental PST/material scores are White-relative. Sear
 
 ## Transposition Table
 
-The transposition table shares search results between Lazy SMP threads. The DE1-SoC target uses external SDR SDRAM with an on-chip cache. Other targets may connect another memory controller through the same interface or use inferred on-chip RAM.
+The transposition table shares search results between Lazy SMP threads. The DE1-SoC target uses external SDR SDRAM with an on-chip cache. Other targets may connect another memory controller through the same interface with a burst-memory model used for simulation.
 
 TT lookups are more latency-sensitive than stores and receive priority when memory bandwidth conflicts. Stores are best-effort and may be dropped under pressure so publication never blocks search.
 

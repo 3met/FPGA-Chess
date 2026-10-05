@@ -48,8 +48,8 @@ module unsigned_iterative_divider #(
             end else if (busy) begin
                 automatic logic [WIDTH:0] shifted_remainder;
                 shifted_remainder = {remainder, dividend[WIDTH-1]};
-                dividend <= {dividend[WIDTH-2:0], 1'b0};
-                quotient <= {quotient[WIDTH-2:0], 1'b0};
+                dividend <= dividend << 1;
+                quotient <= quotient << 1;
                 if (shifted_remainder >= {1'b0, divisor}) begin
                     remainder <= WIDTH'(shifted_remainder - {1'b0, divisor});
                     quotient[0] <= 1'b1;

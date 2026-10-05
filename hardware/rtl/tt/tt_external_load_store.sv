@@ -1,20 +1,19 @@
-// Portable cached TT frontend for a 16-bit burst-memory backend.
-
+// Engine-domain two-bank cache, outstanding metadata, and complete-entry assembly.
 import chess_defs::*;
 import tt_defs::*;
-
 module tt_external_load_store #(
     parameter int CACHE_INDEX_BITS = 10,
     parameter int TAG_BITS = TT_DEFAULT_TAG_BITS,
-    parameter int ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT
-        / ((TAG_BITS + TT_ENTRY_PAYLOAD_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS),
+    parameter int ENTRY_COUNT = 2 * (TT_EXTERNAL_WORD_COUNT
+        / (TT_WAYS*((TAG_BITS+TT_ENTRY_PAYLOAD_BITS+TT_WORD_BITS-1)/TT_WORD_BITS)) / 2),
     parameter int STORE_FIFO_DEPTH = 256,
+    parameter int OUTSTANDING_DEPTH = 8,
+    parameter int RESPONSE_FIFO_DEPTH = 64,
+    parameter int WRITEBACK_FIFO_DEPTH = 8,
     parameter int unsigned STALE_DEPTH_TOLERANCE = 4
 ) (
-    input logic clk,
-    input logic rst_n,
-    input logic memory_ready,
-    input logic memory_error,
+    input logic clk, rst_n, memory_clk, memory_rst_n,
+    input logic memory_ready, memory_error,
     input logic clear,
     output logic clear_busy,
     input logic lookup_req_valid,
@@ -22,459 +21,394 @@ module tt_external_load_store #(
     input TTLookupRequest lookup_req,
     output logic lookup_resp_valid,
     output TTLookupResponse lookup_resp,
-    output logic cache_access,
-    output logic cache_hit,
-    output logic cache_access_is_store,
+    output logic cache_access, cache_hit, cache_store_access, cache_store_hit,
     input logic store_req_valid,
     output logic store_req_ready,
     input TTStoreRequest store_req,
+    // The search arbiter uses this hint to select a probe in the other bank.
+    output logic store_bank_valid, store_bank,
     output logic mem_req_valid,
     input logic mem_req_ready,
     output logic mem_req_write,
     output TTWordAddress mem_req_address,
-    output logic [3:0] mem_req_length,
+    output TTBurstLength mem_req_length,
     output logic mem_write_valid,
     input logic mem_write_ready,
-    output logic [15:0] mem_write_data,
+    output logic [TT_WORD_BITS-1:0] mem_write_data,
     output logic mem_write_last,
     input logic mem_read_valid,
     output logic mem_read_ready,
-    input logic [15:0] mem_read_data,
+    input logic [TT_WORD_BITS-1:0] mem_read_data,
     input logic mem_read_last,
     input logic mem_done_valid,
     output logic mem_done_ready,
     input logic mem_done_error
 );
-
-    localparam int CACHE_COUNT = 1 << CACHE_INDEX_BITS;
-    localparam int ENTRY_INDEX_BITS = $clog2(ENTRY_COUNT);
-    localparam int SELECTOR_BITS = $bits(ZobristKey) - TAG_BITS;
-    localparam int HASH_ENTROPY_BITS = SELECTOR_BITS < TT_HASH_BITS
-        ? SELECTOR_BITS : TT_HASH_BITS;
-    localparam int COMPACT_ENTRY_BITS = TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
-    localparam int PHYSICAL_ENTRY_BITS =
-        ((COMPACT_ENTRY_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS) * TT_WORD_BITS;
-    localparam int WORDS_PER_ENTRY = PHYSICAL_ENTRY_BITS / TT_WORD_BITS;
-    localparam int WORD_COUNT_BITS = $clog2(WORDS_PER_ENTRY);
+    localparam int BANK_INDEX_BITS = CACHE_INDEX_BITS-1;
+    localparam int BANK_COUNT = 1 << BANK_INDEX_BITS;
+    localparam int CACHE_LINE_COUNT = 1 << CACHE_INDEX_BITS;
+    localparam int CACHE_TAG_COUNT = (ENTRY_COUNT+CACHE_LINE_COUNT-1)/CACHE_LINE_COUNT;
+    localparam int CACHE_TAG_BITS = $clog2(CACHE_TAG_COUNT+1);
+    localparam int ENTRY_INDEX_BITS = $clog2(ENTRY_COUNT+1);
+    localparam int WAY_PAYLOAD_BITS = TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
+    localparam int WAY_BITS = ((WAY_PAYLOAD_BITS+TT_WORD_BITS-1)/TT_WORD_BITS)*TT_WORD_BITS;
+    localparam int WAY_WORDS = WAY_BITS/TT_WORD_BITS;
+    localparam int ENTRY_WORDS = TT_WAYS*WAY_WORDS;
+    localparam int ENTRY_BITS = TT_WAYS*WAY_BITS;
+    localparam int WORD_COUNT_BITS = $clog2(ENTRY_WORDS+1);
     typedef logic [ENTRY_INDEX_BITS-1:0] EntryIndex;
-    typedef logic [CACHE_INDEX_BITS-1:0] CacheIndex;
-    typedef logic [TAG_BITS-1:0] EntryTag;
-    typedef logic [PHYSICAL_ENTRY_BITS-1:0] PhysicalEntry;
+    typedef logic [BANK_INDEX_BITS-1:0] CacheIndex;
+    typedef logic [CACHE_TAG_BITS-1:0] CacheTag;
+    typedef logic [WAY_BITS-1:0] PhysicalWay;
+    typedef logic [ENTRY_BITS-1:0] PhysicalEntry;
     typedef struct packed {
         TTAge age;
-        TTBoundType bound_type;
         TTDepth depth;
         EvalScore score;
         TTMoveBits best_move_bits;
-        EntryTag tag;
-    } CompactEntry;
-    typedef logic [$clog2(STORE_FIFO_DEPTH + 1)-1:0] StoreFifoCount;
-    typedef struct packed {
-        logic valid;
-        EntryIndex tag;
-        PhysicalEntry data;
-    } CacheLine;
-
-    typedef enum logic [3:0] {
-        S_IDLE, S_READ_REQ, S_READ_DATA, S_WRITE_REQ, S_WRITE_DATA, S_WRITE_DONE,
-        S_CLEAR_REQ, S_CLEAR_DATA, S_CLEAR_DONE, S_CACHE_CLEAR, S_CACHE_READ,
-        S_READ_DONE
-    } State;
-
+        logic [TAG_BITS-1:0] tag;
+        TTBoundType bound_type;
+    } Way;
+    typedef logic [TT_WAYS*$bits(Way)-1:0] CacheEntry;
+    typedef struct packed { CacheTag tag; CacheEntry data; } CacheLine;
+    typedef struct packed { TTLookupRequest req; EntryIndex index; } ProbeTarget;
+    typedef struct packed { TTStoreRequest req; EntryIndex index; } StoreTarget;
+    typedef enum logic [1:0] { S_IDLE, S_DRAIN, S_CLEAR_WAIT, S_CACHE_CLEAR } State;
     State state;
-    logic operation_store;
-    TTLookupRequest active_lookup;
-    TTStoreRequest active_store;
-    PhysicalEntry transfer_entry;
-    PhysicalEntry write_entry;
-    logic [WORD_COUNT_BITS-1:0] word_count;
-    EntryIndex active_index;
-    EntryIndex clear_index;
-    CacheIndex cache_clear_index;
-    TTAge generation;
+    CacheIndex clear_index;
+    logic clear_toggle, clear_ack, transport_idle;
     logic clear_prev;
-    logic clear_pending;
-    EntryIndex lookup_request_index;
-    StoreFifoCount store_fifo_count;
+    logic active;
+    logic probe_pending, store_pending;
+    ProbeTarget probe_stage;
+    logic probe_buffer_valid, probe_accept;
+    TTLookupRequest probe_buffer;
+    StoreTarget store_stage;
+    CacheLine bank_read[2];
+    logic [1:0] bank_read_enable, bank_write_enable;
+    CacheIndex bank_read_index[2], bank_write_index[2];
+    CacheLine bank_write_line[2];
+    logic probe_issue, store_issue;
+    EntryIndex probe_index, store_index;
+    logic probe_line_present, probe_position_hit, store_position_hit;
+    logic probe_enqueue, store_enqueue;
+    logic probe_transport_ready, store_transport_ready;
+    logic probe_meta_ready, store_meta_ready, probe_meta_valid, store_meta_valid;
+    ProbeTarget probe_meta;
+    StoreTarget store_meta;
+    logic [$clog2(OUTSTANDING_DEPTH+1)-1:0] probe_meta_count, store_meta_count;
+    logic probe_complete, store_complete;
+    // Reuse one way comparison while retaining the full group for cache fill.
+    PhysicalWay probe_next_way;
+    logic [$clog2(WAY_WORDS+1)-1:0] probe_way_word_count;
+    logic probe_way_last, probe_returned;
+    TTLookupResponse probe_stream_response;
+    PhysicalEntry probe_entry, store_entry;
+    logic [WORD_COUNT_BITS-1:0] probe_word_count, store_word_count;
+    logic probe_word_valid, store_word_valid, probe_word_ready, store_word_ready;
+    logic [TT_WORD_BITS-1:0] probe_word, store_word;
+    logic probe_finish, store_finish;
+    logic fill_valid;
+    EntryIndex fill_index;
+    PhysicalEntry fill_entry;
+    logic fill_write;
     TTStoreRequest store_fifo_data;
-    logic store_fifo_valid;
-    logic store_fifo_push_ready;
-    logic store_accept;
-    logic store_pop;
-    logic store_stage_valid;
-    TTStoreRequest store_stage_req;
-    EntryIndex store_stage_index;
-    logic store_stage_issue;
-    logic lookup_probe_valid;
-    TTLookupRequest lookup_probe_req;
-    EntryIndex lookup_probe_index;
-    logic lookup_miss_valid;
-    TTLookupRequest lookup_miss_req;
-    EntryIndex lookup_miss_index;
-    logic store_write_pending;
-    EntryIndex store_write_index;
-    PhysicalEntry store_write_data;
-    logic backend_lookup_response;
-    logic cache_read_enable;
-    CacheIndex cache_read_index;
+    logic store_fifo_valid, store_fifo_push_ready, store_pop, store_accept;
+    logic [$clog2(STORE_FIFO_DEPTH+1)-1:0] store_fifo_count;
+    logic store_buffer_valid;
+    StoreTarget store_buffer;
+    logic replacement_valid, replacement_cache, replacement_matches, replacement_write;
+    logic [$clog2(TT_WAYS)-1:0] replacement_way;
+    PhysicalEntry replacement_old, replacement_updated;
+    PhysicalWay replacement_new;
+    StoreTarget replacement_target;
+    logic way_write_ready;
+    // Pipeline the cache comparison and publication to keep RAM and replacement
+    // paths independent while retaining one shared replacement datapath.
+    logic cache_store_valid;
+    StoreTarget cache_store_target;
+    PhysicalEntry cache_store_entry;
+    logic commit_valid;
+    StoreTarget commit_target;
+    PhysicalEntry commit_entry;
+    PhysicalWay commit_way;
+    logic [$clog2(TT_WAYS)-1:0] commit_way_index;
 
-`ifndef SYNTHESIS
-    initial begin
-        if (STORE_FIFO_DEPTH < 2) $error("tt_external_load_store STORE_FIFO_DEPTH must be at least two");
-        if (TAG_BITS < 1 || TAG_BITS >= $bits(ZobristKey))
-            $error("tt_external_load_store TAG_BITS must be between 1 and 63");
-        if (ENTRY_INDEX_BITS > HASH_ENTROPY_BITS)
-            $error("tt_external_load_store has more TT entries than untagged hash entropy can address");
-        else if (ENTRY_INDEX_BITS + 8 > HASH_ENTROPY_BITS)
-            $warning("tt_external_load_store TT entry count is large relative to untagged hash entropy");
-        if (WORDS_PER_ENTRY > 15)
-            $error("tt_external_load_store entry does not fit the four-bit burst length");
-    end
-`endif
+    // Both banks infer one synchronous read port and one independent write port.
+    genvar bank;
+    generate for (bank = 0; bank < 2; bank++) begin : cache_banks
+        tt_cache_bank #(.LINE_BITS($bits(CacheLine)), .INDEX_BITS(BANK_INDEX_BITS)) cache_bank (
+            .clk(clk), .read_enable(bank_read_enable[bank]), .read_index(bank_read_index[bank]), .read_line(bank_read[bank]),
+            .write_enable(bank_write_enable[bank]), .write_index(bank_write_index[bank]), .write_line(bank_write_line[bank]));
+    end endgenerate
 
-    // Packing the complete line into one RAM avoids separately rounding the
-    // data, tag, and validity arrays to physical block-RAM boundaries.
-    (* ramstyle = "M10K" *) (* ram_style = "block" *) CacheLine cache[0:CACHE_COUNT-1];
-    CacheLine cache_read_line;
-
+    // Split the external entry space evenly; bit 63 exclusively chooses the bank.
     function automatic EntryIndex entry_index(input ZobristKey key);
-        logic [TT_HASH_BITS + ENTRY_INDEX_BITS-1:0] product;
-        product = tt_index_hash(key, TAG_BITS) * ENTRY_COUNT;
-        return EntryIndex'(product >> TT_HASH_BITS);
+        logic [TT_HASH_BITS+ENTRY_INDEX_BITS-1:0] product;
+        ZobristKey index_key;
+        index_key = key; index_key[$bits(ZobristKey)-1] = 1'b0;
+        product = tt_index_hash(index_key, TAG_BITS) * (ENTRY_COUNT/2);
+        return (EntryIndex'(product >> TT_HASH_BITS) << 1) | EntryIndex'(key[$bits(ZobristKey)-1]);
     endfunction
-
-    function automatic CacheIndex cache_index(input ZobristKey key);
-        return CacheIndex'(tt_index_hash(key, TAG_BITS));
+    // Derive the cache slot from the external index so all tags in a group agree.
+    function automatic CacheIndex cache_index(input EntryIndex index);
+        return CacheIndex'(index >> 1);
     endfunction
-
-    function automatic TTWordAddress word_address(input EntryIndex index);
-        return TTWordAddress'(index * WORDS_PER_ENTRY);
+    // Bank and slot already identify the low index bits; reserve one unused tag.
+    function automatic CacheTag cache_tag(input EntryIndex index);
+        return CacheTag'(index >> CACHE_INDEX_BITS);
     endfunction
-
-    function automatic EntryTag entry_tag(input ZobristKey key);
-        return EntryTag'(key);
+    // Padding is needed only on the external-memory word interface.
+    function automatic CacheEntry pack_cache(input PhysicalEntry entry);
+        CacheEntry result;
+        for (int i = 0; i < TT_WAYS; i++)
+            result[i*$bits(Way) +: $bits(Way)] = Way'(entry[i*WAY_BITS +: WAY_BITS]);
+        return result;
     endfunction
-
-    function automatic CompactEntry unpack_entry(input PhysicalEntry physical);
-        return CompactEntry'(physical[COMPACT_ENTRY_BITS-1:0]);
+    // Restore each way's zero padding when feeding the shared replacement path.
+    function automatic PhysicalEntry unpack_cache(input CacheEntry entry);
+        PhysicalEntry result;
+        for (int i = 0; i < TT_WAYS; i++)
+            result[i*WAY_BITS +: WAY_BITS] = PhysicalWay'(entry[i*$bits(Way) +: $bits(Way)]);
+        return result;
     endfunction
-
-    function automatic TTAge physical_age(input PhysicalEntry physical);
-        automatic CompactEntry entry = unpack_entry(physical);
-        return entry.age;
+    // The search producer already omits underpromotion moves using its board.
+    function automatic PhysicalWay make_way(input TTStoreRequest req);
+        Way way;
+        way.age = req.age; way.depth = req.depth;
+        way.score = tt_normalize_mate_score(req.score, req.ply);
+        way.best_move_bits = tt_encode_move(req.best_move);
+        way.tag = TAG_BITS'(req.zobrist_key); way.bound_type = req.bound_type;
+        return PhysicalWay'(way);
     endfunction
-
-    function automatic logic entry_hit(input CompactEntry entry, input ZobristKey key);
-        return entry.bound_type != TT_BOUND_INVALID && entry.age == generation
-            && entry.tag == entry_tag(key);
-    endfunction
-
-    function automatic logic should_replace(input CompactEntry old_entry, input TTStoreRequest req);
-        // New Game makes older generations unusable. Treat those slots as
-        // empty so a previous game's depth cannot suppress current results.
-        return tt_should_replace(
-            old_entry.bound_type != TT_BOUND_INVALID && old_entry.age == generation,
-            old_entry.tag == entry_tag(req.zobrist_key),
-            old_entry.age,
-            old_entry.depth,
-            old_entry.bound_type,
-            generation,
-            req.depth,
-            req.bound_type,
-            STALE_DEPTH_TOLERANCE
-        );
-    endfunction
-
-    function automatic PhysicalEntry make_store_entry(input TTStoreRequest req);
-        CompactEntry entry;
-        PhysicalEntry physical;
-
-        entry.tag = entry_tag(req.zobrist_key);
-        entry.best_move_bits = tt_encode_move(req.best_move);
-        entry.score = tt_normalize_mate_score(req.score, req.ply);
-        entry.depth = req.depth;
-        entry.bound_type = req.bound_type;
-        entry.age = generation;
-        physical = '0;
-        physical[COMPACT_ENTRY_BITS-1:0] = entry;
-        return physical;
-    endfunction
-
-    task automatic drive_lookup_response(input TTLookupRequest req, input PhysicalEntry physical);
-        CompactEntry entry;
+    // Match every valid way, without making age a validity condition.
+    function automatic logic position_hit(input PhysicalEntry entry, input ZobristKey key);
+        Way way;
         logic hit;
-        entry = unpack_entry(physical);
-        hit = entry_hit(entry, req.zobrist_key);
-        lookup_resp.thread_id <= req.thread_id;
-        lookup_resp.hit <= hit;
-        lookup_resp.score <= hit ? tt_restore_mate_score(entry.score, req.ply) : UNKNOWN_EVAL_SCORE;
-        lookup_resp.bound_type <= hit ? entry.bound_type : TT_BOUND_INVALID;
-        lookup_resp.depth <= hit ? entry.depth : TTDepth'(0);
-        lookup_resp.best_move <= hit ? tt_decode_move(entry.best_move_bits) : NULL_MOVE;
-        lookup_resp_valid <= 1'b1;
-    endtask
+        hit = 1'b0;
+        for (int i = 0; i < TT_WAYS; i++) begin
+            way = Way'(entry[i*WAY_BITS +: WAY_BITS]);
+            hit |= way.bound_type != TT_BOUND_INVALID && way.tag == TAG_BITS'(key);
+        end
+        return hit;
+    endfunction
+    // A streaming probe uses this single-way comparison and payload decoder.
+    function automatic TTLookupResponse way_response(input TTLookupRequest req, input PhysicalWay physical_way);
+        TTLookupResponse result;
+        Way way;
+        result = '0; result.thread_id = req.thread_id; result.best_move = NULL_MOVE;
+        way = Way'(physical_way);
+        if (way.bound_type != TT_BOUND_INVALID && way.tag == TAG_BITS'(req.zobrist_key)) begin
+            result.hit = 1'b1; result.score = tt_restore_mate_score(way.score, req.ply);
+            result.bound_type = way.bound_type; result.depth = way.depth;
+            result.best_move = tt_decode_move(way.best_move_bits);
+        end
+        return result;
+    endfunction
+    // Cache reads still compare complete groups, preferring the first matching way.
+    function automatic TTLookupResponse response(input TTLookupRequest req, input PhysicalEntry entry);
+        TTLookupResponse result, candidate;
+        result = '0; result.thread_id = req.thread_id; result.best_move = NULL_MOVE;
+        for (int i = TT_WAYS-1; i >= 0; i--) begin
+            candidate = way_response(req, entry[i*WAY_BITS +: WAY_BITS]);
+            if (candidate.hit) result = candidate;
+        end
+        return result;
+    endfunction
 
+    // Cache-hit stores own the single replacement datapath before memory stores.
     always_comb begin
-        // Lookup reduction remains combinational so blocking probes retain
-        // their latency. Best-effort stores are reduced into a staging register.
-        lookup_request_index = entry_index(lookup_req.zobrist_key);
-        // One buffered probe is sufficient to serve cache hits while an
-        // unrelated SDRAM transaction is active. Cache-fill/write cycles are
-        // excluded so inferred single-port RAM read-during-write behavior is
-        // never part of the frontend contract.
-        // External-TT users hold this frontend in reset until memory is ready
-        // and reset it on backend failure, so request readiness only needs to
-        // reflect frontend capacity and clear state.
-        lookup_req_ready = !clear && !clear_busy
-            && !lookup_probe_valid && !lookup_miss_valid
-            && state != S_READ_DONE && state != S_WRITE_DONE;
-        // A full queue drops the incoming best-effort publication rather than
-        // stalling its search thread.
-        store_req_ready = !clear && !clear_busy;
+        active = state == S_IDLE && !clear && memory_ready && !memory_error;
+        clear_busy = state != S_IDLE || clear;
+        probe_index = entry_index(probe_buffer.zobrist_key);
+        store_index = store_buffer.index;
+        probe_line_present = bank_read[probe_stage.index[0]].tag == cache_tag(probe_stage.index);
+        probe_position_hit = probe_line_present && position_hit(unpack_cache(bank_read[probe_stage.index[0]].data), probe_stage.req.zobrist_key);
+        store_position_hit = bank_read[store_stage.index[0]].tag == cache_tag(store_stage.index)
+            && position_hit(unpack_cache(bank_read[store_stage.index[0]].data), store_stage.req.zobrist_key);
+        // Include the arriving final word so a way can respond on its acceptance edge.
+        probe_next_way = {probe_word, probe_entry[ENTRY_BITS-1 -: WAY_BITS-TT_WORD_BITS]};
+        probe_way_last = int'(probe_way_word_count) == WAY_WORDS-1;
+        probe_stream_response = way_response(probe_meta.req, probe_next_way);
+        // Register thread selection before address hashing and the bank RAM.
+        // Accepted probes also drain during New Game before memory is cleared.
+        probe_issue = (state == S_IDLE || state == S_DRAIN)
+            && memory_ready && !memory_error && probe_buffer_valid && !probe_complete
+            // Let the previous cache read retire, then give the stream a response slot.
+            && !(probe_word_valid && probe_way_last && !probe_returned);
+        lookup_req_ready = active && (!probe_buffer_valid || probe_issue);
+        probe_accept = lookup_req_valid && lookup_req_ready;
+        store_req_ready = active;
         store_accept = store_req_valid && store_req_ready;
-        store_stage_issue = state == S_IDLE && store_stage_valid
-            && !clear && !clear_pending && !lookup_req_valid
-            && !lookup_probe_valid && !lookup_miss_valid && !store_write_pending;
-        store_pop = state == S_IDLE && !clear && !clear_pending && !lookup_req_valid
-            && !lookup_probe_valid && !lookup_miss_valid && !store_write_pending
-            && !store_stage_valid
-            && store_fifo_valid;
-        cache_read_enable = (lookup_req_valid && lookup_req_ready) || store_stage_issue;
-        // The direct-mapped cache uses the same mixed hash without the wide
-        // external-table range reduction. Its full entry index remains the tag.
-        cache_read_index = lookup_req_valid
-            ? cache_index(lookup_req.zobrist_key)
-            : cache_index(store_stage_req.zobrist_key);
-        clear_busy = clear || clear_pending || state == S_CACHE_CLEAR
-            || state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE;
-        mem_req_valid = state == S_READ_REQ || state == S_WRITE_REQ || state == S_CLEAR_REQ;
-        mem_req_write = state != S_READ_REQ;
-        mem_req_address = (state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE)
-            ? word_address(clear_index) + TTWordAddress'(WORDS_PER_ENTRY - 1) : word_address(active_index);
-        mem_req_length = (state == S_CLEAR_REQ || state == S_CLEAR_DATA || state == S_CLEAR_DONE)
-            ? 4'd1 : 4'(WORDS_PER_ENTRY);
-        mem_write_valid = state == S_WRITE_DATA || state == S_CLEAR_DATA;
-        mem_write_data = (state == S_CLEAR_DATA) ? 16'h0000
-            : write_entry[word_count*TT_WORD_BITS +: TT_WORD_BITS];
-        mem_write_last = state == S_CLEAR_DATA
-            || word_count == WORD_COUNT_BITS'(WORDS_PER_ENTRY - 1);
-        mem_read_ready = state == S_READ_DATA;
-        // Every backend request, including reads, has a completion token. Do
-        // not allow the backend to remain blocked after delivering read data.
-        mem_done_ready = state == S_READ_DONE || state == S_WRITE_DONE || state == S_CLEAR_DONE;
-        backend_lookup_response = (!operation_store && state == S_READ_DONE && mem_done_valid)
-            || (!operation_store && memory_error && state != S_IDLE);
+        store_pop = active && !store_buffer_valid && store_fifo_valid;
+        // Advertise a store held by the current probe: it will still need a
+        // read when the newly selected probe reaches the registered bank input.
+        store_bank_valid = active && store_buffer_valid && probe_issue
+            && probe_index[0] == store_index[0];
+        store_bank = store_index[0];
+        store_issue = active && store_buffer_valid && (!probe_issue || probe_index[0] != store_index[0]);
+        probe_enqueue = probe_pending && !probe_position_hit && probe_transport_ready && probe_meta_ready;
+        store_enqueue = store_pending && !store_position_hit && store_transport_ready && store_meta_ready;
+        probe_finish = probe_complete && !probe_pending && probe_meta_valid;
+        replacement_cache = cache_store_valid;
+        replacement_valid = replacement_cache || (store_complete && store_meta_valid);
+        replacement_target = replacement_cache ? cache_store_target : store_meta;
+        replacement_old = replacement_cache ? cache_store_entry : store_entry;
+        replacement_new = make_way(replacement_target.req);
+        store_finish = replacement_valid && !replacement_cache;
+        // Cache results own the response port; hold only an unanswered way boundary.
+        probe_word_ready = !probe_complete && probe_meta_valid
+            && (probe_returned || !probe_way_last || !probe_pending);
+        store_word_ready = !store_complete;
+        fill_write = fill_valid && !(commit_valid
+            && commit_target.index[0] == fill_index[0]);
+        bank_read_enable = '0; bank_write_enable = '0;
+        for (int b = 0; b < 2; b++) begin
+            bank_read_index[b] = cache_index(store_index);
+            bank_write_index[b] = cache_index(fill_index);
+            bank_write_line[b] = CacheLine'({cache_tag(fill_index), pack_cache(fill_entry)});
+            if (store_issue && store_index[0] == b) bank_read_enable[b] = 1'b1;
+            if (probe_issue && probe_index[0] == b) begin
+                bank_read_enable[b] = 1'b1; bank_read_index[b] = cache_index(probe_index);
+            end
+            if (fill_write && fill_index[0] == b) bank_write_enable[b] = 1'b1;
+            if (commit_valid && commit_target.index[0] == b) begin
+                bank_write_enable[b] = 1'b1;
+                bank_write_index[b] = cache_index(commit_target.index);
+                bank_write_line[b] = CacheLine'({cache_tag(commit_target.index), pack_cache(commit_entry)});
+            end
+            if (state == S_CACHE_CLEAR) begin
+                bank_write_enable[b] = 1'b1; bank_write_index[b] = clear_index;
+                bank_write_line[b] = CacheLine'({CacheTag'(CACHE_TAG_COUNT), CacheEntry'(0)});
+            end
+        end
     end
 
+    tt_replacement #(.TAG_BITS(TAG_BITS), .WAY_BITS(WAY_BITS), .STALE_DEPTH_TOLERANCE(STALE_DEPTH_TOLERANCE)) replacement (
+        .old_entry(replacement_old), .new_way(replacement_new), .position_matches(replacement_matches),
+        .replace(replacement_write), .selected_way(replacement_way), .updated_entry(replacement_updated));
+
+    // Metadata never leaves the engine clock domain and is queued with each miss.
+    synchronous_fifo #(.DATA_WIDTH($bits(ProbeTarget)), .DEPTH(OUTSTANDING_DEPTH)) probe_targets (
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .push_valid(probe_enqueue), .push_ready(probe_meta_ready),
+        .push_data(probe_stage), .pop_valid(probe_meta_valid), .pop_ready(probe_finish), .pop_data(probe_meta), .count(probe_meta_count));
+    synchronous_fifo #(.DATA_WIDTH($bits(StoreTarget)), .DEPTH(OUTSTANDING_DEPTH)) store_targets (
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .push_valid(store_enqueue), .push_ready(store_meta_ready),
+        .push_data(store_stage), .pop_valid(store_meta_valid), .pop_ready(store_finish), .pop_data(store_meta), .count(store_meta_count));
+    synchronous_fifo #(.DATA_WIDTH($bits(TTStoreRequest)), .DEPTH(STORE_FIFO_DEPTH)) stores (
+        .clk(clk), .rst_n(rst_n), .clear(clear), .push_valid(store_accept), .push_ready(store_fifo_push_ready),
+        .push_data(store_req), .pop_valid(store_fifo_valid), .pop_ready(store_pop), .pop_data(store_fifo_data), .count(store_fifo_count));
+
+    tt_memory_cdc_bridge #(.WAY_BITS(WAY_BITS), .ENTRY_COUNT(ENTRY_COUNT),
+        .READ_FIFO_DEPTH(OUTSTANDING_DEPTH), .WRITE_FIFO_DEPTH(WRITEBACK_FIFO_DEPTH),
+        .RESPONSE_FIFO_DEPTH(RESPONSE_FIFO_DEPTH)) transport (
+        .req_clk(clk), .req_rst_n(rst_n), .mem_clk(memory_clk), .mem_rst_n(memory_rst_n),
+        .clear_toggle(clear_toggle), .clear_ack(clear_ack), .idle(transport_idle),
+        .probe_valid(probe_enqueue), .probe_ready(probe_transport_ready), .probe_entry_index(probe_stage.index),
+        .probe_response_valid(probe_word_valid), .probe_response_ready(probe_word_ready), .probe_response_data(probe_word),
+        .store_valid(store_enqueue), .store_ready(store_transport_ready), .store_entry_index(store_stage.index),
+        .store_response_valid(store_word_valid), .store_response_ready(store_word_ready), .store_response_data(store_word),
+        .write_valid(commit_valid), .write_ready(way_write_ready),
+        .write_entry_index(commit_target.index), .write_way_index(commit_way_index), .write_way(commit_way),
+        .backend_req_valid(mem_req_valid), .backend_req_ready(mem_req_ready), .backend_req_write(mem_req_write),
+        .backend_req_address(mem_req_address), .backend_req_length(mem_req_length),
+        .backend_write_valid(mem_write_valid), .backend_write_ready(mem_write_ready), .backend_write_data(mem_write_data), .backend_write_last(mem_write_last),
+        .backend_read_valid(mem_read_valid), .backend_read_ready(mem_read_ready), .backend_read_data(mem_read_data), .backend_read_last(mem_read_last),
+        .backend_done_valid(mem_done_valid), .backend_done_ready(mem_done_ready), .backend_done_error(mem_done_error));
+
+    // Cache reads retire every cycle; full miss queues return/drop without stalling.
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            state <= S_CACHE_CLEAR;
-            generation <= TTAge'(1);
-            clear_prev <= 1'b0;
-            clear_pending <= 1'b0;
-            lookup_resp_valid <= 1'b0;
-            cache_access <= 1'b0;
-            cache_hit <= 1'b0;
-            cache_access_is_store <= 1'b0;
-            lookup_resp <= TTLookupResponse'('0);
-            word_count <= '0;
-            clear_index <= '0;
-            cache_clear_index <= '0;
-            lookup_probe_valid <= 1'b0;
-            lookup_miss_valid <= 1'b0;
-            store_write_pending <= 1'b0;
-            store_stage_valid <= 1'b0;
+            cache_store_valid <= 1'b0; commit_valid <= 1'b0;
+            state <= S_CACHE_CLEAR; clear_index <= '0; clear_toggle <= 1'b0; clear_prev <= 1'b0;
+            probe_buffer_valid <= 1'b0; probe_buffer <= '0;
+            probe_pending <= 1'b0; store_pending <= 1'b0; store_buffer_valid <= 1'b0;
+            probe_complete <= 1'b0; store_complete <= 1'b0;
+            probe_way_word_count <= '0; probe_returned <= 1'b0;
+            probe_word_count <= '0; store_word_count <= '0; fill_valid <= 1'b0;
+            lookup_resp_valid <= 1'b0; lookup_resp <= '0;
+            cache_access <= 1'b0; cache_hit <= 1'b0; cache_store_access <= 1'b0; cache_store_hit <= 1'b0;
         end else begin
-            lookup_resp_valid <= 1'b0;
-            cache_access <= 1'b0;
-            cache_hit <= 1'b0;
-            cache_access_is_store <= 1'b0;
+            cache_store_valid <= store_pending && store_position_hit;
+            if (store_pending && store_position_hit) begin
+                cache_store_target <= store_stage;
+                cache_store_entry <= unpack_cache(bank_read[store_stage.index[0]].data);
+            end
+            commit_valid <= replacement_valid && replacement_write;
+            if (replacement_valid && replacement_write) begin
+                commit_target <= replacement_target; commit_entry <= replacement_updated;
+                commit_way <= replacement_new; commit_way_index <= replacement_way;
+            end
             clear_prev <= clear;
-            if (clear && !clear_prev) begin
-                clear_pending <= 1'b1;
-                store_stage_valid <= 1'b0;
-            end
-            if (cache_read_enable) cache_read_line <= cache[cache_read_index];
-
-            // Break the store FIFO BRAM-to-index-multiplier-to-cache BRAM path.
-            // Store draining is best-effort and never blocks a lookup.
+            lookup_resp_valid <= 1'b0; cache_access <= 1'b0; cache_hit <= 1'b0;
+            cache_store_access <= 1'b0; cache_store_hit <= 1'b0;
+            probe_pending <= probe_issue; store_pending <= store_issue;
             if (store_pop) begin
-                store_stage_req <= store_fifo_data;
-                store_stage_index <= entry_index(store_fifo_data.zobrist_key);
-                store_stage_valid <= 1'b1;
+                store_buffer.req <= store_fifo_data; store_buffer.index <= entry_index(store_fifo_data.zobrist_key);
+                store_buffer_valid <= 1'b1;
             end
-
-            if (lookup_req_valid && lookup_req_ready) begin
-                lookup_probe_req <= lookup_req;
-                lookup_probe_index <= lookup_request_index;
-                lookup_probe_valid <= 1'b1;
+            if (store_issue) begin store_stage <= store_buffer; store_buffer_valid <= 1'b0; end
+            if (probe_issue) probe_buffer_valid <= 1'b0;
+            if (probe_accept) begin probe_buffer <= lookup_req; probe_buffer_valid <= 1'b1; end
+            if (probe_issue) begin probe_stage.req <= probe_buffer; probe_stage.index <= probe_index; end
+            if (clear) store_buffer_valid <= 1'b0;
+            if (probe_pending) begin
+                cache_access <= 1'b1; cache_hit <= probe_position_hit;
+                if (probe_position_hit || !probe_enqueue) begin
+                    lookup_resp <= response(probe_stage.req, probe_position_hit ? unpack_cache(bank_read[probe_stage.index[0]].data) : PhysicalEntry'(0));
+                    lookup_resp_valid <= 1'b1;
+                end
             end
-
-            // Lookup cache probes are independent of the external-memory state
-            // machine. A response from the active backend operation wins the
-            // single response port; a buffered probe remains held for one more
-            // cycle in that rare collision.
-            if (lookup_probe_valid && !backend_lookup_response) begin
-                cache_access <= 1'b1;
-                cache_hit <= cache_read_line.valid
-                    && physical_age(cache_read_line.data) == generation
-                    && cache_read_line.tag == lookup_probe_index;
-                cache_access_is_store <= 1'b0;
-                if (cache_read_line.valid
-                        && physical_age(cache_read_line.data) == generation
-                        && cache_read_line.tag == lookup_probe_index) begin
-                    drive_lookup_response(lookup_probe_req, cache_read_line.data);
-                end else begin
-                    lookup_miss_req <= lookup_probe_req;
-                    lookup_miss_index <= lookup_probe_index;
-                    lookup_miss_valid <= 1'b1;
-                end
-                lookup_probe_valid <= 1'b0;
+            if (store_pending) begin
+                cache_store_access <= 1'b1; cache_store_hit <= store_position_hit;
             end
-
-            if (memory_error && state != S_IDLE) begin
-                if (operation_store) begin
-                end else begin
-                    drive_lookup_response(active_lookup, '0);
-                end
-                state <= S_IDLE;
-            end else case (state)
-                S_CACHE_CLEAR: begin
-                    cache[cache_clear_index] <= CacheLine'('0);
-                    if (cache_clear_index == CacheIndex'(CACHE_COUNT-1)) state <= S_IDLE;
-                    else cache_clear_index <= cache_clear_index + CacheIndex'(1);
-                end
-                S_CACHE_READ: begin
-                    cache_access <= 1'b1;
-                    cache_hit <= cache_read_line.valid
-                        && physical_age(cache_read_line.data) == generation
-                        && cache_read_line.tag == active_index;
-                    cache_access_is_store <= 1'b1;
-                    if (cache_read_line.valid
-                            && physical_age(cache_read_line.data) == generation
-                            && cache_read_line.tag == active_index) begin
-                        if (should_replace(unpack_entry(cache_read_line.data), active_store)) begin
-                            store_write_index <= active_index;
-                            store_write_data <= make_store_entry(active_store);
-                            store_write_pending <= 1'b1;
-                        end
-                        state <= S_IDLE;
-                    end else begin
-                        state <= S_READ_REQ;
+            if (probe_word_valid && probe_word_ready) begin
+                // Low words arrive first; the high slice holds the latest complete way.
+                probe_entry <= {probe_word, probe_entry[ENTRY_BITS-1:TT_WORD_BITS]};
+                if (probe_way_last) begin
+                    probe_way_word_count <= '0;
+                    if (!probe_returned && (probe_stream_response.hit || int'(probe_word_count) == ENTRY_WORDS-1)) begin
+                        lookup_resp <= probe_stream_response; lookup_resp_valid <= 1'b1;
+                        probe_returned <= 1'b1;
                     end
+                end else probe_way_word_count <= probe_way_word_count + 1'b1;
+                if (int'(probe_word_count) == ENTRY_WORDS-1) begin probe_complete <= 1'b1; probe_word_count <= '0; end
+                else probe_word_count <= probe_word_count + 1'b1;
+            end
+            if (store_word_valid && store_word_ready) begin
+                store_entry[store_word_count*TT_WORD_BITS +: TT_WORD_BITS] <= store_word;
+                if (int'(store_word_count) == ENTRY_WORDS-1) begin store_complete <= 1'b1; store_word_count <= '0; end
+                else store_word_count <= store_word_count + 1'b1;
+            end
+            if (store_finish) store_complete <= 1'b0;
+            // A newer complete probe fill can overwrite a repeatedly blocked fill.
+            if (fill_write) fill_valid <= 1'b0;
+            if (probe_finish) begin
+                // Keep metadata until all words drain, even after an early hit.
+                probe_returned <= 1'b0;
+                probe_complete <= 1'b0; fill_valid <= 1'b1;
+                fill_index <= probe_meta.index; fill_entry <= probe_entry;
+            end
+            case (state)
+                S_IDLE: if (clear && !clear_prev) state <= S_DRAIN;
+                S_DRAIN: if (!probe_buffer_valid && !probe_pending && !store_pending && !cache_store_valid && !commit_valid && probe_meta_count == 0
+                        && store_meta_count == 0 && transport_idle && !fill_valid) begin
+                    clear_toggle <= !clear_toggle; state <= S_CLEAR_WAIT;
                 end
-                S_IDLE: begin
-                    if ((clear_pending || (clear && !clear_prev))
-                            && !lookup_probe_valid && !lookup_miss_valid
-                            && !store_write_pending) begin
-                        clear_pending <= 1'b0;
-                        if (&generation) begin
-                            clear_index <= '0;
-                            state <= S_CLEAR_REQ;
-                        end else begin
-                            generation <= generation + TTAge'(1);
-                        end
-                    end else if (lookup_miss_valid) begin
-                        active_index <= lookup_miss_index;
-                        active_lookup <= lookup_miss_req;
-                        operation_store <= 1'b0;
-                        lookup_miss_valid <= 1'b0;
-                        state <= S_READ_REQ;
-                    end else if (store_write_pending && !lookup_probe_valid
-                            && !lookup_req_valid) begin
-                        active_index <= store_write_index;
-                        write_entry <= store_write_data;
-                        operation_store <= 1'b1;
-                        store_write_pending <= 1'b0;
-                        state <= S_WRITE_REQ;
-                    end else if (store_stage_issue) begin
-                        active_index <= store_stage_index;
-                        active_store <= store_stage_req;
-                        operation_store <= 1'b1;
-                        store_stage_valid <= 1'b0;
-                        state <= S_CACHE_READ;
-                    end
-                end
-                S_READ_REQ: if (mem_req_valid && mem_req_ready) begin word_count <= '0; transfer_entry <= '0; state <= S_READ_DATA; end
-                S_READ_DATA: if (mem_read_valid) begin
-                    PhysicalEntry assembled;
-                    assembled = transfer_entry;
-                    assembled[word_count*TT_WORD_BITS +: TT_WORD_BITS] = mem_read_data;
-                    transfer_entry <= assembled;
-                    if (mem_read_last
-                            || word_count == WORD_COUNT_BITS'(WORDS_PER_ENTRY - 1)) begin
-                        state <= S_READ_DONE;
-                    end else word_count <= word_count + WORD_COUNT_BITS'(1);
-                end
-                S_READ_DONE: if (mem_done_valid) begin
-                    if (mem_done_error) begin
-                        if (operation_store) begin
-                        end else begin
-                            drive_lookup_response(active_lookup, '0);
-                        end
-                        state <= S_IDLE;
-                    end else begin
-                        CacheIndex cidx;
-                        cidx = operation_store
-                            ? cache_index(active_store.zobrist_key)
-                            : cache_index(active_lookup.zobrist_key);
-                        cache[cidx] <= CacheLine'({1'b1, active_index, transfer_entry});
-                        if (!operation_store) begin
-                            drive_lookup_response(active_lookup, transfer_entry);
-                            state <= S_IDLE;
-                        end else if (should_replace(unpack_entry(transfer_entry), active_store)) begin
-                            store_write_index <= active_index;
-                            store_write_data <= make_store_entry(active_store);
-                            store_write_pending <= 1'b1;
-                            state <= S_IDLE;
-                        end else begin
-                            state <= S_IDLE;
-                        end
-                    end
-                end
-                S_WRITE_REQ: if (mem_req_valid && mem_req_ready) begin word_count <= '0; state <= S_WRITE_DATA; end
-                S_WRITE_DATA: if (mem_write_valid && mem_write_ready) begin
-                    if (word_count == WORD_COUNT_BITS'(WORDS_PER_ENTRY - 1)) state <= S_WRITE_DONE;
-                    else word_count <= word_count + WORD_COUNT_BITS'(1);
-                end
-                S_WRITE_DONE: if (mem_done_valid) begin
-                    CacheIndex cidx;
-                    cidx = cache_index(active_store.zobrist_key);
-                    if (!mem_done_error) begin
-                        cache[cidx] <= CacheLine'({1'b1, active_index, write_entry});
-                    end
-                    state <= S_IDLE;
-                end
-                S_CLEAR_REQ: if (mem_req_valid && mem_req_ready) state <= S_CLEAR_DATA;
-                S_CLEAR_DATA: if (mem_write_valid && mem_write_ready) state <= S_CLEAR_DONE;
-                S_CLEAR_DONE: if (mem_done_valid) begin
-                    if (clear_index == EntryIndex'(ENTRY_COUNT - 1)) begin
-                        generation <= TTAge'(1);
-                        cache_clear_index <= '0;
-                        state <= S_CACHE_CLEAR;
-                    end else begin
-                        clear_index <= clear_index + EntryIndex'(1);
-                        state <= S_CLEAR_REQ;
-                    end
-                end
+                S_CLEAR_WAIT: if (clear_ack == clear_toggle) begin clear_index <= '0; state <= S_CACHE_CLEAR; end
+                S_CACHE_CLEAR: if (int'(clear_index) == BANK_COUNT-1) state <= S_IDLE;
+                    else clear_index <= clear_index + 1'b1;
                 default: state <= S_IDLE;
             endcase
         end
     end
-
-    synchronous_fifo #(
-        .DATA_WIDTH($bits(TTStoreRequest)),
-        .DEPTH(STORE_FIFO_DEPTH)
-    ) store_queue (
-        .clk(clk),
-        .rst_n(rst_n),
-        .clear(clear && !clear_prev),
-        .push_valid(store_accept),
-        .push_ready(store_fifo_push_ready),
-        .push_data(store_req),
-        .pop_valid(store_fifo_valid),
-        .pop_ready(store_pop),
-        .pop_data(store_fifo_data),
-        .count(store_fifo_count)
-    );
+`ifndef SYNTHESIS
+    initial begin
+        if (CACHE_INDEX_BITS < 2 || TAG_BITS < 1 || TAG_BITS >= $bits(ZobristKey)
+                || ENTRY_COUNT < 2 || ENTRY_COUNT % 2 != 0)
+            $fatal(1, "TT requires two cache banks, a legal tag width, and an even entry count");
+        if (ENTRY_COUNT*ENTRY_WORDS > TT_EXTERNAL_WORD_COUNT)
+            $fatal(1, "TT entries exceed external memory capacity");
+    end
+`endif
 endmodule

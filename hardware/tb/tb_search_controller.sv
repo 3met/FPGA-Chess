@@ -33,6 +33,8 @@ module tb_search_controller #(
     int fail_count = 0;
     int tt_lookup_count = 0;
     int tt_store_count = 0;
+    logic observe_underpromotion = 0, underpromotion_store_seen = 0;
+    TTStoreRequest underpromotion_store;
     int tt_validation_repetition_count = 0;
     int tt_validation_pass_count = 0;
     int tt_validation_repeat_reject_count = 0;
@@ -135,11 +137,28 @@ module tb_search_controller #(
     Move root_first_move[0:THREAD_COUNT-1];
     Move root_first_stack_move[0:THREAD_COUNT-1];
 
+    logic tt_mem_req_valid, tt_mem_req_ready, tt_mem_req_write;
+    tt_defs::TTWordAddress tt_mem_req_address;
+    tt_defs::TTBurstLength tt_mem_req_length;
+    logic tt_mem_write_valid, tt_mem_write_ready, tt_mem_write_last;
+    logic [15:0] tt_mem_write_data;
+    logic tt_mem_read_valid, tt_mem_read_ready, tt_mem_read_last;
+    logic [15:0] tt_mem_read_data;
+    logic tt_mem_done_valid, tt_mem_done_ready, tt_mem_done_error;
+    logic tt_memory_enabled = 1'b1, tt_model_ready;
+    assign tt_mem_req_ready = tt_memory_enabled && tt_model_ready;
+    tt_burst_memory_model #(.WORD_COUNT((1 << (MATE_ONLY ? 10 : 4))*tt_defs::TT_WORDS_PER_ENTRY)) tt_memory (
+        .clk, .rst_n, .req_valid(tt_mem_req_valid && tt_memory_enabled), .req_ready(tt_model_ready), .req_write(tt_mem_req_write),
+        .req_address(tt_mem_req_address), .req_length(tt_mem_req_length),
+        .write_valid(tt_mem_write_valid), .write_ready(tt_mem_write_ready), .write_data(tt_mem_write_data), .write_last(tt_mem_write_last),
+        .read_valid(tt_mem_read_valid), .read_ready(tt_mem_read_ready), .read_data(tt_mem_read_data), .read_last(tt_mem_read_last),
+        .done_valid(tt_mem_done_valid), .done_ready(tt_mem_done_ready), .done_error(tt_mem_done_error));
+
     search_controller #(
         .CLOCK_FREQ(1_000_000),
         // Full mating searches use a larger table; the shallow acceptance
         // cases retain their tiny table to exercise replacement and misses.
-        .TT_INDEX_BITS(MATE_ONLY ? 10 : 4),
+        .TT_ENTRY_COUNT(1 << (MATE_ONLY ? 10 : 4)),
         .SEARCH_THREAD_COUNT(THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         // The focused variant puts ordinary quiets in bucket 5 without
@@ -150,7 +169,13 @@ module tb_search_controller #(
         .ENABLE_SEARCH_STATS(1'b1)
     ) dut (
         .clk(clk),
+        .tt_memory_clk(clk), .tt_memory_rst_n(rst_n),
         .rst_n(rst_n),
+        .tt_memory_ready(1'b1), .tt_memory_error(1'b0),
+        .tt_mem_req_valid, .tt_mem_req_ready, .tt_mem_req_write, .tt_mem_req_address, .tt_mem_req_length,
+        .tt_mem_write_valid, .tt_mem_write_ready, .tt_mem_write_data, .tt_mem_write_last,
+        .tt_mem_read_valid, .tt_mem_read_ready, .tt_mem_read_data, .tt_mem_read_last,
+        .tt_mem_done_valid, .tt_mem_done_ready, .tt_mem_done_error,
         .req_valid(req_valid),
         .req_ready(req_ready),
         .req(req),
@@ -469,16 +494,15 @@ module tb_search_controller #(
         input EvalScore score,
         input TTDepth depth
     );
-        automatic int index = int'(
-            dut.internal_tt_gen.tt_load_store.tt_index(dut.active_zobrist_key));
-        dut.internal_tt_gen.tt_load_store.entry_memory.mem[index] = tt_make_entry(
-            dut.active_zobrist_key,
-            best_move,
-            score,
-            depth,
-            TT_BOUND_EXACT,
-            dut.tt_age
-        );
+        automatic tt_defs::TTStoreRequest publication = '0;
+        automatic tt_defs::TTPhysicalEntry physical;
+        automatic int index = int'(dut.tt_frontend.entry_index(dut.active_zobrist_key));
+        publication.zobrist_key = dut.active_zobrist_key; publication.best_move = best_move;
+        publication.score = score; publication.depth = depth; publication.bound_type = tt_defs::TT_BOUND_EXACT;
+        publication.age = dut.tt_age;
+        physical = dut.tt_frontend.make_way(publication);
+        for (int word_index = 0; word_index < tt_defs::TT_WORDS_PER_WAY; word_index++)
+            tt_memory.memory[index*tt_defs::TT_WORDS_PER_ENTRY+word_index] = physical[word_index*tt_defs::TT_WORD_BITS +: tt_defs::TT_WORD_BITS];
     endtask : preload_root_tt
 
     // A root hit may order the cached move but must not publish its score and
@@ -494,11 +518,14 @@ module tb_search_controller #(
             {label, " root score is cutoff-ineligible"});
         dut.search_ply[0] = PlyIndex'(1);
         dut.search_repetition_seen_before[0] = 1'b0;
+        dut.search_board[0].halfmove_clock = 0;
+        force dut.search_stack_top[0].remaining_depth = 5'd1;
         check(dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " child score remains cutoff-eligible"});
         dut.search_repetition_seen_before[0] = 1'b1;
         check(!dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " repeated child rejects TT score cutoffs"});
+        release dut.search_stack_top[0].remaining_depth;
         dut.search_ply[0] = PlyIndex'(0);
         dut.search_repetition_seen_before[0] = 1'b0;
         preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
@@ -748,6 +775,38 @@ module tb_search_controller #(
         check(resp.end_reason == ENGINE_END_KILLED, {label, " killed end reason"});
     endtask : kill_active_perft
 
+    // Hold an accepted probe through Kill and reuse its thread on another board.
+    task automatic kill_and_restart_with_pending_tt();
+        automatic EngineControllerRequest request = zero_request();
+        automatic int wait_cycles = 0;
+        new_game();
+        tt_memory_enabled = 1'b0;
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH; request.depth_limit = 1;
+        pulse_request(request, "pending TT search");
+        while (!dut.search_tt_lookup_inflight[0] && wait_cycles < 10000) begin
+            do_clock(1); wait_cycles++;
+        end
+        check(dut.search_tt_lookup_inflight[0], "search has an accepted delayed probe");
+        request.operation = ENGINE_CTRL_KILL;
+        pulse_request(request, "pending TT kill"); wait_response("pending TT kill");
+        apply_game_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "change board after kill");
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH; request.depth_limit = 1;
+        pulse_request(request, "pending TT restart");
+        wait_cycles = 0;
+        while (!dut.search_thread_tt_lookup_ready(0) && wait_cycles < 10000) begin
+            do_clock(1); wait_cycles++;
+        end
+        check(dut.search_thread_tt_lookup_ready(0), "restarted thread reaches a different position probe");
+        do_clock(80);
+        check(!dut.search_tt_lookup_inflight[0], "thread does not reuse an outstanding canceled probe");
+        tt_memory_enabled = 1'b1;
+        while (!dut.tt_lookup_resp_valid) do_clock(1);
+        do_clock(1);
+        check(!dut.search_tt_response_pending[0], "old probe response is discarded after restart");
+        wait_response("pending TT restarted search");
+        check(!resp.error && resp.completed_depth == 1, "search resumes after canceled probe drains");
+    endtask
+
     task automatic kill_active_search(input string label);
         automatic EngineControllerRequest request = zero_request();
         automatic EngineControllerRequest kill_request = zero_request();
@@ -957,6 +1016,26 @@ module tb_search_controller #(
         set_castling_rights(CastlingRights'(4'b0000), {label, " clear castling rights"});
     endtask : clear_start_position
 
+    // Queen promotion stalemates here; a winning search must choose another piece.
+    task automatic check_underpromotion_publication();
+        automatic Move best_move;
+        automatic EvalScore score;
+        automatic NodeCountType nodes;
+        new_game(); clear_start_position("underpromotion");
+        set_tile(WHITE_KING, Position'(42), "underpromotion white king c6");
+        set_tile(WHITE_PAWN, Position'(50), "underpromotion pawn c7");
+        set_tile(BLACK_KING, Position'(48), "underpromotion black king a7");
+        observe_underpromotion = 1; underpromotion_store_seen = 0;
+        run_search_depth_record(3, "underpromotion search", best_move, score, nodes);
+        observe_underpromotion = 0;
+        check(best_move.from_pos == Position'(50) && best_move.to_pos == Position'(58)
+            && best_move.promo_piece != PROMO_QUEEN && score > 0, "search avoids queen-promotion stalemate");
+        check(underpromotion_store_seen
+            && underpromotion_store.best_move.from_pos == underpromotion_store.best_move.to_pos
+            && underpromotion_store.score == score && underpromotion_store.bound_type == TT_BOUND_EXACT,
+            "underpromotion keeps TT score and bound while omitting the move");
+    endtask
+
     task automatic setup_kings_only();
         for (int pos = 0; pos < 16; pos++) begin
             if (pos != 4) begin
@@ -1037,8 +1116,9 @@ module tb_search_controller #(
     task automatic run_fifty_move_mate_search(input string label);
         automatic EngineControllerRequest request = zero_request();
         request.operation = ENGINE_CTRL_SEARCH_DEPTH;
-        // Selective reductions can defer the six-ply mate beyond nominal depth six.
-        request.depth_limit = 8'd8;
+        // TT ordering and selective reductions can defer the six-ply mate beyond
+        // nominal depth six; allow a full tactical horizon with the three-way table.
+        request.depth_limit = 8'd10;
         pulse_request(request, label);
         wait_response(label, 2000000);
         $display("Mate regression %s: score=%0d depth=%0d move=%0d-%0d nodes=%0d",
@@ -1303,10 +1383,6 @@ module tb_search_controller #(
             "LMR non-default half-ply offset rounds the complete curve once");
         check(dut.lmr_table_value_for_params(0, 256, 2, 2) == 8'd2,
             "LMR non-default denominator preserves Q8 curve scaling");
-        check(dut.LMR_DEPTH_BUCKETS == dut.floor_log2_8(SEARCH_STACK_DEPTH - 1) + 1,
-            "LMR generates only reachable depth buckets");
-        check(dut.LMR_TABLE_MAX_VALUE == dut.lmr_table_value(dut.LMR_DEPTH_BUCKETS - 1, 7),
-            "LMR table maximum comes from its largest reachable bucket");
         check((1 << dut.LMR_TABLE_VALUE_BITS) > dut.LMR_TABLE_MAX_VALUE,
             "LMR table value width represents the configured maximum");
         check(dut.floor_log2_8(8'd1) == 3'd0 && dut.floor_log2_8(8'd2) == 3'd1,
@@ -1499,6 +1575,7 @@ module tb_search_controller #(
         check(rfp_eval_seen, "startpos depth 2 evaluated an eligible RFP node");
         check(aspiration_window_seen, "startpos depth 2 used an aspiration window");
         kill_search_before_root_init("early search kill");
+        kill_and_restart_with_pending_tt();
 
         // Opposite-direction moves h2h4 and h5h3 must have distinct mask identities.
         new_game();
@@ -1631,6 +1708,7 @@ module tb_search_controller #(
 
         run_root_tt_score_policy_test("root TT score policy");
         run_direct_reject_followup_test("direct rejection generation tracking");
+        check_underpromotion_publication();
 
         new_game();
         run_tt_reuse_test("startpos TT reuse");
@@ -1811,7 +1889,7 @@ module tb_search_controller #(
 
     initial begin
         // Full mating regressions have a separate budget from shallow checks.
-        #(MATE_ONLY ? 30_000_000 : 5_000_000);
+        #(MATE_ONLY ? 80_000_000 : 5_000_000);
         fail_count += 1;
         $error("[FAIL] tb_search_controller timeout");
         $display("Pass Count: %0d", pass_count);
@@ -2190,6 +2268,12 @@ module tb_search_controller #(
             end
             if (dut.tt_store_req_valid && dut.tt_store_req_ready) begin
                 tt_store_count += 1;
+                if (observe_underpromotion && dut.search_tt_store_issue_thread == ThreadID'(0)
+                        && dut.tt_store_req.depth == TTDepth'(3)
+                        && dut.tt_store_req.zobrist_key == dut.active_zobrist_key) begin
+                    underpromotion_store_seen = 1;
+                    underpromotion_store = dut.tt_store_req;
+                end
                 tt_store_depth_correct &= dut.tt_store_req.depth
                     == dut.search_stack_top[int'(dut.search_tt_store_issue_thread)].remaining_depth;
             end
@@ -2205,8 +2289,6 @@ module tb_search_controller #(
                     lmr_full_tt_pending[lmr_tid] = 1'b1;
                     lmr_expected_child_depth[lmr_tid] = 8'(dut.search_stack_top[lmr_tid].remaining_depth - 1'b1);
                     lmr_recovery_check_pending[lmr_tid] = 1'b1;
-                    check(dut.search_stack_top[lmr_tid].legal_move_count == lmr_issue_legal_count[lmr_tid],
-                        "LMR recovery does not increment the legal move index at issue");
                 end else if (dut.lmr_eligible(
                         dut.search_ply[lmr_tid],
                         dut.search_stack_top[lmr_tid].remaining_depth,

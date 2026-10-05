@@ -10,9 +10,15 @@ import tt_defs::*;
 
 module search_controller #(
     parameter int CLOCK_FREQ = 100_000_000,
-    parameter int TT_INDEX_BITS = 10,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
+    parameter int TT_ENTRY_COUNT = 2 * (TT_EXTERNAL_WORD_COUNT
+        / (TT_WAYS*((TT_TAG_BITS+TT_ENTRY_PAYLOAD_BITS+TT_WORD_BITS-1)/TT_WORD_BITS)) / 2),
+    // Queue storage is selected by the device profile.
     parameter int TT_CACHE_INDEX_BITS = 10,
+    parameter int TT_STORE_FIFO_DEPTH = 256,
+    parameter int TT_OUTSTANDING_DEPTH = 8,
+    parameter int TT_RESPONSE_FIFO_DEPTH = 64,
+    parameter int TT_WRITEBACK_FIFO_DEPTH = 8,
     parameter int ACTIVE_REPETITION_DEPTH = 100,
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
@@ -72,10 +78,11 @@ module search_controller #(
     parameter int TT_VALIDATE_MINIMUM_DEPTH = 8,
     parameter int TT_VALIDATE_BYPASS_HALFMOVES = 4,
     parameter int TT_STALE_DEPTH_TOLERANCE = 4,
-    parameter bit EXTERNAL_TT = 1'b0,
     parameter bit ENABLE_SEARCH_STATS = 1'b0
 ) (
     input logic clk,
+    input logic tt_memory_clk,
+    input logic tt_memory_rst_n,
     input logic rst_n,
     input logic req_valid,
     output logic req_ready,
@@ -90,7 +97,7 @@ module search_controller #(
     input logic tt_mem_req_ready,
     output logic tt_mem_req_write,
     output TTWordAddress tt_mem_req_address,
-    output logic [3:0] tt_mem_req_length,
+    output TTBurstLength tt_mem_req_length,
     output logic tt_mem_write_valid,
     input logic tt_mem_write_ready,
     output logic [15:0] tt_mem_write_data,
@@ -315,6 +322,7 @@ module search_controller #(
     logic search_generation_inflight[0:SEARCH_THREAD_COUNT-1];
     PlyIndex search_generation_ply[0:SEARCH_THREAD_COUNT-1];
     logic search_tt_lookup_inflight[0:SEARCH_THREAD_COUNT-1];
+    SearchThreadMask tt_transport_pending;
     logic search_tt_response_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_pending[0:SEARCH_THREAD_COUNT-1];
     logic search_repetition_done[0:SEARCH_THREAD_COUNT-1];
@@ -575,6 +583,15 @@ module search_controller #(
     // Shared transposition-table frontend request and result signals.
     logic tt_clear;
     logic tt_clear_busy;
+    // Reset work is infrequent: register the clear pulse rather than routing
+    // the controller's wide state decoder into cache-bank read controls.
+    always_ff @(posedge clk) begin
+        if (!rst_n) tt_clear <= 1'b0;
+        else tt_clear <= state == ST_NEW_CLEAR_START;
+    end
+
+    logic tt_store_bank_valid, tt_store_bank;
+    SearchThreadMask tt_noncolliding_lookup_mask;
     logic tt_lookup_req_valid;
     logic tt_lookup_req_ready;
     TTLookupRequest tt_lookup_req;
@@ -582,7 +599,7 @@ module search_controller #(
     TTLookupResponse tt_lookup_resp;
     logic tt_cache_access;
     logic tt_cache_hit;
-    logic tt_cache_access_is_store;
+    logic tt_cache_store_access, tt_cache_store_hit;
     logic tt_store_req_valid;
     logic tt_store_req_ready;
     TTStoreRequest tt_store_req;
@@ -669,6 +686,17 @@ module search_controller #(
     assign resp = resp_reg;
     assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
         || state == ST_IDLE;
+
+    // Canceled searches still own their accepted TT probes until they return.
+    // Prevent thread reuse from associating an old response with a new position.
+    always_ff @(posedge clk) begin
+        if (!rst_n) tt_transport_pending <= '0;
+        else begin
+            if (tt_lookup_resp_valid) tt_transport_pending[tt_lookup_resp.thread_id] <= 1'b0;
+            if (tt_lookup_req_valid && tt_lookup_req_ready)
+                tt_transport_pending[tt_lookup_req.thread_id] <= 1'b1;
+        end
+    end
 
     // Complete storage ownership independently of the move-read transaction.
     // The synchronous parent read must be aligned before repairing a saved node.
@@ -866,55 +894,36 @@ module search_controller #(
         .stat_bucket_count(move_stat_bucket_count), .stat_bucket_high_water(move_stat_bucket_high_water)
     );
 
-    generate
-        if (EXTERNAL_TT) begin : external_tt_gen
-            tt_external_load_store #(
-                .CACHE_INDEX_BITS(TT_CACHE_INDEX_BITS),
-                .TAG_BITS(TT_TAG_BITS),
-                .STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE)
-            ) tt_load_store (
-                .clk(clk), .rst_n(rst_n), .memory_ready(tt_memory_ready), .memory_error(tt_memory_error),
-                .clear(tt_clear), .clear_busy(tt_clear_busy),
-                .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
-                .lookup_req(tt_lookup_req), .lookup_resp_valid(tt_lookup_resp_valid), .lookup_resp(tt_lookup_resp),
-                .cache_access(tt_cache_access), .cache_hit(tt_cache_hit),
-                .cache_access_is_store(tt_cache_access_is_store),
-                .store_req_valid(tt_store_req_valid), .store_req_ready(tt_store_req_ready), .store_req(tt_store_req),
-                .mem_req_valid(tt_mem_req_valid), .mem_req_ready(tt_mem_req_ready),
-                .mem_req_write(tt_mem_req_write),
-                .mem_req_address(tt_mem_req_address),
-                .mem_req_length(tt_mem_req_length),
-                .mem_write_valid(tt_mem_write_valid), .mem_write_ready(tt_mem_write_ready),
-                .mem_write_data(tt_mem_write_data), .mem_write_last(tt_mem_write_last),
-                .mem_read_valid(tt_mem_read_valid), .mem_read_ready(tt_mem_read_ready),
-                .mem_read_data(tt_mem_read_data), .mem_read_last(tt_mem_read_last),
-                .mem_done_valid(tt_mem_done_valid),
-                .mem_done_ready(tt_mem_done_ready),
-                .mem_done_error(tt_mem_done_error)
-            );
-        end else begin : internal_tt_gen
-            tt_load_store #(
-                .TT_INDEX_BITS(TT_INDEX_BITS),
-                .TAG_BITS(TT_TAG_BITS),
-                .STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE)
-            ) tt_load_store (
-                .clk(clk), .rst_n(rst_n), .clear(tt_clear), .clear_busy(tt_clear_busy),
-                .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
-                .lookup_req(tt_lookup_req), .lookup_resp_valid(tt_lookup_resp_valid), .lookup_resp(tt_lookup_resp),
-                .cache_access(tt_cache_access), .cache_hit(tt_cache_hit),
-                .cache_access_is_store(tt_cache_access_is_store),
-                .store_req_valid(tt_store_req_valid), .store_req_ready(tt_store_req_ready), .store_req(tt_store_req));
-            assign tt_mem_req_valid = 1'b0;
-            assign tt_mem_req_write = 1'b0;
-            assign tt_mem_req_address = '0;
-            assign tt_mem_req_length = '0;
-            assign tt_mem_write_valid = 1'b0;
-            assign tt_mem_write_data = '0;
-            assign tt_mem_write_last = 1'b0;
-            assign tt_mem_read_ready = 1'b0;
-            assign tt_mem_done_ready = 1'b0;
-        end
-    endgenerate
+    tt_external_load_store #(
+        .CACHE_INDEX_BITS(TT_CACHE_INDEX_BITS),
+        .STORE_FIFO_DEPTH(TT_STORE_FIFO_DEPTH),
+        .OUTSTANDING_DEPTH(TT_OUTSTANDING_DEPTH),
+        .RESPONSE_FIFO_DEPTH(TT_RESPONSE_FIFO_DEPTH),
+        .WRITEBACK_FIFO_DEPTH(TT_WRITEBACK_FIFO_DEPTH),
+        .ENTRY_COUNT(TT_ENTRY_COUNT),
+        .TAG_BITS(TT_TAG_BITS),
+        .STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE)
+    ) tt_frontend (
+        .clk(clk), .rst_n(rst_n), .memory_clk(tt_memory_clk), .memory_rst_n(tt_memory_rst_n), .memory_ready(tt_memory_ready), .memory_error(tt_memory_error),
+        .clear(tt_clear), .clear_busy(tt_clear_busy),
+        .store_bank_valid(tt_store_bank_valid), .store_bank(tt_store_bank),
+        .lookup_req_valid(tt_lookup_req_valid), .lookup_req_ready(tt_lookup_req_ready),
+        .lookup_req(tt_lookup_req), .lookup_resp_valid(tt_lookup_resp_valid), .lookup_resp(tt_lookup_resp),
+        .cache_access(tt_cache_access), .cache_hit(tt_cache_hit),
+        .cache_store_access(tt_cache_store_access), .cache_store_hit(tt_cache_store_hit),
+        .store_req_valid(tt_store_req_valid), .store_req_ready(tt_store_req_ready), .store_req(tt_store_req),
+        .mem_req_valid(tt_mem_req_valid), .mem_req_ready(tt_mem_req_ready),
+        .mem_req_write(tt_mem_req_write),
+        .mem_req_address(tt_mem_req_address),
+        .mem_req_length(tt_mem_req_length),
+        .mem_write_valid(tt_mem_write_valid), .mem_write_ready(tt_mem_write_ready),
+        .mem_write_data(tt_mem_write_data), .mem_write_last(tt_mem_write_last),
+        .mem_read_valid(tt_mem_read_valid), .mem_read_ready(tt_mem_read_ready),
+        .mem_read_data(tt_mem_read_data), .mem_read_last(tt_mem_read_last),
+        .mem_done_valid(tt_mem_done_valid),
+        .mem_done_ready(tt_mem_done_ready),
+        .mem_done_error(tt_mem_done_error)
+    );
 
     logic [39:0] stat_tt_lookups;
     logic [39:0] stat_tt_hits;
@@ -960,7 +969,7 @@ module search_controller #(
                         if (tt_lookup_resp.hit) stat_tt_hits <= stat_tt_hits + 40'd1;
                     end
                     // Cache rate describes lookup probes; store probes are excluded.
-                    if (tt_cache_access && !tt_cache_access_is_store) begin
+                    if (tt_cache_access) begin
                         stat_cache_lookups <= stat_cache_lookups + 40'd1;
                         if (tt_cache_hit) stat_cache_hits <= stat_cache_hits + 40'd1;
                     end
@@ -1992,8 +2001,11 @@ module search_controller #(
     // Root and previously seen nodes use TT hits for ordering only; their
     // scores depend on the current search or repetition history.
     function automatic logic tt_score_cutoff_eligible(input ThreadID thread);
+        // The key omits the halfmove clock: a horizon reaching the draw boundary
+        // cannot reuse a score computed with a different reversible history.
         return search_ply[thread] != PlyIndex'(0)
-            && !search_repetition_seen_before[thread];
+            && !search_repetition_seen_before[thread]
+            && (int'(search_board[thread].halfmove_clock) + int'(search_remaining_depth(thread)) < 100);
     endfunction : tt_score_cutoff_eligible
 
     // Repetition history can affect a TT score only after enough reversible
@@ -2127,7 +2139,8 @@ module search_controller #(
             search_eval_mask[idx] = search_thread_eval_ready(idx)
                 && (!(nnue_delta_busy || nnue_plan_any)
                     || nnue_state_valid[idx]);
-            search_tt_lookup_mask[idx] = search_thread_tt_lookup_ready(idx);
+            search_tt_lookup_mask[idx] = search_thread_tt_lookup_ready(idx)
+                && !tt_transport_pending[idx];
             search_return_mask[idx] = search_thread_return_pending(idx);
             search_tt_response_mask[idx] = search_thread_tt_response_pending(idx);
             search_null_mask[idx] = search_thread_null_ready(idx)
@@ -2234,8 +2247,14 @@ module search_controller #(
             : ThreadID'(0);
         // Request payloads are sampled only when their valid signal is set, so
         // keep validity out of these wide thread-selected data paths.
+        // Prefer a ready probe in the bank not needed by the staged store.
+        tt_noncolliding_lookup_mask = '0;
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+            tt_noncolliding_lookup_mask[tid] = search_tt_lookup_mask[tid]
+                && search_zobrist_key[tid][$bits(ZobristKey)-1] != tt_store_bank;
         search_tt_lookup_issue_thread = search_select_thread(
-            search_tt_lookup_mask, search_dispatch.tt_lookup);
+            tt_store_bank_valid && |tt_noncolliding_lookup_mask
+                ? tt_noncolliding_lookup_mask : search_tt_lookup_mask, search_dispatch.tt_lookup);
         search_tt_store_issue_thread = search_select_thread(
             search_store_mask, search_dispatch.tt_store);
 
@@ -2595,7 +2614,6 @@ module search_controller #(
                     || nnue_delta_step == 3'd2;
         end
 
-        tt_clear = state == ST_NEW_CLEAR_START;
         tt_lookup_req_valid = search_tt_lookup_issue_valid;
         tt_lookup_req = TTLookupRequest'('0);
         tt_lookup_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
@@ -2616,6 +2634,10 @@ module search_controller #(
             search_stack_top[search_tt_store_issue_thread].beta
         );
         tt_store_req.best_move = search_stack_top[search_tt_store_issue_thread].best_move;
+        // Promotion type is meaningful only when the source is a promoting pawn.
+        if (is_promotion_move(search_board[search_tt_store_issue_thread], tt_store_req.best_move)
+                && tt_store_req.best_move.promo_piece != PROMO_QUEEN)
+            tt_store_req.best_move = NULL_MOVE;
         tt_store_req.age = tt_age;
         tt_store_req.ply = search_ply[search_tt_store_issue_thread];
 
@@ -3090,7 +3112,7 @@ module search_controller #(
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
                                     search_move_in_check_pipe[idx] <= 1'b0;
                                 end
-                                tt_age <= tt_age + TTAge'(1);
+                                tt_age <= TTAge'(0);
                                 state <= ST_NEW_CLEAR_START;
                             end
 

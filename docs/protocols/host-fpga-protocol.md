@@ -52,7 +52,7 @@ Perft is a supported hardware command in the engine/controller protocol and is e
 
 `Set board` replaces the active position atomically.
 
-`New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents or TT generation validity, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
+`New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
 
 Ack responses for Set Board, Make Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
 

@@ -7,7 +7,11 @@
   },
   "transposition_table": {
     "tag_bits": 32,
-    "cache_index_bits": 11
+    "cache_index_bits": 11,
+    "store_fifo_depth": 256,
+    "outstanding_depth": 8,
+    "response_fifo_depth": 64,
+    "writeback_fifo_depth": 256
   },
   "history_heuristic": {
     "entry_count": 8192,

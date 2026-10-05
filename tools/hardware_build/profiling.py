@@ -64,6 +64,17 @@ def _profile_parameter_args(config: dict, prefix: str) -> list[str]:
     return [f"{prefix}{name}={value}" for name, value in values.items()]
 
 
+def _profile_memory_parameter_args(args: argparse.Namespace, prefix: str) -> list[str]:
+    """Keep the SDRAM simulation clocks aligned with the selected board target."""
+    clock = getattr(args, "memory_clock_config", {})
+    values = {
+        "MEMORY_CLOCK_FREQ": clock.get("memory_frequency_hz", 133333333),
+        "MEMORY_OUTPUT_PHASE_PS": clock.get("memory_output_phase_ps", 1313),
+        "MEMORY_OUTPUT_DUTY_PERCENT": clock.get("memory_output_duty_percent", 40),
+    }
+    return [f"{prefix}{name}={value}" for name, value in values.items()]
+
+
 def _resolve_profile_config(args: argparse.Namespace, manifest: dict | None = None) -> dict:
     """Resolve the synthesis target's engine profile and apply CLI overrides."""
     if manifest is None:
@@ -76,6 +87,7 @@ def _resolve_profile_config(args: argparse.Namespace, manifest: dict | None = No
     if engine_config is None:
         raise BuildError(f"Synthesis target '{target_name}' has no engine configuration")
     args.synthesis_target = target_name
+    args.memory_clock_config = targets[target_name].get("clock_generator", {})
     config = load_engine_config(engine_config)
     if args.threads is None:
         args.threads = config["threads"]
@@ -125,7 +137,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     half_period_ps = max(1, round(500_000_000_000 / args.engine_clock_hz))
     build_key = (
         f"threads={args.threads};stack={args.stack_depth};clock={args.engine_clock_hz};"
-        f"half_ps={half_period_ps};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
+        f"memory={_profile_memory_parameter_args(args, '')};half_ps={half_period_ps};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
         f"verilator={verilator_path}:{verilator_stat.st_size}:{verilator_stat.st_mtime_ns};"
         f"config={args.resolved_engine_config['digest']};native_opt=o3-lto-v1"
     )
@@ -177,6 +189,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         f"-GENGINE_CLOCK_FREQ={args.engine_clock_hz}",
         f"-GENGINE_HALF_PERIOD_PS={half_period_ps}",
         *_profile_parameter_args(args.resolved_engine_config, "-G"),
+        *_profile_memory_parameter_args(args, "-G"),
     ]
     if args.waveform:
         cmd.append("--trace-fst")
@@ -324,6 +337,7 @@ def _run_profile_position(
             f"-gENGINE_CLOCK_FREQ={args.engine_clock_hz}",
             f"-gENGINE_HALF_PERIOD_PS={half_period_ps}",
             *_profile_parameter_args(args.resolved_engine_config, "-g"),
+            *_profile_memory_parameter_args(args, "-g"),
             *plusargs,
         ]
         if not args.waveform:
@@ -349,8 +363,9 @@ def _run_profile_position(
 
     metrics, result_values = parse_metric_records(metrics_path.read_text(encoding="utf-8"))
     tt_depth_bits = max(1, (args.stack_depth - 1).bit_length())
-    tt_payload_bits = 14 + 16 + tt_depth_bits + 2 + 5
-    tt_entry_words = (args.resolved_engine_config["tt_tag_bits"] + tt_payload_bits + 15) // 16
+    tt_payload_bits = 12 + 16 + tt_depth_bits + 2 + 5
+    tt_way_words = (args.resolved_engine_config["tt_tag_bits"] + tt_payload_bits + 15) // 16
+    tt_entry_words = 3 * tt_way_words
     configuration = {
         "fen": fen,
         "search_limit": {"kind": search_kind, "value": search_limit},
@@ -359,10 +374,10 @@ def _run_profile_position(
         "engine_clock_hz": args.engine_clock_hz,
         "engine_profile": args.resolved_engine_config,
         "synthesis_target": args.synthesis_target,
-        "memory_clock_hz": 100_000_000,
+        "memory_clock_hz": args.memory_clock_config.get("memory_frequency_hz", 133333333),
         "tt_tag_bits": args.resolved_engine_config["tt_tag_bits"],
         "tt_entry_words": tt_entry_words,
-        "tt_entries": (1 << 25) // tt_entry_words,
+        "tt_entries": 2 * ((1 << 25) // tt_entry_words // 2),
         "tt_cache_lines": 1 << args.resolved_engine_config["tt_cache_index_bits"],
         "tt_initial_state": "cold",
         "memory_path": "external-cache-cdc-sdr-sdram",

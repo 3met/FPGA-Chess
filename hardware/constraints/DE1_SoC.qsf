@@ -121,6 +121,7 @@ set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to DRAM_CKE
 set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to DRAM_CS_N
 set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to DRAM_DQ[*]
 set_instance_assignment -name FAST_OUTPUT_ENABLE_REGISTER ON -to DRAM_DQ[*]
+# Pack capture into IO registers to minimize the SDRAM input data path.
 set_instance_assignment -name FAST_INPUT_REGISTER ON -to DRAM_DQ[*]
 set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to DRAM_RAS_N
 set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to DRAM_WE_N

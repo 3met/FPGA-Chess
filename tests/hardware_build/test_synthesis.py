@@ -13,6 +13,7 @@ from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_b
 from tools.hardware_build.synthesis import (
     command_synth,
     deterministic_build_id,
+    materialize_intel_pll,
     quartus_negative_slack,
     quartus_smart_commands,
     synth_quartus,
@@ -43,6 +44,30 @@ class EngineBuildConfigTests(unittest.TestCase):
                 "localparam int ENGINE_CLOCK_FREQ = 40_000_000;\n",
             )
 
+    def test_engine_frequency_change_keeps_board_memory_clock_settings(self):
+        """Independent PLLs retain memory timing when an engine profile changes."""
+        manifest = load_manifest()
+        target = manifest["synthesis_targets"]["quartus-de1-soc"]
+        clock_config = target["clock_generator"]
+        template = Path(__file__).resolve().parents[2] / clock_config["template"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            implementations = []
+            for frequency in (40.0, 60.0):
+                build_dir = Path(temp_dir) / str(frequency)
+                qip = materialize_intel_pll(template, build_dir, frequency, clock_config)
+                self.assertTrue(qip.is_file())
+                implementation = (qip.parent / "pll_ip" / "pll_ip_0002.v").read_text(encoding="utf-8")
+                engine_pll, memory_pll, communication_pll = implementation.split("    altera_pll #(\n")[1:]
+                self.assertIn(f'.output_clock_frequency0("{frequency:.6f} MHz")', engine_pll)
+                memory_frequency = clock_config["memory_frequency_hz"] / 1_000_000
+                for index in range(2):
+                    self.assertIn(f'.output_clock_frequency{index}("{memory_frequency:.6f} MHz")', memory_pll)
+                self.assertIn(f'.phase_shift1("{clock_config["memory_output_phase_ps"]} ps")', memory_pll)
+                self.assertIn(f'.duty_cycle1({clock_config["memory_output_duty_percent"]})', memory_pll)
+                self.assertIn(f'.output_clock_frequency0("{clock_config["communication_frequency_hz"] / 1_000_000:.6f} MHz")', communication_pll)
+                implementations.append(memory_pll + communication_pll)
+            self.assertEqual(*implementations)
+
     def test_quartus_project_includes_generated_engine_metadata(self):
         manifest = load_manifest()
         target = manifest["synthesis_targets"]["quartus-de1-soc"]
@@ -60,6 +85,8 @@ class EngineBuildConfigTests(unittest.TestCase):
             self.assertIn(f"ENGINE_SEARCH_THREAD_COUNT = {resolved['threads']}", generated_config)
             self.assertIn(f"ENGINE_SEARCH_STACK_DEPTH = {resolved['stack_depth']}", generated_config)
             self.assertIn(f"ENGINE_TT_CACHE_INDEX_BITS = {resolved['tt_cache_index_bits']}", generated_config)
+            for name in ("store_fifo_depth", "outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"):
+                self.assertIn(f"ENGINE_TT_{name.upper()} = {resolved['tt_' + name]}", generated_config)
             self.assertIn(
                 f"ENGINE_ASPIRATION_DELTA_MULTIPLIER_Q3 = {resolved['search']['aspiration_delta_multiplier_q3']}",
                 generated_config,

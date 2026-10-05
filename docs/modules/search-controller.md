@@ -7,7 +7,7 @@ The search controller owns the active position, search threads and stacks, repet
 | Operation | Behavior |
 | --------- | -------- |
 | Board Update | Apply position setup or a game move to the active position. |
-| New Game | Cancel active work, clear game-dependent state, advance the TT generation, and restore the starting position. |
+| New Game | Cancel active work, clear game-dependent state, physically invalidate the TT, and restore the starting position. |
 | Search Depth | Search to a fixed depth. |
 | Search Fixed Time | Search until a fixed-time budget expires. |
 | Search on Clock | Derive and enforce a budget from clock and increment values. |
@@ -25,7 +25,8 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 | Input | `req_valid`, `req` | Typed operation request from the command layer. |
 | Output | `req_ready` | Request acceptance. |
 | Output | `resp_valid`, `resp` | Operation completion and result. |
-| Input | `tt_memory_ready`, `tt_memory_error` | Selected TT backend status. |
+| Input | `tt_memory_clk`, `tt_memory_rst_n` | External-memory interface clock and local reset. |
+| Input | `tt_memory_ready`, `tt_memory_error` | External-memory backend status synchronized to the engine clock. |
 | Request/response | `tt_mem_*` | Vendor-neutral TT memory channels described in [tt-memory.md](tt-memory.md). |
 
 ## State Ownership
@@ -53,7 +54,7 @@ A thread has at most one in-flight request in each subsystem, with generation an
 
 Before search, NNUE builds a root accumulator for every thread. Legal child preparation completes NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator.
 
-Reset, New Game, Kill, and search restart prevent outstanding responses from changing a later operation.
+Reset, New Game, Kill, and search restart prevent outstanding responses from changing a later operation. Each thread retains TT transport ownership until its accepted probe returns, even after search cancellation. A new probe for that thread waits for the old response to drain; canceled responses are discarded.
 
 ## Node Lifecycle
 

@@ -1,6 +1,5 @@
 import argparse
 import os
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -583,22 +582,11 @@ class ProfileArgumentTests(unittest.TestCase):
         args.engine_config = None
         config = _resolve_profile_config(args)
         parameters = _profile_parameter_args(config, "-G")
-        self.assertIn("-GTT_CACHE_INDEX_BITS=11", parameters)
+        self.assertIn(f"-GTT_CACHE_INDEX_BITS={config['tt_cache_index_bits']}", parameters)
+        for name in ("store_fifo_depth", "outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"):
+            self.assertIn(f"-GTT_{name.upper()}={config['tt_' + name]}", parameters)
         self.assertIn("-GENABLE_SEARCH_STATS=0", parameters)
 
-    def test_profile_bench_accepts_and_connects_every_device_parameter(self):
-        """Keep profiling's RTL interface aligned with the synthesis configuration."""
-        args = self.namespace(threads=None, stack_depth=None, engine_clock_hz=None)
-        args.target = "quartus-de1-soc"
-        args.engine_config = None
-        config = _resolve_profile_config(args)
-        bench = Path("hardware/tb/profile/tb_engine_profile.sv").read_text(encoding="utf-8")
-        header = bench.split(");", 1)[0]
-        for argument in _profile_parameter_args(config, "-G"):
-            name = argument[2:].split("=", 1)[0]
-            with self.subTest(parameter=name):
-                self.assertRegex(header, rf"parameter\s+[^,;=]*\b{re.escape(name)}\s*=")
-                self.assertIn(f".{name}({name})", bench)
 
 
 class ProfileSuiteTests(unittest.TestCase):

@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 // Sparse behavioral model of the DE1-SoC 32M x 16 SDR SDRAM.
 //
 // The production controller remains responsible for JEDEC timing, banking,
@@ -6,6 +7,8 @@
 
 module sdram_chip_model #(
     parameter int CAS_LATENCY = 2,
+    parameter realtime READ_ACCESS_NS = 2.0,
+    parameter realtime WRITE_INPUT_DELAY_NS = 0.0,
     parameter int TRCD_CYCLES = 2,
     parameter int TRP_CYCLES = 2,
     parameter int TRAS_CYCLES = 5,
@@ -50,6 +53,16 @@ module sdram_chip_model #(
 
     assign dq = dq_oe ? dq_out : 16'hzzzz;
 
+    // Model output-buffer transport when the forwarded pin clock is delayed.
+    wire [12:0] pin_addr;
+    wire [1:0] pin_ba;
+    wire pin_cas_n, pin_cke, pin_cs_n, pin_ldqm, pin_ras_n, pin_udqm, pin_we_n;
+    wire [15:0] pin_dq;
+    assign #(WRITE_INPUT_DELAY_NS) {pin_addr, pin_ba, pin_cas_n, pin_cke, pin_cs_n,
+        pin_ldqm, pin_ras_n, pin_udqm, pin_we_n} =
+        {addr, ba, cas_n, cke, cs_n, ldqm, ras_n, udqm, we_n};
+    assign #(WRITE_INPUT_DELAY_NS) pin_dq = dq;
+
     function automatic WordAddress word_address(
         input logic [1:0] bank,
         input logic [12:0] row,
@@ -86,31 +99,32 @@ module sdram_chip_model #(
 
     always @(posedge clk) begin
         cycle_count <= cycle_count + 1;
-        if (cke && cke_start_cycle < 0) cke_start_cycle <= longint'(cycle_count);
+        if (pin_cke && cke_start_cycle < 0) cke_start_cycle <= longint'(cycle_count);
         if (mode_loaded && last_refresh >= 0
                 && longint'(cycle_count) - last_refresh > REFRESH_MAX_CYCLES)
             $fatal(1, "SDRAM refresh deadline exceeded");
-        dq_oe <= 1'b0;
-        if (cke && !cs_n) begin
+        // Hold the previous data through the output hold/access interval.
+        dq_oe <= #(READ_ACCESS_NS) 1'b0;
+        if (pin_cke && !pin_cs_n) begin
             // ACTIVE
-            if (!ras_n && cas_n && we_n) begin
+            if (!pin_ras_n && pin_cas_n && pin_we_n) begin
                 if (!mode_loaded)
                     $fatal(1, "SDRAM ACTIVE issued before initialization completed");
-                if (open_valid[ba])
+                if (open_valid[pin_ba])
                     $fatal(1, "SDRAM ACTIVE issued to an already-open bank");
-                if (longint'(cycle_count) - last_precharge[ba] < TRP_CYCLES)
+                if (longint'(cycle_count) - last_precharge[pin_ba] < TRP_CYCLES)
                     $fatal(1, "SDRAM tRP violation");
-                if (longint'(cycle_count) - last_activate[ba] < TRC_CYCLES)
+                if (longint'(cycle_count) - last_activate[pin_ba] < TRC_CYCLES)
                     $fatal(1, "SDRAM tRC violation");
-                open_row[ba] <= addr;
-                open_valid[ba] <= 1'b1;
-                last_activate[ba] <= longint'(cycle_count);
+                open_row[pin_ba] <= pin_addr;
+                open_valid[pin_ba] <= 1'b1;
+                last_activate[pin_ba] <= longint'(cycle_count);
             // PRECHARGE
-            end else if (!ras_n && cas_n && !we_n) begin
+            end else if (!pin_ras_n && pin_cas_n && !pin_we_n) begin
                 if (cke_start_cycle >= 0 && !precharged_all
                         && longint'(cycle_count) - cke_start_cycle < 10_000)
                     $fatal(1, "SDRAM power-up delay shorter than 100 us");
-                if (addr[10]) begin
+                if (pin_addr[10]) begin
                     for (int bank = 0; bank < 4; bank++) begin
                         if (open_valid[bank]
                                 && longint'(cycle_count) - last_activate[bank] < TRAS_CYCLES)
@@ -122,16 +136,16 @@ module sdram_chip_model #(
                     end
                     precharged_all <= 1'b1;
                 end else begin
-                    if (open_valid[ba]
-                            && longint'(cycle_count) - last_activate[ba] < TRAS_CYCLES)
+                    if (open_valid[pin_ba]
+                            && longint'(cycle_count) - last_activate[pin_ba] < TRAS_CYCLES)
                         $fatal(1, "SDRAM tRAS violation");
-                    if (longint'(cycle_count) - last_write[ba] < TDPL_CYCLES)
+                    if (longint'(cycle_count) - last_write[pin_ba] < TDPL_CYCLES)
                         $fatal(1, "SDRAM tDPL violation");
-                    open_valid[ba] <= 1'b0;
-                    last_precharge[ba] <= longint'(cycle_count);
+                    open_valid[pin_ba] <= 1'b0;
+                    last_precharge[pin_ba] <= longint'(cycle_count);
                 end
             // AUTO REFRESH invalidates the model's open-row bookkeeping.
-            end else if (!ras_n && !cas_n && we_n) begin
+            end else if (!pin_ras_n && !pin_cas_n && pin_we_n) begin
                 for (int bank = 0; bank < 4; bank++)
                     if (open_valid[bank])
                         $fatal(1, "SDRAM AUTO REFRESH issued with an open bank");
@@ -142,42 +156,42 @@ module sdram_chip_model #(
                 last_refresh <= longint'(cycle_count);
                 for (int bank = 0; bank < 4; bank++) open_valid[bank] <= 1'b0;
             // LOAD MODE REGISTER
-            end else if (!ras_n && !cas_n && !we_n) begin
+            end else if (!pin_ras_n && !pin_cas_n && !pin_we_n) begin
                 if (!precharged_all || initialization_refreshes < 2)
                     $fatal(1, "SDRAM mode register loaded before initialization refreshes");
-                if (ba != 0 || addr[12:10] != 0 || addr[9] != 0
-                        || addr[8:7] != 0 || addr[6:4] != 3'(CAS_LATENCY)
-                        || addr[3] != 0 || addr[2:0] != 3'b111)
-                    $fatal(1, "SDRAM mode register does not select full-page sequential CAS-2 bursts");
+                if (pin_ba != 0 || pin_addr[12:10] != 0 || pin_addr[9] != 0
+                        || pin_addr[8:7] != 0 || pin_addr[6:4] != 3'(CAS_LATENCY)
+                        || pin_addr[3] != 0 || pin_addr[2:0] != 3'b111)
+                    $fatal(1, "SDRAM mode register does not select the configured full-page sequential burst timing");
                 mode_loaded <= 1'b1;
             // READ
-            end else if (ras_n && !cas_n && we_n && open_valid[ba]) begin
+            end else if (pin_ras_n && !pin_cas_n && pin_we_n && open_valid[pin_ba]) begin
                 if (!mode_loaded) $fatal(1, "SDRAM READ before mode register load");
-                if (longint'(cycle_count) - last_activate[ba] < TRCD_CYCLES)
+                if (longint'(cycle_count) - last_activate[pin_ba] < TRCD_CYCLES)
                     $fatal(1, "SDRAM tRCD violation on READ");
                 read_active <= 1'b1;
-                read_bank <= ba;
-                read_col <= addr[9:0];
-                // CAS latency counts from the READ command edge to the first
-                // data edge; this process observes the command as edge zero.
-                read_delay <= 4'(CAS_LATENCY - 1);
+                read_bank <= pin_ba;
+                read_col <= pin_addr[9:0];
+                // SDRAM starts driving after edge n + CAS - 1 so data is
+                // available by edge n + CAS; tAC follows the driving edge.
+                read_delay <= 4'(CAS_LATENCY - 2);
             // WRITE. The controller presents one consecutive word each cycle.
-            end else if (ras_n && !cas_n && !we_n && open_valid[ba]) begin
-                automatic WordAddress write_address = word_address(ba, open_row[ba], addr[9:0]);
+            end else if (pin_ras_n && !pin_cas_n && !pin_we_n && open_valid[pin_ba]) begin
+                automatic WordAddress write_address = word_address(pin_ba, open_row[pin_ba], pin_addr[9:0]);
                 automatic logic [15:0] old_word = read_word(write_address);
                 if (!mode_loaded) $fatal(1, "SDRAM WRITE before mode register load");
-                if (longint'(cycle_count) - last_activate[ba] < TRCD_CYCLES)
+                if (longint'(cycle_count) - last_activate[pin_ba] < TRCD_CYCLES)
                     $fatal(1, "SDRAM tRCD violation on WRITE");
                 memory[write_address] = {
-                    udqm ? old_word[15:8] : dq[15:8],
-                    ldqm ? old_word[7:0] : dq[7:0]
+                    pin_udqm ? old_word[15:8] : pin_dq[15:8],
+                    pin_ldqm ? old_word[7:0] : pin_dq[7:0]
                 };
                 write_active <= 1'b1;
-                write_bank <= ba;
-                write_col <= addr[9:0] + 1'b1;
-                last_write[ba] <= longint'(cycle_count);
+                write_bank <= pin_ba;
+                write_col <= pin_addr[9:0] + 1'b1;
+                last_write[pin_ba] <= longint'(cycle_count);
             // BURST TERMINATE
-            end else if (ras_n && cas_n && !we_n) begin
+            end else if (pin_ras_n && pin_cas_n && !pin_we_n) begin
                 read_active <= 1'b0;
                 write_active <= 1'b0;
             end
@@ -187,20 +201,20 @@ module sdram_chip_model #(
             if (read_delay != 0) begin
                 read_delay <= read_delay - 1'b1;
             end else begin
-                dq_out <= read_word(word_address(read_bank, open_row[read_bank], read_col));
-                dq_oe <= 1'b1;
+                dq_out <= #(READ_ACCESS_NS) read_word(word_address(read_bank, open_row[read_bank], read_col));
+                dq_oe <= #(READ_ACCESS_NS) 1'b1;
                 read_col <= read_col + 1'b1;
             end
         end
 
         // WRITE data after the first command word continues without CAS.
-        if (write_active && cke && !cs_n && ras_n && cas_n && we_n) begin
+        if (write_active && pin_cke && !pin_cs_n && pin_ras_n && pin_cas_n && pin_we_n) begin
             automatic WordAddress write_address =
                 word_address(write_bank, open_row[write_bank], write_col);
             automatic logic [15:0] old_word = read_word(write_address);
             memory[write_address] = {
-                udqm ? old_word[15:8] : dq[15:8],
-                ldqm ? old_word[7:0] : dq[7:0]
+                pin_udqm ? old_word[15:8] : pin_dq[15:8],
+                pin_ldqm ? old_word[7:0] : pin_dq[7:0]
             };
             write_col <= write_col + 1'b1;
             last_write[write_bank] <= longint'(cycle_count);

@@ -29,6 +29,10 @@ def engine_rtl_parameter_values(config: dict) -> dict[str, int]:
         "SEARCH_STACK_DEPTH": config["stack_depth"],
         "TT_TAG_BITS": config["tt_tag_bits"],
         "TT_CACHE_INDEX_BITS": config["tt_cache_index_bits"],
+        "TT_STORE_FIFO_DEPTH": config["tt_store_fifo_depth"],
+        "TT_OUTSTANDING_DEPTH": config["tt_outstanding_depth"],
+        "TT_RESPONSE_FIFO_DEPTH": config["tt_response_fifo_depth"],
+        "TT_WRITEBACK_FIFO_DEPTH": config["tt_writeback_fifo_depth"],
         "MOVE_MEMORY_ENTRIES": config["move_memory_entries"],
         **{f"MOVE_BUCKET_{7-index}_RATIO": ratio
            for index, ratio in enumerate(config["move_bucket_ratios_descending"])},
@@ -335,7 +339,7 @@ def load_engine_config(value: str) -> dict:
     move_memory = _object(engine_profile, "move_memory", rel(engine_path))
     instrumentation = _object(engine_profile, "instrumentation", rel(engine_path))
     _require_keys(engine, {"threads", "stack_depth", "clock_frequency_hz"}, f"{rel(engine_path)}.engine")
-    _require_keys(tt, {"tag_bits", "cache_index_bits"}, f"{rel(engine_path)}.transposition_table")
+    _require_keys(tt, {"tag_bits", "cache_index_bits", "store_fifo_depth", "outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"}, f"{rel(engine_path)}.transposition_table")
     _require_keys(history, {"entry_count", "entry_bits"}, f"{rel(engine_path)}.history_heuristic")
     _require_keys(instrumentation, {"search_statistics"}, f"{rel(engine_path)}.instrumentation")
     _require_keys(move_memory, {"entries_per_thread", "bucket_ratios_descending"}, f"{rel(engine_path)}.move_memory")
@@ -358,11 +362,20 @@ def load_engine_config(value: str) -> dict:
         "clock_frequency_hz": _integer(engine, "clock_frequency_hz", f"{rel(engine_path)}.engine", 1),
         "tt_tag_bits": _integer(tt, "tag_bits", f"{rel(engine_path)}.transposition_table", 1, 63),
         "tt_cache_index_bits": _integer(tt, "cache_index_bits", f"{rel(engine_path)}.transposition_table", 1),
+        "tt_store_fifo_depth": _integer(tt, "store_fifo_depth", f"{rel(engine_path)}.transposition_table", 2),
+        "tt_outstanding_depth": _integer(tt, "outstanding_depth", f"{rel(engine_path)}.transposition_table", 2),
+        "tt_response_fifo_depth": _integer(tt, "response_fifo_depth", f"{rel(engine_path)}.transposition_table", 2),
+        "tt_writeback_fifo_depth": _integer(tt, "writeback_fifo_depth", f"{rel(engine_path)}.transposition_table", 2),
         "history_entry_count": _integer(history, "entry_count", f"{rel(engine_path)}.history_heuristic", 2),
         "history_entry_bits": _integer(history, "entry_bits", f"{rel(engine_path)}.history_heuristic", 2),
         "search_statistics": _boolean(instrumentation, "search_statistics", f"{rel(engine_path)}.instrumentation"),
         "search": search,
     }
+    # CDC queues use Gray pointers; matching metadata shares the read depth.
+    for key in ("tt_outstanding_depth", "tt_response_fifo_depth", "tt_writeback_fifo_depth"):
+        depth = resolved[key]
+        if depth & (depth - 1):
+            raise BuildError(f"{rel(engine_path)}.{key} must be a power of two")
     if search["rfp_maximum_depth"] > resolved["stack_depth"]:
         raise BuildError(
             f"{rel(engine_path)} RFP maximum depth must not exceed the engine stack depth"

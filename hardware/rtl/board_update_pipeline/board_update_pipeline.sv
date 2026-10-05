@@ -533,7 +533,7 @@ module board_update_pipeline #(
         next_ctx_pipe[0].thread_id   = thread_id;
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
-        next_ctx_pipe[0].mover_king_square = pushed_king_square(board_in, move_in);
+        next_ctx_pipe[0].mover_king_square = '0;
         if (board_op == BOARD_PUSH_MOVE_OP || board_op == BOARD_COMMIT_MOVE_OP
                 || board_op == BOARD_PUSH_NULL_OP || board_op == BOARD_REVERSE_MOVE_OP)
             next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(~board_in.turn)];
@@ -548,6 +548,9 @@ module board_update_pipeline #(
 
     always_comb begin
         next_ctx_pipe[1] = ctx_pipe[0];
+        // Decode the king destination after request capture so dispatch does
+        // not feed a dynamic tile read before the first register boundary.
+        next_ctx_pipe[1].mover_king_square = pushed_king_square(ctx_pipe[0].board, ctx_pipe[0].move);
     end
 
     // Decode the captured request into registered overlay masks during the

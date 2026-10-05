@@ -14,7 +14,7 @@ module tb_sdr_sdram_controller #(
     logic req_ready;
     logic req_write;
     TTWordAddress req_address;
-    logic [3:0] req_length;
+    TTBurstLength req_length;
     logic write_valid;
     logic write_ready;
     logic write_last;
@@ -286,6 +286,25 @@ module tb_sdr_sdram_controller #(
         wait_for_completion();
     endtask : test_read_backpressure
 
+    // A ready receiver drains early words while the remaining burst is captured.
+    task automatic test_overlapped_read();
+        read_ready = 1'b1;
+        issue_request(1'b0, TTWordAddress'(20), 4'd2);
+        while (!read_valid) @(negedge clk);
+        check(dut.read_capture_count < dut.transaction_length,
+            "first word is available before the complete burst is captured");
+        check(read_data == 16'h9abc && !read_last && !done_valid,
+            "streamed first word has data and no premature completion");
+        @(negedge clk);
+        check(read_valid && read_data == 16'hdef0 && read_last,
+            "streamed second word follows without a delivery gap");
+        @(negedge clk);
+        check(!read_valid, "each captured word is delivered exactly once");
+        wait_for_completion();
+        check(dut.remaining == 0 && !done_error,
+            "streaming completion follows physical burst completion");
+    endtask : test_overlapped_read
+
     task automatic test_queued_request_preserves_row();
         automatic int single_precharge_base = single_precharge_count;
 
@@ -368,6 +387,7 @@ module tb_sdr_sdram_controller #(
         test_initialization();
         test_buffered_write();
         test_read_backpressure();
+        test_overlapped_read();
         test_queued_request_preserves_row();
         test_row_crossing_write();
         test_refresh_during_stalls();

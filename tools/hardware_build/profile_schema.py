@@ -49,10 +49,10 @@ ORDINAL_BUCKETS = ["1", "2", "3", "4", "5-8", "9-16", "17-32", "33+"]
 STALL_LABELS = {
     "move_not_ready": "Move generator busy; a generation request was waiting",
     "tt_request_not_ready": "TT frontend busy; a lookup request was waiting",
-    "cdc_command": "SDRAM command CDC FIFO full",
-    "cdc_write": "SDRAM write-data CDC FIFO full",
-    "cdc_read": "Returned SDRAM read data waiting for the TT frontend",
-    "cdc_done": "Returned SDRAM completion waiting for the TT frontend",
+    "cdc_command": "SDRAM request backpressure (engine-clock samples)",
+    "cdc_write": "SDRAM write backpressure (engine-clock samples)",
+    "cdc_read": "SDRAM read backpressure (engine-clock samples)",
+    "cdc_done": "SDRAM completion backpressure (engine-clock samples)",
 }
 ALGORITHM_LABELS = {
     "main_board_issues": "Main-search move pushes",
@@ -83,10 +83,8 @@ MOVE_GENERATOR_OPERATION_LABELS = {
     "quiet_generation": "Quiet generation",
     "bucket_pop": "Bucket pop",
 }
-TT_FRONTEND_STATES = [
-    "idle", "read_request", "read_data", "write_request", "write_data", "write_done",
-    "clear_request", "clear_data", "clear_done", "cache_clear", "cache_read", "read_done",
-]
+TT_FRONTEND_STATES = ["idle", "drain", "clear_wait", "cache_clear"]
+
 SDRAM_STATES = [
     "powerup", "init_precharge", "init_precharge_wait", "init_refresh_1",
     "init_refresh_1_wait", "init_refresh_2", "init_refresh_2_wait", "init_mode",

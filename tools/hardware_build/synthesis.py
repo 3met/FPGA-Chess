@@ -1,7 +1,6 @@
 """Quartus and Vivado project generation and synthesis commands."""
 
 import argparse
-import base64
 import hashlib
 import json
 import re
@@ -65,49 +64,39 @@ def qsf_relevant_pin_line(line: str) -> bool:
     )
 
 
-def replace_once(path: Path, pattern: str, replacement: str) -> None:
-    """Update one generated PLL setting and reject an unexpected IP layout."""
-    contents = path.read_text(encoding="utf-8")
-    updated, count = re.subn(pattern, replacement, contents, count=1)
-    if count != 1:
-        raise BuildError(f"Could not configure clock-generator template {rel(path)}")
-    path.write_text(updated, encoding="utf-8")
-
-
 def engine_clock_values(engine_clock_mhz: float) -> tuple[str, int]:
     """Quantize MHz to the PLL's micro-MHz precision and derive exact Hz for RTL."""
     frequency_text = f"{engine_clock_mhz:.6f}"
     return frequency_text, round(float(frequency_text) * 1_000_000)
 
 
-def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: float) -> Path:
-    """Copy the Intel PLL IP and set its output frequency for this build target."""
+def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: float, clock_config: dict) -> Path:
+    """Configure separate engine, memory, and communication PLLs from board-specific clock settings."""
     destination = build_dir / "clock_generator"
     shutil.copytree(template, destination, dirs_exist_ok=True)
     frequency_text, _ = engine_clock_values(engine_clock_mhz)
-    replace_once(
-        destination / "pll_ip" / "pll_ip_0002.v",
-        r'\.output_clock_frequency0\("[^"]+"\),',
-        f'.output_clock_frequency0("{frequency_text} MHz"),',
-    )
-    replace_once(
-        destination / "pll_ip.v",
-        r'(gui_output_clock_frequency0" value=")[^"]+(" />)',
-        rf"\g<1>{float(frequency_text):g}\g<2>",
-    )
-    qip = destination / "pll_ip.qip"
-    gui_value = base64.b64encode(f"{float(frequency_text):g}".encode()).decode()
-    output_value = base64.b64encode(f"{frequency_text} MHz".encode()).decode()
-    replace_once(
-        qip,
-        r"(Z3VpX291dHB1dF9jbG9ja19mcmVxdWVuY3kw::)[^:]+(::RGVzaXJlZCBGcmVxdWVuY3k=)",
-        rf"\g<1>{gui_value}\g<2>",
-    )
-    replace_once(
-        qip,
-        r"(b3V0cHV0X2Nsb2NrX2ZyZXF1ZW5jeTA=::)[^:]+(::b3V0cHV0X2Nsb2NrX2ZyZXF1ZW5jeTA=)",
-        rf"\g<1>{output_value}\g<2>",
-    )
+    implementation = destination / "pll_ip" / "pll_ip_0002.v"
+    # Literal PLL primitive settings avoid packed-string truncation by vendor elaborators.
+    source = implementation.read_text(encoding="utf-8")
+    engine_source, memory_source, communication_source = source.split("    altera_pll #(\n")[1:]
+    engine_source = re.sub(r'\.output_clock_frequency0\("[^"]+"\)',
+                           f'.output_clock_frequency0("{frequency_text} MHz")', engine_source)
+    memory_frequency = f"{clock_config['memory_frequency_hz'] / 1_000_000:.6f} MHz"
+    for index in range(2):
+        memory_source = re.sub(rf'\.output_clock_frequency{index}\("[^"]+"\)',
+                              f'.output_clock_frequency{index}("{memory_frequency}")', memory_source)
+    for index, key in [(1, "memory_output_phase_ps")]:
+        memory_source = re.sub(rf'\.phase_shift{index}\("[^"]+"\)',
+                              f'.phase_shift{index}("{clock_config[key]} ps")', memory_source)
+    memory_source = re.sub(r'\.duty_cycle1\(\d+\)',
+                           f'.duty_cycle1({clock_config["memory_output_duty_percent"]})', memory_source)
+    communication_frequency = f"{clock_config['communication_frequency_hz'] / 1_000_000:.6f} MHz"
+    communication_source = re.sub(r'\.output_clock_frequency0\("[^\"]+"\)',
+                                   f'.output_clock_frequency0("{communication_frequency}")', communication_source)
+    implementation.write_text(source.split("    altera_pll #(\n", 1)[0]
+                              + "    altera_pll #(\n" + engine_source
+                              + "    altera_pll #(\n" + memory_source
+                              + "    altera_pll #(\n" + communication_source, encoding="utf-8")
     return destination / "pll_ip.qip"
 
 
@@ -332,9 +321,14 @@ def write_quartus_project(
     if "clock_generator" in target:
         qip_files.append(
             materialize_intel_pll(
-                repo_path(target["clock_generator"]["template"]), build_dir, engine_clock_mhz
+                repo_path(target["clock_generator"]["template"]), build_dir, engine_clock_mhz, target["clock_generator"]
             )
         )
+    if "clock_generator" in target:
+        clock_config = target["clock_generator"]
+        with generated_build_config.open("a", encoding="utf-8") as config_file:
+            config_file.write(f"localparam int COMMUNICATION_CLOCK_FREQ = {clock_config['communication_frequency_hz']};\n")
+            config_file.write(f"localparam int MEMORY_CLOCK_FREQ = {clock_config['memory_frequency_hz']};\n")
     for qip in qip_files:
         lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(qip)}"')
 

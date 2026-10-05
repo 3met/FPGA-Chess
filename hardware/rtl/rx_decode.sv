@@ -48,6 +48,7 @@ module uart_receiver #(
     logic [BREAK_TIMER_BITS-1:0] low_timer;
     logic [2:0] rx_data_pos;
     logic [7:0] rx_shift;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic uart_rx_meta, uart_rx_sync;
     logic [1:0] sample_high_count;
 
@@ -210,10 +211,14 @@ module rx_decode #(
     logic rx_fifo_wr_en;
     logic rx_fifo_rd_en;
     logic uart_error_latched;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic uart_error_engine_meta;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic uart_error_engine_sync;
 
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic break_engine_meta;
+    (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic break_engine_sync;
     logic engine_fifo_rst_n;
     logic uart_fifo_rst_n;

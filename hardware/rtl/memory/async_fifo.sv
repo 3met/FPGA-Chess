@@ -7,6 +7,8 @@ module async_fifo #(
     input wr_en,
     input logic [DATA_WIDTH-1:0] wr_data,
     output logic full,
+    output logic wr_empty,
+    output logic [$clog2(DEPTH):0] wr_free,
 
     input rd_clk,
     input rd_rst_n,
@@ -102,7 +104,18 @@ module async_fifo #(
         end
     end
 
+    // A delayed read pointer conservatively underestimates available space.
+    logic [PTR_WIDTH-1:0] rd_bin_wrclk;
+    always_comb begin
+        rd_bin_wrclk[PTR_WIDTH-1] = rd_gray_wrclk_sync[PTR_WIDTH-1];
+        for (int bit_index = PTR_WIDTH-2; bit_index >= 0; bit_index--)
+            rd_bin_wrclk[bit_index] = rd_bin_wrclk[bit_index+1] ^ rd_gray_wrclk_sync[bit_index];
+        wr_free = PTR_WIDTH'(DEPTH) - (wr_bin - rd_bin_wrclk);
+    end
+
     assign rd_data = mem[rd_bin[PTR_BITS-1:0]];
+    // Source-domain emptiness stays false until the synchronized consumer acknowledges every word.
+    assign wr_empty = (wr_gray == rd_gray_wrclk_sync);
     assign empty = (rd_gray == wr_gray_rdclk_sync);
     assign full = (wr_gray == full_compare_gray);
 

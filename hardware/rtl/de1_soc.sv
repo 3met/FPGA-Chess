@@ -22,14 +22,14 @@ module de1_soc(input CLOCK_50,
             output logic DRAM_WE_N
             );
 
-	parameter UART_CLOCK_FREQ = 100_000_000;
 	parameter BAUD_RATE = 2_000_000;
 
 	// The build target generates these constants for the exact synthesized image.
 	`include "engine_build_config.svh"
 	localparam int TT_COMPACT_BITS = ENGINE_TT_TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
-	localparam int TT_ENTRY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
-	localparam int TT_ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS;
+	localparam int TT_WAY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
+	localparam int TT_ENTRY_WORDS = TT_WAYS * TT_WAY_WORDS;
+	localparam int TT_ENTRY_COUNT = 2 * (TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS / 2);
 
 	wire rst_n;
 	assign rst_n = KEY[3];
@@ -37,23 +37,26 @@ module de1_soc(input CLOCK_50,
 	wire clk;
 	wire memory_clk;
 	wire memory_output_clk;
-	wire memory_read_clk;
 	wire uart_clk;
 	logic pll_reset;
 	wire pll_locked_status;
 	wire pll_clocks_ready;
 	pll_ip pll_1(.refclk(CLOCK_50), .rst(pll_reset), .outclk_0(clk),
-		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(memory_read_clk),
+		.outclk_1(memory_clk), .outclk_2(memory_output_clk), .outclk_3(uart_clk),
 		.locked(pll_locked_status));
-	assign DRAM_CLK = memory_output_clk;
+	// Use the dedicated DDR output register to forward a clean SDRAM clock.
+	// Forward the falling edge to SDRAM; capture reads on the rising edge.
+	altddio_out #(.width(1), .intended_device_family("Cyclone V"),
+		.power_up_high("OFF"), .oe_reg("UNREGISTERED")) sdram_clock_forward (
+		.datain_h(1'b0), .datain_l(1'b1), .outclock(memory_output_clk),
+		.outclocken(1'b1), .oe(1'b1), .aclr(1'b0), .aset(1'b0),
+		.sclr(1'b0), .sset(1'b0), .dataout(DRAM_CLK));
 	// Only GPIO_0[7] and GPIO_0[9] are the UART TX/RX pins. Keep the other
 	// header pins explicitly high impedance rather than leaving bidirectional
 	// ports structurally undriven.
 	assign GPIO_0[35:10] = 'z;
 	assign GPIO_0[8:8] = 1'bz;
 	assign GPIO_0[6:0] = 'z;
-	// Reuse the PLL's zero-phase 100 MHz memory clock for finer UART sampling.
-	assign uart_clk = memory_clk;
 
 	// One shared LFSR handles the slow PLL phases; configuration power-up
 	// values make startup independent of either physical reset button.
@@ -89,20 +92,12 @@ module de1_soc(input CLOCK_50,
 	logic tt_memory_ready, tt_memory_error;
 	logic tt_mem_req_valid, tt_mem_req_ready, tt_mem_req_write;
 	TTWordAddress tt_mem_req_address;
-	logic [3:0] tt_mem_req_length;
+	TTBurstLength tt_mem_req_length;
 	logic tt_mem_write_valid, tt_mem_write_ready, tt_mem_write_last;
 	logic [15:0] tt_mem_write_data;
 	logic tt_mem_read_valid, tt_mem_read_ready, tt_mem_read_last;
 	logic [15:0] tt_mem_read_data;
 	logic tt_mem_done_valid, tt_mem_done_ready, tt_mem_done_error;
-	logic backend_req_valid, backend_req_ready, backend_req_write;
-	TTWordAddress backend_req_address;
-	logic [3:0] backend_req_length;
-	logic backend_write_valid, backend_write_ready, backend_write_last;
-	logic [15:0] backend_write_data;
-	logic backend_read_valid, backend_read_ready, backend_read_last;
-	logic [15:0] backend_read_data;
-	logic backend_done_valid, backend_done_ready, backend_done_error;
 	logic tt_memory_ready_backend, tt_memory_error_backend;
 	// Any transport error means byte-stream position is unknowable. Fail closed
 	// until the host's next BREAK clears the RX path and restarts every domain.
@@ -149,7 +144,7 @@ module de1_soc(input CLOCK_50,
 
 	rx_decode #(
 		.BAUD_RATE(BAUD_RATE),
-		.UART_CLOCK_FREQ(UART_CLOCK_FREQ)
+		.UART_CLOCK_FREQ(COMMUNICATION_CLOCK_FREQ)
 	) rx_decode (
 		.clk(clk),
 		.uart_clk(uart_clk),
@@ -179,6 +174,10 @@ module de1_soc(input CLOCK_50,
 		.SEARCH_STACK_DEPTH(ENGINE_SEARCH_STACK_DEPTH),
 		.TT_TAG_BITS(ENGINE_TT_TAG_BITS),
 		.TT_CACHE_INDEX_BITS(ENGINE_TT_CACHE_INDEX_BITS),
+		.TT_STORE_FIFO_DEPTH(ENGINE_TT_STORE_FIFO_DEPTH),
+		.TT_OUTSTANDING_DEPTH(ENGINE_TT_OUTSTANDING_DEPTH),
+		.TT_RESPONSE_FIFO_DEPTH(ENGINE_TT_RESPONSE_FIFO_DEPTH),
+		.TT_WRITEBACK_FIFO_DEPTH(ENGINE_TT_WRITEBACK_FIFO_DEPTH),
 		.LMR_A_Q8(ENGINE_LMR_A_Q8),
 		.LMR_B_Q8(ENGINE_LMR_B_Q8),
 		.ASPIRATION_STARTING_DELTA(ENGINE_ASPIRATION_STARTING_DELTA),
@@ -232,10 +231,10 @@ module de1_soc(input CLOCK_50,
 		.TT_VALIDATE_MINIMUM_DEPTH(ENGINE_TT_VALIDATE_MINIMUM_DEPTH),
 		.TT_VALIDATE_BYPASS_HALFMOVES(ENGINE_TT_VALIDATE_BYPASS_HALFMOVES),
 		.TT_STALE_DEPTH_TOLERANCE(ENGINE_TT_STALE_DEPTH_TOLERANCE),
-		.EXTERNAL_TT(1'b1),
 		.ENABLE_SEARCH_STATS(ENGINE_ENABLE_SEARCH_STATS)
 	) engine (
 		.clk(clk),
+		.tt_memory_clk(memory_clk), .tt_memory_rst_n(memory_rst_n),
 		.rst_n(engine_core_rst_n),
 		.data_in(rx_stream),
 		.data_in_valid(rx_stream_valid),
@@ -254,37 +253,30 @@ module de1_soc(input CLOCK_50,
 		.tt_mem_done_valid(tt_mem_done_valid), .tt_mem_done_ready(tt_mem_done_ready), .tt_mem_done_error(tt_mem_done_error)
 	);
 
-	tt_memory_cdc_bridge tt_memory_bridge (
-		.req_clk(clk), .req_rst_n(engine_rst_n), .mem_clk(memory_clk), .mem_rst_n(memory_rst_n),
-		.backend_ready(tt_memory_ready_backend), .backend_error(tt_memory_error_backend),
-		.req_memory_ready(tt_memory_ready), .req_memory_error(tt_memory_error),
-		.req_valid(tt_mem_req_valid), .req_ready(tt_mem_req_ready), .req_write(tt_mem_req_write),
-		.req_address(tt_mem_req_address), .req_length(tt_mem_req_length),
-		.write_valid(tt_mem_write_valid), .write_ready(tt_mem_write_ready), .write_data(tt_mem_write_data), .write_last(tt_mem_write_last),
-		.read_valid(tt_mem_read_valid), .read_ready(tt_mem_read_ready), .read_data(tt_mem_read_data), .read_last(tt_mem_read_last),
-		.done_valid(tt_mem_done_valid), .done_ready(tt_mem_done_ready), .done_error(tt_mem_done_error),
-		.backend_req_valid(backend_req_valid), .backend_req_ready(backend_req_ready), .backend_req_write(backend_req_write),
-		.backend_req_address(backend_req_address), .backend_req_length(backend_req_length),
-		.backend_write_valid(backend_write_valid), .backend_write_ready(backend_write_ready),
-		.backend_write_data(backend_write_data), .backend_write_last(backend_write_last),
-		.backend_read_valid(backend_read_valid), .backend_read_ready(backend_read_ready),
-		.backend_read_data(backend_read_data), .backend_read_last(backend_read_last),
-		.backend_done_valid(backend_done_valid), .backend_done_ready(backend_done_ready), .backend_done_error(backend_done_error));
+	// Synchronize readiness before releasing the engine; TT owns its five CDC FIFOs.
+	(* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
+	logic ready_meta, error_meta;
+	always_ff @(posedge clk) begin
+		if (!engine_rst_n) begin ready_meta <= 0; tt_memory_ready <= 0; error_meta <= 0; tt_memory_error <= 0; end
+		else begin ready_meta <= tt_memory_ready_backend; tt_memory_ready <= ready_meta; error_meta <= tt_memory_error_backend; tt_memory_error <= error_meta; end
+	end
 
 	sdr_sdram_controller #(
-		.CLOCK_FREQ(100_000_000),
+		.CLOCK_FREQ(MEMORY_CLOCK_FREQ),
 		.ENTRY_COUNT(TT_ENTRY_COUNT),
-		.WORDS_PER_ENTRY(TT_ENTRY_WORDS)
+		.WORDS_PER_ENTRY(TT_ENTRY_WORDS),
+		// Match the fixed capture/sample pipeline to the first SDRAM output beat.
+		.INVALIDATE_STRIDE(TT_WAY_WORDS), .INVALIDATE_OFFSET(0), .CAS_LATENCY(3), .READ_PIPELINE_CYCLES(1), .READ_CAPTURE_FALLING_EDGE(1'b0)
 	) tt_sdram (
-		.clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(memory_rst_n),
+		.clk(memory_clk), .read_capture_clk(memory_output_clk), .rst_n(memory_rst_n),
 		.ready(tt_memory_ready_backend), .error(tt_memory_error_backend),
-		.req_valid(backend_req_valid), .req_ready(backend_req_ready), .req_write(backend_req_write),
-		.req_address(backend_req_address), .req_length(backend_req_length),
-		.write_valid(backend_write_valid), .write_ready(backend_write_ready),
-		.write_data(backend_write_data), .write_last(backend_write_last),
-		.read_valid(backend_read_valid), .read_ready(backend_read_ready),
-		.read_data(backend_read_data), .read_last(backend_read_last),
-		.done_valid(backend_done_valid), .done_ready(backend_done_ready), .done_error(backend_done_error),
+		.req_valid(tt_mem_req_valid), .req_ready(tt_mem_req_ready), .req_write(tt_mem_req_write),
+		.req_address(tt_mem_req_address), .req_length(tt_mem_req_length),
+		.write_valid(tt_mem_write_valid), .write_ready(tt_mem_write_ready),
+		.write_data(tt_mem_write_data), .write_last(tt_mem_write_last),
+		.read_valid(tt_mem_read_valid), .read_ready(tt_mem_read_ready),
+		.read_data(tt_mem_read_data), .read_last(tt_mem_read_last),
+		.done_valid(tt_mem_done_valid), .done_ready(tt_mem_done_ready), .done_error(tt_mem_done_error),
 		.dram_addr(DRAM_ADDR), .dram_ba(DRAM_BA), .dram_cas_n(DRAM_CAS_N), .dram_cke(DRAM_CKE),
 		.dram_cs_n(DRAM_CS_N), .dram_dq(DRAM_DQ), .dram_ldqm(DRAM_LDQM),
 		.dram_ras_n(DRAM_RAS_N), .dram_udqm(DRAM_UDQM), .dram_we_n(DRAM_WE_N));
@@ -294,7 +286,7 @@ module de1_soc(input CLOCK_50,
 	// --- UART Output Encoding ---
 	tx_encode #(
 		.BAUD_RATE(BAUD_RATE),
-		.UART_CLOCK_FREQ(UART_CLOCK_FREQ)
+		.UART_CLOCK_FREQ(COMMUNICATION_CLOCK_FREQ)
 	) tx_encode (
 		.clk(clk),
 		.uart_clk(uart_clk),

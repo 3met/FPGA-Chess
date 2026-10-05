@@ -11,10 +11,18 @@ import tt_defs::*;
 module tb_engine_profile #(
     parameter int ENGINE_CLOCK_FREQ = 75_000_000,
     parameter int ENGINE_HALF_PERIOD_PS = 6667,
+    parameter int MEMORY_CLOCK_FREQ = 133333333,
+    parameter int MEMORY_OUTPUT_PHASE_PS = 1313,
+    parameter int MEMORY_OUTPUT_DUTY_PERCENT = 40,
     parameter int SEARCH_THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = 24,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
+    // Queue storage is selected by the device profile.
     parameter int TT_CACHE_INDEX_BITS = 10,
+    parameter int TT_STORE_FIFO_DEPTH = 256,
+    parameter int TT_OUTSTANDING_DEPTH = 8,
+    parameter int TT_RESPONSE_FIFO_DEPTH = 64,
+    parameter int TT_WRITEBACK_FIFO_DEPTH = 8,
     parameter bit ENABLE_SEARCH_STATS = 1'b0,
     parameter int ASPIRATION_STARTING_DELTA = 15,
     parameter int unsigned ASPIRATION_DELTA_MULTIPLIER_Q3 = 12,
@@ -71,13 +79,17 @@ module tb_engine_profile #(
     parameter int TT_STALE_DEPTH_TOLERANCE = 4
 );
     localparam int TT_COMPACT_BITS = TT_TAG_BITS + TT_ENTRY_PAYLOAD_BITS;
-    localparam int TT_ENTRY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
-    localparam int TT_ENTRY_COUNT = TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS;
-    localparam int MEMORY_HALF_PERIOD_NS = 5;
-    localparam realtime MEMORY_PIN_LEAD_NS = 2.5;
-    // The DE1 pin clock leads the controller by 2.5 ns. Sampling 5 ns after the
-    // controller edge places reads 7.5 ns into the SDRAM's 10 ns data cycle.
-    localparam int MEMORY_READ_LAG_NS = 5;
+    localparam int TT_WAY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
+    localparam int TT_ENTRY_WORDS = TT_WAYS*TT_WAY_WORDS;
+    localparam int TT_ENTRY_COUNT = 2 * (TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS / 2);
+    // Quantize once to prevent drift between the controller and pin clocks.
+    localparam realtime MEMORY_HALF_PERIOD_NS = $rtoi(500_000_000_000.0 / MEMORY_CLOCK_FREQ + 0.5) / 1000.0;
+    localparam realtime MEMORY_SOURCE_HIGH_NS = $rtoi(20.0 * MEMORY_HALF_PERIOD_NS * MEMORY_OUTPUT_DUTY_PERCENT + 0.5) / 1000.0;
+    localparam realtime MEMORY_SOURCE_LOW_NS = 2.0 * MEMORY_HALF_PERIOD_NS - MEMORY_SOURCE_HIGH_NS;
+    // Representative routed IO delays model the inverted DDR pin clock and
+    // rising-edge input capture relative to the memory controller clock.
+    localparam realtime MEMORY_PIN_PHASE_NS = MEMORY_OUTPUT_PHASE_PS / 1000.0 + MEMORY_SOURCE_HIGH_NS + 3.5;
+    localparam realtime MEMORY_CAPTURE_PHASE_NS = MEMORY_OUTPUT_PHASE_PS / 1000.0 - 0.5;
     localparam int ENGINE_STATE_COUNT = 8;
     localparam int CONTROLLER_STATE_COUNT = 24;
     localparam int THREAD_PHASE_COUNT = 11;
@@ -99,7 +111,7 @@ module tb_engine_profile #(
     localparam int MOVE_OPERATION_BUCKET_POP = 3;
     localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1)
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
-    localparam int TT_STATE_COUNT = 12;
+    localparam int TT_STATE_COUNT = 4;
     localparam int TT_STATE_IDLE = 0;
     localparam int SDRAM_STATE_COUNT = 37;
 
@@ -112,12 +124,20 @@ module tb_engine_profile #(
     always #(ENGINE_HALF_PERIOD_PS * 1ps) engine_clk = ~engine_clk;
     always #(MEMORY_HALF_PERIOD_NS) memory_clk = ~memory_clk;
     initial begin
-        #(MEMORY_HALF_PERIOD_NS - MEMORY_PIN_LEAD_NS);
-        forever #(MEMORY_HALF_PERIOD_NS) memory_pin_clk = ~memory_pin_clk;
+        #(MEMORY_HALF_PERIOD_NS + MEMORY_PIN_PHASE_NS);
+        memory_pin_clk = 1'b1;
+        forever begin
+            #(MEMORY_SOURCE_LOW_NS) memory_pin_clk = 1'b0;
+            #(MEMORY_SOURCE_HIGH_NS) memory_pin_clk = 1'b1;
+        end
     end
     initial begin
-        #(MEMORY_HALF_PERIOD_NS + MEMORY_READ_LAG_NS);
-        forever #(MEMORY_HALF_PERIOD_NS) memory_read_clk = ~memory_read_clk;
+        #(MEMORY_HALF_PERIOD_NS + MEMORY_CAPTURE_PHASE_NS);
+        memory_read_clk = 1'b1;
+        forever begin
+            #(MEMORY_SOURCE_HIGH_NS) memory_read_clk = 1'b0;
+            #(MEMORY_SOURCE_LOW_NS) memory_read_clk = 1'b1;
+        end
     end
 
     logic [7:0] data_in;
@@ -131,21 +151,13 @@ module tb_engine_profile #(
     logic tt_memory_error;
     logic tt_mem_req_valid, tt_mem_req_ready, tt_mem_req_write;
     TTWordAddress tt_mem_req_address;
-    logic [3:0] tt_mem_req_length;
+    TTBurstLength tt_mem_req_length;
     logic tt_mem_write_valid, tt_mem_write_ready, tt_mem_write_last;
     logic [15:0] tt_mem_write_data;
     logic tt_mem_read_valid, tt_mem_read_ready, tt_mem_read_last;
     logic [15:0] tt_mem_read_data;
     logic tt_mem_done_valid, tt_mem_done_ready, tt_mem_done_error;
 
-    logic backend_req_valid, backend_req_ready, backend_req_write;
-    TTWordAddress backend_req_address;
-    logic [3:0] backend_req_length;
-    logic backend_write_valid, backend_write_ready, backend_write_last;
-    logic [15:0] backend_write_data;
-    logic backend_read_valid, backend_read_ready, backend_read_last;
-    logic [15:0] backend_read_data;
-    logic backend_done_valid, backend_done_ready, backend_done_error;
     logic backend_memory_ready, backend_memory_error;
 
     logic [12:0] dram_addr;
@@ -162,6 +174,10 @@ module tb_engine_profile #(
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         .TT_TAG_BITS(TT_TAG_BITS),
         .TT_CACHE_INDEX_BITS(TT_CACHE_INDEX_BITS),
+        .TT_STORE_FIFO_DEPTH(TT_STORE_FIFO_DEPTH),
+        .TT_OUTSTANDING_DEPTH(TT_OUTSTANDING_DEPTH),
+        .TT_RESPONSE_FIFO_DEPTH(TT_RESPONSE_FIFO_DEPTH),
+        .TT_WRITEBACK_FIFO_DEPTH(TT_WRITEBACK_FIFO_DEPTH),
         .ASPIRATION_STARTING_DELTA(ASPIRATION_STARTING_DELTA),
         .ASPIRATION_DELTA_MULTIPLIER_Q3(ASPIRATION_DELTA_MULTIPLIER_Q3),
         .LMR_A_Q8(LMR_A_Q8), .LMR_B_Q8(LMR_B_Q8),
@@ -207,10 +223,10 @@ module tb_engine_profile #(
         .TT_VALIDATE_MINIMUM_DEPTH(TT_VALIDATE_MINIMUM_DEPTH),
         .TT_VALIDATE_BYPASS_HALFMOVES(TT_VALIDATE_BYPASS_HALFMOVES),
         .TT_STALE_DEPTH_TOLERANCE(TT_STALE_DEPTH_TOLERANCE),
-        .EXTERNAL_TT(1'b1),
         .ENABLE_SEARCH_STATS(ENABLE_SEARCH_STATS)
     ) dut (
         .clk(engine_clk), .rst_n(engine_rst_n),
+        .tt_memory_clk(memory_clk), .tt_memory_rst_n(system_rst_n),
         .data_in, .data_in_valid, .ready_for_result,
         .error_flag, .ready, .data_out, .data_out_valid,
         .tt_memory_ready, .tt_memory_error,
@@ -221,11 +237,23 @@ module tb_engine_profile #(
         .tt_mem_done_valid, .tt_mem_done_ready, .tt_mem_done_error
     );
 
-    tt_memory_cdc_bridge memory_bridge (
-        .req_clk(engine_clk), .req_rst_n(system_rst_n),
-        .mem_clk(memory_clk), .mem_rst_n(system_rst_n),
-        .backend_ready(backend_memory_ready), .backend_error(backend_memory_error),
-        .req_memory_ready(tt_memory_ready), .req_memory_error(tt_memory_error),
+    // Match the board's startup synchronization while CDC lives in the TT.
+    logic ready_meta, error_meta;
+    always_ff @(posedge engine_clk) begin
+        if (!system_rst_n) begin ready_meta <= 0; tt_memory_ready <= 0; error_meta <= 0; tt_memory_error <= 0; end
+        else begin ready_meta <= backend_memory_ready; tt_memory_ready <= ready_meta; error_meta <= backend_memory_error; tt_memory_error <= error_meta; end
+    end
+
+    sdr_sdram_controller #(
+        .CLOCK_FREQ(MEMORY_CLOCK_FREQ),
+        .ENTRY_COUNT(TT_ENTRY_COUNT),
+        .WORDS_PER_ENTRY(TT_ENTRY_WORDS),
+        .INVALIDATE_STRIDE(TT_WAY_WORDS), .INVALIDATE_OFFSET(0),
+        .CAS_LATENCY(3), .READ_PIPELINE_CYCLES(1), .READ_CAPTURE_FALLING_EDGE(1'b0),
+        .SKIP_INITIAL_CLEAR(1'b1)
+    ) memory_controller (
+        .clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(system_rst_n),
+        .ready(backend_memory_ready), .error(backend_memory_error),
         .req_valid(tt_mem_req_valid), .req_ready(tt_mem_req_ready),
         .req_write(tt_mem_req_write), .req_address(tt_mem_req_address), .req_length(tt_mem_req_length),
         .write_valid(tt_mem_write_valid), .write_ready(tt_mem_write_ready),
@@ -233,34 +261,29 @@ module tb_engine_profile #(
         .read_valid(tt_mem_read_valid), .read_ready(tt_mem_read_ready),
         .read_data(tt_mem_read_data), .read_last(tt_mem_read_last),
         .done_valid(tt_mem_done_valid), .done_ready(tt_mem_done_ready), .done_error(tt_mem_done_error),
-        .backend_req_valid, .backend_req_ready, .backend_req_write,
-        .backend_req_address, .backend_req_length,
-        .backend_write_valid, .backend_write_ready, .backend_write_data, .backend_write_last,
-        .backend_read_valid, .backend_read_ready, .backend_read_data, .backend_read_last,
-        .backend_done_valid, .backend_done_ready, .backend_done_error
-    );
-
-    sdr_sdram_controller #(
-        .CLOCK_FREQ(100_000_000),
-        .ENTRY_COUNT(TT_ENTRY_COUNT),
-        .WORDS_PER_ENTRY(TT_ENTRY_WORDS),
-        .CAS_LATENCY(2),
-        .SKIP_INITIAL_CLEAR(1'b1)
-    ) memory_controller (
-        .clk(memory_clk), .read_capture_clk(memory_read_clk), .rst_n(system_rst_n),
-        .ready(backend_memory_ready), .error(backend_memory_error),
-        .req_valid(backend_req_valid), .req_ready(backend_req_ready),
-        .req_write(backend_req_write), .req_address(backend_req_address), .req_length(backend_req_length),
-        .write_valid(backend_write_valid), .write_ready(backend_write_ready),
-        .write_data(backend_write_data), .write_last(backend_write_last),
-        .read_valid(backend_read_valid), .read_ready(backend_read_ready),
-        .read_data(backend_read_data), .read_last(backend_read_last),
-        .done_valid(backend_done_valid), .done_ready(backend_done_ready), .done_error(backend_done_error),
         .dram_addr, .dram_ba, .dram_cas_n, .dram_cke, .dram_cs_n,
         .dram_dq, .dram_ldqm, .dram_ras_n, .dram_udqm, .dram_we_n
     );
 
-    sdram_chip_model memory_chip (
+    // Verify every returned word against persistent chip storage, so a shifted
+    // read burst cannot silently turn external TT hits into heuristic misses.
+    TTWordAddress checked_read_address;
+    int checked_read_word;
+    always @(posedge memory_clk) begin
+        if (tt_mem_req_valid && tt_mem_req_ready && !tt_mem_req_write) begin
+            checked_read_address <= tt_mem_req_address;
+            checked_read_word <= 0;
+        end
+        if (tt_mem_read_valid && tt_mem_read_ready) begin
+            if (tt_mem_read_data !== memory_chip.read_word(checked_read_address + TTWordAddress'(checked_read_word)))
+                $fatal(1, "SDRAM read word mismatch at address %h: got %h expected %h", checked_read_address + TTWordAddress'(checked_read_word), tt_mem_read_data, memory_chip.read_word(checked_read_address + TTWordAddress'(checked_read_word)));
+            checked_read_word <= checked_read_word + 1;
+        end
+    end
+
+    // Read access includes the SDRAM maximum plus representative FPGA input delay.
+    sdram_chip_model #(.CAS_LATENCY(3), .READ_ACCESS_NS(7.5), .WRITE_INPUT_DELAY_NS(3.6), .TRCD_CYCLES(3), .TRP_CYCLES(3),
+        .TRAS_CYCLES(6), .TRC_CYCLES(9), .TDPL_CYCLES(2), .REFRESH_MAX_CYCLES(1042)) memory_chip (
         .clk(memory_pin_clk), .addr(dram_addr), .ba(dram_ba),
         .cas_n(dram_cas_n), .cke(dram_cke), .cs_n(dram_cs_n),
         .dq(dram_dq), .ldqm(dram_ldqm), .ras_n(dram_ras_n),
@@ -479,16 +502,16 @@ module tb_engine_profile #(
                 generator_state_cycles[int'(dut.controller.move_generator.noisy_lane.state)] + 1;
             generator_state_cycles[int'(dut.controller.move_generator.quiet_lane.state)] =
                 generator_state_cycles[int'(dut.controller.move_generator.quiet_lane.state)] + 1;
-            tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] =
-                tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] + 1;
-            if (dut.controller.external_tt_gen.tt_load_store.store_fifo_count
+            tt_state_cycles[int'(dut.controller.tt_frontend.state)] =
+                tt_state_cycles[int'(dut.controller.tt_frontend.state)] + 1;
+            if (dut.controller.tt_frontend.store_fifo_count
                     > tt_store_fifo_high_water)
                 tt_store_fifo_high_water =
-                    dut.controller.external_tt_gen.tt_load_store.store_fifo_count;
-            if (int'(dut.controller.external_tt_gen.tt_load_store.state)
+                    dut.controller.tt_frontend.store_fifo_count;
+            if (int'(dut.controller.tt_frontend.state)
                         == TT_STATE_IDLE
-                    && dut.controller.external_tt_gen.tt_load_store.lookup_miss_valid
-                    && dut.controller.external_tt_gen.tt_load_store.store_write_pending)
+                    && !dut.controller.tt_frontend.transport.probe_empty
+                    && !dut.controller.tt_frontend.transport.write_empty)
                 tt_store_write_preemptions = tt_store_write_preemptions + 1;
 
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
@@ -881,24 +904,22 @@ module tb_engine_profile #(
                 end
             end
             if (dut.controller.tt_store_req_valid && dut.controller.tt_store_req_ready) tt_stores <= tt_stores + 1;
+            // Probe and store reads may complete together in different banks.
+            if (dut.controller.tt_cache_store_access) begin
+                tt_cache_store_probes <= tt_cache_store_probes + 1;
+                if (dut.controller.tt_cache_store_hit) tt_cache_store_hits <= tt_cache_store_hits + 1;
+            end
             if (dut.controller.tt_cache_access) begin
-                if (dut.controller.tt_cache_access_is_store) begin
-                    tt_cache_store_probes <= tt_cache_store_probes + 1;
-                    if (dut.controller.tt_cache_hit) tt_cache_store_hits <= tt_cache_store_hits + 1;
-                end else begin
-                    tt_cache_lookup_probes <= tt_cache_lookup_probes + 1;
-                    depth_cache_probes[iteration_depth] <= depth_cache_probes[iteration_depth] + 1;
-                    if (dut.controller.tt_cache_hit) tt_cache_lookup_hits <= tt_cache_lookup_hits + 1;
-                    if (dut.controller.tt_cache_hit
-                            && int'(dut.controller.external_tt_gen.tt_load_store.state)
-                                != TT_STATE_IDLE)
-                        tt_cache_bypass_hits <= tt_cache_bypass_hits + 1;
-                    if (dut.controller.tt_cache_hit)
-                        depth_cache_hits[iteration_depth] <= depth_cache_hits[iteration_depth] + 1;
+                tt_cache_lookup_probes <= tt_cache_lookup_probes + 1;
+                depth_cache_probes[iteration_depth] <= depth_cache_probes[iteration_depth] + 1;
+                if (dut.controller.tt_cache_hit) begin
+                    tt_cache_lookup_hits <= tt_cache_lookup_hits + 1;
+                    depth_cache_hits[iteration_depth] <= depth_cache_hits[iteration_depth] + 1;
+                    if (!dut.controller.tt_frontend.transport_idle) tt_cache_bypass_hits <= tt_cache_bypass_hits + 1;
                 end
             end
-            if (dut.controller.external_tt_gen.tt_load_store.store_accept
-                    && !dut.controller.external_tt_gen.tt_load_store.store_fifo_push_ready)
+            if (dut.controller.tt_frontend.store_accept
+                    && !dut.controller.tt_frontend.store_fifo_push_ready)
                 tt_store_drops <= tt_store_drops + 1;
             if (tt_mem_req_valid && !tt_mem_req_ready) cdc_command_stalls <= cdc_command_stalls + 1;
             if (tt_mem_write_valid && !tt_mem_write_ready) cdc_write_stalls <= cdc_write_stalls + 1;
@@ -969,11 +990,11 @@ module tb_engine_profile #(
         end
         if (drain_active) begin
             drain_cycles <= drain_cycles + 1;
-            tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] <=
-                tt_state_cycles[int'(dut.controller.external_tt_gen.tt_load_store.state)] + 1;
-            if (dut.controller.tt_cache_access && dut.controller.tt_cache_access_is_store) begin
+            tt_state_cycles[int'(dut.controller.tt_frontend.state)] <=
+                tt_state_cycles[int'(dut.controller.tt_frontend.state)] + 1;
+            if (dut.controller.tt_cache_store_access) begin
                 tt_cache_store_probes <= tt_cache_store_probes + 1;
-                if (dut.controller.tt_cache_hit) tt_cache_store_hits <= tt_cache_store_hits + 1;
+                if (dut.controller.tt_cache_store_hit) tt_cache_store_hits <= tt_cache_store_hits + 1;
             end
             if (tt_mem_req_valid && !tt_mem_req_ready) cdc_command_stalls <= cdc_command_stalls + 1;
             if (tt_mem_write_valid && !tt_mem_write_ready) cdc_write_stalls <= cdc_write_stalls + 1;
@@ -986,16 +1007,16 @@ module tb_engine_profile #(
         if (profile_active || drain_active) begin
             sdram_state_cycles[int'(memory_controller.state)] <=
                 sdram_state_cycles[int'(memory_controller.state)] + 1;
-            if (backend_req_valid && backend_req_ready) begin
-                if (backend_req_write) begin
+            if (tt_mem_req_valid && tt_mem_req_ready) begin
+                if (tt_mem_req_write) begin
                     sdram_writes <= sdram_writes + 1;
-                    sdram_write_words <= sdram_write_words + backend_req_length;
+                    sdram_write_words <= sdram_write_words + tt_mem_req_length;
                 end else begin
                     sdram_reads <= sdram_reads + 1;
-                    sdram_read_words <= sdram_read_words + backend_req_length;
+                    sdram_read_words <= sdram_read_words + tt_mem_req_length;
                 end
-                if (memory_controller.open_valid[backend_req_address[24:23]]) begin
-                    if (memory_controller.open_row[backend_req_address[24:23]] == backend_req_address[22:10])
+                if (memory_controller.open_valid[tt_mem_req_address[24:23]]) begin
+                    if (memory_controller.open_row[tt_mem_req_address[24:23]] == tt_mem_req_address[22:10])
                         sdram_row_hits <= sdram_row_hits + 1;
                     else
                         sdram_row_conflicts <= sdram_row_conflicts + 1;
@@ -1332,12 +1353,11 @@ module tb_engine_profile #(
         // in search utilization.
         repeat (20000) begin
             @(posedge engine_clk);
-            if (dut.controller.external_tt_gen.tt_load_store.store_fifo_count == 0
-                    && !dut.controller.external_tt_gen.tt_load_store.store_stage_valid
-                    && !dut.controller.external_tt_gen.tt_load_store.store_write_pending
-                    && dut.controller.external_tt_gen.tt_load_store.state == 0
-                    && memory_bridge.cmd_empty && memory_bridge.write_empty
-                    && memory_bridge.done_empty && memory_controller.state == 16)
+            if (dut.controller.tt_frontend.store_fifo_count == 0
+                    && !dut.controller.tt_frontend.store_buffer_valid
+                    && !!dut.controller.tt_frontend.transport.write_empty
+                    && dut.controller.tt_frontend.state == 0
+                    && dut.controller.tt_frontend.transport_idle && memory_controller.state == 16)
                 break;
         end
         drain_active = 1'b0;

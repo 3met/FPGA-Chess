@@ -1,44 +1,43 @@
 # Transposition-Table Memory
 
-The TT memory subsystem implements the logical lookup and best-effort store contract in [transposition-table.md](transposition-table.md). Search is independent of the physical memory technology: a target may use inferred on-chip RAM or a cached external-memory backend without changing the search-controller interface.
+`tt_external_load_store` owns the engine-clock cache, request metadata, response assembly, and replacement policy. `tt_memory_cdc_bridge` owns exactly five asynchronous FIFOs and the memory-clock scheduler. The external controller implements the burst protocol without chess-specific replacement logic.
 
-## Backends
+## Indexing and Layout
 
-The on-chip backend stores one logical entry per indexed RAM word. It is suitable for simulation, portable synthesis, and targets without external memory.
+The most significant Zobrist bit selects one of two cache banks and one of two interleaved sets of external entries. The remaining untagged hash bits are mixed and range-reduced within that set. Low key bits form the configurable position tag. The cache slot derives from the external entry index so every position in a three-way group selects the same slot. A cache tag stores the external index bits not already identified by its bank and slot; one unused tag identifies an invalid line.
 
-The external backend stores compact entries through a vendor-neutral 16-bit burst protocol. Its entry count and burst length derive from the configured compact-tag width. It contains a direct-mapped on-chip cache indexed independently from the external table. Cache tags identify the complete external entry index, and a key match is still required before a lookup is reported as a hit.
+Requests cross into the memory domain as logical entry indices, with a way selector for writes. The memory scheduler shares the physical address calculation across request classes. External addresses count memory words. For logical way width `L` and word width `W`, each way occupies `ceil(L/W)` words and a complete entry occupies three times that number. Entry `e`, way `w`, word `k` uses address `e * entry_words + w * way_words + k`. Only the high bits of each way's final word are padded; fields remain packed without individual alignment or extra padding between entries. The controller splits bursts at physical row boundaries.
 
-Both backends preserve the same lookup result, mate-score normalization, generation handling, and replacement semantics.
+The cache size parameter counts total index bits including the bank bit. Each bank has one synchronous read port and one write port, both transferring complete three-way groups. Cache ways contain only their logical fields; memory-word padding is added at the external interface. A read of the same slot being written forwards the new complete line independently of inferred RAM read-during-write behavior.
 
-## External-Memory Protocol
+## Cache Arbitration
 
-The protocol consists of four independent ready/valid channels:
+Incoming probe selection is registered before hashing and cache access. At most one probe and one store read issue each engine cycle. Probes have priority when both need the same bank. The search arbiter prefers a ready thread whose probe avoids the staged store's bank; otherwise it chooses its ordinary round-robin probe.
 
-| Channel | Direction | Contents |
-| ------- | --------- | -------- |
-| Request | Frontend to memory | Read/write flag, word address, and burst length. |
-| Write data | Frontend to memory | 16-bit words and an end-of-burst marker. |
-| Read data | Memory to frontend | 16-bit words and an end-of-burst marker. |
-| Completion | Memory to frontend | One terminal status for every accepted request. |
+Probe cache-tag hits compare all three ways and return a tagged response. A cache-tag or position-way miss records engine-local request metadata and queues the logical entry index. If either the request FIFO or metadata queue lacks space, the thread receives a miss immediately.
 
-At most one external-memory transaction is issued by the TT frontend at a time. The cache-probe path remains independent of that transaction, so a buffered lookup that hits in the cache may complete while an unrelated external read or write is active. A backend may apply backpressure before accepting a request or write word and the frontend may apply backpressure to returned read data and completion. Once a physical SDR write burst begins, any required buffering is the backend's responsibility.
+Stores first read the cache. A matching cache tag and position way feeds the shared replacement datapath. Otherwise the store records its metadata and queues a complete external group read. Full store queues drop publications. A complete store response compares all three ways using the same replacement datapath, after cache-hit stores.
 
-Every request produces exactly one completion, including reads. Read data precedes its completion. A failed read produces a miss-equivalent lookup response and sets the persistent memory-error status; failed stores do not affect search correctness.
+Store cache writebacks take priority over probe fills in the same bank. Different banks can receive both writes in one cycle. A probe fill occupies one pending register; another complete probe response can overwrite a blocked fill. Fills are complete groups and best-effort, including responses from older reads that race with newer stores.
 
 ## Clock-Domain Crossing
 
-When the search and memory controllers use different clocks, a bridge transfers commands, write words, read words, and completions through separate asynchronous FIFOs. Packet boundaries are carried with the data rather than reconstructed from clock timing. Gray-pointer paths require bounded skew and delay in board timing constraints.
+| FIFO | Direction | Payload |
+| ---- | --------- | ------- |
+| Probe read | Engine to memory | Logical entry index. |
+| Probe response | Memory to engine | One external memory word. |
+| Store read | Engine to memory | Logical entry index. |
+| Store response | Memory to engine | One external memory word. |
+| Way writeback | Engine to memory | Logical entry index, way selector, and one complete padded way. |
 
-The read-data FIFO holds at least one maximum-length physical burst because an SDR SDRAM device cannot pause after a read burst has begun. Backend readiness and persistent error status are synchronized into the request clock domain.
+Probe and store metadata remain in separate ordered engine-clock queues. Probe responses reuse one way comparator as each complete way arrives and return the first hit immediately; a miss waits for all three ways. Request metadata remains queued until the full response drains, preventing duplicate replies or misrouting after an early hit. Store replacement and cache fills wait for complete three-way groups. Neither response FIFO contains routing bits, completion bits, or partial cache lines.
 
-Each clock domain has its own reset. The subsystem does not report memory ready until the backend has completed initialization and the synchronized ready indication has reached the search domain.
+The memory scheduler considers eligible probe reads first, then store reads, then one-way writes. Before issuing a read it reserves enough response FIFO capacity for the entire three-way group using a conservative synchronized read pointer. A blocked response class does not prevent eligible traffic in another class. One-way writes are dropped at enqueue when their FIFO is full.
 
-## Cache and Arbitration
+A single backend transaction runs at a time. Read words are staged until backend completion, then emitted in order to the selected response FIFO. Failed or truncated reads emit a complete invalid group so outstanding metadata can retire. Read and completion handshakes remain inside the memory clock domain. Gray-pointer paths require bounded delay and skew in board constraints; reset releases independently in each clock domain.
 
-Lookups take priority over queued stores. One lookup probe or miss may be buffered independently from the external-memory state machine. Stores are buffered and consumed only when no lookup is waiting; a full store queue drops new publications while still accepting them from search.
+## External-Memory Protocol
 
-On a cache miss, the frontend reads the external entry before responding or applying replacement policy. Accepted replacements update both cache and external memory; waiting lookups take priority over replacement writes.
+The vendor-neutral protocol has ready/valid request, write-word, read-word, and completion channels. Addresses and lengths are in external memory words. A read transfers a complete three-way group; a replacement write transfers one selected padded way. Burst-length width derives from the supported field widths. The controller buffers unpausable physical bursts, handles row-boundary splitting and refresh, and produces one terminal completion per accepted request.
 
-## Clearing
-
-New Game advances the logical TT generation. Cached entries from older generations do not hit. When the finite generation counter wraps, the external validity metadata is cleared before requests resume. Reset also invalidates the on-chip cache before the frontend becomes available.
+Clock frequencies, SDRAM geometry/timing, PLLs/MMCMs, phases, pins, and initialization settings belong to target wrappers and configuration. Generic TT RTL contains no board clock assumptions.

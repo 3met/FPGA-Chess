@@ -31,8 +31,8 @@ module engine_command_layer #(
 
     localparam int SET_BOARD_PAYLOAD_BYTES = 36;
     localparam logic [31:0] BUILD_CLOCK_FREQ = CLOCK_FREQ;
-    localparam logic [7:0] BUILD_THREAD_COUNT = SEARCH_THREAD_COUNT;
-    localparam logic [7:0] BUILD_SEARCH_STACK_DEPTH = SEARCH_STACK_DEPTH;
+    localparam logic [7:0] BUILD_THREAD_COUNT = 8'(SEARCH_THREAD_COUNT);
+    localparam logic [7:0] BUILD_SEARCH_STACK_DEPTH = 8'(SEARCH_STACK_DEPTH);
 
     typedef enum logic [2:0] {
         ST_IDLE,

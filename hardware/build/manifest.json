@@ -1,8 +1,14 @@
 {
   "simulator": {
     "modelsim": {
-      "vlog_args": ["-sv"],
-      "vsim_args": ["-c", "-t", "ns"],
+      "vlog_args": [
+        "-sv"
+      ],
+      "vsim_args": [
+        "-c",
+        "-t",
+        "ns"
+      ],
       "run_do": "run -all; quit -f"
     }
   },
@@ -56,7 +62,10 @@
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/memory/synchronous_fifo.sv",
       "hardware/rtl/tt/tt_defs.sv",
-      "hardware/rtl/tt/tt_load_store.sv",
+      "hardware/rtl/memory/async_fifo.sv",
+      "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
+      "hardware/rtl/tt/tt_cache_bank.sv",
+      "hardware/rtl/tt/tt_replacement.sv",
       "hardware/rtl/tt/tt_external_load_store.sv"
     ],
     "tt-sdram-controller": [
@@ -128,6 +137,17 @@
       "hardware/rtl/memory/sdr_sdram_controller.sv",
       "hardware/tb/profile/sdram_chip_model.sv",
       "hardware/tb/profile/tb_engine_profile.sv"
+    ],
+    "tt-test-memory": [
+      "@tt-load-store",
+      "hardware/tb/tt/tt_burst_memory_model.sv"
+    ],
+    "search-controller-test": [
+      "@search-controller",
+      "hardware/tb/tt/tt_burst_memory_model.sv"
+    ],
+    "sdram-chip-model": [
+      "hardware/tb/profile/sdram_chip_model.sv"
     ]
   },
   "tests": {
@@ -161,13 +181,8 @@
       "testbench": "hardware/tb/nnue/tb_nnue_evaluator.sv",
       "top": "tb_nnue_evaluator"
     },
-    "tt-load-store": {
-      "source_set": "tt-load-store",
-      "testbench": "hardware/tb/tt/tb_tt_load_store.sv",
-      "top": "tb_tt_load_store"
-    },
     "tt-external-load-store": {
-      "source_set": "tt-load-store",
+      "source_set": "tt-test-memory",
       "testbench": "hardware/tb/tt/tb_tt_external_load_store.sv",
       "top": "tb_tt_external_load_store"
     },
@@ -222,29 +237,54 @@
       "top": "tb_host_link"
     },
     "search-controller": {
-      "source_set": "search-controller",
+      "source_set": "search-controller-test",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller"
     },
     "search-controller-early-reads": {
-      "source_set": "search-controller",
+      "source_set": "search-controller-test",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller_early_reads"
     },
     "search-controller-multithread": {
-      "source_set": "search-controller",
+      "source_set": "search-controller-test",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller_multithread"
     },
     "search-controller-fifty-move-mate": {
-      "source_set": "search-controller",
+      "source_set": "search-controller-test",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller_fifty_move_mate"
     },
     "search-controller-fifty-move-mate-multithread": {
-      "source_set": "search-controller",
+      "source_set": "search-controller-test",
       "testbench": "hardware/tb/tb_search_controller.sv",
       "top": "tb_search_controller_fifty_move_mate_multithread"
+    },
+    "tt-memory-cdc": {
+      "source_set": "tt-test-memory",
+      "testbench": "hardware/tb/tt/tb_tt_memory_cdc_bridge.sv",
+      "top": "tb_tt_memory_cdc_bridge"
+    },
+    "tt-external-small-tag": {
+      "source_set": "tt-test-memory",
+      "testbench": "hardware/tb/tt/tb_tt_external_load_store.sv",
+      "top": "tb_tt_external_load_store_small_tag"
+    },
+    "tt-external-large-tag": {
+      "source_set": "tt-test-memory",
+      "testbench": "hardware/tb/tt/tb_tt_external_load_store.sv",
+      "top": "tb_tt_external_load_store_large_tag"
+    },
+    "sdram-chip-model": {
+      "source_set": "sdram-chip-model",
+      "testbench": "hardware/tb/tt/tb_sdram_chip_model.sv",
+      "top": "tb_sdram_chip_model"
+    },
+    "sdram-chip-model-cas3": {
+      "source_set": "sdram-chip-model",
+      "testbench": "hardware/tb/tt/tb_sdram_chip_model.sv",
+      "top": "tb_sdram_chip_model_cas3"
     }
   },
   "generated_data": {
@@ -284,9 +324,13 @@
       "engine_config": "hardware/config/engine/de1-soc.json",
       "clock_generator": {
         "kind": "intel-pll",
-        "template": "hardware/ip/pll"
+        "template": "hardware/ip/pll",
+        "memory_frequency_hz": 133333333,
+        "memory_output_phase_ps": 1313,
+        "memory_output_duty_percent": 40,
+        "communication_frequency_hz": 100000000
       },
-      "seed": 3,
+      "seed": 1,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",

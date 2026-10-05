@@ -10,9 +10,9 @@ Memory readiness and transactions are described in [tt-memory.md](tt-memory.md) 
 
 ## Clocking and Reset
 
-`CLOCK_50` is the board reference clock. The synthesis flow configures the Intel PLL from the target's engine-clock setting and generates matching engine metadata. The PLL supplies the engine, UART, and SDRAM clocks, including the phase relationships required by SDRAM timing.
+`CLOCK_50` is the board reference clock. The synthesis flow configures independent Intel engine, memory, and communication PLLs and generates matching clock metadata. The cache and search use the engine clock; the memory interface uses the board-configured approximately 133.333333 MHz memory clock (a 7.5 ns period), and UART uses its own 100 MHz communication clock. The memory PLL also supplies a phase-adjusted SDRAM output clock; a dedicated DDR output register forwards its inverted waveform to the chip, and IO input registers capture on the source clock’s rising edge. Sharing that clock source reduces variation between forwarded and capture timing. Frequency, phase, and duty-cycle settings live in the DE1-SoC target's `clock_generator` configuration in the build manifest; the SDRAM wrapper supplies the matching CAS and capture-pipeline settings.
 
-A startup controller holds the design in reset until the PLL is stable and restarts it if lock is lost. Each clock domain releases reset locally. UART BREAK resets the engine, memory path, and transmitter so the board can recover without a physical reset; UART framing and overflow errors hold the engine inactive until the next BREAK.
+A startup controller holds the design in reset until all PLLs are stable and restarts it if any lock is lost. Each clock domain releases reset locally. UART BREAK resets the engine, memory path, and transmitter so the board can recover without a physical reset; UART framing and overflow errors hold the engine inactive until the next BREAK.
 
 Clock generation and device-specific constraints remain confined to this wrapper. A new board wrapper may use another vendor's PLL/MMCM or a suitable board clock, but it must set `engine.CLOCK_FREQ` to the frequency actually driven on `engine.clk`.
 

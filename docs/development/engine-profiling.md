@@ -4,7 +4,7 @@
 
 ## Simulated Hardware
 
-The profiling testbench instantiates the vendor-neutral engine and the production external-TT path, including its cache, clock-domain bridge, and DE1 SDR SDRAM controller. A sparse simulator memory model supplies the SDRAM contents. UART, PLL, displays, and the board wrapper are outside the profiling boundary.
+The profiling testbench instantiates the vendor-neutral engine and the production external-TT path, including its cache, clock-domain bridge, and DE1 SDR SDRAM controller. A sparse chip model supplies persistent SDRAM contents, checks command timing, and models SDRAM read access, representative FPGA input delay, and routed forwarded-clock delay. Memory frequency, output phase, and duty cycle follow the selected synthesis target. Every returned memory word is checked against that storage. UART, PLL, displays, and the board wrapper are outside the profiling boundary.
 
 ## Usage
 

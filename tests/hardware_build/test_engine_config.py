@@ -54,8 +54,8 @@ class EngineConfigTests(unittest.TestCase):
             search["qsearch_delta_pruning"]["margin"],
         )
         rtl_parameters = engine_rtl_parameter_values(config)
-        self.assertEqual(rtl_parameters["HISTORY_ENTRY_COUNT"], 8192)
-        self.assertEqual(rtl_parameters["HISTORY_ENTRY_BITS"], 8)
+        self.assertEqual(rtl_parameters["HISTORY_ENTRY_COUNT"], engine["history_heuristic"]["entry_count"])
+        self.assertEqual(rtl_parameters["HISTORY_ENTRY_BITS"], engine["history_heuristic"]["entry_bits"])
         self.assertEqual(rtl_parameters["RFP_BASE_MARGIN"], search["rfp"]["base_margin"])
         self.assertEqual(rtl_parameters["RFP_MARGIN_PER_DEPTH"], search["rfp"]["margin_per_depth"])
         self.assertEqual(rtl_parameters["RFP_MAXIMUM_DEPTH"], search["rfp"]["maximum_depth"])
@@ -73,12 +73,34 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(rtl_parameters["SINGLE_LEGAL_MOVE_MS"], timing["single_legal_move_ms"])
         self.assertEqual(len(config["digest"]), 64)
 
-    def test_move_memory_device_parameters_and_ratio_order(self):
-        config = self.load_temporary_config()
+    def test_tt_queue_depths_reach_rtl_parameters(self):
+        """Check device overrides independently of the production queue sizes."""
+        queues = {"store_fifo_depth": 17, "outstanding_depth": 16,
+                  "response_fifo_depth": 128, "writeback_fifo_depth": 32}
+        config = self.load_temporary_config(engine_updates={"transposition_table": queues})
         params = engine_rtl_parameter_values(config)
-        self.assertEqual(params["MOVE_MEMORY_ENTRIES"], 4096)
+        for field, depth in queues.items():
+            with self.subTest(field=field):
+                self.assertEqual(params["TT_" + field.upper()], depth)
+
+    def test_tt_queue_depths_reject_invalid_pointer_configurations(self):
+        """Validate queue capacity and the CDC Gray-pointer power-of-two rule."""
+        for field in ("store_fifo_depth", "outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"):
+            for depth in (0, 1, True):
+                with self.subTest(field=field, depth=depth), self.assertRaises(BuildError):
+                    self.load_temporary_config(engine_updates={"transposition_table": {field: depth}})
+        for field in ("outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"):
+            with self.subTest(field=field), self.assertRaisesRegex(BuildError, "power of two"):
+                self.load_temporary_config(engine_updates={"transposition_table": {field: 12}})
+
+    def test_move_memory_device_parameters_and_ratio_order(self):
+        move_memory = {"entries_per_thread": 2304,
+                       "bucket_ratios_descending": [8, 7, 6, 5, 4, 3, 2, 1]}
+        config = self.load_temporary_config(engine_updates={"move_memory": move_memory})
+        params = engine_rtl_parameter_values(config)
+        self.assertEqual(params["MOVE_MEMORY_ENTRIES"], move_memory["entries_per_thread"])
         self.assertEqual([params[f"MOVE_BUCKET_{b}_RATIO"] for b in range(7, -1, -1)],
-                         [32, 64, 64, 112, 64, 112, 16, 48])
+                         move_memory["bucket_ratios_descending"])
 
     def test_move_memory_rejects_invalid_partitions(self):
         for updates in ({"entries_per_thread": 2049},
@@ -104,7 +126,7 @@ class EngineConfigTests(unittest.TestCase):
                 json.dumps({
                     "search_config": str(search_path),
                     "engine": {"threads": 17, "stack_depth": 65, "clock_frequency_hz": 1},
-                    "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
+                    "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
                     "move_memory": {"entries_per_thread": 2048,
                                     "bucket_ratios_descending": [32, 64, 32, 64, 64, 192, 16, 48]},
@@ -126,7 +148,7 @@ class EngineConfigTests(unittest.TestCase):
                 json.dumps({
                     "search_config": "hardware/config/search/default.json",
                     "engine": {"threads": 0, "stack_depth": 1, "clock_frequency_hz": 1},
-                    "transposition_table": {"tag_bits": 32, "cache_index_bits": 10},
+                    "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
                     "move_memory": {"entries_per_thread": 2048,
                                     "bucket_ratios_descending": [32, 64, 32, 64, 64, 192, 16, 48]},

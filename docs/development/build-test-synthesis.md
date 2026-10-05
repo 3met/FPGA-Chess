@@ -48,7 +48,7 @@ Synthesis verifies generated data before invoking the vendor tools. Quartus reus
 
 Targets with an engine profile also accept `--engine-config <path>` to synthesize an isolated profile without modifying the manifest target. This is used by search-parameter tuning and records the resolved override in normal synthesis metadata.
 
-The DE1-SoC target generates its Quartus project under `work/build/quartus-de1-soc/` and derives the PLL and engine constants from its selected profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
+The DE1-SoC target generates its Quartus project under `work/build/quartus-de1-soc/` and derives engine constants from its selected profile and independent engine/memory PLLs from the board clock configuration. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 
