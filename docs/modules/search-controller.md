@@ -62,7 +62,7 @@ The controller applies the search policy described in [search-design.md](../arch
 
 Move generation produces pseudo-legal candidates. The controller applies each candidate speculatively and rejects it if the moving side remains in check. Accepted children update repetition and NNUE state; returning from a child restores the parent position and folds the child score into its result.
 
-Generation and move reads can overlap. The controller initializes a node's move storage before descent and waits for parent generation to complete before a child can allocate move storage, descend, or reverse the parent. Cancellation covers both generation and reads. Bucket ordering and storage ownership are defined in [move-generator.md](move-generator.md).
+Generation and move reads can overlap. Generation and direct-validation commands share lane arbitration; each thread accepts bucket pops through its own ready/valid channel independently of command selection. The controller initializes a node's move storage before descent and waits for parent generation to complete before a child can allocate move storage, descend, or reverse the parent. Cancellation covers both generation and reads. Bucket ordering and storage ownership are defined in [move-generator.md](move-generator.md).
 
 TT moves pass through the same legality checks as generated moves. The controller enforces the root and repetition-sensitive cutoff restrictions described in [transposition-table.md](transposition-table.md).
 

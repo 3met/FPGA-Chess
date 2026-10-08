@@ -56,7 +56,7 @@ class EngineBuildConfigTests(unittest.TestCase):
                 build_dir = Path(temp_dir) / str(frequency)
                 qip = materialize_intel_pll(template, build_dir, frequency, clock_config)
                 self.assertTrue(qip.is_file())
-                implementation = (qip.parent / "pll_ip" / "pll_ip_0002.v").read_text(encoding="utf-8")
+                implementation = (qip.parent / "pll_ip" / "pll_ip_0002.sv").read_text(encoding="utf-8")
                 engine_pll, memory_pll, communication_pll = implementation.split("    altera_pll #(\n")[1:]
                 self.assertIn(f'.output_clock_frequency0("{frequency:.6f} MHz")', engine_pll)
                 memory_frequency = clock_config["memory_frequency_hz"] / 1_000_000

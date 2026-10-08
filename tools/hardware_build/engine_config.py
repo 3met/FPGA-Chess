@@ -414,8 +414,8 @@ def engine_config_for_target(target: dict) -> dict | None:
 
 
 def engine_clock_mhz_for_target(target: dict) -> float | None:
-    """Return the target clock from its engine profile or legacy manifest field."""
+    """Return the target clock from its engine profile."""
     config = engine_config_for_target(target)
     if config is not None:
         return config["clock_frequency_hz"] / 1_000_000
-    return target.get("engine_clock_mhz")
+    return None

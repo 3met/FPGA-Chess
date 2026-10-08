@@ -330,7 +330,7 @@
         "memory_output_duty_percent": 40,
         "communication_frequency_hz": 100000000
       },
-      "seed": 1,
+      "seed": 4,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",

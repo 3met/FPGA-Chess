@@ -75,7 +75,7 @@ def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: flo
     destination = build_dir / "clock_generator"
     shutil.copytree(template, destination, dirs_exist_ok=True)
     frequency_text, _ = engine_clock_values(engine_clock_mhz)
-    implementation = destination / "pll_ip" / "pll_ip_0002.v"
+    implementation = destination / "pll_ip" / "pll_ip_0002.sv"
     # Literal PLL primitive settings avoid packed-string truncation by vendor elaborators.
     source = implementation.read_text(encoding="utf-8")
     engine_source, memory_source, communication_source = source.split("    altera_pll #(\n")[1:]

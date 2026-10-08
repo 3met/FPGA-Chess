@@ -1,2 +1,2 @@
-set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) "pll_ip.v"]
-set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) "pll_ip/pll_ip_0002.v"]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) "pll_ip.sv"]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) "pll_ip/pll_ip_0002.sv"]

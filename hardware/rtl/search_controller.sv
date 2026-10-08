@@ -492,6 +492,7 @@ module search_controller #(
     logic move_node_init_ready[SEARCH_THREAD_COUNT];
     PlyIndex move_node_init_ply[SEARCH_THREAD_COUNT];
     logic search_node_init_request[SEARCH_THREAD_COUNT];
+    logic search_direct_command[SEARCH_THREAD_COUNT];
     logic search_node_init_pending[SEARCH_THREAD_COUNT];
     logic search_node_init_done[SEARCH_THREAD_COUNT];
     logic move_bad_noisy_enable[SEARCH_THREAD_COUNT];
@@ -2123,17 +2124,23 @@ module search_controller #(
         end
         for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++) begin
             automatic Move order_move = ordering_move_for_thread(ThreadID'(idx));
-            automatic logic direct_init_needed = search_thread_move_ready(idx)
-                && search_stack_top[idx].move_order_state == MOVE_ORDER_DIRECT
-                && !is_null_move(order_move);
+            automatic logic direct_init_needed;
             automatic logic null_init_needed = search_thread_null_ready(idx);
+            // Decode command kind before thread selection so a wide move mux
+            // and null-move comparison do not follow shared arbitration.
+            search_direct_command[idx] = search_stack_top[idx].move_order_state == MOVE_ORDER_DIRECT
+                && !is_null_move(order_move);
+            direct_init_needed = search_thread_move_ready(idx) && search_direct_command[idx];
             search_node_init_request[idx]
                 = !search_node_init_done[idx]
                     && (direct_init_needed || null_init_needed);
             search_store_mask[idx] = search_thread_store_pending(idx);
             search_board_mask[idx] = search_thread_board_pending(idx)
                 || search_thread_reverse_pending(idx);
+            // Only generation/direct commands share lane arbitration; bucket
+            // pops use each thread's independent ready/valid channel.
             search_move_mask[idx] = search_thread_move_ready(idx)
+                && !move_state_uses_pop(search_stack_top[idx].move_order_state)
                 && !search_node_init_request[idx];
             search_quiet_mask[idx] = search_thread_quiet_ready(idx);
             search_eval_mask[idx] = search_thread_eval_ready(idx)
@@ -2405,24 +2412,19 @@ module search_controller #(
                 default: begin end
             endcase
         end else if (search_move_issue_valid) begin
-            automatic MoveOrderState order_state = search_stack_top[search_move_issue_thread].move_order_state;
             automatic Move order_move = ordering_move_for_thread(search_move_issue_thread);
             move_cmd_thread = search_move_issue_thread;
             move_cmd_ply = search_ply[search_move_issue_thread];
             move_cmd_board = search_board[search_move_issue_thread];
             move_cmd_suppress_valid = search_stack_top[search_move_issue_thread].direct_attempted;
             move_cmd_suppress_move = search_stack_top[search_move_issue_thread].tt_move;
-            if (move_state_uses_pop(order_state)) begin
-                move_pop_valid = 1'b1;
+            move_cmd_valid = 1'b1;
+            if (search_direct_command[search_move_issue_thread]) begin
+                move_cmd = MOVE_GEN_VALIDATE_DIRECT;
+                move_cmd_suppress_valid = 1'b1;
+                move_cmd_suppress_move = order_move;
             end else begin
-                move_cmd_valid = 1'b1;
-                if (order_state == MOVE_ORDER_DIRECT && !is_null_move(order_move)) begin
-                    move_cmd = MOVE_GEN_VALIDATE_DIRECT;
-                    move_cmd_suppress_valid = 1'b1;
-                    move_cmd_suppress_move = order_move;
-                end else begin
-                    move_cmd = MOVE_GEN_GENERATE_NOISY;
-                end
+                move_cmd = MOVE_GEN_GENERATE_NOISY;
             end
         end
 
@@ -4975,9 +4977,7 @@ module search_controller #(
                                     <= search_thread_after(move_followup_thread);
                         end
 
-                        if (search_move_issue_valid
-                                && ((move_cmd_valid && move_cmd_ready)
-                                    || (move_pop_valid && move_pop_ready))) begin
+                        if (search_move_issue_valid && move_cmd_valid && move_cmd_ready) begin
                             search_thread_id <= search_move_issue_thread;
                             // Generation and reads are separate transactions:
                             // start reading the admitted class on the next cycle.
@@ -5001,14 +5001,11 @@ module search_controller #(
                             search_dispatch.move <= search_thread_after(search_move_issue_thread);
                         end
 
-                        // Pop-capable threads do not share request bandwidth.
-                        // The scalar block above still handles generation and
-                        // its selected pop; this loop advances every additional
-                        // independently accepted reader request.
+                        // Accept every reader locally, without routing a pop
+                        // through shared command arbitration or another thread's
+                        // move-order decode.
                         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
-                            if (move_pop_valid_vec[tid] && move_pop_ready_vec[tid]
-                                    && !(search_move_issue_valid && move_pop_valid
-                                        && search_move_issue_thread == ThreadID'(tid))) begin
+                            if (move_pop_valid_vec[tid] && move_pop_ready_vec[tid]) begin
                                 search_thread_phase[tid] <= SEARCH_PHASE_MOVE_WAIT;
                                 search_move_inflight[tid] <= 1'b1;
                                 search_stack_top[tid].rfp_checked <= 1'b1;

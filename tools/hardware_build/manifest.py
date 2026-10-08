@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import math
 import re
 from pathlib import Path
 
@@ -80,13 +79,6 @@ def validate_manifest(manifest: object) -> None:
         if target["tool"] not in tool_fields:
             raise BuildError(f"Synthesis target '{name}' uses unsupported tool '{target['tool']}'")
         require_fields(target, f"Synthesis target '{name}'", tool_fields[target["tool"]])
-        if "engine_clock_mhz" in target and (
-            isinstance(target["engine_clock_mhz"], bool)
-            or not isinstance(target["engine_clock_mhz"], (int, float))
-            or not math.isfinite(target["engine_clock_mhz"])
-            or target["engine_clock_mhz"] <= 0
-        ):
-            raise BuildError(f"Synthesis target '{name}' engine_clock_mhz must be a positive finite number")
         if "engine_config" in target:
             if not isinstance(target["engine_config"], str) or not target["engine_config"]:
                 raise BuildError(f"Synthesis target '{name}' engine_config must be a nonempty path")
@@ -112,9 +104,9 @@ def validate_manifest(manifest: object) -> None:
                 require_fields(clock_generator, f"Synthesis target '{name}' clock_generator", {"kind", "template"})
                 if clock_generator["kind"] != "intel-pll":
                     raise BuildError(f"Synthesis target '{name}' uses unsupported clock generator '{clock_generator['kind']}'")
-                if "engine_clock_mhz" not in target and "engine_config" not in target:
+                if "engine_config" not in target:
                     raise BuildError(
-                        f"Synthesis target '{name}' clock_generator requires engine_clock_mhz or engine_config"
+                        f"Synthesis target '{name}' clock_generator requires engine_config"
                     )
                 ensure_existing([repo_path(clock_generator["template"])])
             message_disable = target.get("message_disable", [])
