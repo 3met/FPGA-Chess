@@ -46,6 +46,7 @@ module tb_sdr_sdram_controller #(
     int refresh_count;
     int mode_count;
     int write_count;
+    int completion_count = 0;
     logic [12:0] mode_address;
     logic [9:0] write_columns[0:15];
     logic physical_write_active;
@@ -59,7 +60,7 @@ module tb_sdr_sdram_controller #(
     assign dram_dq = dq_drive_enable ? dq_drive_data : 16'hzzzz;
 
     sdr_sdram_controller #(
-        .CLOCK_FREQ(10_000_000),
+        .CLOCK_FREQ(133_333_333),
         .ENTRY_COUNT(2),
         .CAS_LATENCY(TEST_CAS_LATENCY)
     ) dut (
@@ -95,6 +96,10 @@ module tb_sdr_sdram_controller #(
         .dram_udqm,
         .dram_we_n
     );
+
+    // Count terminal handshakes independently of the physical close state.
+    always @(posedge clk)
+        if (rst_n && done_valid && done_ready) completion_count++;
 
     // Observe physical commands and provide a minimal two-word read response.
     always @(posedge clk) begin
@@ -248,8 +253,10 @@ module tb_sdr_sdram_controller #(
     endtask : test_initialization
 
     task automatic test_buffered_write();
-        automatic int single_precharge_base = single_precharge_count;
+        int single_precharge_base;
 
+        while (!req_ready) @(negedge clk);
+        single_precharge_base = single_precharge_count;
         physical_write_words = 0;
         issue_request(1'b1, TTWordAddress'(20), 4'd2);
         send_write_word(16'h1234, 1'b0, 3);
@@ -263,12 +270,15 @@ module tb_sdr_sdram_controller #(
             "gapped input retained consecutive physical write data");
         while (!req_ready) @(negedge clk);
         check(single_precharge_count == single_precharge_base + 1,
-            "idle terminal write closed its bank during the command gap");
+            "terminal write closed its bank before accepting another request");
     endtask : test_buffered_write
 
     task automatic test_read_backpressure();
         automatic bit first_word_stable = 1'b1;
+        int single_precharge_base;
 
+        while (!req_ready) @(negedge clk);
+        single_precharge_base = single_precharge_count;
         read_ready = 1'b0;
         issue_request(1'b0, TTWordAddress'(20), 4'd2);
         while (!read_valid) @(negedge clk);
@@ -279,6 +289,9 @@ module tb_sdr_sdram_controller #(
             first_word_stable &= read_valid && read_data == 16'h9abc && !read_last;
         end
         check(first_word_stable, "staged read data remained stable under backpressure");
+        while (single_precharge_count == single_precharge_base) @(negedge clk);
+        check(read_valid && read_data == 16'h9abc && !done_valid,
+            "read row closed while buffered response remained stalled");
         read_ready = 1'b1;
         @(negedge clk);
         check(read_valid && read_data == 16'hdef0 && read_last,
@@ -288,6 +301,9 @@ module tb_sdr_sdram_controller #(
 
     // A ready receiver drains early words while the remaining burst is captured.
     task automatic test_overlapped_read();
+        int completion_base;
+        while (!req_ready) @(negedge clk);
+        completion_base = completion_count;
         read_ready = 1'b1;
         issue_request(1'b0, TTWordAddress'(20), 4'd2);
         while (!read_valid) @(negedge clk);
@@ -303,11 +319,18 @@ module tb_sdr_sdram_controller #(
         wait_for_completion();
         check(dut.remaining == 0 && !done_error,
             "streaming completion follows physical burst completion");
+        check(!req_ready, "completion overlaps bank precharge recovery");
+        while (!req_ready) @(negedge clk);
+        check(completion_count == completion_base + 1,
+            "early completion is acknowledged exactly once");
     endtask : test_overlapped_read
 
-    task automatic test_queued_request_preserves_row();
-        automatic int single_precharge_base = single_precharge_count;
+    // Pending same-row requests must not suppress the closed-row policy.
+    task automatic test_queued_request_closes_row();
+        int single_precharge_base;
 
+        while (!req_ready) @(negedge clk);
+        single_precharge_base = single_precharge_count;
         issue_request(1'b1, TTWordAddress'(40), 4'd2);
         send_write_word(16'h1111, 1'b0);
         send_write_word(16'h2222, 1'b1);
@@ -315,25 +338,70 @@ module tb_sdr_sdram_controller #(
             queue_request(1'b0, TTWordAddress'(60), 4'd2);
             wait_for_completion();
         join
-        check(single_precharge_count == single_precharge_base,
-            "queued traffic suppressed opportunistic post-write close");
+        check(single_precharge_count == single_precharge_base + 1,
+            "queued same-row traffic still closed the preceding write bank");
         wait_for_completion();
-    endtask : test_queued_request_preserves_row
+    endtask : test_queued_request_closes_row
 
     task automatic test_row_crossing_write();
         automatic int crossing_write_base = write_count;
+        int single_precharge_base;
 
+        while (!req_ready) @(negedge clk);
+        single_precharge_base = single_precharge_count;
         issue_request(1'b1, TTWordAddress'(1022), 4'd5);
         for (int word = 0; word < 5; word++) begin
             send_write_word(16'(16'h8000 + word), word == 4);
         end
         wait_for_completion();
+        while (!req_ready) @(negedge clk);
+        check(single_precharge_count == single_precharge_base + 2,
+            "row-crossing write closed both physical segments");
         check(write_count == crossing_write_base + 2,
             "row-crossing write split into two physical bursts");
         check(write_columns[crossing_write_base] == 10'd1022
                 && write_columns[crossing_write_base + 1] == 10'd0,
             "row-crossing write restarted at column zero of the next row");
     endtask : test_row_crossing_write
+
+    // Buffered read data must survive closing and reopening across a row boundary.
+    task automatic test_row_crossing_read();
+        int single_precharge_base;
+        bit data_matches;
+        while (!req_ready) @(negedge clk);
+        single_precharge_base = single_precharge_count;
+        read_ready = 1'b0;
+        issue_request(1'b0, TTWordAddress'(1022), 4'd4);
+        while (dut.read_capture_count != 4 || single_precharge_count < single_precharge_base + 2)
+            @(negedge clk);
+        check(!done_valid && !dut.open_valid[0],
+            "row-crossing read closed both segments before stalled delivery");
+        data_matches = 1'b1;
+        read_ready = 1'b1;
+        for (int word = 0; word < 4; word++) begin
+            data_matches &= read_valid && read_data == (word[0] ? 16'hdef0 : 16'h9abc)
+                && read_last == (word == 3);
+            @(negedge clk);
+        end
+        check(data_matches, "row-crossing read delivered all buffered words in order");
+        wait_for_completion();
+    endtask : test_row_crossing_read
+
+    // A segment ending at a bank boundary must close the bank it actually used.
+    task automatic test_bank_crossing_write();
+        int single_precharge_base;
+        while (!req_ready) @(negedge clk);
+        single_precharge_base = single_precharge_count;
+        issue_request(1'b1, TTWordAddress'((1 << 23) - 1), 4'd2);
+        send_write_word(16'h5555, 1'b0);
+        send_write_word(16'haaaa, 1'b1);
+        wait_for_completion();
+        while (!req_ready) @(negedge clk);
+        check(single_precharge_count == single_precharge_base + 2,
+            "bank-crossing write closed each physical segment");
+        check(!dut.open_valid[0] && !dut.open_valid[1],
+            "both banks were closed after a bank-crossing write");
+    endtask : test_bank_crossing_write
 
     task automatic test_invalid_length();
         issue_request(1'b0, TTWordAddress'(0), 4'd0);
@@ -344,10 +412,11 @@ module tb_sdr_sdram_controller #(
     // A stalled protocol channel must not prevent periodic physical refresh.
     task automatic test_refresh_during_stalls();
         int refresh_base;
+        bit completion_stable;
 
         issue_request(1'b1, TTWordAddress'(80), 4'd2);
         refresh_base = refresh_count;
-        repeat (180) @(negedge clk);
+        repeat (2 * dut.REFRESH_CYCLES) @(negedge clk);
         check(refresh_count > refresh_base, "refresh continued while collecting write data");
         send_write_word(16'h3333, 1'b0);
         send_write_word(16'h4444, 1'b1);
@@ -358,7 +427,7 @@ module tb_sdr_sdram_controller #(
         issue_request(1'b0, TTWordAddress'(80), 4'd2);
         while (!read_valid) @(negedge clk);
         refresh_base = refresh_count;
-        repeat (180) @(negedge clk);
+        repeat (2 * dut.REFRESH_CYCLES) @(negedge clk);
         check(refresh_count > refresh_base, "refresh continued during read backpressure");
         check(read_valid && read_data == 16'h9abc && !read_last,
             "first read word survived refresh without a handshake");
@@ -373,8 +442,15 @@ module tb_sdr_sdram_controller #(
         done_ready = 1'b0;
         issue_request(1'b0, TTWordAddress'(80), 4'd1);
         while (!done_valid) @(negedge clk);
+        // Completion must remain asserted as closing transitions to the stalled response.
+        completion_stable = 1'b1;
+        repeat (dut.TRP + dut.TRAS + 4) begin
+            @(negedge clk);
+            completion_stable &= done_valid && !done_error;
+        end
+        check(completion_stable, "stalled completion remained valid through bank closing");
         refresh_base = refresh_count;
-        repeat (180) @(negedge clk);
+        repeat (2 * dut.REFRESH_CYCLES) @(negedge clk);
         check(refresh_count > refresh_base, "refresh continued during completion backpressure");
         check(done_valid && !done_error, "completion remained valid across refresh");
         while (!dut.refreshing) @(negedge clk);
@@ -388,8 +464,10 @@ module tb_sdr_sdram_controller #(
         test_buffered_write();
         test_read_backpressure();
         test_overlapped_read();
-        test_queued_request_preserves_row();
+        test_queued_request_closes_row();
         test_row_crossing_write();
+        test_row_crossing_read();
+        test_bank_crossing_write();
         test_refresh_during_stalls();
         repeat (20) @(posedge clk);
         check(refresh_count >= 3, "distributed refresh continued after initialization");

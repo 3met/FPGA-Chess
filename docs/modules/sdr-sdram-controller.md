@@ -22,7 +22,9 @@ The controller accepts one transaction at a time. Addresses and lengths are expr
 
 For writes, the controller buffers the complete transaction before issuing the SDRAM WRITE command because the physical burst cannot be stalled. For reads, captured words become available while the physical burst continues. The buffer can hold the complete transaction if the receiver stalls, and completion follows burst termination and delivery of every word.
 
-Transactions crossing a row boundary are divided into legal physical segments while remaining one logical request. Per-bank minimum-active-time and write-recovery counters prevent short segments from precharging too early at faster clocks. The controller tracks and reuses open rows, precharging and activating banks as required. Reads may retain their row for a conditional TT replacement, while idle banks may be closed between requests.
+Transactions crossing a row boundary are divided into legal physical segments while remaining one logical request. Per-bank minimum-active-time and write-recovery counters prevent short segments from precharging too early at faster clocks.
+
+Runtime accesses use a closed-row policy: each physical read or write segment ends with burst termination and explicit bank precharge as soon as minimum active time and write recovery permit. Queued requests do not suppress closing, and there is no post-write grace period. Captured read words continue draining during precharge; terminal completion may release the scheduler to deliver buffered responses before precharge recovery finishes, but the controller accepts the next transaction only after the bank has closed. Initialization reuses rows during its serial validity sweep, then closes all banks before runtime requests begin.
 
 Every accepted request terminates with one completion. Invalid lengths, malformed write termination, or memory-controller faults set the persistent error output and mark the completion as failed.
 

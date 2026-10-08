@@ -70,6 +70,7 @@ module tt_memory_cdc_bridge #(
     logic store_response_full, store_response_empty, store_response_push;
     logic [$clog2(RESPONSE_FIFO_DEPTH):0] probe_free, store_free;
     logic selected_probe, selected_store, selected_write;
+    logic probe_space_available, store_space_available;
     logic operation_probe, operation_write;
     TTWordAddress request_address;
     logic [ENTRY_BITS-1:0] read_entry;
@@ -119,8 +120,8 @@ module tt_memory_cdc_bridge #(
 
     // Reserve the entire response before issuing a read, using conservative CDC space.
     always_comb begin
-        selected_probe = !probe_empty && int'(probe_free) >= ENTRY_WORDS;
-        selected_store = !selected_probe && !store_empty && int'(store_free) >= ENTRY_WORDS;
+        selected_probe = !probe_empty && probe_space_available;
+        selected_store = !selected_probe && !store_empty && store_space_available;
         selected_write = !selected_probe && !selected_store && !write_empty;
         // Select before translation so all three request classes share address logic.
         selected_entry_index = selected_probe ? probe_head : selected_store ? store_head : write_head.entry_index;
@@ -142,6 +143,20 @@ module tt_memory_cdc_bridge #(
             || state == S_CLEAR_DONE;
         probe_response_push = state == S_RESPONSE && operation_probe && !probe_response_full;
         store_response_push = state == S_RESPONSE && !operation_probe && !store_response_full;
+    end
+
+    // Pipeline capacity decoding before arbitration and FIFO pointer advancement.
+    // Include this edge's response push so the registered flag never overstates space.
+    always_ff @(posedge mem_clk) begin
+        if (!mem_rst_n) begin
+            probe_space_available <= 1'b0;
+            store_space_available <= 1'b0;
+        end else begin
+            probe_space_available <= probe_response_push
+                ? int'(probe_free) > ENTRY_WORDS : int'(probe_free) >= ENTRY_WORDS;
+            store_space_available <= store_response_push
+                ? int'(store_free) > ENTRY_WORDS : int'(store_free) >= ENTRY_WORDS;
+        end
     end
 
     // Commit read words only after successful completion; errors become all-invalid entries.

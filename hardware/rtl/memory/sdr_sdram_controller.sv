@@ -43,9 +43,6 @@ module sdr_sdram_controller #(
     // Start refresh service early enough that precharge/command latency still
     // keeps successive AUTO REFRESH commands within the 7.8125 us requirement.
     localparam int REFRESH_CYCLES = cycles_ns(7_200);
-    // A short post-write grace period covers tRAS/tDPL and lets a command
-    // already crossing the CDC bridge preserve the row before it is closed.
-    localparam int WRITE_CLOSE_DELAY = cycles_ns(100);
     localparam int WAIT_COUNT_BITS = $clog2(POWERUP_CYCLES + 1);
     localparam int REFRESH_COUNT_BITS = $clog2(REFRESH_CYCLES + 1);
     localparam int BURST_COUNT_BITS = $clog2(WORDS_PER_ENTRY + 1);
@@ -55,11 +52,11 @@ module sdr_sdram_controller #(
         S_INIT_REF2, S_INIT_REF2_WAIT, S_INIT_MODE, S_INIT_MODE_WAIT,
         S_CLEAR_CHECK, S_CLEAR_PRE, S_CLEAR_PRE_WAIT, S_CLEAR_ACT, S_CLEAR_ACT_WAIT,
         S_CLEAR_WRITE, S_CLEAR_TERM,
-        S_IDLE, S_PRE, S_PRE_WAIT, S_ACT, S_ACT_WAIT, S_READ_CMD, S_READ_WAIT,
+        S_IDLE, S_ACT, S_ACT_WAIT, S_READ_CMD, S_READ_WAIT,
         S_READ_DATA, S_READ_SERVE, S_WRITE_COLLECT, S_WRITE_CMD, S_WRITE_DATA,
         S_BURST_TERM, S_COMPLETE,
         S_REFRESH_PRE, S_REFRESH_PRE_WAIT, S_REFRESH, S_REFRESH_WAIT,
-        S_WRITE_CLOSE_WAIT, S_WRITE_CLOSE, S_WRITE_CLOSE_PRE_WAIT
+        S_CLOSE, S_CLOSE_WAIT
     } State;
     State state;
     State refresh_resume, refresh_resume_next;
@@ -79,8 +76,9 @@ module sdr_sdram_controller #(
     TTBurstLength transaction_length;
     logic [12:0] open_row[0:3];
     logic open_valid[0:3];
-    logic [1:0] completed_write_bank;
-    logic [12:0] completed_write_row;
+    logic [1:0] close_bank;
+    logic close_can_precharge;
+    logic completion_accepted;
     logic [15:0] dq_out;
     logic dq_oe;
     logic [12:0] dram_addr_next;
@@ -121,6 +119,8 @@ module sdr_sdram_controller #(
     always_comb begin
         bank_can_precharge = active_remaining[bank_of(address)] == 0
             && recovery_remaining[bank_of(address)] == 0;
+        close_can_precharge = active_remaining[close_bank] == 0
+            && recovery_remaining[close_bank] == 0;
         all_can_precharge = 1'b1;
         for (int bank = 0; bank < 4; bank++)
             all_can_precharge &= active_remaining[bank] == 0 && recovery_remaining[bank] == 0;
@@ -160,7 +160,11 @@ module sdr_sdram_controller #(
         write_ready = 1'b0;
         read_data = read_buffer[read_emit_count];
         read_last = read_emit_count == BURST_COUNT_BITS'(transaction_length - 1'b1);
-        done_valid = state == S_COMPLETE || (refreshing && refresh_resume == S_COMPLETE);
+        // Completion can release buffered responses while the bank finishes closing.
+        done_valid = !completion_accepted && (state == S_COMPLETE
+            || (refreshing && refresh_resume == S_COMPLETE)
+            || ((state == S_CLOSE || state == S_CLOSE_WAIT) && remaining == 0
+                && (transaction_write || read_emit_count == BURST_COUNT_BITS'(transaction_length))));
         done_error = error;
         // Captured words may drain before the full burst finishes; the buffer
         // still holds the entire transaction when the receiver applies backpressure.
@@ -169,7 +173,7 @@ module sdr_sdram_controller #(
         case (state)
             S_INIT_PRE: begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b1; end
             S_REFRESH_PRE: if (all_can_precharge) begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b1; end
-            S_CLEAR_PRE, S_PRE: if (bank_can_precharge) begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b0; end
+            S_CLEAR_PRE: if (bank_can_precharge) begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b0; end
             S_INIT_REF1, S_INIT_REF2, S_REFRESH: begin dram_ras_n_next = 1'b0; dram_cas_n_next = 1'b0; end
             S_INIT_MODE: begin
                 dram_ras_n_next = 1'b0; dram_cas_n_next = 1'b0; dram_we_n_next = 1'b0;
@@ -194,15 +198,11 @@ module sdr_sdram_controller #(
                 dq_out_next = write_buffer[write_emit_count];
             end
             S_CLEAR_TERM, S_BURST_TERM: begin dram_we_n_next = 1'b0; end
-            S_WRITE_CLOSE: begin
-                if (refresh_count != 0 && !req_valid
-                        && open_valid[completed_write_bank]
-                        && open_row[completed_write_bank] == completed_write_row) begin
-                    dram_ba_next = completed_write_bank;
-                    dram_ras_n_next = 1'b0;
-                    dram_we_n_next = 1'b0;
-                    dram_addr_next[10] = 1'b0;
-                end
+            S_CLOSE: if (close_can_precharge) begin
+                dram_ba_next = close_bank;
+                dram_ras_n_next = 1'b0;
+                dram_we_n_next = 1'b0;
+                dram_addr_next[10] = 1'b0;
             end
             default: begin end
         endcase
@@ -218,7 +218,7 @@ module sdr_sdram_controller #(
             refresh_resume <= S_IDLE;
             wait_count <= WAIT_COUNT_BITS'(POWERUP_CYCLES); refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
             clear_word <= 25'(INVALIDATE_OFFSET); address <= '0; remaining <= '0; segment_remaining <= '0;
-            completed_write_bank <= '0; completed_write_row <= '0;
+            close_bank <= '0; completion_accepted <= 1'b0;
             write_collect_count <= '0; write_emit_count <= '0;
             read_capture_count <= '0; read_emit_count <= '0; transaction_length <= '0;
             invalidate_rows();
@@ -235,6 +235,7 @@ module sdr_sdram_controller #(
             dq_out <= dq_out_next; dq_oe <= dq_oe_next;
             if ((ready || state >= S_CLEAR_CHECK) && refresh_count != 0) refresh_count <= refresh_count - 1'b1;
             if (refreshing) refresh_resume <= refresh_resume_next;
+            if (done_valid && done_ready) completion_accepted <= 1'b1;
             // Drain captured words while later SDRAM words are still arriving.
             if (read_valid && read_ready)
                 read_emit_count <= read_emit_count + BURST_COUNT_BITS'(1);
@@ -271,10 +272,8 @@ module sdr_sdram_controller #(
                 S_CLEAR_TERM: begin
                     if (clear_word >= 25'(ENTRY_COUNT*WORDS_PER_ENTRY-INVALIDATE_STRIDE+INVALIDATE_OFFSET)) begin
                         ready <= 1'b1;
-                        if (refresh_count == 0) begin
-                            refresh_resume <= S_IDLE;
-                            state <= S_REFRESH_PRE;
-                        end else state <= S_IDLE;
+                        refresh_resume <= S_IDLE;
+                        state <= S_REFRESH_PRE;
                     end
                     else begin
                         clear_word <= clear_word + 25'(INVALIDATE_STRIDE);
@@ -290,6 +289,7 @@ module sdr_sdram_controller #(
                         state <= S_REFRESH_PRE;
                     end
                     else if (req_valid && req_ready) begin
+                        completion_accepted <= 1'b0;
                         address <= req_address; remaining <= req_length;
                         transaction_length <= req_length; transaction_write <= req_write;
                         if (req_length == 0 || req_length > TTBurstLength'(WORDS_PER_ENTRY)) begin
@@ -302,11 +302,7 @@ module sdr_sdram_controller #(
                         end else begin
                             segment_remaining <= segment_len(req_address, req_length);
                             read_capture_count <= '0; read_emit_count <= '0;
-                            if (open_valid[bank_of(req_address)]
-                                    && open_row[bank_of(req_address)] == row_of(req_address))
-                                state <= S_READ_CMD;
-                            else if (open_valid[bank_of(req_address)]) state <= S_PRE;
-                            else state <= S_ACT;
+                            state <= S_ACT;
                         end
                     end
                 end
@@ -320,14 +316,9 @@ module sdr_sdram_controller #(
                         error <= 1'b1;
                     if (write_collect_count == BURST_COUNT_BITS'(remaining - 1'b1)) begin
                         write_emit_count <= '0;
-                        if (open_valid[bank_of(address)] && open_row[bank_of(address)] == row_of(address))
-                            state <= S_WRITE_CMD;
-                        else if (open_valid[bank_of(address)]) state <= S_PRE;
-                        else state <= S_ACT;
+                        state <= S_ACT;
                     end else write_collect_count <= write_collect_count + BURST_COUNT_BITS'(1);
                 end
-                S_PRE: if (bank_can_precharge) begin open_valid[address[24:23]] <= 1'b0; wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_PRE_WAIT; end
-                S_PRE_WAIT: if (wait_count == 0) state <= S_ACT; else wait_count <= wait_count - 1'b1;
                 S_ACT: begin open_valid[address[24:23]] <= 1'b1; open_row[address[24:23]] <= row_of(address); wait_count <= WAIT_COUNT_BITS'(TRCD - 1); state <= S_ACT_WAIT; end
                 S_ACT_WAIT: if (wait_count == 0) state <= transaction_write ? S_WRITE_CMD : S_READ_CMD; else wait_count <= wait_count - 1'b1;
                 S_READ_CMD: begin wait_count <= WAIT_COUNT_BITS'(CAS_LATENCY + READ_PIPELINE_CYCLES); state <= S_READ_WAIT; end
@@ -352,39 +343,33 @@ module sdr_sdram_controller #(
                     if (remaining == 1 || segment_remaining == 1) state <= S_BURST_TERM;
                     else state <= S_WRITE_DATA;
                 end
+                // Terminate every physical segment before closing its bank. The
+                // advanced address may already identify a different row or bank.
                 S_BURST_TERM: begin
-                    if (remaining == 0) begin
-                        if (transaction_write) begin
-                            // Address has advanced past the final emitted word.
-                            completed_write_bank <= bank_of(address - 25'd1);
-                            completed_write_row <= row_of(address - 25'd1);
-                            state <= S_COMPLETE;
-                        end else begin
-                            state <= S_READ_SERVE;
-                        end
-                    end
-                    else begin
-                        segment_remaining <= segment_len(address, remaining);
-                        if (open_valid[bank_of(address)] && open_row[bank_of(address)] == row_of(address))
-                            state <= transaction_write ? S_WRITE_CMD : S_READ_CMD;
-                        else if (open_valid[bank_of(address)]) state <= S_PRE;
-                        else state <= S_ACT;
-                    end
+                    close_bank <= bank_of(address - 25'd1);
+                    state <= S_CLOSE;
                 end
+                S_CLOSE: if (close_can_precharge) begin
+                    open_valid[close_bank] <= 1'b0;
+                    wait_count <= WAIT_COUNT_BITS'(TRP - 1);
+                    state <= S_CLOSE_WAIT;
+                end
+                S_CLOSE_WAIT: if (wait_count == 0) begin
+                    if (remaining != 0) begin
+                        segment_remaining <= segment_len(address, remaining);
+                        state <= S_ACT;
+                    end else if (completion_accepted || (done_valid && done_ready)) begin
+                        state <= S_IDLE;
+                    end else begin
+                        state <= (transaction_write
+                            || read_emit_count == BURST_COUNT_BITS'(transaction_length))
+                            ? S_COMPLETE : S_READ_SERVE;
+                    end
+                end else wait_count <= wait_count - 1'b1;
                 S_COMPLETE: if (refresh_count == 0 && !done_ready) begin
                     refresh_resume <= S_COMPLETE;
                     state <= S_REFRESH_PRE;
-                end else if (done_valid && done_ready) begin
-                    if (transaction_write && transaction_length != 0
-                            && transaction_length <= TTBurstLength'(WORDS_PER_ENTRY)
-                            && open_valid[completed_write_bank]
-                            && open_row[completed_write_bank] == completed_write_row) begin
-                        wait_count <= WAIT_COUNT_BITS'(WRITE_CLOSE_DELAY - 1);
-                        state <= S_WRITE_CLOSE_WAIT;
-                    end else begin
-                        state <= S_IDLE;
-                    end
-                end
+                end else if (done_valid && done_ready) state <= S_IDLE;
                 S_REFRESH_PRE: if (all_can_precharge) begin invalidate_rows(); wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= S_REFRESH_PRE_WAIT; end
                 S_REFRESH_PRE_WAIT: if (wait_count == 0) state <= S_REFRESH; else wait_count <= wait_count - 1'b1;
                 S_REFRESH: begin wait_count <= WAIT_COUNT_BITS'(TRFC - 1); state <= S_REFRESH_WAIT; end
@@ -392,42 +377,6 @@ module sdr_sdram_controller #(
                     refresh_count <= REFRESH_COUNT_BITS'(REFRESH_CYCLES);
                     state <= refresh_resume_next;
                 end else wait_count <= wait_count - 1'b1;
-                // Close only during a real command gap. A queued request keeps
-                // the row available, including same-entry follow-up traffic.
-                S_WRITE_CLOSE_WAIT: begin
-                    if (refresh_count == 0) begin
-                        refresh_resume <= S_IDLE;
-                        state <= S_REFRESH_PRE;
-                    end else if (req_valid || !open_valid[completed_write_bank]
-                            || open_row[completed_write_bank] != completed_write_row) begin
-                        state <= S_IDLE;
-                    end else if (wait_count == 0) begin
-                        state <= S_WRITE_CLOSE;
-                    end else begin
-                        wait_count <= wait_count - 1'b1;
-                    end
-                end
-                S_WRITE_CLOSE: begin
-                    if (refresh_count == 0) begin
-                        refresh_resume <= S_IDLE;
-                        state <= S_REFRESH_PRE;
-                    end else if (req_valid || !open_valid[completed_write_bank]
-                            || open_row[completed_write_bank] != completed_write_row) begin
-                        state <= S_IDLE;
-                    end else begin
-                        open_valid[completed_write_bank] <= 1'b0;
-                        wait_count <= WAIT_COUNT_BITS'(TRP - 1);
-                        state <= S_WRITE_CLOSE_PRE_WAIT;
-                    end
-                end
-                S_WRITE_CLOSE_PRE_WAIT: if (wait_count == 0) begin
-                    if (refresh_count == 0) begin
-                        refresh_resume <= S_IDLE;
-                        state <= S_REFRESH_PRE;
-                    end else state <= S_IDLE;
-                end else begin
-                    wait_count <= wait_count - 1'b1;
-                end
                 default: state <= S_POWERUP;
             endcase
         end

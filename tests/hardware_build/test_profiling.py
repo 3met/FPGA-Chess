@@ -1,6 +1,7 @@
 import argparse
 import copy
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ from tools.hardware_build.profile_schema import (
     MOVE_GENERATOR_OPERATIONS,
     MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
+    SDRAM_STATES,
     THREAD_PHASES,
     TT_FIFOS,
 )
@@ -247,10 +249,10 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "sdram.read_words_per_request": 6,
         "sdram.clock_hz": 200,
         "sdram.idle_cycles": 4,
-        "sdram.states.16": 5,
-        "sdram.states.23": 6,
-        "sdram.states.26": 1,
-        "sdram.states.27": 5,
+        f"sdram.states.{SDRAM_STATES.index('idle')}": 5,
+        f"sdram.states.{SDRAM_STATES.index('read_data')}": 6,
+        f"sdram.states.{SDRAM_STATES.index('write_command')}": 1,
+        f"sdram.states.{SDRAM_STATES.index('write_data')}": 5,
         "sdram.write_requests": 1,
         "sdram.read_words": 6,
         "sdram.write_words": 6,
@@ -371,6 +373,25 @@ class MetricRecordTests(unittest.TestCase):
             )
 
 
+class SDRAMStateMappingTests(unittest.TestCase):
+    def test_payload_state_indices_match_controller(self):
+        """Keep bandwidth counters aligned when the controller state machine changes."""
+        root = Path(__file__).resolve().parents[2]
+        controller = (root / "hardware/rtl/memory/sdr_sdram_controller.sv").read_text(encoding="utf-8")
+        bench = (root / "hardware/tb/profile/tb_engine_profile.sv").read_text(encoding="utf-8")
+        declaration = re.search(r"typedef enum logic \[5:0\] \{(.*?)\} State;", controller, re.S)
+        self.assertIsNotNone(declaration)
+        states = re.findall(r"\bS_[A-Z0-9_]+\b", declaration.group(1))
+        self.assertEqual(len(SDRAM_STATES), len(states))
+        for name, state in (("idle", "S_IDLE"), ("read_data", "S_READ_DATA"),
+                            ("write_command", "S_WRITE_CMD"), ("write_data", "S_WRITE_DATA")):
+            self.assertEqual(SDRAM_STATES.index(name), states.index(state))
+        for constant, expected in (("COUNT", len(states)), ("IDLE", states.index("S_IDLE"))):
+            value = re.search(rf"SDRAM_STATE_{constant} = (\d+);", bench)
+            self.assertIsNotNone(value)
+            self.assertEqual(int(value.group(1)), expected)
+
+
 class ReportTests(unittest.TestCase):
     def build_sample_report(self) -> dict:
         """Build one internally consistent report shared by focused assertions."""
@@ -442,7 +463,7 @@ class ReportTests(unittest.TestCase):
     def test_memory_suite_idle_and_bandwidth_pool_memory_cycles(self):
         first = self.build_sample_report()
         second = self.build_sample_report()
-        second["raw_metrics"]["sdram.states.16"] *= 10
+        second["raw_metrics"][f"sdram.states.{SDRAM_STATES.index('idle')}"] *= 10
         second["raw_metrics"]["sdram.idle_cycles"] *= 10
         suite = build_profile_suite_report([("first", first), ("second", second)])
         memory = suite["aggregate_profile"]["transposition_table"]["memory_interface"]

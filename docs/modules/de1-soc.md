@@ -4,7 +4,7 @@ The `de1_soc` module is the board-specific top level for the Terasic DE1-SoC. It
 
 ## External Memory
 
-The DE1 build uses the FPGA-side 64 MiB SDR SDRAM as the primary transposition-table store. The portable controller performs JEDEC initialization, validity initialization, open-row burst access, and refresh before reporting memory ready. The engine remains in reset until the memory path is initialized.
+The DE1 build uses the FPGA-side 64 MiB SDR SDRAM as the primary transposition-table store. The portable controller performs JEDEC initialization, validity initialization, closed-row burst access, and refresh before reporting memory ready. The engine remains in reset until the memory path is initialized.
 
 Memory readiness and transactions are described in [tt-memory.md](tt-memory.md) and [sdr-sdram-controller.md](sdr-sdram-controller.md).
 

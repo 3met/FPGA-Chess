@@ -113,7 +113,8 @@ module tb_engine_profile #(
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
     localparam int TT_STATE_COUNT = 4;
     localparam int TT_STATE_IDLE = 0;
-    localparam int SDRAM_STATE_COUNT = 37;
+    localparam int SDRAM_STATE_COUNT = 34;
+    localparam int SDRAM_STATE_IDLE = 16;
 
     logic engine_clk = 1'b0;
     logic memory_clk = 1'b0;
@@ -1141,7 +1142,7 @@ module tb_engine_profile #(
         end
         if (profile_active || drain_active) begin
             // Idle excludes an arriving request, row timing, refresh, and completion overhead.
-            if (int'(memory_controller.state) == 16 && !tt_mem_req_valid)
+            if (int'(memory_controller.state) == SDRAM_STATE_IDLE && !tt_mem_req_valid)
                 sdram_idle_cycles <= sdram_idle_cycles + 1;
             sdram_state_cycles[int'(memory_controller.state)] <=
                 sdram_state_cycles[int'(memory_controller.state)] + 1;
@@ -1538,7 +1539,7 @@ module tb_engine_profile #(
                     && !dut.controller.tt_frontend.store_buffer_valid
                     && !!dut.controller.tt_frontend.transport.write_empty
                     && dut.controller.tt_frontend.state == 0
-                    && dut.controller.tt_frontend.transport_idle && memory_controller.state == 16)
+                    && dut.controller.tt_frontend.transport_idle && int'(memory_controller.state) == SDRAM_STATE_IDLE)
                 break;
         end
         drain_active = 1'b0;

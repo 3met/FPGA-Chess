@@ -33,6 +33,7 @@ module tb_tt_memory_cdc_bridge;
     logic [1:0] read_fault = 0;
     int pass_count = 0, fail_count = 0;
     int accepted = 0;
+    logic reservations_safe = 1;
     int addresses[32], lengths[32];
     logic writes[32];
     tt_memory_cdc_bridge #(.ENTRY_COUNT(ENTRIES), .READ_FIFO_DEPTH(4), .RESPONSE_FIFO_DEPTH(RESPONSE_DEPTH)) dut (
@@ -58,6 +59,13 @@ module tb_tt_memory_cdc_bridge;
             writes[accepted] = backend_req_write;
         end
         accepted++;
+    end
+    // Observe actual capacity when staged eligibility advances a request FIFO.
+    always @(posedge mem_clk) if (rst_n) begin
+        if (dut.probe_pop) reservations_safe &= int'(dut.probe_free) >= ENTRY_WORDS;
+        if (dut.store_pop) reservations_safe &= int'(dut.store_free) >= ENTRY_WORDS;
+        reservations_safe &= !(dut.probe_response_push && dut.probe_response_full)
+            && !(dut.store_response_push && dut.store_response_full);
     end
     task automatic check(input logic condition, input string label);
         if (condition) pass_count++; else begin fail_count++; $error("[FAIL] %s", label); end
@@ -173,6 +181,29 @@ module tb_tt_memory_cdc_bridge;
             check(ordered, "logical last-entry probe returns all three written ways in order");
         end
         while (!idle) @(negedge clk);
+        // Make the last response push cross the whole-entry capacity threshold.
+        // Stale eligibility on that edge would wrongly admit the next queued read.
+        begin
+            int baseline, groups, drain_words;
+            baseline = accepted;
+            groups = RESPONSE_DEPTH / ENTRY_WORDS;
+            read_fault = 1; enabled = 0;
+            repeat (groups) enqueue(1,0,0);
+            enabled = 1; settle();
+            check(accepted == baseline + groups, "response FIFO filled with complete invalid groups");
+            enabled = 0;
+            repeat (2) enqueue(1,0,0);
+            drain_words = 2*ENTRY_WORDS - 1 - (RESPONSE_DEPTH - groups*ENTRY_WORDS);
+            consume_response(1, drain_words, 0, 1); settle();
+            enabled = 1; settle();
+            check(accepted == baseline + groups + 1,
+                "last response push revoked eligibility before another read was selected");
+            consume_response(1, (groups+1)*ENTRY_WORDS - drain_words, 0, 1); settle();
+            check(accepted == baseline + groups + 2, "threshold-blocked read resumed after draining space");
+            consume_response(1, ENTRY_WORDS, 0, 1);
+            while (!idle) @(negedge clk);
+            read_fault = 0;
+        end
         // A pending clear must drain the last queued write even if the backend
         // was blocked when its request pointer crossed into the memory domain.
         enabled = 0;
@@ -185,6 +216,7 @@ module tb_tt_memory_cdc_bridge;
             for (int i = 0; i < ENTRIES*TT_WAYS; i++) cleared &= memory.memory[i*WAY_WORDS][1:0] == 0;
             check(cleared, "clear invalidates every external way");
         end
+        check(reservations_safe, "registered eligibility always reserves actual whole-response capacity");
         $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);
         if (fail_count) $fatal(1, "TT transport test failed"); $finish;
     end

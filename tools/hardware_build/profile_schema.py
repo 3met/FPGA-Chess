@@ -90,11 +90,10 @@ SDRAM_STATES = [
     "init_refresh_1_wait", "init_refresh_2", "init_refresh_2_wait", "init_mode",
     "init_mode_wait", "clear_check", "clear_precharge", "clear_precharge_wait",
     "clear_activate", "clear_activate_wait", "clear_write", "clear_terminate", "idle",
-    "precharge", "precharge_wait", "activate", "activate_wait", "read_command",
+    "activate", "activate_wait", "read_command",
     "read_wait", "read_data", "read_serve", "write_collect", "write_command", "write_data",
     "burst_terminate", "complete", "refresh_precharge", "refresh_precharge_wait",
-    "refresh", "refresh_wait", "write_close_wait", "write_close",
-    "write_close_precharge_wait",
+    "refresh", "refresh_wait", "close", "close_wait",
 ]
 
 # Queue identifiers match the testbench's occupancy histogram rows.
