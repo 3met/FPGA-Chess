@@ -374,7 +374,10 @@ module tb_engine_profile #(
     longint unsigned tt_store_drops;
     longint unsigned tt_store_fifo_high_water;
     longint unsigned tt_cache_bypass_hits;
-    longint unsigned tt_store_write_preemptions;
+    longint unsigned tt_writeback_probe_queue_overlap_cycles;
+    longint unsigned tt_cache_port_cycles;
+    longint unsigned tt_cache_probe_read_cycles, tt_cache_probe_write_cycles;
+    longint unsigned tt_cache_store_read_cycles, tt_cache_store_write_cycles;
     longint unsigned pvs_scouts, pvs_researches, lmr_reduced_issues, rfp_cutoffs;
     longint unsigned futility_pruned_moves, qdelta_pruned_moves;
     longint unsigned terminal_checkmates, terminal_stalemates;
@@ -382,6 +385,8 @@ module tb_engine_profile #(
     longint unsigned repetition_draws, fifty_move_draws;
     longint unsigned qsearch_board_issues, main_search_board_issues;
     longint unsigned sdram_reads, sdram_writes, sdram_read_words, sdram_write_words;
+    longint unsigned sdram_probe_reads, sdram_store_reads;
+    longint unsigned sdram_idle_cycles;
     longint unsigned sdram_row_hits, sdram_row_misses, sdram_row_conflicts;
     longint unsigned cdc_command_stalls, cdc_write_stalls, cdc_read_stalls, cdc_done_stalls;
     longint unsigned previous_nodes;
@@ -396,6 +401,96 @@ module tb_engine_profile #(
     logic selected_bucket_valid[0:SEARCH_THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
     Move selected_bucket_move[0:SEARCH_THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
     MoveBucketIndex selected_bucket[0:SEARCH_THREAD_COUNT-1][0:MAX_PLY_COUNT-1];
+
+    // Histograms live only in the profiler; every queued level includes idle cycles.
+    localparam int TT_FIFO_COUNT = 8;
+    localparam int TT_FIFO_MAX_DEPTH = TT_STORE_FIFO_DEPTH > TT_OUTSTANDING_DEPTH
+        ? (TT_STORE_FIFO_DEPTH > TT_RESPONSE_FIFO_DEPTH
+            ? (TT_STORE_FIFO_DEPTH > TT_WRITEBACK_FIFO_DEPTH ? TT_STORE_FIFO_DEPTH : TT_WRITEBACK_FIFO_DEPTH)
+            : (TT_RESPONSE_FIFO_DEPTH > TT_WRITEBACK_FIFO_DEPTH ? TT_RESPONSE_FIFO_DEPTH : TT_WRITEBACK_FIFO_DEPTH))
+        : (TT_OUTSTANDING_DEPTH > TT_RESPONSE_FIFO_DEPTH
+            ? (TT_OUTSTANDING_DEPTH > TT_WRITEBACK_FIFO_DEPTH ? TT_OUTSTANDING_DEPTH : TT_WRITEBACK_FIFO_DEPTH)
+            : (TT_RESPONSE_FIFO_DEPTH > TT_WRITEBACK_FIFO_DEPTH ? TT_RESPONSE_FIFO_DEPTH : TT_WRITEBACK_FIFO_DEPTH));
+    localparam int TT_FIFO_CAPACITIES[TT_FIFO_COUNT] = '{
+        TT_STORE_FIFO_DEPTH, TT_OUTSTANDING_DEPTH, TT_OUTSTANDING_DEPTH,
+        TT_OUTSTANDING_DEPTH, TT_OUTSTANDING_DEPTH, TT_WRITEBACK_FIFO_DEPTH,
+        TT_RESPONSE_FIFO_DEPTH, TT_RESPONSE_FIFO_DEPTH
+    };
+    longint unsigned tt_fifo_histogram[TT_FIFO_COUNT][TT_FIFO_MAX_DEPTH+1];
+    longint unsigned tt_fifo_samples[TT_FIFO_COUNT];
+
+    // Observe actual queued words, rather than conservative synchronized-pointer estimates.
+    function automatic int async_occupancy(input int write_pointer, read_pointer, capacity);
+        return (write_pointer - read_pointer) & (2 * capacity - 1);
+    endfunction
+
+    // Sample each FIFO on its producer clock before that edge's transfers commit.
+    task automatic sample_tt_fifo(input int fifo, occupancy);
+        if (occupancy < 0 || occupancy > TT_FIFO_CAPACITIES[fifo])
+            $fatal(1, "TT FIFO %0d occupancy %0d exceeds capacity %0d", fifo, occupancy, TT_FIFO_CAPACITIES[fifo]);
+        tt_fifo_histogram[fifo][occupancy]++;
+        tt_fifo_samples[fifo]++;
+    endtask
+
+    // Names are shared with the host report schema, independent of configured depths.
+    function automatic string tt_fifo_name(input int fifo);
+        case (fifo)
+            0: return "stores";
+            1: return "probe_metadata";
+            2: return "store_metadata";
+            3: return "probe_read";
+            4: return "store_read";
+            5: return "way_write";
+            6: return "probe_response";
+            7: return "store_response";
+            default: return "invalid";
+        endcase
+    endfunction
+
+    longint unsigned tt_probe_cache_wait_cycles, tt_store_cache_wait_cycles;
+    longint unsigned tt_probe_cache_wait_samples, tt_store_cache_wait_samples;
+    int tt_probe_cache_pending, tt_store_cache_pending;
+
+    // Follow request identity through cache arbitration, miss queues, and SDRAM acknowledgement.
+    tt_latency_profiler #(.THREAD_COUNT(SEARCH_THREAD_COUNT)) tt_latency (
+        .clk(engine_clk), .memory_clk, .rst_n(engine_rst_n), .enable(profile_active || drain_active),
+        .probe_accept(dut.controller.tt_frontend.probe_accept),
+        .probe_accept_thread(int'(dut.controller.tt_lookup_req.thread_id)),
+        .probe_classify(dut.controller.tt_frontend.probe_pending),
+        .probe_classify_thread(int'(dut.controller.tt_frontend.probe_stage.req.thread_id)),
+        .probe_cache_hit(dut.controller.tt_frontend.probe_position_hit),
+        .probe_complete(dut.controller.tt_lookup_resp_valid),
+        .probe_complete_thread(int'(dut.controller.tt_lookup_resp.thread_id)),
+        .store_accept(dut.controller.tt_frontend.store_accept && dut.controller.tt_frontend.store_fifo_push_ready),
+        .store_drop(dut.controller.tt_frontend.store_accept && !dut.controller.tt_frontend.store_fifo_push_ready),
+        .store_issue(dut.controller.tt_frontend.store_issue),
+        .store_classify(dut.controller.tt_frontend.store_pending),
+        .store_cache_hit(dut.controller.tt_frontend.store_position_hit),
+        .store_enqueue(dut.controller.tt_frontend.store_enqueue),
+        .replacement_valid(dut.controller.tt_frontend.replacement_valid),
+        .replacement_cache(dut.controller.tt_frontend.replacement_cache),
+        .replacement_write(dut.controller.tt_frontend.replacement_write),
+        .commit_valid(dut.controller.tt_frontend.commit_valid),
+        .commit_ready(dut.controller.tt_frontend.way_write_ready),
+        .memory_write_done(tt_mem_done_valid && tt_mem_done_ready
+            && dut.controller.tt_frontend.transport.operation_write)
+    );
+
+    // Stores include FIFO queueing and the staged request; dropped publications have no timestamp.
+    cache_wait_profiler #(.QUEUE_DEPTH(1)) probe_cache_wait (
+        .clk(engine_clk), .rst_n(engine_rst_n), .enable(profile_active || drain_active),
+        .accept(dut.controller.tt_frontend.probe_accept),
+        .access(dut.controller.tt_frontend.probe_issue),
+        .wait_cycles(tt_probe_cache_wait_cycles), .accesses(tt_probe_cache_wait_samples),
+        .pending(tt_probe_cache_pending)
+    );
+    cache_wait_profiler #(.QUEUE_DEPTH(TT_STORE_FIFO_DEPTH+1)) store_cache_wait (
+        .clk(engine_clk), .rst_n(engine_rst_n), .enable(profile_active || drain_active),
+        .accept(dut.controller.tt_frontend.store_accept && dut.controller.tt_frontend.store_fifo_push_ready),
+        .access(dut.controller.tt_frontend.store_issue),
+        .wait_cycles(tt_store_cache_wait_cycles), .accesses(tt_store_cache_wait_samples),
+        .pending(tt_store_cache_pending)
+    );
 
     task automatic send_byte(input logic [7:0] value);
         while (!ready) @(posedge engine_clk);
@@ -474,6 +569,18 @@ module tb_engine_profile #(
             // avoid scheduling thousands of needless NBA events without changing
             // any DUT timing or sampled value.
             search_cycles = search_cycles + 1;
+            sample_tt_fifo(0, int'(dut.controller.tt_frontend.store_fifo_count));
+            sample_tt_fifo(1, int'(dut.controller.tt_frontend.probe_meta_count));
+            sample_tt_fifo(2, int'(dut.controller.tt_frontend.store_meta_count));
+            sample_tt_fifo(3, async_occupancy(
+                int'(dut.controller.tt_frontend.transport.probe_read_fifo.wr_bin),
+                int'(dut.controller.tt_frontend.transport.probe_read_fifo.rd_bin), TT_OUTSTANDING_DEPTH));
+            sample_tt_fifo(4, async_occupancy(
+                int'(dut.controller.tt_frontend.transport.store_read_fifo.wr_bin),
+                int'(dut.controller.tt_frontend.transport.store_read_fifo.rd_bin), TT_OUTSTANDING_DEPTH));
+            sample_tt_fifo(5, async_occupancy(
+                int'(dut.controller.tt_frontend.transport.way_write_fifo.wr_bin),
+                int'(dut.controller.tt_frontend.transport.way_write_fifo.rd_bin), TT_WRITEBACK_FIFO_DEPTH));
             // Fail a stuck search well before the global wall-clock timeout.
             // A million cycles without entering a node exceeds normal pipeline,
             // memory, generation, and complete-stack unwind latency by far.
@@ -512,7 +619,7 @@ module tb_engine_profile #(
                         == TT_STATE_IDLE
                     && !dut.controller.tt_frontend.transport.probe_empty
                     && !dut.controller.tt_frontend.transport.write_empty)
-                tt_store_write_preemptions = tt_store_write_preemptions + 1;
+                tt_writeback_probe_queue_overlap_cycles = tt_writeback_probe_queue_overlap_cycles + 1;
 
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
                 if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_MOVE_WAIT
@@ -990,6 +1097,14 @@ module tb_engine_profile #(
         end
         if (drain_active) begin
             drain_cycles <= drain_cycles + 1;
+            // Cache totals cover search and drain, including late results from accepted probes.
+            if (dut.controller.tt_cache_access) begin
+                tt_cache_lookup_probes <= tt_cache_lookup_probes + 1;
+                if (dut.controller.tt_cache_hit) begin
+                    tt_cache_lookup_hits <= tt_cache_lookup_hits + 1;
+                    if (!dut.controller.tt_frontend.transport_idle) tt_cache_bypass_hits <= tt_cache_bypass_hits + 1;
+                end
+            end
             tt_state_cycles[int'(dut.controller.tt_frontend.state)] <=
                 tt_state_cycles[int'(dut.controller.tt_frontend.state)] + 1;
             if (dut.controller.tt_cache_store_access) begin
@@ -1003,8 +1118,31 @@ module tb_engine_profile #(
         end
     end
 
-    always @(posedge memory_clk) begin
+    // Measure actual cache bank operations, including post-search publications.
+    always @(posedge engine_clk) begin
         if (profile_active || drain_active) begin
+            tt_cache_port_cycles++;
+            if (dut.controller.tt_frontend.probe_issue) tt_cache_probe_read_cycles++;
+            if (dut.controller.tt_frontend.fill_write) tt_cache_probe_write_cycles++;
+            if (dut.controller.tt_frontend.store_issue) tt_cache_store_read_cycles++;
+            if (dut.controller.tt_frontend.commit_valid) tt_cache_store_write_cycles++;
+        end
+    end
+
+    always @(posedge memory_clk) begin
+        // Response FIFOs are written in the memory domain; exclude post-search drain.
+        if (profile_active) begin
+            sample_tt_fifo(6, async_occupancy(
+                int'(dut.controller.tt_frontend.transport.probe_response_fifo.wr_bin),
+                int'(dut.controller.tt_frontend.transport.probe_response_fifo.rd_bin), TT_RESPONSE_FIFO_DEPTH));
+            sample_tt_fifo(7, async_occupancy(
+                int'(dut.controller.tt_frontend.transport.store_response_fifo.wr_bin),
+                int'(dut.controller.tt_frontend.transport.store_response_fifo.rd_bin), TT_RESPONSE_FIFO_DEPTH));
+        end
+        if (profile_active || drain_active) begin
+            // Idle excludes an arriving request, row timing, refresh, and completion overhead.
+            if (int'(memory_controller.state) == 16 && !tt_mem_req_valid)
+                sdram_idle_cycles <= sdram_idle_cycles + 1;
             sdram_state_cycles[int'(memory_controller.state)] <=
                 sdram_state_cycles[int'(memory_controller.state)] + 1;
             if (tt_mem_req_valid && tt_mem_req_ready) begin
@@ -1014,6 +1152,11 @@ module tb_engine_profile #(
                 end else begin
                     sdram_reads <= sdram_reads + 1;
                     sdram_read_words <= sdram_read_words + tt_mem_req_length;
+                    // Classify accepted bursts using the bridge's latched owner.
+                    if (dut.controller.tt_frontend.transport.operation_probe)
+                        sdram_probe_reads <= sdram_probe_reads + 1;
+                    else
+                        sdram_store_reads <= sdram_store_reads + 1;
                 end
                 if (memory_controller.open_valid[tt_mem_req_address[24:23]]) begin
                     if (memory_controller.open_row[tt_mem_req_address[24:23]] == tt_mem_req_address[22:10])
@@ -1028,6 +1171,7 @@ module tb_engine_profile #(
     end
 
     task automatic write_metrics();
+        tt_latency.write_metrics(metrics_fd);
         emit("cycles.setup", setup_cycles);
         emit("cycles.search", search_cycles);
         emit("cycles.output", output_cycles);
@@ -1195,13 +1339,38 @@ module tb_engine_profile #(
         emit("tt.stores", tt_stores);
         emit("tt.store_drops", tt_store_drops);
         emit("tt.store_fifo_high_water", tt_store_fifo_high_water);
-        emit("tt.store_write_preemptions", tt_store_write_preemptions);
+        // Retain the full distribution so suite percentiles can pool cycle samples.
+        for (int fifo = 0; fifo < TT_FIFO_COUNT; fifo++) begin
+            emit($sformatf("tt.fifos.%s.capacity", tt_fifo_name(fifo)), TT_FIFO_CAPACITIES[fifo]);
+            emit($sformatf("tt.fifos.%s.samples", tt_fifo_name(fifo)), tt_fifo_samples[fifo]);
+            for (int occupancy = 0; occupancy <= TT_FIFO_CAPACITIES[fifo]; occupancy++)
+                emit($sformatf("tt.fifos.%s.occupancy.%0d", tt_fifo_name(fifo), occupancy),
+                    tt_fifo_histogram[fifo][occupancy]);
+        end
+        emit("tt.writeback_probe_queue_overlap_cycles", tt_writeback_probe_queue_overlap_cycles);
+        emit("tt.cache.port_cycles", tt_cache_port_cycles);
+        emit("tt.cache.probe_read_cycles", tt_cache_probe_read_cycles);
+        emit("tt.cache.probe_write_cycles", tt_cache_probe_write_cycles);
+        emit("tt.cache.store_read_cycles", tt_cache_store_read_cycles);
+        emit("tt.cache.store_write_cycles", tt_cache_store_write_cycles);
+        if (tt_probe_cache_wait_samples != tt_cache_lookup_probes
+                || tt_store_cache_wait_samples != tt_cache_store_probes)
+            $fatal(1, "cache wait samples do not match completed cache accesses");
+        emit("tt.cache.entries", 64'd1 << TT_CACHE_INDEX_BITS);
+        emit("tt.cache.probe_wait_cycles", tt_probe_cache_wait_cycles);
+        emit("tt.cache.store_wait_cycles", tt_store_cache_wait_cycles);
         emit("tt.cache.lookup_probes", tt_cache_lookup_probes);
         emit("tt.cache.lookup_hits", tt_cache_lookup_hits);
         emit("tt.cache.bypass_hits", tt_cache_bypass_hits);
         emit("tt.cache.store_probes", tt_cache_store_probes);
         emit("tt.cache.store_hits", tt_cache_store_hits);
         emit("sdram.read_requests", sdram_reads);
+        emit("sdram.probe_reads", sdram_probe_reads);
+        emit("sdram.store_reads", sdram_store_reads);
+        emit("sdram.word_bits", TT_WORD_BITS);
+        emit("sdram.read_words_per_request", TT_ENTRY_WORDS);
+        emit("sdram.clock_hz", MEMORY_CLOCK_FREQ);
+        emit("sdram.idle_cycles", sdram_idle_cycles);
         emit("sdram.write_requests", sdram_writes);
         emit("sdram.read_words", sdram_read_words);
         emit("sdram.write_words", sdram_write_words);
@@ -1226,8 +1395,13 @@ module tb_engine_profile #(
         previous_nodes = 0;
         deepest_search_ply = PlyIndex'(0);
         tt_store_fifo_high_water = 0;
+        for (int fifo = 0; fifo < TT_FIFO_COUNT; fifo++) begin
+            tt_fifo_samples[fifo] = 0;
+            for (int occupancy = 0; occupancy <= TT_FIFO_MAX_DEPTH; occupancy++)
+                tt_fifo_histogram[fifo][occupancy] = 0;
+        end
         tt_cache_bypass_hits = 0;
-        tt_store_write_preemptions = 0;
+        tt_writeback_probe_queue_overlap_cycles = 0;
         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
             move_command_active[tid] = 1'b0;
             move_command_operation[tid] = '0;
@@ -1353,7 +1527,14 @@ module tb_engine_profile #(
         // in search utilization.
         repeat (20000) begin
             @(posedge engine_clk);
-            if (dut.controller.tt_frontend.store_fifo_count == 0
+            // Wait for cache-result pipelines as well as queued external writes.
+            if (dut.controller.tt_frontend.probe_buffer_valid == 0
+                    && !dut.controller.tt_frontend.probe_pending
+                    && !dut.controller.tt_frontend.store_pending
+                    && !dut.controller.tt_frontend.cache_store_valid
+                    && !dut.controller.tt_frontend.commit_valid
+                    && !dut.controller.tt_cache_access && !dut.controller.tt_cache_store_access
+                    && dut.controller.tt_frontend.store_fifo_count == 0
                     && !dut.controller.tt_frontend.store_buffer_valid
                     && !!dut.controller.tt_frontend.transport.write_empty
                     && dut.controller.tt_frontend.state == 0

@@ -136,6 +136,8 @@
       "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
       "hardware/rtl/memory/sdr_sdram_controller.sv",
       "hardware/tb/profile/sdram_chip_model.sv",
+      "hardware/tb/profile/cache_wait_profiler.sv",
+      "hardware/tb/profile/tt_latency_profiler.sv",
       "hardware/tb/profile/tb_engine_profile.sv"
     ],
     "tt-test-memory": [
@@ -146,11 +148,27 @@
       "@search-controller",
       "hardware/tb/tt/tt_burst_memory_model.sv"
     ],
+    "tt-latency-profiler": [
+      "hardware/tb/profile/tt_latency_profiler.sv"
+    ],
+    "cache-wait-profiler": [
+      "hardware/tb/profile/cache_wait_profiler.sv"
+    ],
     "sdram-chip-model": [
       "hardware/tb/profile/sdram_chip_model.sv"
     ]
   },
   "tests": {
+    "tt-latency-profiler": {
+      "source_set": "tt-latency-profiler",
+      "testbench": "hardware/tb/profile/tb_tt_latency_profiler.sv",
+      "top": "tb_tt_latency_profiler"
+    },
+    "cache-wait-profiler": {
+      "source_set": "cache-wait-profiler",
+      "testbench": "hardware/tb/profile/tb_cache_wait_profiler.sv",
+      "top": "tb_cache_wait_profiler"
+    },
     "time-management": {
       "source_set": "time-management",
       "testbench": "hardware/tb/time_management/tb_time_management.sv",

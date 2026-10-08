@@ -10,6 +10,8 @@ from .generated_data import command_gen_data
 from .manifest import command_list, command_validate
 from .programming import command_flash
 from .profiling import command_profile, command_profile_position
+from .profile_format import PROFILE_TOPICS
+from .profile_runs import command_profile_view
 from .reports import command_synth_report
 from .reports_quartus import command_timing_paths
 from .simulation import command_compile, command_test
@@ -74,7 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
             "--timeout", type=float,
             help="Optional simulator wall-clock timeout in seconds per position; disabled by default",
         )
-        profile_command.add_argument("--output", help="Artifact directory; defaults to a timestamped build directory")
+        destination = profile_command.add_mutually_exclusive_group()
+        destination.add_argument("--name", help="Run name; defaults to a timestamp under work/build/profile")
+        destination.add_argument("--output", help="Explicit artifact directory instead of a run name")
+        profile_command.add_argument("--replace", action="store_true", help="Replace an existing named run or explicit profile directory")
         profile_command.add_argument(
             "--simulator", choices=("auto", "verilator", "modelsim"), default="auto",
             help="Simulation backend; auto prefers Verilator when installed",
@@ -91,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     profile_parser = subparsers.add_parser(
-        "profile", help="Profile the named position suite and print aggregate statistics"
+        "profile", help="Profile the named position suite and print a short summary"
     )
     add_profile_options(profile_parser)
     profile_parser.add_argument(
@@ -106,6 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
     position_parser.add_argument("--fen", required=True, help="Position to profile in FEN notation")
     add_profile_options(position_parser)
     position_parser.set_defaults(func=command_profile_position)
+
+    view_parser = subparsers.add_parser("profile-view", help="View topics from a saved profiling run")
+    view_parser.add_argument("name", nargs="?", help="Saved run name; defaults to the latest completed run")
+    view_parser.add_argument("--run", help="Explicit saved-run directory instead of a name")
+    view_parser.add_argument("--topic", nargs="+", action="extend", choices=(*PROFILE_TOPICS, "all"), help="Topics to display; defaults to summary")
+    view_parser.add_argument("--position", help="Named suite position to inspect instead of the aggregate")
+    listing = view_parser.add_mutually_exclusive_group()
+    listing.add_argument("--list-runs", action="store_true", help="List completed saved runs, newest first")
+    listing.add_argument("--list-topics", action="store_true", help="List report topics")
+    view_parser.set_defaults(func=command_profile_view)
 
     check_parser = subparsers.add_parser("check", help="Check generated data and run Python and RTL tests")
     check_parser.add_argument("--jobs", type=int, help="Number of RTL tests to run concurrently; defaults to 1")

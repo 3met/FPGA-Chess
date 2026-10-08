@@ -14,6 +14,7 @@ from .profile_schema import (
     SDRAM_STATES,
     THREAD_PHASES,
     TT_FRONTEND_STATES,
+    TT_FIFOS,
 )
 
 
@@ -29,6 +30,85 @@ def rate(numerator: int | float, denominator: int | float) -> float | None:
     if denominator == 0:
         return None
     return float(numerator) / float(denominator)
+
+
+def _idle_percent(active_cycles: int, sampled_cycles: int, label: str) -> float | None:
+    """Validate activity and preserve undefined empty-window percentages."""
+    if active_cycles < 0 or sampled_cycles < 0 or active_cycles > sampled_cycles:
+        raise BuildError(f"Invalid activity counters for {label}")
+    return percent(sampled_cycles - active_cycles, sampled_cycles)
+
+
+def _build_tt_memory_interface(metrics: dict[str, int]) -> dict:
+    """Describe accepted memory bursts and the instantiated SDR SDRAM interface."""
+    if metrics["sdram.probe_reads"] + metrics["sdram.store_reads"] != metrics["sdram.read_requests"]:
+        raise BuildError("Probe and store memory reads do not match total SDRAM reads")
+    states = _named_series(metrics, "sdram.states", SDRAM_STATES)
+    if any(count < 0 for count in states.values()) or not 0 <= metrics["sdram.idle_cycles"] <= states["idle"]:
+        raise BuildError("Invalid SDRAM idle or state counters")
+    samples = sum(states.values())
+    data_cycles = states["read_data"] + states["write_command"] + states["write_data"]
+    duration = rate(samples, metrics["sdram.clock_hz"])
+    return {
+        "probe_reads": metrics["sdram.probe_reads"],
+        "store_reads": metrics["sdram.store_reads"],
+        "store_writes": metrics["sdram.write_requests"],
+        "word_bits": metrics["sdram.word_bits"],
+        "clock_hz": metrics["sdram.clock_hz"],
+        "transfer_mode": "single data rate",
+        "sampled_cycles": samples,
+        "controller_idle_percent": _idle_percent(samples - metrics["sdram.idle_cycles"], samples, "memory controller"),
+        "data_bus_idle_percent": _idle_percent(data_cycles, samples, "memory data bus"),
+        "average_payload_bytes_per_second": None if duration is None else rate(
+            data_cycles * metrics["sdram.word_bits"] / 8, duration,
+        ),
+    }
+
+
+def _build_tt_latency_reports(metrics: dict[str, int]) -> dict:
+    """Pool exact completion histograms before computing averages and nearest-rank P99."""
+    def summarize(histogram: dict[int, int]) -> dict:
+        """Preserve undefined statistics when no requests completed."""
+        samples = sum(histogram.values())
+        total_ps = sum(latency * count for latency, count in histogram.items())
+        target = (99 * samples + 99) // 100
+        cumulative = 0
+        p99 = None
+        for latency, count in sorted(histogram.items()):
+            cumulative += count
+            if samples and cumulative >= target:
+                p99 = latency / 1000
+                break
+        return {"samples": samples, "average_ns": rate(total_ps, samples * 1000), "p99_ns": p99}
+
+    reports = {}
+    for operation in ("probe", "store"):
+        combined = {}
+        values = {}
+        for outcome in ("hit", "miss"):
+            prefix = f"tt.latency.{operation}.{outcome}"
+            try:
+                histogram = {
+                    int(key.removeprefix(prefix + ".histogram.")): count
+                    for key, count in metrics.items() if key.startswith(prefix + ".histogram.")
+                }
+            except ValueError as exc:
+                raise BuildError(f"Invalid TT latency bin for {operation} cache {outcome}") from exc
+            samples = metrics[f"{prefix}.samples"]
+            total_ps = metrics[f"{prefix}.total_ps"]
+            if (any(latency < 0 or count < 0 for latency, count in histogram.items())
+                    or sum(histogram.values()) != samples
+                    or sum(latency * count for latency, count in histogram.items()) != total_ps):
+                raise BuildError(f"Invalid TT latency histogram for {operation} cache {outcome}")
+            values[outcome] = summarize(histogram)
+            for latency, count in histogram.items():
+                combined[latency] = combined.get(latency, 0) + count
+        values["all"] = summarize(combined)
+        values["unfinished"] = metrics[f"tt.latency.{operation}.unfinished"]
+        if operation == "store":
+            values["dropped"] = metrics["tt.latency.store.dropped"]
+        reports[operation] = values
+    return reports
 
 
 def parse_metric_records(text: str) -> tuple[dict[str, int], dict[str, int]]:
@@ -62,6 +142,89 @@ def _named_series(metrics: dict[str, int], prefix: str, names: list[str]) -> dic
     return {name: metrics.get(f"{prefix}.{index}", 0) for index, name in enumerate(names)}
 
 
+def _build_tt_fifo_reports(metrics: dict[str, int], search_cycles: int) -> dict:
+    """Derive cycle-weighted occupancy statistics from complete FIFO histograms."""
+    fifos = {}
+    memory_samples = None
+    for name, (_, unit, clock) in TT_FIFOS.items():
+        prefix = f"tt.fifos.{name}"
+        try:
+            capacity = metrics[f"{prefix}.capacity"]
+            samples = metrics[f"{prefix}.samples"]
+            if capacity < 1 or samples < 0:
+                raise BuildError(f"Invalid capacity or sample count for TT FIFO {name}")
+            histogram = [metrics[f"{prefix}.occupancy.{level}"] for level in range(capacity + 1)]
+        except KeyError as exc:
+            raise BuildError(f"Incomplete occupancy measurements for TT FIFO {name}: {exc}") from exc
+        if any(count < 0 for count in histogram) or sum(histogram) != samples:
+            raise BuildError(f"Invalid occupancy histogram for TT FIFO {name}")
+        if clock == "engine" and samples != search_cycles:
+            raise BuildError(f"TT FIFO {name} samples do not match measured search cycles")
+        if clock == "memory":
+            if memory_samples is not None and samples != memory_samples:
+                raise BuildError("TT response FIFO sample counts disagree")
+            memory_samples = samples
+
+        def percentile(per_mille: int) -> int | None:
+            """Use the nearest rank, with integer arithmetic for long profiling runs."""
+            if not samples:
+                return None
+            rank = (samples * per_mille + 999) // 1000
+            cumulative = 0
+            for occupancy, count in enumerate(histogram):
+                cumulative += count
+                if cumulative >= rank:
+                    return occupancy
+            raise BuildError(f"Incomplete percentile distribution for TT FIFO {name}")
+
+        fifos[name] = {
+            "capacity": capacity,
+            "unit": unit,
+            "sample_clock": clock,
+            "samples": samples,
+            "average": rate(sum(level * count for level, count in enumerate(histogram)), samples),
+            "median": percentile(500),
+            "p90": percentile(900),
+            "p99": percentile(990),
+            "p99_9": percentile(999),
+            "peak": max((level for level, count in enumerate(histogram) if count), default=None),
+        }
+    return fifos
+
+
+def _build_tt_cache_report(metrics: dict[str, int], engine_clock_hz: int) -> dict:
+    """Calculate cache hit rates and waits using completed accesses as denominators."""
+    entries = metrics["tt.cache.entries"]
+    if entries < 1:
+        raise BuildError("TT cache capacity must be positive")
+    cache = {"entries": entries, "bypass_hits": metrics["tt.cache.bypass_hits"]}
+    sampled_cycles = metrics["tt.cache.port_cycles"]
+    cache["port_activity"] = {
+        operation: {
+            "active_cycles": metrics[f"tt.cache.{operation}_cycles"],
+            "sampled_cycles": sampled_cycles,
+            "idle_percent": _idle_percent(metrics[f"tt.cache.{operation}_cycles"], sampled_cycles, f"cache {operation}"),
+        }
+        for operation in ("probe_read", "probe_write", "store_read", "store_write")
+    }
+    for operation, prefix in (("lookup", "probe"), ("store", "store")):
+        accesses = metrics[f"tt.cache.{operation}_probes"]
+        hits = metrics[f"tt.cache.{operation}_hits"]
+        wait_cycles = metrics[f"tt.cache.{prefix}_wait_cycles"]
+        if accesses < 0 or hits < 0 or hits > accesses or wait_cycles < 0 or (not accesses and wait_cycles):
+            raise BuildError(f"Invalid TT cache {operation} measurements")
+        average_cycles = rate(wait_cycles, accesses)
+        cache.update({
+            f"{operation}_probes": accesses,
+            f"{operation}_hits": hits,
+            f"{operation}_hit_rate_percent": percent(hits, accesses),
+            f"{prefix}_wait_cycles": wait_cycles,
+            f"average_{prefix}_wait_cycles": average_cycles,
+            f"average_{prefix}_wait_ns": None if average_cycles is None else average_cycles * 1e9 / engine_clock_hz,
+        })
+    return cache
+
+
 def build_profile_report(
     configuration: dict,
     metrics: dict[str, int],
@@ -78,9 +241,7 @@ def build_profile_report(
     if sum(controller_states.values()) != search_cycles:
         raise BuildError("Controller-state cycles do not match measured search cycles")
     simulated_seconds = search_cycles / configuration["engine_clock_hz"]
-    memory_window_seconds = (
-        search_cycles + metrics["cycles.drain"]
-    ) / configuration["engine_clock_hz"]
+    memory_interface = _build_tt_memory_interface(metrics)
     threads = []
     for tid in range(configuration["threads"]):
         phases = _named_series(metrics, f"threads.{tid}.phases", THREAD_PHASES)
@@ -424,26 +585,22 @@ def build_profile_report(
             if key.startswith("algorithm.")
         },
         "transposition_table": {
+            "memory_interface": memory_interface,
+            "latency": _build_tt_latency_reports(metrics),
+            "fifos": _build_tt_fifo_reports(metrics, search_cycles),
             "lookups": tt_lookups,
             "hits": tt_hits,
             "hit_rate_percent": percent(tt_hits, tt_lookups),
             "stores": metrics["tt.stores"],
             "store_drops": metrics["tt.store_drops"],
             "store_fifo_high_water": metrics["tt.store_fifo_high_water"],
-            "store_write_preemptions": metrics["tt.store_write_preemptions"],
+            "writeback_probe_queue_overlap_cycles": metrics["tt.writeback_probe_queue_overlap_cycles"],
             "cutoff_hits": metrics["tt.cutoff_hits"],
             "ordering_only_hits": metrics["tt.ordering_hits"],
             "bound_hits": {
                 name: metrics[f"tt.bound_hits.{name}"] for name in ("exact", "lower", "upper")
             },
-            "cache": {
-                "lookup_probes": cache_probes,
-                "lookup_hits": cache_hits,
-                "lookup_hit_rate_percent": percent(cache_hits, cache_probes),
-                "bypass_hits": metrics["tt.cache.bypass_hits"],
-                "store_probes": metrics["tt.cache.store_probes"],
-                "store_hits": metrics["tt.cache.store_hits"],
-            },
+            "cache": _build_tt_cache_report(metrics, configuration["engine_clock_hz"]),
             "frontend_state_cycles": _named_series(
                 metrics, "tt.frontend_states", TT_FRONTEND_STATES
             ),
@@ -462,10 +619,7 @@ def build_profile_report(
                 + metrics["sdram.row_misses"]
                 + metrics["sdram.row_conflicts"],
             ),
-            "effective_bytes_per_simulated_second": rate(
-                2 * (metrics["sdram.read_words"] + metrics["sdram.write_words"]),
-                memory_window_seconds,
-            ),
+            "effective_bytes_per_simulated_second": memory_interface["average_payload_bytes_per_second"],
             "state_cycles": _named_series(metrics, "sdram.states", SDRAM_STATES),
         },
         "raw_metrics": metrics,
@@ -475,10 +629,22 @@ def build_profile_report(
 def _aggregate_profile_reports(reports: list[dict], configuration: dict) -> dict:
     """Build one detailed profile from suite counters using each counter's aggregation semantics."""
     metric_names = sorted(set().union(*(report["raw_metrics"] for report in reports)))
+    # Capacities and interface settings describe hardware; sampled counts add.
+    capacities = {f"tt.fifos.{name}.capacity": f"TT FIFO {name}" for name in TT_FIFOS}
+    capacities["tt.cache.entries"] = "TT cache"
+    capacities.update({
+        f"sdram.{key}": f"Memory interface {key}"
+        for key in ("word_bits", "read_words_per_request", "clock_hz")
+    })
+    for key, label in capacities.items():
+        if len({report["raw_metrics"][key] for report in reports}) != 1:
+            kind = "interface settings" if key.startswith("sdram.") else "capacities"
+            raise BuildError(f"Cannot aggregate different {kind} for {label}")
 
     def is_maximum_metric(name: str) -> bool:
         return (
-            name.endswith(".max_cycles")
+            name in capacities
+            or name.endswith(".max_cycles")
             or name.endswith(".max_ply")
             or "max_occupancy" in name
             or "high_water" in name
@@ -525,6 +691,7 @@ def build_profile_suite_report(
     named_reports: list[tuple[str, dict]],
     suite_wall_seconds: float | None = None,
     jobs: int = 1,
+    profiling_wall_seconds: float | None = None,
 ) -> dict:
     """Aggregate additive counters and weighted rates across named positions."""
     if not named_reports:
@@ -567,6 +734,7 @@ def build_profile_suite_report(
             "simulated_search_seconds": total_simulated_seconds,
             "simulator_wall_seconds": total_wall_seconds,
             "suite_wall_seconds": suite_wall_seconds,
+            "profiling_wall_seconds": profiling_wall_seconds,
             "cycles_per_node": rate(total_cycles, total_nodes),
             "nodes_per_simulated_second": rate(total_nodes, total_simulated_seconds),
             "search_cycles_per_wall_second": rate(total_cycles, total_wall_seconds),

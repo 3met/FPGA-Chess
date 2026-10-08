@@ -1,14 +1,21 @@
 import argparse
+import copy
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from software.engine.protocol import encode_fen
 from tools.hardware_build.common import BuildError
-from tools.hardware_build.profile_format import format_profile_report, format_profile_suite_report
+from tools.hardware_build.profile_format import format_profile_topics
 from tools.hardware_build.profile_positions import PROFILE_POSITIONS
 from tools.hardware_build.profile_report import (
+    _build_tt_fifo_reports,
+    _build_tt_cache_report,
+    _build_tt_memory_interface,
+    _build_tt_latency_reports,
     build_profile_report,
     build_profile_suite_report,
     parse_metric_records,
@@ -23,14 +30,18 @@ from tools.hardware_build.profile_schema import (
     MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
     THREAD_PHASES,
+    TT_FIFOS,
 )
 from tools.hardware_build.profiling import (
+    _compile_verilator,
     _compact_verilator_profile_build,
     _prune_verilator_profile_cache,
     _profile_job_count,
     _profile_parameter_args,
     _resolve_profile_config,
     _validate_profile_args,
+    _verilator_native_flags,
+    _train_verilator_profile,
 )
 
 
@@ -42,6 +53,132 @@ def make_completed_verilator_build(cache: Path, name: str, timestamp: int) -> Pa
     (build / ("profile_sim.exe" if os.name == "nt" else "profile_sim")).touch()
     os.utime(fingerprint, ns=(timestamp, timestamp))
     return build
+
+
+class NativeCompilerTests(unittest.TestCase):
+    """Check portable fallback and CPU-specific simulator cache identities."""
+
+    def probe(self, root: Path, macros: str) -> tuple[str, str, bool]:
+        """Supply compiler output without depending on the test host's toolchain."""
+        outputs = [
+            subprocess.CompletedProcess([], 0, str(root)),
+            subprocess.CompletedProcess([], 0, macros),
+        ]
+        with patch("tools.hardware_build.profiling.subprocess.run", side_effect=outputs):
+            return _verilator_native_flags("verilator")
+
+    def test_cache_identity_tracks_cpu_features_and_ignores_macro_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "include").mkdir()
+            (root / "include" / "verilated.mk").write_text("CXX = c++\n", encoding="utf-8")
+            flags, first, _ = self.probe(root, "#define CPU_A 1\n#define ABI 1\n")
+            _, reordered, _ = self.probe(root, "#define ABI 1\n#define CPU_A 1\n")
+            _, changed, _ = self.probe(root, "#define CPU_B 1\n#define ABI 1\n")
+            self.assertTrue(flags)
+            self.assertEqual(first, reordered)
+            self.assertNotEqual(first, changed)
+
+    def test_unavailable_or_unsupported_compiler_uses_portable_flags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "include").mkdir()
+            (root / "include" / "verilated.mk").write_text("CXX = c++\n", encoding="utf-8")
+            for error in (OSError("missing tool"), subprocess.CalledProcessError(1, "compiler"),
+                          subprocess.TimeoutExpired("compiler", 10)):
+                with self.subTest(error=error), patch(
+                    "tools.hardware_build.profiling.subprocess.run",
+                    side_effect=[subprocess.CompletedProcess([], 0, str(root)), error],
+                ):
+                    self.assertEqual(_verilator_native_flags("verilator"), ("", "portable", False))
+
+    def test_unrecognized_compiler_command_or_empty_probe_uses_portable_flags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "include").mkdir()
+            makefile = root / "include" / "verilated.mk"
+            makefile.write_text("CXX = $(CUSTOM_COMPILER)\n", encoding="utf-8")
+            self.assertEqual(self.probe(root, "#define CPU_A 1\n"), ("", "portable", False))
+            makefile.write_text("CXX = c++\n", encoding="utf-8")
+            self.assertEqual(self.probe(root, ""), ("", "portable", False))
+
+    def test_profile_guided_support_is_selected_for_gcc_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "include").mkdir()
+            (root / "include" / "verilated.mk").write_text("CXX = c++\n", encoding="utf-8")
+            gcc_macros = "#define __GNUC__ 14\n"
+            self.assertTrue(self.probe(root, gcc_macros)[2])
+            for other in ("__clang__", "__INTEL_COMPILER", "__INTEL_LLVM_COMPILER"):
+                with self.subTest(compiler=other):
+                    self.assertFalse(self.probe(root, gcc_macros + f"#define {other} 1\n")[2])
+
+
+class ProfileGuidedBuildTests(unittest.TestCase):
+    """Keep compiler training separate from reusable builds and reported searches."""
+
+    def test_training_checks_completion_faults_and_wall_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for content, code, fails in (("PROFILE_COMPLETE\nRESULT\terror\t0\n", 0, False),
+                                         ("RESULT\terror\t0\n", 0, True),
+                                         ("PROFILE_COMPLETE\nRESULT\terror\t1\n", 0, True),
+                                         ("", 124, True)):
+                def run(cmd, cwd, log, **kwargs):
+                    """Supply the simulator's output and record its bounded command."""
+                    metrics = Path(next(value.split("=", 1)[1] for value in cmd
+                                        if value.startswith("+METRICS_FILE=")))
+                    metrics.write_text(content, encoding="utf-8")
+                    self.assertGreater(kwargs["timeout_seconds"], 0)
+                    return code, "", 0.1
+
+                with self.subTest(content=content, code=code), patch(
+                    "tools.hardware_build.profiling.run_command", side_effect=run,
+                ):
+                    if fails:
+                        with self.assertRaises(BuildError):
+                            _train_verilator_profile(root / "simulator", root)
+                    else:
+                        _train_verilator_profile(root / "simulator", root)
+
+    def test_failed_training_invalidates_build_and_successful_retry_is_cached(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = root / "verilator"
+            tool.touch()
+            build = root / "profile" / "compile" / "verilator" / "test-key"
+            build.mkdir(parents=True)
+            fingerprint = build / "fingerprint.txt"
+            fingerprint.write_text("test-key\n", encoding="utf-8")
+            args = argparse.Namespace(threads=2, stack_depth=8, engine_clock_hz=100,
+                                      simulator_threads=1, waveform=False, force_rebuild=True,
+                                      resolved_engine_config={"digest": "configuration"})
+
+            def run(cmd, *unused):
+                """Create the instrumented executable before training fails."""
+                (build / ("profile_sim.exe" if os.name == "nt" else "profile_sim")).touch()
+                return 0, "", 0.1
+
+            with patch("tools.hardware_build.profiling.BUILD_ROOT", root), \
+                    patch("tools.hardware_build.profiling.require_tool", return_value=str(tool)), \
+                    patch("tools.hardware_build.profiling._verilator_native_flags", return_value=("", "cpu", True)), \
+                    patch("tools.hardware_build.profiling._profile_fingerprint", return_value="test-key"), \
+                    patch("tools.hardware_build.profiling._profile_parameter_args", return_value=[]), \
+                    patch("tools.hardware_build.profiling.run_command", side_effect=run) as compiler, \
+                    patch("tools.hardware_build.profiling._train_verilator_profile", side_effect=BuildError("training failed")) as training:
+                with self.assertRaisesRegex(BuildError, "training failed"):
+                    _compile_verilator([], args)
+                self.assertFalse(fingerprint.exists())
+                args.force_rebuild = False
+                training.side_effect = None
+                calls_before_retry = compiler.call_count
+                executable = _compile_verilator([], args)
+                self.assertEqual(compiler.call_count, calls_before_retry + 2)
+                self.assertTrue(fingerprint.exists())
+                calls_after_retry = compiler.call_count
+                self.assertEqual(_compile_verilator([], args), executable)
+                self.assertEqual(compiler.call_count, calls_after_retry)
+                self.assertEqual(training.call_count, 2)
 
 
 def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
@@ -84,18 +221,36 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "tt.stores": 1,
         "tt.store_drops": 0,
         "tt.store_fifo_high_water": 1,
-        "tt.store_write_preemptions": 1,
+        "tt.writeback_probe_queue_overlap_cycles": 1,
         "tt.bound_hits.exact": 1,
         "tt.bound_hits.lower": 0,
         "tt.bound_hits.upper": 0,
         "tt.cutoff_hits": 1,
         "tt.ordering_hits": 0,
+        "tt.cache.entries": 16,
+        "tt.cache.port_cycles": 20,
+        "tt.cache.probe_read_cycles": 2,
+        "tt.cache.probe_write_cycles": 1,
+        "tt.cache.store_read_cycles": 1,
+        "tt.cache.store_write_cycles": 1,
+        "tt.cache.probe_wait_cycles": 3,
+        "tt.cache.store_wait_cycles": 5,
         "tt.cache.lookup_probes": 2,
         "tt.cache.lookup_hits": 1,
         "tt.cache.bypass_hits": 1,
         "tt.cache.store_probes": 1,
         "tt.cache.store_hits": 0,
         "sdram.read_requests": 1,
+        "sdram.probe_reads": 1,
+        "sdram.store_reads": 0,
+        "sdram.word_bits": 16,
+        "sdram.read_words_per_request": 6,
+        "sdram.clock_hz": 200,
+        "sdram.idle_cycles": 4,
+        "sdram.states.16": 5,
+        "sdram.states.23": 6,
+        "sdram.states.26": 1,
+        "sdram.states.27": 5,
         "sdram.write_requests": 1,
         "sdram.read_words": 6,
         "sdram.write_words": 6,
@@ -103,6 +258,20 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "sdram.row_misses": 1,
         "sdram.row_conflicts": 0,
     }
+    for operation in ("probe", "store"):
+        metrics[f"tt.latency.{operation}.unfinished"] = 0
+        for outcome in ("hit", "miss"):
+            metrics[f"tt.latency.{operation}.{outcome}.samples"] = 0
+            metrics[f"tt.latency.{operation}.{outcome}.total_ps"] = 0
+    metrics["tt.latency.store.dropped"] = 0
+    for name in TT_FIFOS:
+        # Synthetic histogram depths are independent of the engine configuration.
+        capacity = 4
+        prefix = f"tt.fifos.{name}"
+        metrics[f"{prefix}.capacity"] = capacity
+        metrics[f"{prefix}.samples"] = search_cycles
+        for level in range(capacity + 1):
+            metrics[f"{prefix}.occupancy.{level}"] = search_cycles if level == 0 else 0
     operation_counts = [1, 0, 0, 1]
     operation_cycles = [2, 0, 0, 1]
     for index in range(len(MOVE_GENERATOR_OPERATIONS)):
@@ -236,8 +405,86 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["depth_breakdown"][0]["status"], "complete")
         self.assertEqual(report["depth_breakdown"][1]["status"], "partial")
 
+    def test_memory_interface_formats_totals_width_and_clock(self):
+        report = self.build_sample_report()
+        metrics = report["raw_metrics"]
+        memory = report["transposition_table"]["memory_interface"]
+        self.assertEqual(memory["word_bits"], metrics["sdram.word_bits"])
+        self.assertEqual(memory["clock_hz"], metrics["sdram.clock_hz"])
+        text = format_profile_topics(report, ["tt"])
+        self.assertIn("Memory interface (search + drain)", text)
+        self.assertIn(f"Total probe reads: {memory['probe_reads']:,}", text)
+        self.assertIn(f"Total store reads: {memory['store_reads']:,}", text)
+        self.assertIn(f"Total store writes: {memory['store_writes']:,}", text)
+        self.assertIn(f"Bus width: {memory['word_bits']:,} bits", text)
+        self.assertNotIn("Read width:", text)
+        self.assertNotIn("SDRAM payload words", text)
+        self.assertIn(f"Memory clock: {memory['clock_hz'] / 1e6:.2f} MHz (single data rate)", text)
+
+    def test_memory_read_classification_requires_complete_totals(self):
+        metrics = sample_metrics()
+        metrics["sdram.store_reads"] += 1
+        with self.assertRaisesRegex(BuildError, "do not match total SDRAM reads"):
+            _build_tt_memory_interface(metrics)
+
+    def test_memory_idle_and_bandwidth_use_executed_data_cycles(self):
+        metrics = sample_metrics()
+        memory = _build_tt_memory_interface(metrics)
+        self.assertAlmostEqual(memory["controller_idle_percent"], 4 * 100 / 17)
+        self.assertAlmostEqual(memory["data_bus_idle_percent"], 5 * 100 / 17)
+        self.assertAlmostEqual(memory["average_payload_bytes_per_second"], 12 * 2 / (17 / metrics["sdram.clock_hz"]))
+        metrics["sdram.read_words"] *= 100
+        self.assertEqual(_build_tt_memory_interface(metrics)["average_payload_bytes_per_second"], memory["average_payload_bytes_per_second"])
+        metrics["sdram.idle_cycles"] = 6
+        with self.assertRaisesRegex(BuildError, "Invalid SDRAM idle"):
+            _build_tt_memory_interface(metrics)
+
+    def test_memory_suite_idle_and_bandwidth_pool_memory_cycles(self):
+        first = self.build_sample_report()
+        second = self.build_sample_report()
+        second["raw_metrics"]["sdram.states.16"] *= 10
+        second["raw_metrics"]["sdram.idle_cycles"] *= 10
+        suite = build_profile_suite_report([("first", first), ("second", second)])
+        memory = suite["aggregate_profile"]["transposition_table"]["memory_interface"]
+        self.assertAlmostEqual(memory["controller_idle_percent"], 44 * 100 / 79)
+        self.assertAlmostEqual(memory["data_bus_idle_percent"], 55 * 100 / 79)
+        self.assertAlmostEqual(memory["average_payload_bytes_per_second"],
+                               24 * 2 / (79 / first["raw_metrics"]["sdram.clock_hz"]))
+
+    def test_report_uses_probe_wording_and_clarifies_queue_overlap(self):
+        text = format_profile_topics(self.build_sample_report(), ["tt"])
+        for removed in ("lookup", "preempted", "Read width", "SDRAM payload words", "(SDR,"):
+            self.assertNotIn(removed, text)
+        for added in ("TT: probes=", "Writebacks queued alongside probe reads:",
+                      "Average payload bandwidth:", "Controller idle (no request):",
+                      "Data bus idle (no payload):", "Probe read", "Probe write", "Store read", "Store write"):
+            self.assertIn(added, text)
+
+    def test_memory_suite_sums_requests_and_preserves_interface_dimensions(self):
+        first = self.build_sample_report()
+        metrics = dict(first["raw_metrics"])
+        metrics["sdram.probe_reads"] = 3
+        metrics["sdram.store_reads"] = 2
+        metrics["sdram.read_requests"] = 5
+        metrics["sdram.write_requests"] = 4
+        second = build_profile_report(first["configuration"], metrics, {
+            "best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
+            "score": 0, "nodes": 5, "completed_depth": 1, "deepest_search_ply": 3,
+            "end_reason": 1, "error": 0,
+        }, 0.5)
+        suite = build_profile_suite_report([("first", first), ("second", second)])
+        memory = suite["aggregate_profile"]["transposition_table"]["memory_interface"]
+        self.assertEqual(memory["probe_reads"], 4)
+        self.assertEqual(memory["store_reads"], 2)
+        self.assertEqual(memory["store_writes"], 5)
+        for key in ("word_bits", "clock_hz"):
+            self.assertEqual(memory[key], first["transposition_table"]["memory_interface"][key])
+        second["raw_metrics"]["sdram.clock_hz"] += 1
+        with self.assertRaises(BuildError):
+            build_profile_suite_report([("first", first), ("second", second)])
+
     def test_report_formats_timing_and_thread_lifecycle(self):
-        text = format_profile_report(self.build_sample_report())
+        text = format_profile_topics(self.build_sample_report(), ["all"])
 
         self.assertIn("FPGA Chess Engine Runtime Profile", text)
         self.assertIn("command/position setup=2 cycles", text)
@@ -248,18 +495,52 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Arena high", text)
         self.assertIn("Per-depth breakdown", text)
         self.assertIn("max ply  status", text)
-        self.assertIn("Deepest search ply reached (including quiescence search): 3", text)
-        self.assertIn("Metric", text)
+        self.assertIn("Deepest search ply: 3", text)
+        self.assertIn("Phase", text)
         self.assertIn("T0", text)
         self.assertIn("Pipeline request accepted", text)
         self.assertNotIn("Move request blocked", text)
-        self.assertIn("10 (100.0%)", text)
+        self.assertRegex(text, r"Search total\s+10\s+100\.0%")
         self.assertNotRegex(text, r"\(\s+\d+\.\d+%")
         self.assertNotIn("runnable breakdown", text)
 
+    def test_lifecycle_groups_threads_and_aligns_large_cycle_counts(self):
+        """Large suites retain aligned columns when the thread table wraps."""
+        report = self.build_sample_report()
+        search_cycles = 12_345_678_901_234
+        report["timing"]["search_cycles"] = search_cycles
+        thread = report["threads"][0]
+        thread["phase_cycles"] = {key: 0 for key in thread["phase_cycles"]}
+        thread["phase_cycles"]["ready"] = search_cycles
+        thread["ready_breakdown"] = {key: 0 for key in thread["ready_breakdown"]}
+        thread["ready_breakdown"]["dispatch"] = search_cycles
+        report["threads"] = [dict(copy.deepcopy(thread), id=index) for index in range(5)]
+
+        text = format_profile_topics(report, ["pipeline"])
+        self.assertEqual(text.count("Search total"), 2)
+        self.assertIn("T4", text)
+        self.assertNotIn("TT probe", text.split("Component activity")[0])
+        rows = text.splitlines()
+        parents = [row for row in rows if row.startswith("  Node control and dispatch")]
+        children = [row for row in rows if row.startswith("    Pipeline request accepted")]
+        totals = [row for row in rows if row.startswith("  Search total")]
+        for parent, child, total in zip(parents, children, totals):
+            self.assertEqual(parent.index(f"{search_cycles:,}"), child.index(f"{search_cycles:,}"))
+            self.assertEqual(parent.index(f"{search_cycles:,}"), total.index(f"{search_cycles:,}"))
+            self.assertIn("100.0%", total)
+
+    def test_lifecycle_with_no_search_cycles_has_undefined_percentages(self):
+        """An empty lifecycle still prints its total without inventing a rate."""
+        report = self.build_sample_report()
+        report["timing"]["search_cycles"] = 0
+        thread = report["threads"][0]
+        thread["phase_cycles"] = {key: 0 for key in thread["phase_cycles"]}
+        text = format_profile_topics(report, ["pipeline"])
+        self.assertRegex(text, r"Search total\s+0\s+n/a")
+
     def test_report_formats_component_activity(self):
         report = self.build_sample_report()
-        text = format_profile_report(report)
+        text = format_profile_topics(report, ["all"])
 
         self.assertIn("Searched move ranks", text)
         self.assertIn("Legal candidates", text)
@@ -274,7 +555,7 @@ class ReportTests(unittest.TestCase):
 
     def test_report_formats_move_generator_and_pruning_metrics(self):
         report = self.build_sample_report()
-        text = format_profile_report(report)
+        text = format_profile_topics(report, ["all"])
 
         self.assertIn("Move generator operations", text)
         self.assertIn("Direct validation", text)
@@ -325,7 +606,7 @@ class ReportTests(unittest.TestCase):
             1,
         )
 
-        text = format_profile_report(report)
+        text = format_profile_topics(report, ["all"])
 
         self.assertIn(
             "Move generator operations\n"
@@ -417,9 +698,9 @@ class ReportTests(unittest.TestCase):
             },
             1,
         )
-        text = format_profile_report(report)
-        self.assertIn("Noisy move operation in flight", text)
-        self.assertIn("Quiet move operation in flight", text)
+        text = format_profile_topics(report, ["all"])
+        self.assertIn("Noisy moves", text)
+        self.assertIn("Quiet moves", text)
         self.assertEqual(
             report["threads"][0]["move_wait_breakdown"],
             {"noisy": 2, "quiet": 4},
@@ -443,7 +724,7 @@ class ReportTests(unittest.TestCase):
             },
             1,
         )
-        text = format_profile_report(report)
+        text = format_profile_topics(report, ["all"])
         self.assertIn("NNUE child update pending", text)
         self.assertIn("NNUE + repetition in flight", text)
         self.assertIn("Repetition check in flight", text)
@@ -528,6 +809,226 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["components"]["board_update"]["issues"], 3)
         self.assertEqual(report["components"]["board_update"]["legal_candidates"], 1)
         self.assertEqual(report["components"]["board_update"]["illegal_candidates"], 1)
+
+
+class LatencyReportTests(unittest.TestCase):
+    """Verify completion-weighted means and exact pooled latency percentiles."""
+
+    def with_distribution(self, metrics, operation, outcome, histogram):
+        """Populate consistent sample totals for a synthetic latency distribution."""
+        prefix = f"tt.latency.{operation}.{outcome}"
+        metrics[f"{prefix}.samples"] = sum(histogram.values())
+        metrics[f"{prefix}.total_ps"] = sum(latency * count for latency, count in histogram.items())
+        for latency, count in histogram.items():
+            metrics[f"{prefix}.histogram.{latency}"] = count
+
+    def test_latency_uses_nanoseconds_and_nearest_rank(self):
+        metrics = sample_metrics()
+        self.with_distribution(metrics, "probe", "hit", {1000: 99})
+        self.with_distribution(metrics, "probe", "miss", {100000: 1})
+        self.with_distribution(metrics, "store", "hit", {1357: 2, 6000: 1})
+        report = _build_tt_latency_reports(metrics)
+        self.assertAlmostEqual(report["probe"]["all"]["average_ns"], 1.99)
+        self.assertEqual(report["probe"]["all"]["p99_ns"], 1)
+        self.assertEqual(report["probe"]["miss"]["p99_ns"], 100)
+        self.assertAlmostEqual(report["store"]["hit"]["average_ns"], 8.714 / 3)
+        self.assertEqual(report["store"]["hit"]["p99_ns"], 6)
+        self.assertIsNone(report["store"]["miss"]["average_ns"])
+        self.assertIsNone(report["store"]["miss"]["p99_ns"])
+
+    def test_latency_rejects_inconsistent_or_malformed_histograms(self):
+        for key, value in (("samples", 2), ("total_ps", 999), ("histogram.1000", -1),
+                           ("histogram.invalid", 1)):
+            metrics = sample_metrics()
+            self.with_distribution(metrics, "probe", "hit", {1000: 1})
+            metrics[f"tt.latency.probe.hit.{key}"] = value
+            with self.subTest(key=key), self.assertRaises(BuildError):
+                _build_tt_latency_reports(metrics)
+
+    def test_suite_percentile_pools_samples_instead_of_position_percentiles(self):
+        first = ReportTests().build_sample_report()
+        second = ReportTests().build_sample_report()
+        self.with_distribution(first["raw_metrics"], "probe", "hit", {1000: 99})
+        self.with_distribution(second["raw_metrics"], "probe", "miss", {100000: 1})
+        report = build_profile_suite_report([("first", first), ("second", second)])
+        latency = report["aggregate_profile"]["transposition_table"]["latency"]["probe"]
+        self.assertEqual(latency["all"]["samples"], 100)
+        self.assertEqual(latency["all"]["p99_ns"], 1)
+        self.assertAlmostEqual(latency["all"]["average_ns"], 1.99)
+        text = format_profile_topics(report, ["tt"])
+        for label in ("TT latency (ns, search + drain)", "Hit average", "Hit P99", "Miss average", "Miss P99"):
+            self.assertIn(label, text)
+
+
+class CacheReportTests(unittest.TestCase):
+    def test_idle_time_uses_port_cycles_and_reports_empty_windows(self):
+        metrics = sample_metrics()
+        cache = _build_tt_cache_report(metrics, 100)
+        for operation, activity in cache["port_activity"].items():
+            self.assertAlmostEqual(activity["idle_percent"],
+                                   100 * (1 - metrics[f"tt.cache.{operation}_cycles"] / metrics["tt.cache.port_cycles"]))
+        metrics["tt.cache.port_cycles"] = 0
+        for operation in cache["port_activity"]:
+            metrics[f"tt.cache.{operation}_cycles"] = 0
+        empty = _build_tt_cache_report(metrics, 100)
+        self.assertTrue(all(value["idle_percent"] is None for value in empty["port_activity"].values()))
+        metrics["tt.cache.store_write_cycles"] = 1
+        with self.assertRaisesRegex(BuildError, "Invalid activity counters"):
+            _build_tt_cache_report(metrics, 100)
+
+    def test_suite_idle_time_pools_cycles(self):
+        first = ReportTests().build_sample_report()
+        second = ReportTests().build_sample_report()
+        second["raw_metrics"]["tt.cache.port_cycles"] *= 9
+        second["raw_metrics"]["tt.cache.probe_read_cycles"] = second["raw_metrics"]["tt.cache.port_cycles"]
+        suite = build_profile_suite_report([("first", first), ("second", second)])
+        actual = suite["aggregate_profile"]["transposition_table"]["cache"]["port_activity"]["probe_read"]
+        self.assertEqual(actual["active_cycles"], 182)
+        self.assertEqual(actual["sampled_cycles"], 200)
+        self.assertAlmostEqual(actual["idle_percent"], 9)
+
+    def test_cache_counts_hit_rates_size_and_wait_units(self):
+        metrics = sample_metrics()
+        clock_hz = 250
+        cache = _build_tt_cache_report(metrics, clock_hz)
+        self.assertEqual(cache["entries"], metrics["tt.cache.entries"])
+        self.assertEqual(cache["lookup_probes"], 2)
+        self.assertEqual(cache["lookup_hit_rate_percent"], 50)
+        self.assertEqual(cache["store_probes"], 1)
+        self.assertEqual(cache["store_hit_rate_percent"], 0)
+        self.assertEqual(cache["average_probe_wait_cycles"], 1.5)
+        self.assertEqual(cache["average_store_wait_cycles"], 5)
+        self.assertEqual(cache["average_probe_wait_ns"], 1.5 * 1e9 / clock_hz)
+        self.assertEqual(cache["average_store_wait_ns"], 5 * 1e9 / clock_hz)
+
+    def test_no_accesses_have_undefined_rates_and_waits(self):
+        metrics = sample_metrics()
+        for key in ("lookup_probes", "lookup_hits", "store_probes", "store_hits",
+                    "probe_wait_cycles", "store_wait_cycles", "bypass_hits"):
+            metrics[f"tt.cache.{key}"] = 0
+        cache = _build_tt_cache_report(metrics, 100)
+        for key in ("lookup_hit_rate_percent", "store_hit_rate_percent",
+                    "average_probe_wait_cycles", "average_store_wait_cycles",
+                    "average_probe_wait_ns", "average_store_wait_ns"):
+            self.assertIsNone(cache[key])
+
+    def test_impossible_measurements_fail(self):
+        for key, value in (("store_hits", 2), ("probe_wait_cycles", -1), ("store_probes", 0), ("entries", 0)):
+            metrics = sample_metrics()
+            metrics[f"tt.cache.{key}"] = value
+            with self.subTest(key=key), self.assertRaises(BuildError):
+                _build_tt_cache_report(metrics, 100)
+
+    def test_suite_weights_waits_and_hit_rates_by_access_counts(self):
+        factory = ProfileSuiteTests()
+        first = factory.make_report("first fen", 5, 0.5)
+        second = factory.make_report("second fen", 5, 0.5)
+        second["raw_metrics"].update({
+            "tt.cache.lookup_probes": 8, "tt.cache.lookup_hits": 7,
+            "tt.cache.probe_wait_cycles": 32, "tt.cache.store_probes": 3,
+            "tt.cache.store_hits": 2, "tt.cache.store_wait_cycles": 30,
+        })
+        suite = build_profile_suite_report([("first", first), ("second", second)])
+        cache = suite["aggregate_profile"]["transposition_table"]["cache"]
+        self.assertEqual(cache["entries"], first["raw_metrics"]["tt.cache.entries"])
+        self.assertEqual(cache["lookup_probes"], 10)
+        self.assertEqual(cache["lookup_hit_rate_percent"], 80)
+        self.assertEqual(cache["store_hit_rate_percent"], 50)
+        self.assertEqual(cache["average_probe_wait_cycles"], 3.5)
+        self.assertEqual(cache["average_store_wait_cycles"], 8.75)
+        second["raw_metrics"]["tt.cache.entries"] += 1
+        with self.assertRaisesRegex(BuildError, "different capacities for TT cache"):
+            build_profile_suite_report([("first", first), ("second", second)])
+
+    def test_cache_has_its_own_report_section(self):
+        report = ReportTests().build_sample_report()
+        text = format_profile_topics(report, ["tt"])
+        self.assertIn("TT cache", text)
+        self.assertIn(f"Cache size: {report['transposition_table']['cache']['entries']:,} entries", text)
+        for label in ("Probe", "Store", "Count", "Hit rate", "Avg wait (cycles)", "Avg wait (ns)"):
+            self.assertIn(label, text)
+        self.assertNotIn("Cache stores: probes=", text)
+
+
+class FIFOReportTests(unittest.TestCase):
+    def set_histogram(self, metrics, name, histogram):
+        """Replace one queue distribution independently of hardware settings."""
+        prefix = f"tt.fifos.{name}"
+        metrics[f"{prefix}.capacity"] = len(histogram) - 1
+        metrics[f"{prefix}.samples"] = sum(histogram)
+        for level, count in enumerate(histogram):
+            metrics[f"{prefix}.occupancy.{level}"] = count
+
+    def test_discrete_percentiles_include_idle_cycles_and_rare_peaks(self):
+        histogram = [5000, 4000, 900, 90, 10]
+        metrics = sample_metrics(sum(histogram))
+        self.set_histogram(metrics, "stores", histogram)
+        values = _build_tt_fifo_reports(metrics, sum(histogram))["stores"]
+        self.assertAlmostEqual(values["average"], 0.611)
+        self.assertEqual(values["median"], 0)
+        self.assertEqual(values["p90"], 1)
+        self.assertEqual(values["p99"], 2)
+        self.assertEqual(values["p99_9"], 3)
+        self.assertEqual(values["peak"], 4)
+
+    def test_empty_measurements_have_undefined_statistics(self):
+        values = _build_tt_fifo_reports(sample_metrics(0), 0)["stores"]
+        for field in ("average", "median", "p90", "p99", "p99_9", "peak"):
+            self.assertIsNone(values[field])
+
+    def test_incomplete_or_inconsistent_histograms_fail(self):
+        for change in ("missing", "negative", "samples", "search-cycles", "memory-samples"):
+            metrics = sample_metrics()
+            if change == "missing":
+                del metrics["tt.fifos.stores.occupancy.4"]
+            elif change == "negative":
+                metrics["tt.fifos.stores.occupancy.0"] = -1
+            elif change == "samples":
+                metrics["tt.fifos.stores.samples"] += 1
+            elif change == "search-cycles":
+                self.set_histogram(metrics, "stores", [11, 0, 0, 0, 0])
+            else:
+                self.set_histogram(metrics, "probe_response", [11, 0, 0, 0, 0])
+            with self.subTest(change=change), self.assertRaises(BuildError):
+                _build_tt_fifo_reports(metrics, 10)
+
+    def test_suite_pools_distributions_and_preserves_capacity(self):
+        reports = []
+        for cycles, occupancy in ((10, 0), (1000, 4)):
+            metrics = sample_metrics(cycles)
+            metrics["depths.2.cycles"] = cycles - metrics["depths.1.cycles"]
+            histogram = [0] * 5
+            histogram[occupancy] = cycles
+            self.set_histogram(metrics, "stores", histogram)
+            report = build_profile_report(
+                {"fen": "x", "threads": 1, "engine_clock_hz": 100,
+                 "search_limit": {"kind": "nodes", "value": 5}, "simulator": "verilator"},
+                metrics,
+                {"best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
+                 "score": 0, "nodes": 5, "completed_depth": 1,
+                 "deepest_search_ply": 3, "end_reason": 1, "error": 0},
+                0.5,
+            )
+            reports.append(report)
+        suite = build_profile_suite_report([("first", reports[0]), ("second", reports[1])])
+        values = suite["aggregate_profile"]["transposition_table"]["fifos"]["stores"]
+        self.assertEqual(values["capacity"], reports[0]["transposition_table"]["fifos"]["stores"]["capacity"])
+        self.assertAlmostEqual(values["average"], 4000 / 1010)
+        self.assertEqual(values["median"], 4)
+        self.assertEqual(values["p99_9"], 4)
+        self.assertEqual(values["peak"], 4)
+        reports[1]["raw_metrics"]["tt.fifos.stores.capacity"] += 1
+        with self.assertRaisesRegex(BuildError, "different capacities"):
+            build_profile_suite_report([("first", reports[0]), ("second", reports[1])])
+
+    def test_tt_table_covers_all_fifos_and_requested_percentiles(self):
+        report = ReportTests().build_sample_report()
+        text = format_profile_topics(report, ["tt"])
+        for label, unit, _ in TT_FIFOS.values():
+            self.assertIn(label, text)
+            self.assertIn(unit, text)
+        for header in ("Depth", "Average", "Median", "P90", "P99", "P99.9", "Peak"):
+            self.assertIn(header, text)
 
 
 class ProfileArgumentTests(unittest.TestCase):
@@ -654,7 +1155,7 @@ class ProfileSuiteTests(unittest.TestCase):
         )
         self.assertEqual(aggregate["depth_breakdown"][0]["positions_completed"], 2)
         self.assertEqual(aggregate["depth_breakdown"][1]["positions_completed"], 0)
-        text = format_profile_suite_report(report)
+        text = format_profile_topics(report, ["all"])
         self.assertIn("FPGA Chess Engine Runtime Profile Suite", text)
         self.assertIn("Positions: 2", text)
         self.assertIn("Simulator: verilator", text)
@@ -669,7 +1170,7 @@ class ProfileSuiteTests(unittest.TestCase):
         self.assertIn("Move generator operations", text)
         self.assertIn("Type       Destinations   With >=1 source", text)
         self.assertIn("Transposition table and SDRAM", text)
-        self.assertIn("Suite simulation performance", text)
+        self.assertIn("Suite elapsed wall time", text)
         self.assertNotRegex(text, r"\(\s+\d+\.\d+%")
 
     def test_suite_parallelism_is_bounded_and_validated(self):

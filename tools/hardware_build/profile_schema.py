@@ -20,7 +20,7 @@ THREAD_PHASES = list(SEARCH_THREAD_PHASES)
 THREAD_PHASE_LABELS = {
     "idle": "Inactive",
     "ready": "Runnable",
-    "tt_wait": "TT lookup in flight",
+    "tt_wait": "TT probe in flight",
     "eval_wait": "Evaluation in flight",
     "board_wait": "Board update in flight",
     "reverse_wait": "Reverse update in flight",
@@ -33,7 +33,7 @@ READY_BREAKDOWN_LABELS = {
     "nnue_init": "NNUE root initialization",
     "dispatch": "Pipeline request accepted",
     "arbitration": "Shared-pipeline arbitration",
-    "tt_blocked": "TT lookup request blocked",
+    "tt_blocked": "TT probe request blocked",
     "noisy_move_blocked": "Noisy move request blocked",
     "quiet_move_blocked": "Quiet move request blocked",
     "transition": "Node/iteration transition",
@@ -48,7 +48,7 @@ MOVE_BUCKETS = [
 ORDINAL_BUCKETS = ["1", "2", "3", "4", "5-8", "9-16", "17-32", "33+"]
 STALL_LABELS = {
     "move_not_ready": "Move generator busy; a generation request was waiting",
-    "tt_request_not_ready": "TT frontend busy; a lookup request was waiting",
+    "tt_request_not_ready": "TT frontend busy; a probe request was waiting",
     "cdc_command": "SDRAM request backpressure (engine-clock samples)",
     "cdc_write": "SDRAM write backpressure (engine-clock samples)",
     "cdc_read": "SDRAM read backpressure (engine-clock samples)",
@@ -96,3 +96,15 @@ SDRAM_STATES = [
     "refresh", "refresh_wait", "write_close_wait", "write_close",
     "write_close_precharge_wait",
 ]
+
+# Queue identifiers match the testbench's occupancy histogram rows.
+TT_FIFOS = {
+    "stores": ("Store queue", "entries", "engine"),
+    "probe_metadata": ("Probe metadata", "entries", "engine"),
+    "store_metadata": ("Store metadata", "entries", "engine"),
+    "probe_read": ("Probe read CDC", "entries", "engine"),
+    "store_read": ("Store read CDC", "entries", "engine"),
+    "way_write": ("Way writeback CDC", "entries", "engine"),
+    "probe_response": ("Probe response CDC", "words", "memory"),
+    "store_response": ("Store response CDC", "words", "memory"),
+}

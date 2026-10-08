@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
-import json
 import os
+import re
 import shutil
+import subprocess
 import time
-from datetime import datetime
 from pathlib import Path
 
 from software.engine.protocol import (
@@ -35,8 +35,11 @@ from .engine_config import (
     load_engine_config,
 )
 from .manifest import expand_source_set, load_manifest
-from .profile_format import format_profile_report, format_profile_suite_report
-from .profile_positions import PROFILE_POSITIONS
+from .profile_format import format_profile_topics
+from .profile_runs import (
+    complete_profile_run, prepare_profile_run, profile_output_dir, write_profile_reports,
+)
+from .profile_positions import PROFILE_POSITIONS, STARTPOS_FEN
 from .profile_report import (
     build_profile_report,
     build_profile_suite_report,
@@ -47,6 +50,11 @@ from .simulation import has_sim_errors
 
 VERILATOR_PROFILE_CACHE_LIMIT = 10
 DEFAULT_PROFILE_TARGET = "quartus-de1-soc"
+VERILATOR_TRAINING_NODES = 3000
+VERILATOR_TRAINING_FENS = (STARTPOS_FEN, *(
+    case.fen for case in PROFILE_POSITIONS
+    if case.name in {"high-branching-castling-tactical", "pure-pawn-endgame"}
+))
 
 def _profile_fingerprint(sources: list[Path], extra: str = "") -> str:
     digest = hashlib.sha256()
@@ -129,17 +137,77 @@ def _prune_verilator_profile_cache(cache_root: Path, active_dir: Path) -> None:
             shutil.rmtree(build_dir)
 
 
+def _verilator_native_flags(verilator: str) -> tuple[str, str, bool]:
+    """Probe host instructions, compiler identity, and GCC profile-guided support."""
+    try:
+        root = subprocess.run(
+            [verilator, "-getenv", "VERILATOR_ROOT"], capture_output=True,
+            text=True, check=True, timeout=10,
+        ).stdout.strip()
+        makefile = (Path(root) / "include" / "verilated.mk").read_text(encoding="utf-8")
+        compiler = re.search(r"^CXX\s*=\s*([\w.+/\\:-]+)\s*$", makefile, re.MULTILINE)
+        if compiler is None:
+            return "", "portable", False
+        probe = subprocess.run(
+            [compiler.group(1), "-march=native", "-dM", "-E", "-x", "c++", "-"],
+            input="", capture_output=True, text=True, check=True, timeout=10,
+        )
+        if not probe.stdout.strip():
+            return "", "portable", False
+        # Include compiler/ABI macros as well as ISA features so cached native
+        # executables are rebuilt when the compiler or host capabilities change.
+        macros = "\n".join(sorted(probe.stdout.splitlines()))
+        gcc = "#define __GNUC__ " in macros and not any(
+            name in macros for name in ("__clang__", "__INTEL_COMPILER", "__INTEL_LLVM_COMPILER")
+        )
+        return " -march=native", hashlib.sha256(macros.encode()).hexdigest(), gcc
+    except (OSError, subprocess.SubprocessError):
+        return "", "portable", False
+
+
+def _clear_verilator_profile_objects(build_dir: Path, executable: Path) -> None:
+    """Force recompilation when switching between instrumented and optimized code."""
+    for pattern in ("*.o", "*.a", "*.gch"):
+        for path in build_dir.glob(pattern):
+            path.unlink()
+    executable.unlink(missing_ok=True)
+
+
+def _train_verilator_profile(executable: Path, build_dir: Path) -> None:
+    """Collect compiler branch counts from short, bounded representative searches."""
+    training_dir = build_dir / "training"
+    training_dir.mkdir(exist_ok=True)
+    for index, fen in enumerate(VERILATOR_TRAINING_FENS):
+        board_path = training_dir / f"board-{index}.hex"
+        metrics_path = training_dir / f"metrics-{index}.tsv"
+        log_path = training_dir / f"position-{index}.log"
+        log_label = rel(log_path) if log_path.is_relative_to(REPO_ROOT) else str(log_path)
+        payload = encode_fen(fen)
+        board_path.write_text("".join(f"{value:02x}\n" for value in payload), encoding="ascii")
+        code, output, _ = run_command([
+            str(executable), f"+BOARD_FILE={board_path}", f"+METRICS_FILE={metrics_path}",
+            "+SEARCH_KIND=1", f"+SEARCH_LIMIT={VERILATOR_TRAINING_NODES}",
+        ], REPO_ROOT, log_path, timeout_seconds=120)
+        if code != 0 or has_sim_errors(output) or not metrics_path.is_file():
+            raise BuildError(f"Verilator optimization training failed; see {log_label}")
+        _, result = parse_metric_records(metrics_path.read_text(encoding="utf-8"))
+        if result.get("error", 0):
+            raise BuildError(f"Engine fault during Verilator optimization training; see {log_label}")
+
+
 def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     """Build and cache a native timed profiler executable."""
     verilator = require_tool("verilator")
     verilator_path = Path(verilator).resolve()
     verilator_stat = verilator_path.stat()
+    native_flags, native_target, profile_guided = _verilator_native_flags(verilator)
     half_period_ps = max(1, round(500_000_000_000 / args.engine_clock_hz))
     build_key = (
         f"threads={args.threads};stack={args.stack_depth};clock={args.engine_clock_hz};"
         f"memory={_profile_memory_parameter_args(args, '')};half_ps={half_period_ps};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
         f"verilator={verilator_path}:{verilator_stat.st_size}:{verilator_stat.st_mtime_ns};"
-        f"config={args.resolved_engine_config['digest']};native_opt=o3-lto-v1"
+        f"config={args.resolved_engine_config['digest']};native_opt=o3-lto{native_flags};native_target={native_target}"
+        f";pgo={int(profile_guided)};training={VERILATOR_TRAINING_NODES}:{VERILATOR_TRAINING_FENS if profile_guided else ()}"
     )
     fingerprint = _profile_fingerprint(sources, build_key)
     build_dir = BUILD_ROOT / "profile" / "compile" / "verilator" / fingerprint[:16]
@@ -157,6 +225,12 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         return executable
 
     build_dir.mkdir(parents=True, exist_ok=True)
+    # An interrupted rebuild must never leave an instrumented executable marked
+    # reusable by the previous completed-build fingerprint.
+    fingerprint_path.unlink(missing_ok=True)
+    _clear_verilator_profile_objects(build_dir, executable)
+    for path in build_dir.glob("*.gcda"):
+        path.unlink()
     warnings = [
         "TIMESCALEMOD", "WIDTHEXPAND", "WIDTHTRUNC", "WIDTHXZEXPAND",
         "ALWCOMBORDER", "MULTIDRIVEN", "SIDEEFFECT", "CASEINCOMPLETE",
@@ -172,7 +246,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         str(args.simulator_threads),
         "-O3",
         "-CFLAGS",
-        "-O3 -flto",
+        f"-O3 -flto{native_flags}",
         "-LDFLAGS",
         "-flto",
         "-j",
@@ -194,6 +268,22 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     if args.waveform:
         cmd.append("--trace-fst")
     cmd.extend(str(path) for path in sources)
+    if profile_guided:
+        instrumented_cmd = cmd.copy()
+        instrumented_cmd[instrumented_cmd.index("-CFLAGS") + 1] += " -fprofile-generate"
+        if args.simulator_threads > 1:
+            instrumented_cmd[instrumented_cmd.index("-CFLAGS") + 1] += " -fprofile-update=atomic"
+        instrumented_cmd[instrumented_cmd.index("-LDFLAGS") + 1] += " -fprofile-generate"
+        instrumented_log = build_dir / "instrumented-compile.log"
+        print("Building and training the optimized Verilator simulator...", flush=True)
+        code, output, _ = run_command(instrumented_cmd, REPO_ROOT, instrumented_log)
+        if code != 0 or not executable.exists():
+            print_failure_excerpt(output)
+            raise BuildError(f"Verilator training build failed; see {rel(instrumented_log)}")
+        _train_verilator_profile(executable, build_dir)
+        _clear_verilator_profile_objects(build_dir, executable)
+        cmd[cmd.index("-CFLAGS") + 1] += " -fprofile-use -fprofile-correction"
+        cmd[cmd.index("-LDFLAGS") + 1] += " -fprofile-use -fprofile-correction"
     code, output, _ = run_command(cmd, REPO_ROOT, build_dir / "compile.log")
     if code != 0 or not executable.exists():
         print_failure_excerpt(output)
@@ -387,26 +477,10 @@ def _run_profile_position(
     if position_name is not None:
         configuration["position_name"] = position_name
     report = build_profile_report(configuration, metrics, result_values, elapsed)
-    text_report = format_profile_report(report)
-    (run_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    (run_dir / "report.txt").write_text(text_report, encoding="utf-8")
+    write_profile_reports(run_dir, report)
     if simulator == "modelsim" and not args.waveform:
         transient_wave.unlink(missing_ok=True)
     return report
-
-
-
-
-
-
-
-
-def _profile_output_dir(args: argparse.Namespace) -> Path:
-    """Resolve an explicit output directory or allocate a timestamped one."""
-    if args.output:
-        return Path(args.output).expanduser().resolve()
-    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-    return BUILD_ROOT / "profile" / timestamp
 
 
 def command_profile_position(args: argparse.Namespace) -> int:
@@ -418,14 +492,16 @@ def command_profile_position(args: argparse.Namespace) -> int:
         encode_fen(args.fen)
     except ProtocolError as exc:
         raise BuildError(f"Invalid FEN: {exc}") from exc
+    run_dir = profile_output_dir(args)
+    prepare_profile_run(run_dir, args.replace)
     manifest, simulator, library, executable = _prepare_profile_simulator(args, manifest)
-    run_dir = _profile_output_dir(args)
     report = _run_profile_position(
         args, args.fen, run_dir, search_kind, search_limit,
         manifest, simulator, library, executable,
     )
-    text_report = format_profile_report(report)
-    print(text_report, end="")
+    complete_profile_run(run_dir)
+    print(format_profile_topics(report), end="")
+    print(f"Run: {run_dir.name}")
     print()
     print(f"Artifacts: {rel(run_dir) if run_dir.is_relative_to(REPO_ROOT) else run_dir}")
     return 0
@@ -447,15 +523,16 @@ def _profile_job_count(args: argparse.Namespace, simulator: str) -> int:
 
 def command_profile(args: argparse.Namespace) -> int:
     """Profile the standard named position suite and print only its summary."""
+    profiling_start = time.monotonic()
     manifest = load_manifest()
     args.resolved_engine_config = _resolve_profile_config(args, manifest)
     search_kind, search_limit = _validate_profile_args(args)
     if args.jobs is not None and args.jobs < 1:
         raise BuildError("--jobs must be positive")
+    run_dir = profile_output_dir(args)
+    prepare_profile_run(run_dir, args.replace)
     manifest, simulator, library, executable = _prepare_profile_simulator(args, manifest)
     jobs = _profile_job_count(args, simulator)
-    run_dir = _profile_output_dir(args)
-    run_dir.mkdir(parents=True, exist_ok=True)
     suite_start = time.monotonic()
 
     def run_case(case) -> dict:
@@ -473,19 +550,25 @@ def command_profile(args: argparse.Namespace) -> int:
             for index, case in enumerate(PROFILE_POSITIONS)
         }
         for future in concurrent.futures.as_completed(future_indices):
-            reports[future_indices[future]] = future.result()
+            index = future_indices[future]
+            try:
+                reports[index] = future.result()
+            except BuildError as exc:
+                raise BuildError(f"Position {PROFILE_POSITIONS[index].name} failed: {exc}") from exc
     suite_wall_seconds = time.monotonic() - suite_start
     named_reports = [
         (case.name, report)
         for case, report in zip(PROFILE_POSITIONS, reports)
         if report is not None
     ]
-    suite_report = build_profile_suite_report(named_reports, suite_wall_seconds, jobs)
-    text_report = format_profile_suite_report(suite_report)
-    (run_dir / "report.json").write_text(json.dumps(suite_report, indent=2) + "\n", encoding="utf-8")
-    (run_dir / "report.txt").write_text(text_report, encoding="utf-8")
-    print(text_report, end="")
+    suite_report = build_profile_suite_report(
+        named_reports, suite_wall_seconds, jobs,
+        profiling_wall_seconds=time.monotonic() - profiling_start,
+    )
+    write_profile_reports(run_dir, suite_report)
+    complete_profile_run(run_dir)
+    print(format_profile_topics(suite_report), end="")
+    print(f"Run: {run_dir.name}")
     print()
-    print(f"Per-position reports: {rel(run_dir / 'positions') if run_dir.is_relative_to(REPO_ROOT) else run_dir / 'positions'}")
     print(f"Artifacts: {rel(run_dir) if run_dir.is_relative_to(REPO_ROOT) else run_dir}")
     return 0

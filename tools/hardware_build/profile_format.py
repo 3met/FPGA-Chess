@@ -2,7 +2,7 @@
 
 import math
 
-from .profile_report import percent
+from .profile_report import percent, rate
 from .profile_schema import (
     ALGORITHM_LABELS,
     MOVE_BUCKETS,
@@ -11,7 +11,7 @@ from .profile_schema import (
     ORDINAL_BUCKETS,
     READY_BREAKDOWN_LABELS,
     STALL_LABELS,
-    THREAD_PHASE_LABELS,
+    TT_FIFOS,
 )
 
 
@@ -30,144 +30,98 @@ def _format_percent(value: float | None) -> str:
     return f"{value:.1f}%"
 
 
-def format_profile_report(
-    report: dict,
-    *,
-    include_header: bool = True,
-    include_simulator_performance: bool = True,
-) -> str:
-    """Format a compact but detailed terminal report."""
-    timing = report["timing"]
-    result = report["result"]
-    tt = report["transposition_table"]
-    cache = tt["cache"]
-    lines = []
-    if include_header:
-        title = "FPGA Chess Engine Runtime Profile"
+def _format_lifecycle(report: dict) -> str:
+    """Show exclusive phase totals with their constituent work indented below."""
+    search_cycles = report["timing"]["search_cycles"]
+    threads = report["threads"]
+    phases = [
+        ("ready", "Node control and dispatch", "ready_breakdown", [
+            ("nnue_init", READY_BREAKDOWN_LABELS["nnue_init"]),
+            ("dispatch", READY_BREAKDOWN_LABELS["dispatch"]),
+            ("transition", READY_BREAKDOWN_LABELS["transition"]),
+            ("arbitration", READY_BREAKDOWN_LABELS["arbitration"]),
+            ("tt_blocked", READY_BREAKDOWN_LABELS["tt_blocked"]),
+            ("noisy_move_blocked", READY_BREAKDOWN_LABELS["noisy_move_blocked"]),
+            ("quiet_move_blocked", READY_BREAKDOWN_LABELS["quiet_move_blocked"]),
+        ]),
+        ("tt_wait", "TT probe", None, []),
+        ("eval_wait", "Evaluation", None, []),
+        ("move_wait", "Move generation / validation", "move_wait_breakdown", [
+            ("noisy", "Noisy moves"),
+            ("quiet", "Quiet moves"),
+        ]),
+        ("board_wait", "Board update", None, []),
+        ("repetition_wait", "Child preparation", "repetition_wait_breakdown", [
+            ("nnue_update", "NNUE child update pending"),
+            ("overlap", "NNUE + repetition in flight"),
+            ("checker", "Repetition check in flight"),
+        ]),
+        ("reverse_wait", "Board reverse update", None, []),
+        ("terminal_wait", "Terminal scoring", None, []),
+        ("store_publish", "TT store request pending", None, []),
+        ("done", "Iteration handoff", None, []),
+        ("idle", "Inactive", None, []),
+    ]
+
+    # Hide globally unused phases, retaining the same row order for every group.
+    rows = []
+    for key, label, source, children in phases:
+        if not any(thread["phase_cycles"][key] for thread in threads):
+            continue
+        rows.append((label, "phase_cycles", key))
+        for child_key, child_label in children:
+            if any(thread[source][child_key] for thread in threads):
+                rows.append((f"  {child_label}", source, child_key))
+    label_width = max([len("Search total")] + [len(label) for label, _, _ in rows])
+    lines = [
+        "Per-thread lifecycle (cycles and % of search)",
+        "  Top-level phases sum to search time for each thread.",
+        "  Indented rows split the phase above; all percentages use full search time.",
+        "  Phases with no cycles across all threads are omitted.",
+    ]
+    for start in range(0, len(threads), 4):
+        group = threads[start : start + 4]
+        counts = [search_cycles] + [thread["nodes"] for thread in group]
+        counts += [thread[source][key] for _, source, key in rows for thread in group]
+        count_width = max(len("cycles"), *(len(f"{count:,}") for count in counts))
+        percent_width = len("% search")
+        cell_width = count_width + 2 + percent_width
         lines += [
-            title,
-            "=" * len(title),
-            f"Position: {report['configuration']['fen']}",
-            (
-                f"Simulator: {report['configuration'].get('simulator', 'unspecified')} "
-                f"({report['configuration'].get('simulator_threads', 1)} execution thread"
-                f"{'' if report['configuration'].get('simulator_threads', 1) == 1 else 's'})"
-            ),
-            (
-                f"Result: {result['best_move']}  score={result['score']}  "
-                f"depth={result['completed_depth']}  nodes={result['nodes']:,}"
-            ),
-            (
-                f"Deepest search ply reached (including quiescence search): {result['deepest_search_ply']} "
-                f"(+{result['qsearch_extension_beyond_completed_depth']} beyond completed depth)"
-            ),
-            (
-                f"Search: {timing['search_cycles']:,} cycles, "
-                f"{_format_number(timing['cycles_per_node'])} cycles/node, "
-                f"{_format_number(timing['nodes_per_simulated_second'])} nodes/s"
-            ),
-            (
-                f"Simulated FPGA search time: "
-                f"{_format_number(timing['simulated_search_seconds'] * 1_000)} ms"
-            ),
-            (
-                f"Outside measured search: command/position setup={timing['setup_cycles']:,} cycles, "
-                f"result serialization={timing['output_cycles']:,} cycles, "
-                f"background TT-store completion={timing['post_search_drain_cycles']:,} cycles"
-            ),
             "",
-        ]
-    lines.append("Per-thread lifecycle (cycles and % of search)")
-    lifecycle_metrics = [
-        (THREAD_PHASE_LABELS["idle"], "phase", "idle"),
-        (READY_BREAKDOWN_LABELS["nnue_init"], "ready", "nnue_init"),
-        (READY_BREAKDOWN_LABELS["dispatch"], "ready", "dispatch"),
-        (READY_BREAKDOWN_LABELS["tt_blocked"], "ready", "tt_blocked"),
-        (READY_BREAKDOWN_LABELS["noisy_move_blocked"], "ready", "noisy_move_blocked"),
-        (READY_BREAKDOWN_LABELS["quiet_move_blocked"], "ready", "quiet_move_blocked"),
-        (READY_BREAKDOWN_LABELS["arbitration"], "ready", "arbitration"),
-        (THREAD_PHASE_LABELS["tt_wait"], "phase", "tt_wait"),
-        (THREAD_PHASE_LABELS["eval_wait"], "phase", "eval_wait"),
-        ("Noisy move operation in flight", "move_wait", "noisy"),
-        ("Quiet move operation in flight", "move_wait", "quiet"),
-        (THREAD_PHASE_LABELS["board_wait"], "phase", "board_wait"),
-        ("NNUE child update pending", "repetition_wait", "nnue_update"),
-        ("NNUE + repetition in flight", "repetition_wait", "overlap"),
-        ("Repetition check in flight", "repetition_wait", "checker"),
-        (THREAD_PHASE_LABELS["reverse_wait"], "phase", "reverse_wait"),
-        (THREAD_PHASE_LABELS["terminal_wait"], "phase", "terminal_wait"),
-        (THREAD_PHASE_LABELS["store_publish"], "phase", "store_publish"),
-        (READY_BREAKDOWN_LABELS["transition"], "ready", "transition"),
-        (THREAD_PHASE_LABELS["done"], "phase", "done"),
-    ]
-
-    def lifecycle_value(thread: dict, source: str, key: str) -> int:
-        if source == "phase":
-            return thread["phase_cycles"][key]
-        if source == "move_wait":
-            return thread["move_wait_breakdown"][key]
-        if source == "repetition_wait":
-            return thread["repetition_wait_breakdown"][key]
-        return thread["ready_breakdown"][key]
-
-    lifecycle_metrics = [
-        metric
-        for metric in lifecycle_metrics
-        if any(lifecycle_value(thread, metric[1], metric[2]) for thread in report["threads"])
-    ]
-    label_width = max(
-        20,
-        max((len(label) for label, _, _ in lifecycle_metrics), default=18) + 2,
-    )
-    lifecycle_count_width = 11
-    lifecycle_percent_width = 8
-    lifecycle_suffix_width = 1 + lifecycle_percent_width
-    cell_width = lifecycle_count_width + lifecycle_suffix_width
-    for start in range(0, len(report["threads"]), 4):
-        thread_group = report["threads"][start : start + 4]
-        if start:
-            lines.append("")
-        lines.append(
-            f"  {'Metric':<{label_width}}"
-            + "".join(f"{f'T{thread['id']}':>{cell_width}}" for thread in thread_group)
-        )
-        lines.append(
-            f"  {'-' * (label_width - 2):<{label_width}}"
-            + "".join(f"{'-' * (cell_width - 2):>{cell_width}}" for _ in thread_group)
-        )
-        lines.append((
+            f"  {'Phase':<{label_width}}"
+            + "".join(f"  {f'T{thread['id']}':^{cell_width}}" for thread in group),
+            f"  {'':<{label_width}}"
+            + "".join(f"  {'cycles':>{count_width}}  {'% search':>{percent_width}}" for _ in group),
+            f"  {'-' * label_width}"
+            + "".join(f"  {'-' * cell_width}" for _ in group),
             f"  {'Nodes':<{label_width}}"
-            + "".join(
-                f"{thread['nodes']:>{lifecycle_count_width},}"
-                f"{'':>{lifecycle_suffix_width}}"
-                for thread in thread_group
-            )
-        ).rstrip())
-        for label, source, key in lifecycle_metrics:
+            + "".join(f"  {thread['nodes']:>{count_width},}  {'':>{percent_width}}" for thread in group),
+        ]
+        for label, source, key in rows:
             cells = []
-            for thread in thread_group:
-                value = lifecycle_value(thread, source, key)
-                if value == 0:
-                    cells.append(
-                        f"{'-':>{lifecycle_count_width}}{'':>{lifecycle_suffix_width}}"
-                    )
-                    continue
-                percentage_text = (
-                    f"({_format_percent(percent(value, timing['search_cycles']))})"
-                )
-                percentage_cell = (
-                    f" {percentage_text}"
-                    if len(percentage_text) >= lifecycle_percent_width
-                    else f"{percentage_text:>{lifecycle_percent_width}} "
-                )
+            for thread in group:
+                value = thread[source][key]
                 cells.append(
-                    f"{value:>{lifecycle_count_width},}{percentage_cell}"
+                    f"  {value:>{count_width},}  "
+                    f"{_format_percent(percent(value, search_cycles)):>{percent_width}}"
                 )
-            lines.append((
-                f"  {label:<{label_width}}"
-                + "".join(cells)
-            ).rstrip())
+            lines.append(f"  {label:<{label_width}}" + "".join(cells))
+        lines += [
+            f"  {'-' * label_width}"
+            + "".join(f"  {'-' * cell_width}" for _ in group),
+            f"  {'Search total':<{label_width}}"
+            + "".join(
+                f"  {search_cycles:>{count_width},}  "
+                f"{_format_percent(percent(search_cycles, search_cycles)):>{percent_width}}"
+                for _ in group
+            ),
+        ]
+    return "\n".join(line.rstrip() for line in lines) + "\n"
 
+
+def _format_depths(report: dict) -> str:
+    """Format the depths measurements."""
+    lines = []
     aggregate_depths = bool(
         report["depth_breakdown"]
         and "positions_completed" in report["depth_breakdown"][0]
@@ -201,6 +155,13 @@ def format_profile_report(
             f"{depth['maximum_ply']:>7}{depth_suffix}"
         )
 
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def _format_components(report: dict) -> str:
+    """Format the components measurements."""
+    timing = report["timing"]
+    lines = []
     lines += ["", "Component activity"]
     for name, values in report["components"].items():
         if name == "move_generator":
@@ -259,6 +220,12 @@ def format_profile_report(
             f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles"
         )
 
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def _format_moves(report: dict) -> str:
+    """Format the moves measurements."""
+    lines = []
     move_generator = report["components"]["move_generator"]
     operation_rows = []
     for name in MOVE_GENERATOR_OPERATIONS:
@@ -313,7 +280,14 @@ def format_profile_report(
             f"{_format_number(generation['cycles_per_destination']):>18}"
         )
 
-    lines += ["", "Stalls"]
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def _format_stalls(report: dict) -> str:
+    """Format the stalls measurements."""
+    timing = report["timing"]
+    lines = []
+    lines += ["", "Stalls", "  Percentages use search cycles; CDC uses search + drain cycles. Categories may overlap."]
     stall_names = [name for name in STALL_LABELS if name in report["stalls"]]
     stall_names += sorted(name for name in report["stalls"] if name not in STALL_LABELS)
     for name in stall_names:
@@ -328,6 +302,12 @@ def format_profile_report(
             f"({_format_percent(percent(value, denominator))})"
         )
 
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def _format_search(report: dict) -> str:
+    """Format the search measurements."""
+    lines = []
     lines += [
         "",
         "Move ordering",
@@ -373,22 +353,119 @@ def format_profile_report(
         value = report["algorithm"][name]
         lines.append(f"  {ALGORITHM_LABELS.get(name, name.replace('_', ' ').capitalize())}: {value:,}")
 
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def _format_tt_fifos(fifos: dict) -> str:
+    """Compare occupancy distributions against configured FIFO storage depths."""
+    headers = ("FIFO", "Unit", "Depth", "Average", "Median", "P90", "P99", "P99.9", "Peak")
+    rows = []
+    for name, (label, _, _) in TT_FIFOS.items():
+        values = fifos[name]
+        rows.append((label, values["unit"], str(values["capacity"]), *(
+            _format_number(values[key]) for key in ("average", "median", "p90", "p99", "p99_9", "peak")
+        )))
+    widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
+    lines = [
+        "TT FIFO occupancy",
+        "  Samples include empty cycles during search, before transfers on each FIFO's producer clock.",
+        "  CDC occupancy uses actual pointers. Percentiles use nearest rank; peak is the highest sampled occupancy.",
+    ]
+    for row in [headers, *rows]:
+        lines.append("  " + "  ".join(
+            f"{value:<{widths[index]}}" if index < 2 else f"{value:>{widths[index]}}"
+            for index, value in enumerate(row)
+        ))
+    return "\n".join(lines) + "\n"
+
+
+def _format_tt_cache(cache: dict) -> str:
+    """Show cache size, per-operation hit rates, and acceptance-to-bank-read waits."""
+    headers = ("Operation", "Count", "Hits", "Hit rate", "Avg wait (cycles)", "Avg wait (ns)")
+    rows = []
+    for label, operation, prefix in (("Probe", "lookup", "probe"), ("Store", "store", "store")):
+        rows.append((
+            label, _format_number(cache[f"{operation}_probes"]),
+            _format_number(cache[f"{operation}_hits"]),
+            _format_percent(cache[f"{operation}_hit_rate_percent"]),
+            _format_number(cache[f"average_{prefix}_wait_cycles"]),
+            _format_number(cache[f"average_{prefix}_wait_ns"]),
+        ))
+    widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
+    lines = [
+        "TT cache",
+        f"  Cache size: {cache['entries']:,} entries (three-way groups, both banks combined)",
+        "  Counts cover cache accesses during search + drain. Hits require a matching position way.",
+        "  Waits run from frontend acceptance to bank read, including queuing and staging, in engine cycles.",
+    ]
+    for row in [headers, *rows]:
+        lines.append("  " + "  ".join(
+            f"{value:<{widths[index]}}" if index == 0 else f"{value:>{widths[index]}}"
+            for index, value in enumerate(row)
+        ))
+    lines.append(f"  Probe hits while external transport busy: {cache['bypass_hits']:,}")
+    lines += [
+        "", "  Cache operation idle time (search + drain)",
+        "  Idle = engine cycles with no access of that type on either bank; ports are shared.",
+        "  Probe writes fill the cache; store writes publish replacements.",
+    ]
+    for operation, activity in cache["port_activity"].items():
+        lines.append(f"  {operation.replace('_', ' ').capitalize():<12} "
+                     f"{_format_percent(activity['idle_percent'])} idle")
+    return "\n".join(lines) + "\n"
+
+
+def _format_tt_latency(latency: dict) -> str:
+    """Compare all-request, cache-hit, and cache-miss completion times in nanoseconds."""
+    headers = ("Operation", "Average", "P99", "Hit average", "Hit P99", "Miss average", "Miss P99")
+    rows = []
+    for operation in ("probe", "store"):
+        values = latency[operation]
+        rows.append((operation.capitalize(), *(
+            _format_number(values[outcome][statistic])
+            for outcome in ("all", "hit", "miss") for statistic in ("average_ns", "p99_ns")
+        )))
+    widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
+    lines = [
+        "TT latency (ns, search + drain)",
+        "  Probes: frontend acceptance to response; stores: acceptance to SDRAM write acknowledgement.",
+        "  Stores requiring no replacement complete at the replacement decision.",
+        "  Hit/miss classification uses the initial cache probe; P99 uses nearest rank.",
+    ]
+    for row in [headers, *rows]:
+        lines.append("  " + "  ".join(
+            f"{value:<{widths[index]}}" if index == 0 else f"{value:>{widths[index]}}"
+            for index, value in enumerate(row)
+        ))
+    for operation in ("probe", "store"):
+        values = latency[operation]
+        lines.append(f"  {operation.capitalize()} samples: hits={values['hit']['samples']:,}, "
+                     f"misses={values['miss']['samples']:,}; unfinished={values['unfinished']:,}")
+    lines.append(f"  Dropped stores excluded: {latency['store']['dropped']:,}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_tt(report: dict) -> str:
+    """Format the tt measurements."""
+    tt = report["transposition_table"]
+    cache = tt["cache"]
+    bandwidth = tt["memory_interface"]["average_payload_bytes_per_second"]
+    payload_mib_per_second = None if bandwidth is None else rate(bandwidth, 1024 * 1024)
+    lines = []
     lines += [
         "",
         "Transposition table and SDRAM",
         (
-            f"  TT: lookups={tt['lookups']:,}, hits={tt['hits']:,} "
+            f"  TT: probes={tt['lookups']:,}, hits={tt['hits']:,} "
             f"({_format_percent(tt['hit_rate_percent'])}), stores={tt['stores']:,}, "
             f"dropped={tt['store_drops']:,}"
         ),
         (
-            f"  Cache: probes={cache['lookup_probes']:,}, hits={cache['lookup_hits']:,} "
-            f"({_format_percent(cache['lookup_hit_rate_percent'])}), "
-            f"busy bypasses={cache['bypass_hits']:,}"
+            f"  Store queue: peak={tt['store_fifo_high_water']:,}"
         ),
         (
-            f"  Store queue: peak={tt['store_fifo_high_water']:,}, "
-            f"writes preempted by lookup misses={tt['store_write_preemptions']:,}"
+            f"  Writebacks queued alongside probe reads: {tt['writeback_probe_queue_overlap_cycles']:,} "
+            "engine cycles (search only)"
         ),
         (
             f"  TT hit use: cutoffs={tt['cutoff_hits']:,}, "
@@ -399,78 +476,121 @@ def format_profile_report(
             f"writes={report['sdram']['write_requests']:,}, "
             f"rows hit/miss/conflict={report['sdram']['row_hits']:,}/"
             f"{report['sdram']['row_misses']:,}/{report['sdram']['row_conflicts']:,} "
-            f"({_format_percent(report['sdram']['row_hit_rate_percent'])} hit), "
-            f"payload={_format_number(report['sdram']['effective_bytes_per_simulated_second'] / (1024 * 1024))} MiB/s"
+            f"({_format_percent(report['sdram']['row_hit_rate_percent'])} hit)"
         ),
     ]
-    if include_simulator_performance:
+    lines += [
+        "  Bound hits: " + ", ".join(f"{name}={value:,}" for name, value in tt["bound_hits"].items()),
+    ]
+    memory = tt["memory_interface"]
+    lines += [
+        "", "Memory interface (search + drain)",
+        f"  Total probe reads: {memory['probe_reads']:,}",
+        f"  Total store reads: {memory['store_reads']:,}",
+        f"  Total store writes: {memory['store_writes']:,}",
+        f"  Bus width: {memory['word_bits']:,} bits",
+        f"  Memory clock: {_format_number(memory['clock_hz'] / 1_000_000)} MHz "
+        f"({memory['transfer_mode']})",
+        f"  Controller idle (no request): {_format_percent(memory['controller_idle_percent'])}",
+        f"  Data bus idle (no payload): {_format_percent(memory['data_bus_idle_percent'])}",
+        f"  Average payload bandwidth: {_format_number(payload_mib_per_second)} MiB/s (reads + writes)",
+        "  Average includes idle cycles, row timing, refresh, and completion overhead.",
+        "  Counts are accepted memory requests, including cache-hit store writes.",
+        "", _format_tt_cache(cache).rstrip(), "", _format_tt_latency(tt["latency"]).rstrip(),
+        "", _format_tt_fifos(tt["fifos"]).rstrip(),
+    ]
+    memory_stalls = {name: value for name, value in report["stalls"].items() if name.startswith(("tt_", "cdc_"))}
+    if memory_stalls:
+        lines += ["", _format_stalls({**report, "stalls": memory_stalls}).rstrip()]
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+PROFILE_TOPICS = {
+    "summary": "Throughput, search results, completed depths, and faults",
+    "search": "Depth breakdown, move generation, ordering, and pruning",
+    "pipeline": "Thread lifecycle, component activity, and stalls",
+    "tt": "TT probes, cache, latency, queues, and SDRAM traffic",
+    "simulation": "Simulator speed, wall time, setup, and drain overhead",
+}
+
+
+def _format_summary(report: dict) -> str:
+    """Show throughput and results without the detailed component tables."""
+    suite = "aggregate_profile" in report
+    aggregate = report["aggregate_profile"] if suite else report
+    timing = report["timing"]
+    result = aggregate["result"]
+    title = "FPGA Chess Engine Runtime Profile" + (" Suite" if suite else "")
+    lines = [title, "=" * len(title)]
+    if suite:
+        lines.append(f"Positions: {report['position_count']}")
+    else:
+        lines.append(f"Position: {report['configuration']['fen']}")
+        lines.append(
+            f"Result: {result['best_move']}  score={result['score']}  "
+            f"depth={result['completed_depth']}  nodes={result['nodes']:,}"
+        )
+        lines.append(f"Deepest search ply: {result['deepest_search_ply']}")
+    lines += [
+        f"Search: {timing['search_cycles']:,} cycles, "
+        f"{_format_number(timing['cycles_per_node'])} cycles/node, "
+        f"{_format_number(timing['nodes_per_simulated_second'])} nodes/s",
+        f"Simulated FPGA search time: "
+        f"{_format_number(timing['simulated_search_seconds'] * 1_000)} ms",
+        f"Engine fault: {'yes' if result['error'] else 'no'}",
+    ]
+    if suite:
         lines += [
-            "",
-            (
-                f"Simulator performance: {_format_number(timing['simulator_wall_seconds'])} s wall time, "
-                f"{_format_number(timing['search_cycles_per_wall_second'])} search cycles/wall s"
-            ),
-            (
-                f"Simulation slowdown versus the configured FPGA clock: "
-                f"{_format_number(timing['wall_to_simulated_time_ratio'])}x"
-            ),
+            "Simulated search time per position (average): "
+            f"{_format_number(timing['simulated_search_seconds'] * 1_000 / report['position_count'])} ms",
+            f"Overall profiling wall time: {_format_number(timing['profiling_wall_seconds'])} s",
+        ]
+        failures = [position for position in report["positions"] if position["result"]["error"]]
+        if failures:
+            lines += ["", "Failed positions"]
+            lines.extend(f"  {position['name']}: engine fault" for position in failures)
+    return "\n".join(lines) + "\n"
+
+
+def _format_simulation(report: dict) -> str:
+    """Distinguish suite elapsed time from the sum of position simulator times."""
+    aggregate = report.get("aggregate_profile", report)
+    timing = aggregate["timing"]
+    configuration = report["configuration"]
+    lines = [
+        "Simulation",
+        f"Simulator: {configuration.get('simulator', 'unspecified')}",
+        f"Simulator wall time (sum for suites): {_format_number(timing['simulator_wall_seconds'])} s",
+        f"Simulation throughput: {_format_number(timing['search_cycles_per_wall_second'])} search cycles/wall s",
+        f"Simulation slowdown versus FPGA clock: {_format_number(timing['wall_to_simulated_time_ratio'])}x",
+        f"Outside measured search: command/position setup={timing['setup_cycles']:,} cycles, "
+        f"result serialization={timing['output_cycles']:,} cycles, "
+        f"background TT-store completion={timing['post_search_drain_cycles']:,} cycles",
+    ]
+    if "aggregate_profile" in report:
+        suite_timing = report["timing"]
+        lines += [
+            f"Concurrent position jobs: {report['jobs']}",
+            f"Suite elapsed wall time: {_format_number(suite_timing['suite_wall_seconds'])} s",
+            f"Suite throughput: {_format_number(suite_timing['suite_search_cycles_per_wall_second'])} search cycles/wall s",
         ]
     return "\n".join(lines) + "\n"
 
-def format_profile_suite_report(report: dict) -> str:
-    """Format a detailed aggregate report without dumping individual positions."""
-    timing = report["timing"]
-    aggregate = report["aggregate_profile"]
-    aggregate_timing = aggregate["timing"]
-    configuration = report["configuration"]
-    limit = configuration["search_limit"]
-    limit_text = {
-        "depth": f"depth {limit['value']}",
-        "nodes": f"{limit['value']:,} node{'' if limit['value'] == 1 else 's'}",
-        "time": f"{limit['value']:,} ms",
-    }[limit["kind"]]
-    title = "FPGA Chess Engine Runtime Profile Suite"
-    lines = [
-        title,
-        "=" * len(title),
-        (
-            f"Positions: {report['position_count']}; search threads: {configuration['threads']}; "
-            f"search limit: {limit_text}"
-        ),
-        f"Simulator: {configuration['simulator']}",
-        (
-            f"Aggregate search: {timing['search_cycles']:,} cycles, {timing['nodes']:,} nodes, "
-            f"{_format_number(timing['cycles_per_node'])} cycles/node"
-        ),
-        (
-            f"Simulated FPGA search time: "
-            f"{_format_number(timing['simulated_search_seconds'] * 1_000)} ms; "
-            f"throughput: {_format_number(timing['nodes_per_simulated_second'])} nodes/s"
-        ),
-        (
-            f"Outside measured search: command/position setup={aggregate_timing['setup_cycles']:,} cycles, "
-            f"result serialization={aggregate_timing['output_cycles']:,} cycles, "
-            f"background TT-store completion={aggregate_timing['post_search_drain_cycles']:,} cycles"
-        ),
-        "",
-        format_profile_report(
-            aggregate,
-            include_header=False,
-            include_simulator_performance=False,
-        ).rstrip(),
-        "",
-        "Suite simulation performance",
-        (
-            f"  Elapsed wall time: {_format_number(timing['suite_wall_seconds'])} s"
-        ),
-        (
-            f"  Aggregate simulation throughput: "
-            f"{_format_number(timing['suite_search_cycles_per_wall_second'])} "
-            "search cycles/wall s"
-        ),
-        (
-            f"  Wall time / aggregate simulated search time: "
-            f"{_format_number(timing['suite_wall_to_simulated_time_ratio'])}x"
-        ),
-    ]
-    return "\n".join(lines) + "\n"
+
+def format_profile_topics(report: dict, topics: list[str] | None = None) -> str:
+    """Render selected topics from saved measurements, for a suite or position."""
+    selected = topics or ["summary"]
+    if "all" in selected:
+        selected = list(PROFILE_TOPICS)
+    aggregate = report.get("aggregate_profile", report)
+    formatters = {
+        "summary": lambda: _format_summary(report),
+        "search": lambda: _format_depths(aggregate) + "\n" + _format_moves(aggregate) + "\n" + _format_search(aggregate),
+        "pipeline": lambda: _format_lifecycle(aggregate) + "\n" + _format_components(aggregate) + "\n" + _format_stalls(aggregate),
+        "tt": lambda: _format_tt(aggregate),
+        "simulation": lambda: _format_simulation(report),
+    }
+    return "\n\n".join(
+        f"[{topic}]\n{formatters[topic]().rstrip()}"
+        for topic in dict.fromkeys(selected)
+    ) + "\n"
