@@ -10,8 +10,7 @@ module tt_replacement #(
     input logic [WAY_BITS-1:0] new_way,
     output logic position_matches,
     output logic replace,
-    output logic [$clog2(TT_WAYS)-1:0] selected_way,
-    output logic [TT_WAYS*WAY_BITS-1:0] updated_entry
+    output logic [$clog2(TT_WAYS)-1:0] selected_way
 );
     typedef struct packed {
         TTAge age;
@@ -52,7 +51,5 @@ module tt_replacement #(
         replace = tt_should_replace(victim.bound_type != TT_BOUND_INVALID,
             position_matches, victim.age, victim.depth, victim.bound_type,
             incoming.age, incoming.depth, incoming.bound_type, STALE_DEPTH_TOLERANCE);
-        updated_entry = old_entry;
-        if (replace) updated_entry[selected_way*WAY_BITS +: WAY_BITS] = new_way;
     end
 endmodule

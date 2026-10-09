@@ -1122,11 +1122,20 @@ module tb_engine_profile #(
     // Measure actual cache bank operations, including post-search publications.
     always @(posedge engine_clk) begin
         if (profile_active || drain_active) begin
+            logic probe_write, store_write;
+            probe_write = 0;
+            store_write = dut.controller.tt_frontend.commit_valid && dut.controller.tt_frontend.commit_cache;
+            for (int bank = 0; bank < 2; bank++) begin
+                if (dut.controller.tt_frontend.bank_fill_write[bank]) begin
+                    if (dut.controller.tt_frontend.bank_fill_stage[bank].store) store_write = 1;
+                    else probe_write = 1;
+                end
+            end
             tt_cache_port_cycles++;
-            if (dut.controller.tt_frontend.probe_issue) tt_cache_probe_read_cycles++;
-            if (dut.controller.tt_frontend.fill_write) tt_cache_probe_write_cycles++;
-            if (dut.controller.tt_frontend.store_issue) tt_cache_store_read_cycles++;
-            if (dut.controller.tt_frontend.commit_valid) tt_cache_store_write_cycles++;
+            if (dut.controller.tt_frontend.probe_issue || dut.controller.tt_frontend.fill_issue) tt_cache_probe_read_cycles++;
+            if (probe_write) tt_cache_probe_write_cycles++;
+            if (dut.controller.tt_frontend.store_issue || dut.controller.tt_frontend.store_fill_issue) tt_cache_store_read_cycles++;
+            if (store_write) tt_cache_store_write_cycles++;
         end
     end
 
@@ -1357,7 +1366,7 @@ module tb_engine_profile #(
         if (tt_probe_cache_wait_samples != tt_cache_lookup_probes
                 || tt_store_cache_wait_samples != tt_cache_store_probes)
             $fatal(1, "cache wait samples do not match completed cache accesses");
-        emit("tt.cache.entries", 64'd1 << TT_CACHE_INDEX_BITS);
+        emit("tt.cache.entries", 64'd2 << TT_CACHE_INDEX_BITS);
         emit("tt.cache.probe_wait_cycles", tt_probe_cache_wait_cycles);
         emit("tt.cache.store_wait_cycles", tt_store_cache_wait_cycles);
         emit("tt.cache.lookup_probes", tt_cache_lookup_probes);
@@ -1534,6 +1543,9 @@ module tb_engine_profile #(
                     && !dut.controller.tt_frontend.store_pending
                     && !dut.controller.tt_frontend.cache_store_valid
                     && !dut.controller.tt_frontend.commit_valid
+                    && !dut.controller.tt_frontend.fill_valid && !dut.controller.tt_frontend.store_fill_valid
+                    && dut.controller.tt_frontend.bank_fill_pending == 0
+                    && dut.controller.tt_frontend.probe_meta_count == 0 && dut.controller.tt_frontend.store_meta_count == 0
                     && !dut.controller.tt_cache_access && !dut.controller.tt_cache_store_access
                     && dut.controller.tt_frontend.store_fifo_count == 0
                     && !dut.controller.tt_frontend.store_buffer_valid

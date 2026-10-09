@@ -394,7 +394,7 @@ def _format_tt_cache(cache: dict) -> str:
     widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
     lines = [
         "TT cache",
-        f"  Cache size: {cache['entries']:,} entries (three-way groups, both banks combined)",
+        f"  Cache size: {cache['entries']:,} individual TT ways ({cache['entries']//2:,} two-way sets, both banks combined)",
         "  Counts cover cache accesses during search + drain. Hits require a matching position way.",
         "  Waits run from frontend acceptance to bank read, including queuing and staging, in engine cycles.",
     ]

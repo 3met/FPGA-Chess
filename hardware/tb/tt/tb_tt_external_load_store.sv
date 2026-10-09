@@ -122,7 +122,8 @@ module tb_tt_external_load_store;
     task automatic drain();
         repeat (12) @(negedge clk);
         while (dut.store_fifo_count != 0 || dut.store_buffer_valid || dut.store_pending
-                || dut.store_meta_count != 0 || dut.probe_meta_count != 0 || !dut.transport_idle || dut.fill_valid)
+                || dut.store_meta_count != 0 || dut.probe_meta_count != 0 || !dut.transport_idle || dut.fill_valid
+                || dut.store_fill_valid || dut.bank_fill_pending != 0 || dut.cache_store_valid || dut.commit_valid)
             @(negedge clk);
         repeat (8) @(negedge clk);
     endtask
@@ -135,14 +136,15 @@ module tb_tt_external_load_store;
         do @(negedge clk); while (!store_req_ready);
         store_req_valid = 0; drain();
     endtask
-    task automatic probe(input ZobristKey key, input logic hit, input int score = 0, input ThreadID tid = 0, input int stream_way = -1);
-        int baseline;
+    task automatic probe(input ZobristKey key, input logic hit, input int score = 0, input ThreadID tid = 0, input int stream_way = -1, input logic expect_cached = 0);
+        int baseline, wait_cycles;
         baseline = response_count;
         @(negedge clk); lookup_req = '0; lookup_req.zobrist_key = key; lookup_req.thread_id = tid;
         lookup_req_valid = 1;
         do @(negedge clk); while (!lookup_req_ready);
-        lookup_req_valid = 0;
-        while (!lookup_resp_valid) @(negedge clk);
+        lookup_req_valid = 0; wait_cycles = 0;
+        while (!lookup_resp_valid) begin @(negedge clk); wait_cycles++; end
+        if (expect_cached) check(wait_cycles == 2, "cached probe retains its two-cycle acceptance-to-response latency");
         check(lookup_resp.hit == hit && lookup_resp.thread_id == tid, $sformatf("probe %h hit and routing", key));
         if (hit) check(lookup_resp.score == EvalScore'(score), $sformatf("probe %h score", key));
         if (stream_way >= 0) begin
@@ -154,15 +156,19 @@ module tb_tt_external_load_store;
         drain();
         if (stream_way >= 0) check(response_count == baseline+1, "streamed probe returns exactly once after draining its tail");
     endtask
+    // Require the cache hit's fixed pipeline latency as well as the expected payload.
+    task automatic cached_probe(input ZobristKey key, input int score);
+        probe(key, 1, score, ThreadID'(0), -1, 1);
+    endtask
     initial begin
         repeat (3) @(negedge clk); rst_n = 1;
         while (clear_busy) @(negedge clk);
-        // Low tag bits vary while the index remains identical: all three ways coexist.
+        // All three external ways coexist, although only two positions fit in their cache set.
         store(64'h1, 8, 101); store(64'h2, 6, 102); store(64'h3, 4, 103);
         probe(64'h1, 1, 101); probe(64'h2, 1, 102); probe(64'h3, 1, 103);
-        // Evict the group, then prove one external response restores all three ways.
+        // Two unrelated positions sharing this set can evict both cached positions.
         begin
-            ZobristKey evict_key;
+            ZobristKey evict_key, evict_partner;
             int reads_before;
             evict_key = '0;
             for (int i = 1; i < 100 && evict_key == 0; i++) begin
@@ -171,23 +177,61 @@ module tb_tt_external_load_store;
                 candidate[63] = 1'b0;
                 if (dut.entry_index(candidate) == 8) evict_key = candidate;
             end
-            check(evict_key != 0, "found another external group sharing the cache slot");
-            store(evict_key, 5, 117);
+            check(evict_key != 0, "found another external group sharing the cache set");
+            evict_partner = evict_key ^ ZobristKey'(17 ^ 18);
+            store(evict_key, 5, 117); store(evict_partner, 5, 118);
             reads_before = memory.read_count;
             probe(64'h1, 1, 101); probe(64'h2, 1, 102); probe(64'h3, 1, 103);
-            check(memory.read_count == reads_before+1, "complete external fill restores all three cached ways");
+            check(memory.read_count == reads_before+3, "each uncached position fetches its own way despite sharing an external entry");
+            // Touch one resident position, then admit a third: only the LRU must leave.
+            probe(64'h2, 1, 102);
+            probe(64'h1, 1, 101);
+            reads_before = memory.read_count;
+            probe(64'h2, 1, 102);
+            check(memory.read_count == reads_before, "recently used cache way survives another admission");
+            probe(64'h3, 1, 103);
+            check(memory.read_count == reads_before+1, "cache admission evicts the least recently used way");
             // Evict before each lookup so every way position takes the streaming path.
             for (int way = 0; way < TT_WAYS; way++) begin
-                store(evict_key, 5, 117);
+                store(evict_key, 5, 117); store(evict_partner, 5, 118);
                 probe(ZobristKey'(way+1), 1, 101+way, ThreadID'(way % 2), way);
                 reads_before = memory.read_count;
-                probe(64'h1, 1, 101); probe(64'h2, 1, 102); probe(64'h3, 1, 103);
-                check(memory.read_count == reads_before, "early response still fills all three complete cached ways");
+                cached_probe(ZobristKey'(way+1), 101+way);
+                check(memory.read_count == reads_before, "stream hit admits its complete matching way to cache");
+                probe(ZobristKey'((way+1)%TT_WAYS+1), 1, 101+(way+1)%TT_WAYS);
+                check(memory.read_count == reads_before+1, "unrelated ways from the response are not admitted");
+            end
+            // Overlapping fills for the same position must update one slot, not consume both.
+            store(evict_key, 5, 117); store(evict_partner, 5, 118);
+            cached_probe(evict_key, 117);
+            begin
+                int returned, reads_start;
+                logic [1:0] owners;
+                returned = 0; owners = 0; reads_start = memory.read_count;
+                @(negedge clk); lookup_req = '0; lookup_req.zobrist_key = 64'h1;
+                lookup_req_valid = 1;
+                do @(negedge clk); while (!lookup_req_ready);
+                lookup_req.thread_id = ThreadID'(1);
+                do @(negedge clk); while (!lookup_req_ready);
+                lookup_req_valid = 0;
+                while (returned < 2) begin
+                    @(negedge clk);
+                    if (lookup_resp_valid) begin
+                        if (!lookup_resp.hit || lookup_resp.score != EvalScore'(101))
+                            $fatal(1, "overlapping fill returned an incorrect payload");
+                        owners[int'(lookup_resp.thread_id)] = 1'b1; returned++;
+                    end
+                end
+                drain();
+                check(owners == 2'b11 && memory.read_count == reads_start+2, "overlapping misses route both ordered memory responses");
+                reads_start = memory.read_count;
+                cached_probe(evict_key, 117); cached_probe(64'h1, 101);
+                check(memory.read_count == reads_start, "duplicate fills retain the unrelated hot cache way");
             end
             // Use the other bank so the eventual stream fill cannot evict the cached target.
             // Sustained cache hits must neither starve the stream nor overwrite its reply.
             store(64'h8000_0000_0000_0011, 5, 117);
-            store(evict_key, 5, 117);
+            store(evict_key, 5, 117); store(evict_partner, 5, 118);
             begin
                 int baseline, reads_start, cache_issued, stream_hits;
                 logic routed;
@@ -217,7 +261,7 @@ module tb_tt_external_load_store;
                 check(response_count == baseline+cache_issued+1, "cache/stream response arbitration retires every probe exactly once");
             end
             // Reuse a thread immediately after its early hit, while its old tail still drains.
-            store(evict_key, 5, 117);
+            store(evict_key, 5, 117); store(evict_partner, 5, 118);
             begin
                 int baseline;
                 baseline = response_count;
@@ -238,16 +282,29 @@ module tb_tt_external_load_store;
                 check(response_count == baseline+2, "early thread reuse returns each accepted probe exactly once");
             end
         end
-        // A complete cached group can still lack the probed position.
+        // An external miss must not allocate or evict any cache way.
         begin
             int reads_before; reads_before = memory.read_count;
             probe(64'h7, 0, 0, 0, TT_WAYS-1);
-            check(memory.read_count == reads_before + 1, "cached group position miss fetches external entry");
+            check(memory.read_count == reads_before + 1, "uncached position fetches external entry");
+            probe(64'h1, 1, 101); probe(64'h2, 1, 102);
+            check(memory.read_count == reads_before + 1, "external miss preserves both resident cache ways");
         end
         begin
-            int reads_before; reads_before = memory.read_count;
+            int reads_before;
+            logic neighbors_preserved, selected_changed;
+            logic [TT_WORD_BITS-1:0] before_words[TT_WAYS*WAY_WORDS];
+            reads_before = memory.read_count;
+            for (int word = 0; word < TT_WAYS*WAY_WORDS; word++) before_words[word] = memory.memory[word];
             store(64'h2, 7, 202);
             check(memory.read_count == reads_before, "matching cache way skips memory read");
+            neighbors_preserved = 1; selected_changed = 0;
+            for (int word = 0; word < TT_WAYS*WAY_WORDS; word++)
+                if (word < WAY_WORDS || word >= 2*WAY_WORDS)
+                    neighbors_preserved &= memory.memory[word] == before_words[word];
+                else selected_changed |= memory.memory[word] != before_words[word];
+            check(neighbors_preserved && selected_changed,
+                "cache-hit store uses saved external way selector and preserves neighboring ways");
         end
         probe(64'h1, 1, 101); probe(64'h2, 1, 202); probe(64'h3, 1, 103);
         store(64'h2, 1, 999); probe(64'h2, 1, 202);
@@ -281,7 +338,7 @@ module tb_tt_external_load_store;
         check(dut.bank_read_enable[0] && dut.bank_write_enable[0]
             && dut.bank_read_index[0] == dut.bank_write_index[0], "forwarding test overlaps the physical cache ports");
         while (!lookup_resp_valid) @(negedge clk);
-        check(lookup_resp.hit && lookup_resp.score == EvalScore'(606), "same-slot read forwards newly written complete line");
+        check(lookup_resp.hit && lookup_resp.score == EvalScore'(606), "same-set read forwards the newly written individual way");
         drain();
         // A cached thread must finish while another thread waits for SDRAM.
         begin
@@ -307,7 +364,7 @@ module tb_tt_external_load_store;
             check(!lookup_resp.hit && lookup_resp.thread_id == ThreadID'(0), "older memory probe keeps its own thread identity");
             drain();
         end
-        // Write overflow still commits complete lines in cache without stalling search.
+        // Write overflow still updates the matching cached way without stalling search.
         memory_enabled = 0;
         @(negedge clk); store_req = '0; store_req.zobrist_key = 64'h6;
         store_req.depth = TTDepth'(9); store_req.score = EvalScore'(707); store_req.bound_type = TT_BOUND_EXACT;
@@ -321,7 +378,7 @@ module tb_tt_external_load_store;
         while (!lookup_resp_valid) @(negedge clk);
         check(lookup_resp.hit && lookup_resp.score == EvalScore'(707), "cache retains publication even when external write is dropped");
         memory_enabled = 1; drain();
-        // New Game physically invalidates every way and sweeps both cache tags.
+        // New Game physically invalidates every external and cached way.
         @(negedge clk); clear = 1; @(negedge clk); clear = 0;
         while (clear_busy) @(negedge clk);
         probe(64'h6, 0); probe(64'h8000_0000_0000_0001, 0);

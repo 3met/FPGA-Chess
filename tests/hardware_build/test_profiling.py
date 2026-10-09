@@ -965,7 +965,7 @@ class CacheReportTests(unittest.TestCase):
         report = ReportTests().build_sample_report()
         text = format_profile_topics(report, ["tt"])
         self.assertIn("TT cache", text)
-        self.assertIn(f"Cache size: {report['transposition_table']['cache']['entries']:,} entries", text)
+        self.assertIn(f"Cache size: {report['transposition_table']['cache']['entries']:,} individual TT ways", text)
         for label in ("Probe", "Store", "Count", "Hit rate", "Avg wait (cycles)", "Avg wait (ns)"):
             self.assertIn(label, text)
         self.assertNotIn("Cache stores: probes=", text)
