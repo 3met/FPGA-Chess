@@ -18,7 +18,7 @@ TT moves store only the starting and ending square. Equal squares encode an omit
 
 The age counter advances once per root search and wraps modularly. One replacement datapath serves both cache-hit stores and complete external store responses; cache-hit stores have priority. Registers separate the cache comparison, replacement, and publication stages without an intervening store-hit FIFO.
 
-When a valid way matches the incoming position tag, only that way can change. Replacement permits a deeper result, an allowed equal-depth refresh, or a result from a newer search within the configured depth tolerance. Equal-depth bounds cannot displace an exact result; another exact result can refresh it.
+When a valid way matches the incoming position tag, only that way can change. An accepted replacement retains its existing move when the incoming move is omitted; an explicit incoming move takes precedence. Moves are never inherited from a different position. Replacement permits a deeper result, an allowed equal-depth refresh, or a result from a newer search within the configured depth tolerance. Equal-depth bounds cannot displace an exact result; another exact result can refresh it.
 
 When no way matches, an empty way is preferred. Otherwise the victim minimizes signed `depth - 8 * relative_age`, following [Stockfish's depth-minus-age policy](https://github.com/official-stockfish/Stockfish/blob/master/src/tt.cpp). Ties choose the first way. The other two ways are preserved. An accepted replacement publishes only the selected updated way to the cache and external memory.
 

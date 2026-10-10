@@ -136,7 +136,7 @@ module tt_external_load_store #(
     logic replacement_valid, replacement_cache, replacement_matches, replacement_write;
     logic [$clog2(TT_WAYS)-1:0] replacement_way;
     PhysicalEntry replacement_old;
-    PhysicalWay replacement_new;
+    PhysicalWay replacement_new, replacement_updated;
     StoreTarget replacement_target;
     logic way_write_ready;
     // Pipeline the cache comparison and publication to keep RAM and replacement
@@ -318,7 +318,7 @@ module tt_external_load_store #(
 
     tt_replacement #(.TAG_BITS(TAG_BITS), .WAY_BITS(WAY_BITS), .STALE_DEPTH_TOLERANCE(STALE_DEPTH_TOLERANCE)) replacement (
         .old_entry(replacement_old), .new_way(replacement_new), .position_matches(replacement_matches),
-        .replace(replacement_write), .selected_way(replacement_way));
+        .replace(replacement_write), .selected_way(replacement_way), .updated_way(replacement_updated));
 
     // Metadata never leaves the engine clock domain and is queued with each miss.
     synchronous_fifo #(.DATA_WIDTH($bits(ProbeTarget)), .DEPTH(OUTSTANDING_DEPTH)) probe_targets (
@@ -370,7 +370,7 @@ module tt_external_load_store #(
             commit_valid <= replacement_valid && replacement_write;
             if (replacement_valid && replacement_write) begin
                 commit_target <= replacement_target; commit_cache <= replacement_cache;
-                commit_slot <= cache_store_slot; commit_way <= replacement_new;
+                commit_slot <= cache_store_slot; commit_way <= replacement_updated;
                 commit_way_index <= replacement_cache ? cache_store_way.memory_way : replacement_way;
             end
             clear_prev <= clear;

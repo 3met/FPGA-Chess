@@ -79,7 +79,8 @@ module tb_tt_external_load_store;
                 store_req.depth = TTDepth'(nonce);
                 store_req.bound_type = TTBoundType'(1 + nonce % 3);
                 store_req.age = TTAge'(cycle / 97);
-                store_req.best_move = Move'({Position'(identity), Position'(nonce), PROMO_QUEEN});
+                // Always supply a move so payload correlation excludes deliberate move merging.
+                store_req.best_move = Move'({Position'(identity), Position'(nonce == identity ? nonce ^ 1 : nonce), PROMO_QUEEN});
                 store_req_valid = random_state[16];
                 tid = int'(random_state[17]);
                 if (!lookup_req_valid && !pending[tid]) begin
@@ -106,7 +107,7 @@ module tb_tt_external_load_store;
                             || lookup_resp.depth != TTDepth'(nonce)
                             || lookup_resp.bound_type != TTBoundType'(1 + nonce % 3)
                             || lookup_resp.best_move.from_pos != Position'(target[tid])
-                            || lookup_resp.best_move.to_pos != Position'(nonce))
+                            || lookup_resp.best_move.to_pos != Position'(nonce == target[tid] ? nonce ^ 1 : nonce))
                         $fatal(1, "stress hit mixed or misrouted payload: thread %0d key %0d score %0d", tid, target[tid], lookup_resp.score);
                     hits++;
                 end
@@ -422,6 +423,36 @@ module tb_tt_external_load_store;
             while (clear_busy) @(negedge clk);
             check(response_count == baseline+1, "clear drains the in-flight probe exactly once");
             probe(64'h1, 0);
+        end
+        // Same-position move merging must reach both the cache and external writeback.
+        begin
+            int reads_before;
+            Move original_move, explicit_move;
+            original_move = Move'({Position'(12), Position'(20), PROMO_QUEEN});
+            explicit_move = Move'({Position'(30), Position'(38), PROMO_QUEEN});
+            store(64'h1, 8, 801, 0, TT_BOUND_EXACT, original_move);
+            reads_before = memory.read_count;
+            store(64'h1, 9, 802, 0, TT_BOUND_EXACT, NULL_MOVE);
+            cached_probe(64'h1, 802);
+            check(memory.read_count == reads_before && lookup_resp.depth == TTDepth'(9)
+                && tt_encode_move(lookup_resp.best_move) == tt_encode_move(original_move),
+                "cache-hit replacement updates payload and preserves an omitted move");
+            // Fill both cache slots with other positions, leaving the updated way in memory.
+            store(64'h2, 4, 102); store(64'h3, 5, 103);
+            reads_before = memory.read_count;
+            store(64'h1, 10, 803, 0, TT_BOUND_EXACT, Move'({Position'(22), Position'(22), PROMO_QUEEN}));
+            cached_probe(64'h1, 803);
+            check(memory.read_count == reads_before+1 && lookup_resp.depth == TTDepth'(10)
+                && tt_encode_move(lookup_resp.best_move) == tt_encode_move(original_move),
+                "memory-read replacement preserves the previously written move for any omitted encoding");
+            store(64'h4, 11, 804, 0, TT_BOUND_EXACT, NULL_MOVE);
+            probe(64'h4, 1, 804);
+            check(lookup_resp.best_move.from_pos == lookup_resp.best_move.to_pos,
+                "different-position victim replacement never inherits its move");
+            store(64'h1, 12, 805, 0, TT_BOUND_EXACT, explicit_move);
+            probe(64'h1, 1, 805);
+            check(tt_encode_move(lookup_resp.best_move) == tt_encode_move(explicit_move),
+                "explicit incoming move replaces the prior hint");
         end
         stress_concurrent_requests();
         $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);

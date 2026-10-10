@@ -10,7 +10,8 @@ module tt_replacement #(
     input logic [WAY_BITS-1:0] new_way,
     output logic position_matches,
     output logic replace,
-    output logic [$clog2(TT_WAYS)-1:0] selected_way
+    output logic [$clog2(TT_WAYS)-1:0] selected_way,
+    output logic [WAY_BITS-1:0] updated_way
 );
     typedef struct packed {
         TTAge age;
@@ -20,7 +21,7 @@ module tt_replacement #(
         logic [TAG_BITS-1:0] tag;
         TTBoundType bound_type;
     } Way;
-    Way incoming, candidates[TT_WAYS], victim;
+    Way incoming, candidates[TT_WAYS], victim, updated;
     TTAge relative_age[TT_WAYS];
     // Signed depth-minus-eight-times-age follows Stockfish's general policy.
     localparam int VALUE_BITS = (($bits(TTDepth) > TT_AGE_BITS+3) ? $bits(TTDepth) : TT_AGE_BITS+3) + 2;
@@ -48,6 +49,12 @@ module tt_replacement #(
             end
         end
         victim = candidates[selected_way];
+        // Equal squares encode no move; retain the hint only for the same position.
+        updated = incoming;
+        if (position_matches && incoming.best_move_bits[$bits(Position) +: $bits(Position)]
+                == incoming.best_move_bits[0 +: $bits(Position)])
+            updated.best_move_bits = victim.best_move_bits;
+        updated_way = WAY_BITS'(updated);
         replace = tt_should_replace(victim.bound_type != TT_BOUND_INVALID,
             position_matches, victim.age, victim.depth, victim.bound_type,
             incoming.age, incoming.depth, incoming.bound_type, STALE_DEPTH_TOLERANCE);
