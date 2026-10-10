@@ -41,8 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--set", dest="sets", action="append", help="Source set to compile; defaults to portable-rtl")
     compile_parser.set_defaults(func=command_compile)
 
-    test_parser = subparsers.add_parser("test", help="Run SystemVerilog testbenches with ModelSim/Questa")
+    test_parser = subparsers.add_parser("test", help="Run SystemVerilog testbenches")
     test_parser.add_argument("--name", dest="names", action="append", help="Test name to run; defaults to all tests")
+    test_parser.add_argument("--simulator", choices=("auto", "verilator", "modelsim", "both"),
+                         default="auto", help="RTL backend; auto prefers Verilator, both runs every bench twice")
     test_parser.add_argument("--jobs", type=int, help="Number of tests to run concurrently; defaults to 1")
     test_parser.add_argument(
         "--timeout",
@@ -123,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
     view_parser.set_defaults(func=command_profile_view)
 
     check_parser = subparsers.add_parser("check", help="Check generated data and run Python and RTL tests")
+    check_parser.add_argument("--simulator", choices=("auto", "verilator", "modelsim", "both"),
+                         default="auto", help="RTL backend; auto prefers Verilator, both runs every bench twice")
     check_parser.add_argument("--jobs", type=int, help="Number of RTL tests to run concurrently; defaults to 1")
     check_parser.add_argument(
         "--tuning",

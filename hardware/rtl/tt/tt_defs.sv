@@ -7,13 +7,16 @@ package tt_defs;
     localparam int TT_DEFAULT_TAG_BITS = 32;
     localparam int TT_HASH_BITS = 32;
     localparam int TT_WAYS = 3;
-    localparam int TT_DEPTH_BITS = (MAX_PLY_COUNT <= 1) ? 1 : $clog2(MAX_PLY_COUNT);
+    localparam int TT_DEPTH_BITS = $bits(PlyIndex);
     localparam int TT_AGE_BITS = 5;
 
     // Bit 14 separates finite evaluations from mates. The 0x100 score gap
     // represents distances through 256 plies (mate in at least 128 moves).
     localparam EvalScore MATE_THRESHOLD = EvalScore'(16'h4000);
     localparam EvalScore MATE_SCORE = EvalScore'(16'h4100);
+
+    // Shared FSM type keeps profiler decoding tied to the implementation.
+    typedef enum logic [1:0] { TT_FRONTEND_IDLE, TT_FRONTEND_DRAIN, TT_FRONTEND_CLEAR_WAIT, TT_FRONTEND_CACHE_CLEAR } TTFrontendState;
 
     typedef logic [TT_DEPTH_BITS-1:0] TTDepth;
     typedef logic [TT_AGE_BITS-1:0] TTAge;

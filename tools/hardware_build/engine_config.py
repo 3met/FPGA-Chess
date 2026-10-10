@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 
 from .common import BuildError, rel, repo_path
+from .clocks import resolve_clocks
 
 
 def engine_config_digest(config: dict) -> str:
@@ -325,7 +326,7 @@ def load_engine_config(value: str) -> dict:
     engine_profile = _load_object(engine_path, "engine configuration")
     _require_keys(
         engine_profile,
-        {"search_config", "engine", "transposition_table", "history_heuristic", "move_memory", "instrumentation"},
+        {"search_config", "engine", "transposition_table", "history_heuristic", "move_memory", "instrumentation", "clocks"},
         rel(engine_path),
     )
     search_value = engine_profile.get("search_config")
@@ -338,7 +339,7 @@ def load_engine_config(value: str) -> dict:
     history = _object(engine_profile, "history_heuristic", rel(engine_path))
     move_memory = _object(engine_profile, "move_memory", rel(engine_path))
     instrumentation = _object(engine_profile, "instrumentation", rel(engine_path))
-    _require_keys(engine, {"threads", "stack_depth", "clock_frequency_hz"}, f"{rel(engine_path)}.engine")
+    _require_keys(engine, {"threads", "stack_depth"}, f"{rel(engine_path)}.engine")
     _require_keys(tt, {"tag_bits", "cache_index_bits", "store_fifo_depth", "outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"}, f"{rel(engine_path)}.transposition_table")
     _require_keys(history, {"entry_count", "entry_bits"}, f"{rel(engine_path)}.history_heuristic")
     _require_keys(instrumentation, {"search_statistics"}, f"{rel(engine_path)}.instrumentation")
@@ -359,7 +360,7 @@ def load_engine_config(value: str) -> dict:
         "search_config": rel(search_path),
         "threads": _integer(engine, "threads", f"{rel(engine_path)}.engine", 1),
         "stack_depth": _integer(engine, "stack_depth", f"{rel(engine_path)}.engine", 1),
-        "clock_frequency_hz": _integer(engine, "clock_frequency_hz", f"{rel(engine_path)}.engine", 1),
+        "clocks": resolve_clocks(engine_profile.get("clocks")),
         "tt_tag_bits": _integer(tt, "tag_bits", f"{rel(engine_path)}.transposition_table", 1, 63),
         "tt_cache_index_bits": _integer(tt, "cache_index_bits", f"{rel(engine_path)}.transposition_table", 1),
         "tt_store_fifo_depth": _integer(tt, "store_fifo_depth", f"{rel(engine_path)}.transposition_table", 2),
@@ -411,11 +412,3 @@ def engine_config_for_target(target: dict) -> dict | None:
     if not isinstance(value, str) or not value:
         raise BuildError("Synthesis target engine_config must be a nonempty repository path")
     return load_engine_config(value)
-
-
-def engine_clock_mhz_for_target(target: dict) -> float | None:
-    """Return the target clock from its engine profile."""
-    config = engine_config_for_target(target)
-    if config is not None:
-        return config["clock_frequency_hz"] / 1_000_000
-    return None

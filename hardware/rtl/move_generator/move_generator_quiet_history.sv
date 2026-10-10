@@ -1,6 +1,7 @@
 // Quiet-history lookup and an independent best-effort update pipeline.
 
 import chess_defs::*;
+import move_generator_defs::*;
 
 module move_generator_quiet_history #(
     parameter int HISTORY_ENTRY_COUNT = 8192,
@@ -50,13 +51,6 @@ module move_generator_quiet_history #(
     localparam logic signed [HISTORY_ENTRY_BITS-1:0] HISTORY_MAXIMUM =
         {1'b0, {(HISTORY_ENTRY_BITS-1){1'b1}}};
 
-    typedef enum logic [1:0] {
-        UPDATE_IDLE,
-        UPDATE_READ,
-        UPDATE_CAPTURE,
-        UPDATE_WRITE
-    } UpdateState;
-
     // XOR folding is only wiring, preserves all move bits for the default
     // 13-bit address, and spreads thread/color aliases without added latency.
     function automatic logic [HISTORY_ADDRESS_BITS-1:0] history_hash(
@@ -72,7 +66,7 @@ module move_generator_quiet_history #(
         return result;
     endfunction
 
-    UpdateState state;
+    HistoryUpdateState state;
     logic [HISTORY_ADDRESS_BITS-1:0] clear_address;
     logic read_en;
     logic [HISTORY_ADDRESS_BITS-1:0] read_address;
@@ -133,12 +127,12 @@ module move_generator_quiet_history #(
         if (!init_busy && lookup_valid) begin
             read_en = 1'b1;
             read_address = lookup_address;
-        end else if (!init_busy && state == UPDATE_READ) begin
+        end else if (!init_busy && state == HISTORY_UPDATE_READ) begin
             read_en = 1'b1;
             read_address = active_address;
         end
 
-        if (!init_busy && state == UPDATE_WRITE && !write_conflicts_with_lookup) begin
+        if (!init_busy && state == HISTORY_UPDATE_WRITE && !write_conflicts_with_lookup) begin
             automatic logic [REWARD_BITS-1:0] reward_magnitude;
             automatic logic [REWARD_BITS-1:0] magnitude;
             automatic logic [DEPTH_REWARD_BITS-1:0] depth_reward;
@@ -184,11 +178,11 @@ module move_generator_quiet_history #(
         if (!rst_n) begin
             init_busy <= 1'b1;
             clear_address <= '0;
-            state <= UPDATE_IDLE;
+            state <= HISTORY_UPDATE_IDLE;
         end else if (clear) begin
             init_busy <= 1'b1;
             clear_address <= '0;
-            state <= UPDATE_IDLE;
+            state <= HISTORY_UPDATE_IDLE;
         end else if (init_busy) begin
             if (clear_address == HISTORY_ADDRESS_BITS'(HISTORY_ENTRY_COUNT - 1))
                 init_busy <= 1'b0;
@@ -196,7 +190,7 @@ module move_generator_quiet_history #(
                 clear_address <= clear_address + HISTORY_ADDRESS_BITS'(1);
         end else begin
             case (state)
-                UPDATE_IDLE: begin
+                HISTORY_UPDATE_IDLE: begin
                     // The input is best-effort: ready remains asserted and
                     // any update arriving while this pipeline is occupied
                     // is deliberately dropped.
@@ -212,18 +206,18 @@ module move_generator_quiet_history #(
                         failed_count <= update_failed_count;
                         update_entry <= 2'd0;
                         update_is_malus <= 1'b0;
-                        state <= UPDATE_READ;
+                        state <= HISTORY_UPDATE_READ;
                     end
                 end
-                UPDATE_READ: begin
+                HISTORY_UPDATE_READ: begin
                     if (!lookup_valid)
-                        state <= UPDATE_CAPTURE;
+                        state <= HISTORY_UPDATE_CAPTURE;
                 end
-                UPDATE_CAPTURE: begin
+                HISTORY_UPDATE_CAPTURE: begin
                     captured_value <= read_data;
-                    state <= UPDATE_WRITE;
+                    state <= HISTORY_UPDATE_WRITE;
                 end
-                UPDATE_WRITE: begin
+                HISTORY_UPDATE_WRITE: begin
                     // A same-address generator lookup wins; drop this one
                     // write instead of exposing ambiguous read-during-write data.
                     if (update_entry < failed_count) begin
@@ -234,12 +228,12 @@ module move_generator_quiet_history #(
                         endcase
                         update_entry <= update_entry + 2'd1;
                         update_is_malus <= 1'b1;
-                        state <= UPDATE_READ;
+                        state <= HISTORY_UPDATE_READ;
                     end else begin
-                        state <= UPDATE_IDLE;
+                        state <= HISTORY_UPDATE_IDLE;
                     end
                 end
-                default: state <= UPDATE_IDLE;
+                default: state <= HISTORY_UPDATE_IDLE;
             endcase
         end
     end

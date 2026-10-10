@@ -61,17 +61,6 @@ module move_generator_lane #(
     output MoveBucketTop stat_bucket_high_water [MOVE_BUCKET_COUNT]
 );
 
-    typedef enum logic [3:0] {
-        GEN_IDLE,
-        GEN_DIRECT,
-        GEN_SELECT_DEST,
-        GEN_EXPAND_SOURCE,
-        GEN_BUILD_CONTEXT,
-        GEN_PREPARE_SOURCE,
-        GEN_CASTLE,
-        GEN_FINISH
-    } GeneratorState;
-
 `ifndef SYNTHESIS
     initial begin
         if (THREAD_COUNT < 1 || THREAD_COUNT > chess_defs::THREAD_COUNT)

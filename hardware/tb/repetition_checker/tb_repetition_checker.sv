@@ -1,6 +1,7 @@
 `timescale 1ns/1ps
 
 import chess_defs::*;
+import repetition_defs::*;
 
 module tb_repetition_checker;
     logic clk = 1'b0;
@@ -118,9 +119,10 @@ module tb_repetition_checker;
     task automatic initialize_exhausted_hash;
         @(negedge clk); init_start = 1;
         @(negedge clk); init_start = 0;
-        wait (dut.init_state == dut.INIT_RETRY);
-        @(negedge clk); force dut.init_seed = '1;
-        @(negedge clk); release dut.init_seed;
+        wait (dut.init_state == REP_INIT_RETRY);
+        // Seed the registered retry input before its sampling edge.
+        @(negedge clk); dut.init_seed = '1;
+        @(negedge clk);
         wait (init_done || init_failed);
         check(init_done && !init_failed, "exhausted hash still initializes exact history lookup");
     endtask

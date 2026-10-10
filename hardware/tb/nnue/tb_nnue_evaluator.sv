@@ -4,6 +4,9 @@ import chess_defs::*;
 import nnue_defs::*;
 
 module tb_nnue_evaluator;
+    // A non-power-of-two fixture exercises the highest allocated thread ID.
+    localparam int TEST_THREADS = 9;
+    localparam ThreadID LAST_THREAD = ThreadID'(TEST_THREADS-1);
     logic clk = 1'b0;
     logic rst_n = 1'b0;
     logic clear;
@@ -28,14 +31,14 @@ module tb_nnue_evaluator;
 
     always #5 clk = ~clk;
 
-    nnue_evaluator #(.STATE_THREAD_COUNT(9)) dut (
+    nnue_evaluator #(.STATE_THREAD_COUNT(TEST_THREADS)) dut (
         .clk, .rst_n, .clear, .update_valid, .update_ready, .update_idle, .update_req,
         .update_done_valid, .update_done_thread, .update_done_ply,
         .eval_valid, .eval_ready, .eval_thread_id, .eval_turn, .eval_piece_count,
         .eval_pst, .result_valid, .result, .result_pst
     );
 
-    // Exercise the single-thread state path used by the DE1-SoC build.
+    // Exercise the minimum allocation with a single accumulator state.
     nnue_evaluator #(.STATE_THREAD_COUNT(1)) single_dut (
         .clk, .rst_n, .clear,
         .update_valid(single_update_valid), .update_ready(single_update_ready),
@@ -180,16 +183,16 @@ module tb_nnue_evaluator;
         check(nnue_feature_index(
             Position'(4), WHITE_KING, BLACK) == NnueFeatureIndex'(764),
             "friendly kings are direct input features for the other perspective");
-        check(dut.state_address(ThreadID'(8)) == 8,
+        check(dut.state_address(LAST_THREAD) == int'(LAST_THREAD),
             "one accumulator state is addressed by thread, not ply");
-        check(dut.STATE_COUNT == 9,
+        check(dut.STATE_COUNT == TEST_THREADS,
             "accumulator memory allocates one logical word per thread");
 
         test_output_products();
         test_screlu();
         test_single_thread_state_path();
 
-        update_req.thread_id = ThreadID'(8);
+        update_req.thread_id = LAST_THREAD;
         update_req.ply = PlyIndex'(2);
         update_req.white_feature = 0;
         update_req.black_feature = 1;
@@ -198,8 +201,8 @@ module tb_nnue_evaluator;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
-        eval_thread_id = ThreadID'(8);
-        evaluate(EvalScore'(256), "state memory supports thread IDs above seven");
+        eval_thread_id = LAST_THREAD;
+        evaluate(EvalScore'(256), "state memory supports the highest configured thread ID");
         check(result_pst == EvalScore'(-300), "two-piece position uses endgame PST");
         eval_piece_count = PieceCount'(17);
         evaluate(EvalScore'(256), "midpoint PST blend runs alongside NNUE");
@@ -245,7 +248,7 @@ module tb_nnue_evaluator;
 
         // A tagged child completion identifies the request that just committed.
         update_req = '0;
-        update_req.thread_id = ThreadID'(8);
+        update_req.thread_id = LAST_THREAD;
         update_req.ply = PlyIndex'(1);
         update_req.white_feature = 0;
         update_req.black_feature = 1;
@@ -256,7 +259,7 @@ module tb_nnue_evaluator;
         fork
             begin
                 wait (update_done_valid);
-                check(update_done_thread == ThreadID'(8) && update_done_ply == PlyIndex'(1),
+                check(update_done_thread == LAST_THREAD && update_done_ply == PlyIndex'(1),
                     "tagged completion identifies the finished child state");
             end
             begin
@@ -428,7 +431,7 @@ module tb_nnue_evaluator;
         // that no result or update survives and a fresh rebuild still works.
         @(negedge clk);
         update_req = '0;
-        update_req.thread_id = ThreadID'(8);
+        update_req.thread_id = LAST_THREAD;
         update_req.ply = PlyIndex'(2);
         update_req.white_feature = 0;
         update_req.black_feature = 1;
@@ -457,7 +460,7 @@ module tb_nnue_evaluator;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
-        eval_thread_id = ThreadID'(8);
+        eval_thread_id = LAST_THREAD;
         evaluate(EvalScore'(256), "evaluation restarts correctly after clear");
 
         // Exercise the signed activation product extrema; an unsigned

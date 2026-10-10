@@ -3,13 +3,7 @@
 
 // Shared chess and engine types and constants.
 package chess_defs;
-	// Build tools may size packed identifiers to the selected FPGA profile.
-	`ifndef FPGA_CHESS_SEARCH_STACK_CAPACITY
-		`define FPGA_CHESS_SEARCH_STACK_CAPACITY 64
-	`endif
-	`ifndef FPGA_CHESS_THREAD_CAPACITY
-		`define FPGA_CHESS_THREAD_CAPACITY 16
-	`endif
+	// Build tools compile the selected configuration package before shared types.
 
 	// -- Data Type for Colors --
 	typedef enum logic {
@@ -119,21 +113,8 @@ package chess_defs;
 		0,	1,	2,	3,	4,	5,	6,	7
 	};
 
-	// Order in which the positions are displayed
-	localparam logic[5:0] SHOW_ORDER[0:63] = '{
-		56,	57,	58,	59,	60,	61,	62,	63,
-		48,	49,	50,	51,	52,	53,	54,	55,
-		40,	41,	42,	43,	44,	45,	46,	47,
-		32,	33,	34,	35,	36,	37,	38,	39,
-		24,	25,	26,	27,	28,	29,	30,	31,
-		16,	17,	18,	19,	20,	21,	22,	23,
-		8,	9,	10,	11,	12,	13,	14,	15,
-		0,	1,	2,	3,	4,	5,	6,	7
-	};
-
-
-	// Maximum supported search depth. Target builds may allocate a smaller stack.
-	localparam int MAX_PLY_COUNT = `FPGA_CHESS_SEARCH_STACK_CAPACITY;
+	// Shared ply capacity comes from the selected build configuration.
+	localparam int MAX_PLY_COUNT = rtl_config::SEARCH_STACK_CAPACITY;
 
 	// Data type to index search plies
 	typedef logic [((MAX_PLY_COUNT <= 1) ? 1 : $clog2(MAX_PLY_COUNT))-1:0] PlyIndex;
@@ -214,7 +195,7 @@ package chess_defs;
 
 	// -- Evaluation Related Definitions --
 
-	localparam int THREAD_COUNT = `FPGA_CHESS_THREAD_CAPACITY;
+	localparam int THREAD_COUNT = rtl_config::THREAD_CAPACITY;
 
 	localparam int THREAD_ID_BITS = (THREAD_COUNT <= 1) ? 1 : $clog2(THREAD_COUNT);
 

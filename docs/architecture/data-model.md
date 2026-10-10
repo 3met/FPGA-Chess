@@ -150,7 +150,7 @@ The canonical internal representation is two fields:
 
 ### Search Depth
 
-`PlyIndex` identifies a search ply. Engine profiles select the allocated stack depth; shared type capacities are defined in `chess_defs`.
+`PlyIndex` identifies a search ply. Engine profiles select the allocated stack depth; the generated `rtl_config` package supplies the shared capacity, and `chess_defs` derives the index width from it.
 
 ### Evaluation Scores
 
@@ -184,7 +184,7 @@ Material values are available in two forms:
 | `ZobristKey` | Full 64-bit position key. |
 | `ThreadID` | Search-thread routing identity. |
 
-Engine profiles select the active thread count and stack depth within the shared type capacities. Derived widths and capacity constants belong to `chess_defs`.
+Engine builds derive shared thread and stack capacities from the same resolved profile that supplies module parameters. Standalone module builds select an explicit type-capacity profile. `chess_defs` derives `ThreadID` and `PlyIndex` widths; TT depth uses the ply width. Modules may allocate fewer entries than these capacities for isolated instances. Identifier widths cover indices through capacity minus one, while occupancy counters must also represent the full capacity.
 
 ## Directions
 

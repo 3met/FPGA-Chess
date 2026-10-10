@@ -77,6 +77,11 @@ module tb_move_generator;
 
     move_generator #(
         .THREAD_COUNT(2),
+        // The hand-calculated history checks use this explicit fixture policy.
+        .HISTORY_ENTRY_BITS(8), .HISTORY_REWARD_PER_DEPTH(2),
+        .HISTORY_MAXIMUM_REWARD(31), .HISTORY_MALUS_DIVISOR(2),
+        .QUIET_THRESHOLD_1(8), .QUIET_THRESHOLD_2(32), .QUIET_THRESHOLD_3(64),
+        .CASTLING_HISTORY_BONUS(8),
         .MOVE_MEMORY_ENTRIES(512),
         .ENABLE_STATS(1'b1)
     ) dut (
@@ -536,7 +541,7 @@ module tb_move_generator;
         history_update_valid = 1'b1;
         tick();
         history_update_valid = 1'b0;
-        while (dut.quiet_history.state != 0) tick();
+        while (dut.quiet_history.state != HISTORY_UPDATE_IDLE) tick();
     endtask
 
     task automatic history_update_with_failures(
@@ -559,7 +564,7 @@ module tb_move_generator;
         history_update_valid = 1'b1;
         tick();
         history_update_valid = 1'b0;
-        while (dut.quiet_history.state != 0) tick();
+        while (dut.quiet_history.state != HISTORY_UPDATE_IDLE) tick();
     endtask
 
     task automatic launch_history_update_with_failures(
@@ -570,7 +575,7 @@ module tb_move_generator;
         input logic [1:0] failed_count,
         input logic [5:0] depth
     );
-        while (dut.quiet_history.state != 0) tick();
+        while (dut.quiet_history.state != HISTORY_UPDATE_IDLE) tick();
         history_update_color = WHITE;
         history_update_from = winner.from_pos;
         history_update_to = winner.to_pos;
@@ -858,7 +863,7 @@ module tb_move_generator;
         history_update_valid = 1'b1;
         tick();
         history_update_valid = 1'b0;
-        while (dut.quiet_history.state != 0) tick();
+        while (dut.quiet_history.state != HISTORY_UPDATE_IDLE) tick();
         check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
                     Position'(3), Position'(11))]) == 8'sd0,
@@ -870,10 +875,10 @@ module tb_move_generator;
             make_move(Position'(2), Position'(10)),
             NULL_MOVE, NULL_MOVE, NULL_MOVE, 2'd0, 6'd4
         );
-        check(dut.quiet_history.state == 1, "history update reaches read state");
+        check(dut.quiet_history.state == HISTORY_UPDATE_READ, "history update reaches read state");
         clear = 1'b1;
         tick();
-        check(dut.quiet_history.state == 0 && dut.quiet_history.init_busy,
+        check(dut.quiet_history.state == HISTORY_UPDATE_IDLE && dut.quiet_history.init_busy,
             "clear cancels a pending history update");
         clear = 1'b0;
         while (init_busy) tick();

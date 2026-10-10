@@ -35,17 +35,6 @@ module engine_command_layer #(
     localparam logic [7:0] BUILD_SEARCH_STACK_DEPTH = 8'(SEARCH_STACK_DEPTH);
 
     typedef enum logic [2:0] {
-        ST_IDLE,
-        ST_RECEIVE_PAYLOAD,
-        ST_PROCESS_PAYLOAD,
-        ST_BOARD_UPDATE,
-        ST_ISSUE_REQUEST,
-        ST_WAIT_RESULT,
-        ST_ISSUE_KILL,
-        ST_OUTPUT
-    } EngineState;
-
-    typedef enum logic [2:0] {
         RESP_NONE,
         RESP_STATUS,
         RESP_ACK,
@@ -244,18 +233,18 @@ module engine_command_layer #(
     endfunction : set_board_request
 
     always_comb begin
-        search_req_valid = (state == ST_BOARD_UPDATE && !board_update_request_inflight) || (state == ST_ISSUE_REQUEST) || (state == ST_ISSUE_KILL);
+        search_req_valid = (state == CMD_BOARD_UPDATE && !board_update_request_inflight) || (state == CMD_ISSUE_REQUEST) || (state == CMD_ISSUE_KILL);
         // The request payload is irrelevant until valid; avoid preserving an idle mux value.
         search_req = 'x;
-        if (state == ST_BOARD_UPDATE && !board_update_request_inflight) begin
+        if (state == CMD_BOARD_UPDATE && !board_update_request_inflight) begin
             search_req = set_board_request(board_update_index);
-        end else if (state == ST_ISSUE_REQUEST || state == ST_ISSUE_KILL) begin
+        end else if (state == CMD_ISSUE_REQUEST || state == CMD_ISSUE_KILL) begin
             search_req = request_reg;
         end
     end
 
-    assign ready = (state == ST_IDLE) || (state == ST_RECEIVE_PAYLOAD) || (state == ST_WAIT_RESULT);
-    assign data_out_valid = (state == ST_OUTPUT) && ready_for_result;
+    assign ready = (state == CMD_IDLE) || (state == CMD_RECEIVE_PAYLOAD) || (state == CMD_WAIT_RESULT);
+    assign data_out_valid = (state == CMD_OUTPUT) && ready_for_result;
     assign error_flag = error_code != '0;
 
     always_comb begin
@@ -378,7 +367,7 @@ module engine_command_layer #(
         response_error <= err;
         response_active_op <= search_bit ? active_operation : 8'h00;
         response_status <= status_byte(ready_bit, search_bit, 1'b0, err != ENGINE_ERR_NONE);
-        state <= ST_OUTPUT;
+        state <= CMD_OUTPUT;
     endtask : start_response
 
     task automatic latch_error(input logic [2:0] err);
@@ -398,7 +387,7 @@ module engine_command_layer #(
         request_response_kind <= response_after_accept;
         request_waits_for_result <= waits_for_result;
         request_clears_error <= clears_error;
-        state <= ST_ISSUE_REQUEST;
+        state <= CMD_ISSUE_REQUEST;
     endtask : issue_single_request
 
     task automatic issue_kill_request();
@@ -410,7 +399,7 @@ module engine_command_layer #(
         request_response_kind <= RESP_STATUS;
         request_waits_for_result <= 1'b0;
         request_clears_error <= 1'b0;
-        state <= ST_ISSUE_KILL;
+        state <= CMD_ISSUE_KILL;
     endtask : issue_kill_request
 
     task automatic process_no_payload_command(input logic [7:0] opcode);
@@ -463,7 +452,7 @@ module engine_command_layer #(
                     active_operation <= ENGINE_CMD_SET_BOARD;
                     board_update_index <= 7'd0;
                     board_update_request_inflight <= 1'b0;
-                    state <= ST_BOARD_UPDATE;
+                    state <= CMD_BOARD_UPDATE;
                 end
 
                 ENGINE_CMD_MAKE_MOVE: begin
@@ -527,7 +516,7 @@ module engine_command_layer #(
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            state <= ST_IDLE;
+            state <= CMD_IDLE;
             response_kind <= RESP_NONE;
             response_index <= 4'd0;
             response_status <= 4'h0;
@@ -554,7 +543,7 @@ module engine_command_layer #(
             debug_stat_address_reg <= 8'd0;
         end else begin
             case (state)
-                ST_IDLE: begin
+                CMD_IDLE: begin
                     response_kind <= RESP_NONE;
                     response_index <= 4'd0;
                     active_operation <= 8'h00;
@@ -566,30 +555,30 @@ module engine_command_layer #(
                             payload_count <= 6'd0;
                             payload_error <= 1'b0;
                             active_operation <= data_in;
-                            state <= ST_RECEIVE_PAYLOAD;
+                            state <= CMD_RECEIVE_PAYLOAD;
                         end else begin
                             process_no_payload_command(data_in);
                         end
                     end
                 end
 
-                ST_RECEIVE_PAYLOAD: begin
+                CMD_RECEIVE_PAYLOAD: begin
                     if (data_in_valid) begin
                         payload[payload_count] <= data_in;
                         payload_error <= payload_error || payload_byte_invalid(curr_opcode, payload_count, data_in);
                         if (payload_count == payload_len(curr_opcode) - 6'd1) begin
-                            state <= ST_PROCESS_PAYLOAD;
+                            state <= CMD_PROCESS_PAYLOAD;
                         end else begin
                             payload_count <= payload_count + 6'd1;
                         end
                     end
                 end
 
-                ST_PROCESS_PAYLOAD: begin
+                CMD_PROCESS_PAYLOAD: begin
                     process_payload_command();
                 end
 
-                ST_BOARD_UPDATE: begin
+                CMD_BOARD_UPDATE: begin
                     if (!board_update_request_inflight && search_req_ready && !search_resp_valid) begin
                         board_update_request_inflight <= 1'b1;
                     end else if ((board_update_request_inflight && search_resp_valid)
@@ -608,7 +597,7 @@ module engine_command_layer #(
                     end
                 end
 
-                ST_ISSUE_REQUEST: begin
+                CMD_ISSUE_REQUEST: begin
                     if (search_req_ready) begin
                         if (request_clears_error) begin
                             error_code <= ENGINE_ERR_NONE[2:0];
@@ -621,11 +610,11 @@ module engine_command_layer #(
                         end
 
                         search_active <= request_waits_for_result;
-                        state <= ST_WAIT_RESULT;
+                        state <= CMD_WAIT_RESULT;
                     end
                 end
 
-                ST_WAIT_RESULT: begin
+                CMD_WAIT_RESULT: begin
                     if (data_in_valid) begin
                         if (search_active && data_in == ENGINE_CMD_KILL) begin
                             issue_kill_request();
@@ -657,18 +646,18 @@ module engine_command_layer #(
                     end
                 end
 
-                ST_ISSUE_KILL: begin
+                CMD_ISSUE_KILL: begin
                     if (search_req_ready) begin
-                        state <= ST_WAIT_RESULT;
+                        state <= CMD_WAIT_RESULT;
                     end
                 end
 
-                ST_OUTPUT: begin
+                CMD_OUTPUT: begin
                     if (ready_for_result) begin
                         if (response_index == response_len(response_kind) - 4'd1) begin
                             response_kind <= RESP_NONE;
                             response_index <= 4'd0;
-                            state <= ST_IDLE;
+                            state <= CMD_IDLE;
                         end else begin
                             response_index <= response_index + 4'd1;
                         end

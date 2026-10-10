@@ -1,5 +1,6 @@
 // Shared full-key threefold-repetition history and lookup pipeline.
 import chess_defs::*;
+import repetition_defs::*;
 
 module repetition_checker #(
     parameter int SEARCH_THREAD_COUNT = THREAD_COUNT,
@@ -49,12 +50,7 @@ module repetition_checker #(
         logic [1:0] count;
     } StaticEntry;
     localparam int STATIC_ENTRY_BITS = $bits(StaticEntry);
-    typedef enum logic [2:0] {
-        INIT_IDLE, INIT_CLEAR, INIT_HISTORY_READ, INIT_STATIC_READ,
-        INIT_STATIC_CHECK, INIT_RETRY, INIT_READY, INIT_FAIL
-    } InitState;
-
-    InitState init_state;
+    RepetitionInitState init_state;
     logic [15:0] init_seed;
     logic [STATIC_ADDR_BITS-1:0] clear_index;
     logic [HISTORY_COUNT_BITS-1:0] active_history_count, scan_index;
@@ -129,10 +125,10 @@ module repetition_checker #(
 
     assign static_q = StaticEntry'(static_q_bits);
     assign scan_odd_parity = ~(active_history_count[0] ^ scan_index[0]);
-    assign init_busy = init_state == INIT_CLEAR || init_state == INIT_HISTORY_READ
-        || init_state == INIT_STATIC_READ || init_state == INIT_STATIC_CHECK || init_state == INIT_RETRY;
-    assign init_done = init_state == INIT_READY;
-    assign init_failed = init_state == INIT_FAIL;
+    assign init_busy = init_state == REP_INIT_CLEAR || init_state == REP_INIT_HISTORY_READ
+        || init_state == REP_INIT_STATIC_READ || init_state == REP_INIT_STATIC_CHECK || init_state == REP_INIT_RETRY;
+    assign init_done = init_state == REP_INIT_READY;
+    assign init_failed = init_state == REP_INIT_FAIL;
     assign resp_valid = history_scan_mode ? history_scan_resp_valid : valid_pipe[1];
     assign resp_thread = history_scan_mode ? history_scan_resp_thread : thread_pipe[1];
     assign resp_epoch = history_scan_mode ? history_scan_resp_epoch : epoch_pipe[1];
@@ -140,7 +136,7 @@ module repetition_checker #(
     assign resp_is_draw = resp_previous_count >= 2;
 
     always_comb begin
-        active_history_rden = init_state == INIT_HISTORY_READ
+        active_history_rden = init_state == REP_INIT_HISTORY_READ
             && scan_index < active_history_count;
         active_history_rdaddr = HISTORY_ADDR_BITS'(scan_index);
         if (history_scan_mode && init_done) begin
@@ -152,14 +148,14 @@ module repetition_checker #(
         active_history_wren = active_history_reset || (active_history_write && active_history_count < ACTIVE_HISTORY_DEPTH);
         active_history_wraddr = active_history_reset ? '0 : HISTORY_ADDR_BITS'(active_history_count);
 
-        static_rden = (init_state == INIT_STATIC_READ) || (req_valid && init_done);
-        static_rdaddr = (init_state == INIT_STATIC_READ || init_state == INIT_STATIC_CHECK)
+        static_rden = (init_state == REP_INIT_STATIC_READ) || (req_valid && init_done);
+        static_rdaddr = (init_state == REP_INIT_STATIC_READ || init_state == REP_INIT_STATIC_CHECK)
             ? {scan_odd_parity, hash_key(active_history_q, init_seed)}
             : {req_ply[0], hash_key(req_key, init_seed)};
-        static_wraddr = (init_state == INIT_CLEAR) ? clear_index : static_rdaddr;
-        static_wren = init_state == INIT_CLEAR;
+        static_wraddr = (init_state == REP_INIT_CLEAR) ? clear_index : static_rdaddr;
+        static_wren = init_state == REP_INIT_CLEAR;
         static_write_data = '0;
-        if (init_state == INIT_STATIC_CHECK) begin
+        if (init_state == REP_INIT_STATIC_CHECK) begin
             automatic StaticEntry entry;
             entry = static_q;
             if (!entry.valid) begin
@@ -291,7 +287,7 @@ module repetition_checker #(
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             active_history_count <= '0;
-            init_state <= INIT_IDLE;
+            init_state <= REP_INIT_IDLE;
             init_seed <= 16'h1;
             history_scan_mode <= 1'b0;
             clear_index <= '0;
@@ -307,53 +303,53 @@ module repetition_checker #(
                 active_history_count <= active_history_count + 1'b1;
 
             case (init_state)
-                INIT_IDLE: if (init_start) begin
+                REP_INIT_IDLE: if (init_start) begin
                     clear_index <= '0;
                     init_seed <= 16'h1;
                     history_scan_mode <= 1'b0;
-                    init_state <= INIT_CLEAR;
+                    init_state <= REP_INIT_CLEAR;
                 end
-                INIT_CLEAR: begin
+                REP_INIT_CLEAR: begin
                     if (clear_index == STATIC_WORD_COUNT-1) begin
                         scan_index <= '0;
-                        init_state <= INIT_HISTORY_READ;
+                        init_state <= REP_INIT_HISTORY_READ;
                     end else clear_index <= clear_index + 1'b1;
                 end
-                INIT_HISTORY_READ:
-                    if (scan_index == active_history_count) init_state <= INIT_READY;
-                    else init_state <= INIT_STATIC_READ;
-                INIT_STATIC_READ: begin
-                    init_state <= INIT_STATIC_CHECK;
+                REP_INIT_HISTORY_READ:
+                    if (scan_index == active_history_count) init_state <= REP_INIT_READY;
+                    else init_state <= REP_INIT_STATIC_READ;
+                REP_INIT_STATIC_READ: begin
+                    init_state <= REP_INIT_STATIC_CHECK;
                 end
-                INIT_STATIC_CHECK: begin
+                REP_INIT_STATIC_CHECK: begin
                     automatic StaticEntry entry;
                     entry = static_q;
                     if (!entry.valid || entry.key == active_history_q) begin
                         scan_index <= scan_index + 1'b1;
-                        init_state <= INIT_HISTORY_READ;
-                    end else init_state <= INIT_RETRY;
+                        init_state <= REP_INIT_HISTORY_READ;
+                    end else init_state <= REP_INIT_RETRY;
                 end
-                INIT_RETRY: begin
+                REP_INIT_RETRY: begin
                     if (init_seed == 16'hffff) begin
                         // Exhausting hash seeds cannot invalidate a legal game.
                         history_scan_mode <= 1'b1;
-                        init_state <= INIT_READY;
+                        init_state <= REP_INIT_READY;
                     end
                     else begin
                         init_seed <= init_seed + 1'b1;
                         clear_index <= '0;
-                        init_state <= INIT_CLEAR;
+                        init_state <= REP_INIT_CLEAR;
                     end
                 end
-                INIT_READY: if (init_start) begin
+                REP_INIT_READY: if (init_start) begin
                     clear_index <= '0;
                     init_seed <= 16'h1;
                     history_scan_mode <= 1'b0;
-                    init_state <= INIT_CLEAR;
+                    init_state <= REP_INIT_CLEAR;
                 end
-                default: init_state <= INIT_FAIL;
+                default: init_state <= REP_INIT_FAIL;
             endcase
-            if (active_history_reset || active_history_write) init_state <= INIT_IDLE;
+            if (active_history_reset || active_history_write) init_state <= REP_INIT_IDLE;
 
             valid_pipe[0] <= req_valid && init_done;
             thread_pipe[0] <= req_thread;
@@ -402,7 +398,7 @@ module repetition_checker #(
                 assert (int'(req_ply) < SEARCH_STACK_DEPTH);
             end
             assert ($onehot0(line_wren));
-            if (init_state == INIT_READY) assert (!init_failed);
+            if (init_state == REP_INIT_READY) assert (!init_failed);
 `endif
         end
     end

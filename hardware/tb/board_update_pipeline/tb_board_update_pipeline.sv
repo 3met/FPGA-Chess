@@ -61,11 +61,18 @@ module tb_board_update_pipeline;
     );
 
     task automatic do_clock(input int cnt = 1);
+        /* verilator unroll_disable */
         for (int i = 0; i < cnt; i++) begin
             clk = 1'b0; #5;
             clk = 1'b1; #5;
         end
     endtask
+
+    // Keep FEN formatting loops shared across repeated reference-model checks.
+    function automatic string board_fen(input FullBoard board);
+        /* verilator no_inline_task */
+        return to_fen(board);
+    endfunction
 
     function automatic Tile norm_tile(input Tile tile);
         if (tile.piece_type == NULL_PIECE) begin
@@ -107,7 +114,9 @@ module tb_board_update_pipeline;
 
     // Use the selected material and PST table for one signed piece score.
     function automatic EvalScore ref_tile_score(
-        input Tile tile, input Position pos, input bit endgame = 1'b0
+        input Tile tile, input Position pos, input bit endgame,
+        const ref PstScore first_table[6 * 64], const ref PstScore endgame_table[6 * 64],
+        input EvalScore first_material[8], input EvalScore endgame_material[8]
     );
         automatic Position pst_pos;
         automatic int pst_idx;
@@ -121,26 +130,42 @@ module tb_board_update_pipeline;
         pst_pos = (normalized.piece_color == BLACK) ? mirror_position(pos) : pos;
         pst_idx = (int'(normalized.piece_type) - 1) * 64 + int'(pst_pos);
         if (endgame)
-            score = PIECE_VALS_ENDGAME_128[normalized.piece_type]
-                + EvalScore'(pst_values_endgame[pst_idx]);
+            score = endgame_material[normalized.piece_type]
+                + EvalScore'(endgame_table[pst_idx]);
         else
-            score = PIECE_VALS_128[normalized.piece_type]
-                + EvalScore'(pst_values[pst_idx]);
+            score = first_material[normalized.piece_type]
+                + EvalScore'(first_table[pst_idx]);
         return (normalized.piece_color == WHITE) ? score : -score;
     endfunction
 
-    function automatic EvalScore ref_eval(input FullBoard board, input bit endgame = 1'b0);
+    // Pass reference tables explicitly so the full-board loop can remain shared.
+    function automatic EvalScore calc_ref_eval(
+        input FullBoard board, input bit endgame,
+        const ref PstScore first_table[6 * 64], const ref PstScore endgame_table[6 * 64],
+        input EvalScore first_material[8], input EvalScore endgame_material[8]
+    );
+        /* verilator no_inline_task */
         automatic int signed total = 0;
 
+        /* verilator unroll_disable */
         for (int pos = 0; pos < 64; pos++) begin
-            total += ref_tile_score(board.tiles[pos], Position'(pos), endgame);
+            total += ref_tile_score(board.tiles[pos], Position'(pos), endgame,
+                first_table, endgame_table, first_material, endgame_material);
         end
 
         return EvalScore'(total);
     endfunction
 
+    // Bind the loaded reference tables at the call site.
+    function automatic EvalScore ref_eval(input FullBoard board, input bit endgame = 1'b0);
+        return calc_ref_eval(board, endgame, pst_values, pst_values_endgame,
+            PIECE_VALS_128, PIECE_VALS_ENDGAME_128);
+    endfunction
+
     function automatic PieceCount ref_piece_count(input FullBoard board);
+        /* verilator no_inline_task */
         automatic PieceCount count = PieceCount'(0);
+        /* verilator unroll_disable */
         for (int pos = 0; pos < 64; pos++) begin
             if (board.tiles[pos].piece_type != NULL_PIECE)
                 count += PieceCount'(1);
@@ -148,14 +173,16 @@ module tb_board_update_pipeline;
         return count;
     endfunction
 
-    function automatic ZobristKey ref_zobrist_tile(input Tile tile, input Position pos);
+    function automatic ZobristKey ref_zobrist_tile(
+        input Tile tile, input Position pos, const ref ZobristKey tile_values[ZOBRIST_TILE_ENTRY_CNT]
+    );
         automatic Tile normalized = norm_tile(tile);
 
         if (normalized.piece_type == NULL_PIECE) begin
             return ZobristKey'(0);
         end
 
-        return zobrist_tile_values[zobrist_tile_addr(normalized, pos)];
+        return tile_values[zobrist_tile_addr(normalized, pos)];
     endfunction
 
     function automatic logic ref_ep_has_capturer(
@@ -172,7 +199,12 @@ module tb_board_update_pipeline;
                 && board.tiles[get_position(pawn_rank, ep_file + BoardFile'(1))] == pawn);
     endfunction
 
-    function automatic ZobristKey ref_zobrist_full(input FullBoard board);
+    // Share the full-key calculation instead of expanding its tile loop at each operation.
+    function automatic ZobristKey calc_ref_zobrist_full(
+        input FullBoard board, const ref ZobristKey tile_values[ZOBRIST_TILE_ENTRY_CNT],
+        const ref ZobristKey ep_values[ZOBRIST_EP_ENTRY_CNT]
+    );
+        /* verilator no_inline_task */
         automatic ZobristKey key = ZobristKey'(0);
 
         if (board.turn == BLACK) begin
@@ -185,17 +217,24 @@ module tb_board_update_pipeline;
         if (board.castling_rights.black_queenside) key ^= ZOBRIST_BLACK_QUEENSIDE_VALUE;
 
         if (board.has_ep && ref_ep_has_capturer(board, board.turn, board.ep_file)) begin
-            key ^= zobrist_ep_values[board.ep_file];
+            key ^= ep_values[board.ep_file];
         end
 
+        /* verilator unroll_disable */
         for (int pos = 0; pos < 64; pos++) begin
-            key ^= ref_zobrist_tile(board.tiles[pos], Position'(pos));
+            key ^= ref_zobrist_tile(board.tiles[pos], Position'(pos), tile_values);
         end
 
         return key;
     endfunction
 
+    // Bind the loaded hashing tables at the call site.
+    function automatic ZobristKey ref_zobrist_full(input FullBoard board);
+        return calc_ref_zobrist_full(board, zobrist_tile_values, zobrist_ep_values);
+    endfunction
+
     task automatic init_empty_board(output FullBoard board);
+        /* verilator unroll_disable */
         for (int pos = 0; pos < 64; pos++) begin
             board.tiles[pos] = EMPTY_TILE;
         end
@@ -216,6 +255,7 @@ module tb_board_update_pipeline;
 
     task automatic reset_ref_model();
         init_empty_board(ref_board);
+        /* verilator unroll_disable */
         for (int ply = 0; ply < MAX_PLY_COUNT; ply++) begin
             ref_history[ply] = MoveRecord'('0);
         end
@@ -258,7 +298,7 @@ module tb_board_update_pipeline;
         automatic ZobristKey expected_zobrist = ref_zobrist_full(expected_board);
 
         expect_equal(board_out === expected_board,
-            $sformatf("%s board mismatch expected=%s found=%s", test_name, to_fen(expected_board), to_fen(board_out)));
+            $sformatf("%s board mismatch expected=%s found=%s", test_name, board_fen(expected_board), board_fen(board_out)));
         expect_equal(pst_eval_out.first === expected_pst
                 && pst_eval_out.endgame === expected_pst_endgame,
             $sformatf("%s PST mismatch expected=(%0d,%0d) found=(%0d,%0d)",
@@ -276,7 +316,7 @@ module tb_board_update_pipeline;
     endtask
 
     task automatic expect_fen(input string expected_fen, input string test_name);
-        automatic string found_fen = to_fen(ref_board);
+        automatic string found_fen = board_fen(ref_board);
 
         expect_equal(found_fen == expected_fen,
             $sformatf("%s FEN mismatch expected=%s found=%s", test_name, expected_fen, found_fen));
@@ -593,9 +633,11 @@ module tb_board_update_pipeline;
         set_tile(WHITE_BISHOP, Position'(5),  "setup f1", 1'b0);
         set_tile(WHITE_KNIGHT, Position'(6),  "setup g1", 1'b0);
         set_tile(WHITE_ROOK,   Position'(7),  "setup h1", 1'b0);
+        /* verilator unroll_disable */
         for (int pos = 8; pos < 16; pos++) begin
             set_tile(WHITE_PAWN, Position'(pos), $sformatf("setup white pawn %0d", pos), 1'b0);
         end
+        /* verilator unroll_disable */
         for (int pos = 48; pos < 56; pos++) begin
             set_tile(BLACK_PAWN, Position'(pos), $sformatf("setup black pawn %0d", pos), 1'b0);
         end
@@ -768,6 +810,7 @@ module tb_board_update_pipeline;
         expect_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0", "after overwrite restore");
         expect_equal(ref_pst === DRAW_EVAL_SCORE, $sformatf("restore score expected 0 found=%0d", ref_pst));
 
+        /* verilator unroll_disable */
         for (int piece = PAWN; piece <= QUEEN; piece++) begin
             set_tile(Tile'({WHITE, PieceType'(piece)}), Position'(24), $sformatf("add white piece type %0d", piece));
             expect_equal(ref_pst > DRAW_EVAL_SCORE, $sformatf("white piece type %0d expected positive found=%0d", piece, ref_pst));

@@ -94,11 +94,11 @@ class ProtocolEncodingTests(unittest.TestCase):
     def test_time_is_24_bit_little_endian(self):
         self.assertEqual(encode_time_ms(0x010203), bytes.fromhex("030201"))
 
-    def test_timed_search_commands_include_default_overhead(self):
-        self.assertEqual(cmd_search_fixed_time(250), bytes.fromhex("11fa00000a0000"))
+    def test_timed_search_commands_encode_explicit_overhead(self):
+        self.assertEqual(cmd_search_fixed_time(250, 13), bytes.fromhex("11fa00000d0000"))
         self.assertEqual(
-            cmd_search_on_clock(1000, 10, 30),
-            bytes.fromhex("12e803000a00001e000a0000"),
+            cmd_search_on_clock(1000, 10, 30, 13),
+            bytes.fromhex("12e803000a00001e000d0000"),
         )
 
     def test_search_response_decoding(self):

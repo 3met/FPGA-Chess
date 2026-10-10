@@ -63,10 +63,16 @@ def _format_lifecycle(report: dict) -> str:
         ("idle", "Inactive", None, []),
     ]
 
+    # Include phases introduced by the RTL even before a custom label is added.
+    known_phases = {key for key, _, _, _ in phases}
+    extra_phases = dict.fromkeys(key for thread in threads for key in thread["phase_cycles"]
+                                if key not in known_phases)
+    phases.extend((key, key.replace("_", " ").capitalize(), None, []) for key in extra_phases)
+
     # Hide globally unused phases, retaining the same row order for every group.
     rows = []
     for key, label, source, children in phases:
-        if not any(thread["phase_cycles"][key] for thread in threads):
+        if not any(thread["phase_cycles"].get(key, 0) for thread in threads):
             continue
         rows.append((label, "phase_cycles", key))
         for child_key, child_label in children:

@@ -2,8 +2,7 @@
   "search_config": "hardware/config/search/default.json",
   "engine": {
     "threads": 2,
-    "stack_depth": 32,
-    "clock_frequency_hz": 75000000
+    "stack_depth": 32
   },
   "transposition_table": {
     "tag_bits": 32,
@@ -32,5 +31,26 @@
       16,
       48
     ]
+  },
+  "clocks": {
+    "engine": {
+      "frequency_hz": 75000000,
+      "phase_ps": 0,
+      "duty_percent": 50
+    },
+    "memory": {
+      "frequency_hz": 133333333,
+      "phase_ps": 0,
+      "duty_percent": 50
+    },
+    "memory_io": {
+      "phase_ps": 1313,
+      "duty_percent": 40
+    },
+    "communication": {
+      "frequency_hz": 100000000,
+      "phase_ps": 0,
+      "duty_percent": 50
+    }
   }
 }

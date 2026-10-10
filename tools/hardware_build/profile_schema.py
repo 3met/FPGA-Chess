@@ -1,22 +1,5 @@
 """Names and labels for the profiler's stable metric schema."""
 
-from software.engine.search_metadata import SEARCH_THREAD_PHASES
-
-
-ENGINE_STATES = [
-    "idle", "receive_payload", "process_payload", "board_update",
-    "issue_request", "wait_result", "issue_kill", "output",
-]
-CONTROLLER_STATES = [
-    "idle", "board_issue", "board_wait", "direct_done", "new_clear_start",
-    "new_clear_wait", "new_setup_issue", "new_setup_wait", "new_done",
-    "perft_gen_issue", "perft_gen_wait", "perft_push_issue", "perft_push_wait",
-    "perft_reverse_issue", "perft_reverse_wait", "search_time_setup",
-    "search_time_wait", "repetition_init",
-    "repetition_root_wait", "search_iter_start", "search_root_init", "search_run",
-    "respond", "flush_respond",
-]
-THREAD_PHASES = list(SEARCH_THREAD_PHASES)
 THREAD_PHASE_LABELS = {
     "idle": "Inactive",
     "ready": "Runnable",
@@ -38,9 +21,6 @@ READY_BREAKDOWN_LABELS = {
     "quiet_move_blocked": "Quiet move request blocked",
     "transition": "Node/iteration transition",
 }
-MOVE_ORDER_STATES = [
-    "direct", "generate_noisy", "good_noisy", "generate_quiet", "quiet", "bad_noisy", "done",
-]
 MOVE_BUCKETS = [
     "bad_noisy_low", "bad_noisy_high", "quiet_low", "quiet_medium",
     "quiet_high", "quiet_highest", "good_noisy_low", "good_noisy_high",
@@ -70,10 +50,6 @@ ALGORITHM_LABELS = {
     "repetition_draws": "Repetition draws",
     "fifty_move_draws": "Fifty-move draws",
 }
-GENERATOR_STATES = [
-    "idle", "direct", "select_destination", "expand_source",
-    "build_context", "history_wait", "castle", "finish",
-]
 MOVE_GENERATOR_OPERATIONS = [
     "direct_validation", "noisy_generation", "quiet_generation", "bucket_pop",
 ]
@@ -83,18 +59,7 @@ MOVE_GENERATOR_OPERATION_LABELS = {
     "quiet_generation": "Quiet generation",
     "bucket_pop": "Bucket pop",
 }
-TT_FRONTEND_STATES = ["idle", "drain", "clear_wait", "cache_clear"]
 
-SDRAM_STATES = [
-    "powerup", "init_precharge", "init_precharge_wait", "init_refresh_1",
-    "init_refresh_1_wait", "init_refresh_2", "init_refresh_2_wait", "init_mode",
-    "init_mode_wait", "clear_check", "clear_precharge", "clear_precharge_wait",
-    "clear_activate", "clear_activate_wait", "clear_write", "clear_terminate", "idle",
-    "activate", "activate_wait", "read_command",
-    "read_wait", "read_data", "read_serve", "write_collect", "write_command", "write_data",
-    "burst_terminate", "complete", "refresh_precharge", "refresh_precharge_wait",
-    "refresh", "refresh_wait", "close", "close_wait",
-]
 
 # Queue identifiers match the testbench's occupancy histogram rows.
 TT_FIFOS = {

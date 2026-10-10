@@ -8,42 +8,42 @@ package chess_helpers;
     import chess_defs::*;
 
     // Return the rank for a square.
-	function BoardRank get_rank(input Position pos);
+	function automatic BoardRank get_rank(input Position pos);
 		return BoardRank'(pos[5:3]);
 	endfunction
 
 	// Return the file for a square.
-	function BoardFile get_file(input Position pos);
+	function automatic BoardFile get_file(input Position pos);
 		return BoardFile'(pos[2:0]);
 	endfunction
 
 	// Return the square at a rank and file.
-	function Position get_position(input BoardRank rank, input BoardFile file);
+	function automatic Position get_position(input BoardRank rank, input BoardFile file);
 		return Position'({rank, file});
 	endfunction
 
     // Mirror a square between the White and Black sides of the board.
-    function Position mirror_position(Position in);
+    function automatic Position mirror_position(Position in);
 		return Position'({~get_rank(in), get_file(in)});
 	endfunction
 
     // Returns the incrementally maintained king square for one color.
-    function Position king_position(input FullBoard board, input Color color);
+    function automatic Position king_position(input FullBoard board, input Color color);
 		return Position'(board.king_positions[color]);
 	endfunction
 
     // Return whether a direction is cardinal.
-	function logic is_cardinal_direction(Direction dir);
+	function automatic logic is_cardinal_direction(Direction dir);
 		return (dir==NORTH || dir==SOUTH || dir==EAST || dir==WEST);
 	endfunction : is_cardinal_direction
 
 	// Return whether a direction is diagonal.
-	function logic is_diagonal_direction(Direction dir);
+	function automatic logic is_diagonal_direction(Direction dir);
 		return (dir==NORTH_EAST || dir==SOUTH_EAST || dir==NORTH_WEST || dir==SOUTH_WEST);
 	endfunction : is_diagonal_direction
 
 	// Shift a square in a direction by a distance.
-	function Position shift_position(Position pos, Direction dir, logic [2:0] distance);
+	function automatic Position shift_position(Position pos, Direction dir, logic [2:0] distance);
 		logic [6:0] shifted_pos;
 
 		// Squares intentionally wrap modulo 64 here; is_shift_on_board validates
@@ -56,7 +56,7 @@ package chess_helpers;
 
 	// Return whether shifting a square by the requested direction and distance
 	// remains on the board.
-	function bit is_shift_on_board(Position pos, Direction dir, logic [2:0] distance);
+	function automatic bit is_shift_on_board(Position pos, Direction dir, logic [2:0] distance);
 		automatic Position new_pos = shift_position(pos, dir, distance);
 		automatic BoardRank old_rank = get_rank(pos);
 		automatic BoardFile old_file = get_file(pos);
@@ -81,7 +81,7 @@ package chess_helpers;
 	endfunction : is_shift_on_board
 
 	// Shift a square by a knight move.
-	function Position shift_knight_position(Position pos, KnightDirection dir);
+	function automatic Position shift_knight_position(Position pos, KnightDirection dir);
 		logic [6:0] shifted_pos;
 
 		shifted_pos = {1'b0, pos} + {1'b0, KNIGHT_SHIFT[dir]};
@@ -89,7 +89,7 @@ package chess_helpers;
 	endfunction : shift_knight_position
 
 	// Return whether a knight move remains on the board.
-	function bit is_knight_shift_on_board(Position pos, KnightDirection dir);
+	function automatic bit is_knight_shift_on_board(Position pos, KnightDirection dir);
 		case (dir)
 			NNE: return (is_shift_on_board(pos, NORTH, 2) && is_shift_on_board(pos, EAST, 1));
 			NEE: return (is_shift_on_board(pos, NORTH, 1) && is_shift_on_board(pos, EAST, 2));
@@ -180,7 +180,7 @@ package chess_helpers;
 	endfunction : has_ep_capturer
 
     // Return the FEN character for a tile.
-    function string piece_to_char(Tile t);
+    function automatic string piece_to_char(Tile t);
 		case (t)
 			WHITE_PAWN:   return "P";
 			WHITE_KNIGHT: return "N";
@@ -206,7 +206,8 @@ package chess_helpers;
 		// Append piece placement.
 		for (int row=0; row<8; row++) begin
 			for (int col=0; col<8; col++) begin
-				int sq = SHOW_ORDER[8*row + col];
+				// FEN lists ranks from eight to one, with files ascending.
+				int sq = 8 * (7 - row) + col;
 				if (b.tiles[sq].piece_type == NULL_PIECE) begin
 					empty_cnt += 1;
 				end else begin

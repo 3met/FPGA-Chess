@@ -5,7 +5,7 @@ import move_generator_defs::*;
 
 module move_generator #(
     parameter int THREAD_COUNT = 1,
-    parameter int SEARCH_STACK_DEPTH = 32,
+    parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int MOVE_MEMORY_ENTRIES = 2048,
     parameter int MOVE_BUCKET_0_RATIO = 48,
     parameter int MOVE_BUCKET_1_RATIO = 16,

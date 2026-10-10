@@ -44,6 +44,9 @@ def validate_manifest(manifest: object) -> None:
     modelsim = simulator.get("modelsim")
     if not isinstance(modelsim, dict):
         raise BuildError("Manifest field 'simulator.modelsim' must be an object")
+    require_fields(modelsim, "ModelSim configuration", {"type_config"})
+    from .rtl_config import load_type_config, type_config_for_target
+    load_type_config(modelsim["type_config"])
 
     for name, items in source_sets.items():
         if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
@@ -57,6 +60,9 @@ def validate_manifest(manifest: object) -> None:
         if test["source_set"] not in source_sets:
             raise BuildError(f"Test '{name}' uses unknown source set '{test['source_set']}'")
         ensure_existing([repo_path(test["testbench"])])
+        if "verilator_args" in test and (not isinstance(test["verilator_args"], list)
+                or not all(isinstance(arg, str) for arg in test["verilator_args"])):
+            raise BuildError(f"Test {name!r} verilator_args must be a list of strings")
 
     for name, item in generated_data.items():
         if not isinstance(item, dict):
@@ -83,9 +89,7 @@ def validate_manifest(manifest: object) -> None:
             if not isinstance(target["engine_config"], str) or not target["engine_config"]:
                 raise BuildError(f"Synthesis target '{name}' engine_config must be a nonempty path")
             ensure_existing([repo_path(target["engine_config"])])
-            # Import locally to keep manifest graph helpers independent of profile loading.
-            from .engine_config import load_engine_config
-            load_engine_config(target["engine_config"])
+        type_config_for_target(target)
         if "seed" in target and (not isinstance(target["seed"], int) or target["seed"] < 1):
             raise BuildError(f"Synthesis target '{name}' seed must be a positive integer")
         if target["tool"] == "quartus":
@@ -101,7 +105,15 @@ def validate_manifest(manifest: object) -> None:
             if clock_generator is not None:
                 if not isinstance(clock_generator, dict):
                     raise BuildError(f"Synthesis target '{name}' clock_generator must be an object")
-                require_fields(clock_generator, f"Synthesis target '{name}' clock_generator", {"kind", "template"})
+                require_fields(clock_generator, f"Synthesis target '{name}' clock_generator", {"kind", "template", "reference_frequency_hz", "reference_port"})
+                if set(clock_generator) != {"kind", "template", "reference_frequency_hz", "reference_port"}:
+                    raise BuildError("clock_generator only defines vendor template and board reference clock")
+                frequency = clock_generator["reference_frequency_hz"]
+                port = clock_generator["reference_port"]
+                if type(frequency) is not int or frequency <= 0:
+                    raise BuildError("reference_frequency_hz must be a positive integer")
+                if not isinstance(port, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", port):
+                    raise BuildError("reference_port must be an HDL port name")
                 if clock_generator["kind"] != "intel-pll":
                     raise BuildError(f"Synthesis target '{name}' uses unsupported clock generator '{clock_generator['kind']}'")
                 if "engine_config" not in target:

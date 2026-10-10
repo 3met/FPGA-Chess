@@ -7,6 +7,26 @@ package move_generator_defs;
     // External bucket-relative pointers include the one-past-last entry.
     // Device configurations must keep every partition below 2**11 entries.
     localparam int MOVE_BUCKET_TOP_BITS = 11;
+    // Shared history FSM type prevents testbench encoding assumptions.
+    typedef enum logic [1:0] {
+        HISTORY_UPDATE_IDLE,
+        HISTORY_UPDATE_READ,
+        HISTORY_UPDATE_CAPTURE,
+        HISTORY_UPDATE_WRITE
+    } HistoryUpdateState;
+
+    // Shared FSM type keeps profiler decoding tied to the implementation.
+    typedef enum logic [3:0] {
+        GEN_IDLE,
+        GEN_DIRECT,
+        GEN_SELECT_DEST,
+        GEN_EXPAND_SOURCE,
+        GEN_BUILD_CONTEXT,
+        GEN_PREPARE_SOURCE,
+        GEN_CASTLE,
+        GEN_FINISH
+    } GeneratorState;
+
     typedef logic [2:0] MoveBucketIndex;
     typedef logic [MOVE_BUCKET_TOP_BITS-1:0] MoveBucketTop;
     typedef logic [MOVE_BUCKET_COUNT-1:0][MOVE_BUCKET_TOP_BITS-1:0] MoveBucketTops;

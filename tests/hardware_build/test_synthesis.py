@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from tools.hardware_build.manifest import load_manifest
+from tools.hardware_build.engine_config import load_engine_config
 from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count, short_quartus_node, wrap_timing_node
 from tools.hardware_build.synthesis import (
     command_synth,
@@ -34,37 +35,39 @@ class EngineBuildConfigTests(unittest.TestCase):
         self.assertNotEqual(deterministic_build_id(manifest, changed_target), first)
 
     def test_config_contains_exact_build_id_and_clock_frequency(self):
+        profile = load_engine_config("hardware/config/engine/de1-soc.json")
+        profile["clocks"]["engine"]["frequency_hz"] = 40_000_000
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = write_engine_build_config(Path(temp_dir), 40.0, 0x0123456789ABCDEF)
-            self.assertEqual(config.name, "engine_build_config.svh")
-            self.assertEqual(
-                config.read_text(encoding="utf-8"),
-                "// Generated for this synthesis configuration; do not edit.\n"
-                "localparam logic [63:0] FPGA_BUILD_ID = 64'h0123456789abcdef;\n"
-                "localparam int ENGINE_CLOCK_FREQ = 40_000_000;\n",
-            )
+            config = write_engine_build_config(Path(temp_dir), 0x0123456789ABCDEF, profile)
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("FPGA_BUILD_ID = 64'h0123456789abcdef;", text)
+            self.assertIn("ENGINE_CLOCK_FREQ = 40000000;", text)
+            for role in ("memory", "communication"):
+                self.assertIn(f"{role.upper()}_CLOCK_FREQ = {profile['clocks'][role]['frequency_hz']};", text)
 
     def test_engine_frequency_change_keeps_board_memory_clock_settings(self):
         """Independent PLLs retain memory timing when an engine profile changes."""
         manifest = load_manifest()
         target = manifest["synthesis_targets"]["quartus-de1-soc"]
         clock_config = target["clock_generator"]
+        clocks = load_engine_config(target["engine_config"])["clocks"]
         template = Path(__file__).resolve().parents[2] / clock_config["template"]
         with tempfile.TemporaryDirectory() as temp_dir:
             implementations = []
             for frequency in (40.0, 60.0):
                 build_dir = Path(temp_dir) / str(frequency)
-                qip = materialize_intel_pll(template, build_dir, frequency, clock_config)
+                clocks["engine"]["frequency_hz"] = round(frequency * 1_000_000)
+                qip = materialize_intel_pll(template, build_dir, clocks, clock_config)
                 self.assertTrue(qip.is_file())
                 implementation = (qip.parent / "pll_ip" / "pll_ip_0002.sv").read_text(encoding="utf-8")
                 engine_pll, memory_pll, communication_pll = implementation.split("    altera_pll #(\n")[1:]
                 self.assertIn(f'.output_clock_frequency0("{frequency:.6f} MHz")', engine_pll)
-                memory_frequency = clock_config["memory_frequency_hz"] / 1_000_000
+                memory_frequency = clocks["memory"]["frequency_hz"] / 1_000_000
                 for index in range(2):
                     self.assertIn(f'.output_clock_frequency{index}("{memory_frequency:.6f} MHz")', memory_pll)
-                self.assertIn(f'.phase_shift1("{clock_config["memory_output_phase_ps"]} ps")', memory_pll)
-                self.assertIn(f'.duty_cycle1({clock_config["memory_output_duty_percent"]})', memory_pll)
-                self.assertIn(f'.output_clock_frequency0("{clock_config["communication_frequency_hz"] / 1_000_000:.6f} MHz")', communication_pll)
+                self.assertIn(f'.phase_shift1("{clocks["memory_io"]["phase_ps"] + clocks["memory"]["phase_ps"]} ps")', memory_pll)
+                self.assertIn(f'.duty_cycle1({clocks["memory_io"]["duty_percent"]})', memory_pll)
+                self.assertIn(f'.output_clock_frequency0("{clocks["communication"]["frequency_hz"] / 1_000_000:.6f} MHz")', communication_pll)
                 implementations.append(memory_pll + communication_pll)
             self.assertEqual(*implementations)
 
@@ -108,8 +111,10 @@ class EngineBuildConfigTests(unittest.TestCase):
             self.assertIn("set_global_assignment -name SMART_RECOMPILE ON", qsf)
             self.assertIn("set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED", qsf)
             self.assertIn('set_global_assignment -name FITTER_EFFORT "STANDARD FIT"', qsf)
-            self.assertIn(f"FPGA_CHESS_THREAD_CAPACITY={resolved['threads']}", qsf)
-            self.assertIn(f"FPGA_CHESS_SEARCH_STACK_CAPACITY={resolved['stack_depth']}", qsf)
+            type_config = (build_dir / "rtl_config.sv").read_text(encoding="utf-8")
+            self.assertIn(f"THREAD_CAPACITY = {resolved['threads']}", type_config)
+            self.assertIn(f"SEARCH_STACK_CAPACITY = {resolved['stack_depth']}", type_config)
+            self.assertLess(qsf.index("rtl_config.sv"), qsf.index("chess_defs.sv"))
             self.assertIn("PHYSICAL_SYNTHESIS_COMBO_LOGIC ON", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON", qsf)
             self.assertIn("PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON", qsf)
@@ -192,7 +197,8 @@ class QuartusSynthesisTests(unittest.TestCase):
             )
 
     def test_negative_slack_prints_sta_as_failure_once(self):
-        target = {"tool": "quartus", "top": "fpga_chess"}
+        target = {"tool": "quartus", "top": "fpga_chess",
+                  "type_config": "hardware/config/types/standalone.json"}
         command_results = [(0, "Info: SMART_ACTION = SOURCE\n", 0.5)] + [(0, "", 1.0)] * 3
         timing_failure = "Setup 'engine_clk': -0.736 ns (Slow 1100mV 85C)"
 
@@ -249,7 +255,8 @@ class QuartusSynthesisTests(unittest.TestCase):
             self.assertEqual(metadata["stages"][-1]["status"], "fail")
 
     def test_done_smart_action_skips_all_compilation_stages(self):
-        target = {"tool": "quartus", "top": "fpga_chess"}
+        target = {"tool": "quartus", "top": "fpga_chess",
+                  "type_config": "hardware/config/types/standalone.json"}
         with tempfile.TemporaryDirectory() as temp_dir:
             build_root = Path(temp_dir)
             project = build_root / "quartus-test" / "fpga_chess"

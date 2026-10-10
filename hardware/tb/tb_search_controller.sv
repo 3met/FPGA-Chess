@@ -156,12 +156,19 @@ module tb_search_controller #(
 
     search_controller #(
         .CLOCK_FREQ(1_000_000),
+        // Directed margin and reduction boundaries use an explicit fixture policy.
+        .LMR_A_Q8(192), .LMR_B_Q8(614), .LMR_MINIMUM_DEPTH(3), .LMR_MINIMUM_MOVE_NUMBER(3),
+        .NULL_MINIMUM_DEPTH(3), .NULL_DEEP_DEPTH_THRESHOLD(7),
+        .NULL_SHALLOW_REDUCTION(2), .NULL_DEEP_REDUCTION(3),
+        .RFP_BASE_MARGIN(64), .RFP_MARGIN_PER_DEPTH(128), .RFP_MAXIMUM_DEPTH(5),
+        .FUTILITY_BASE_MARGIN(192), .FUTILITY_MARGIN_PER_DEPTH(192), .FUTILITY_MAXIMUM_DEPTH(3),
+        .QDELTA_MARGIN(384),
         // Full mating searches use a larger table; the shallow acceptance
         // cases retain their tiny table to exercise replacement and misses.
         .TT_ENTRY_COUNT(1 << (MATE_ONLY ? 10 : 4)),
         .SEARCH_THREAD_COUNT(THREAD_COUNT),
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
-        // The focused variant puts ordinary quiets in bucket 5 without
+        // The focused variant puts ordinary quiets in the highest quiet bucket without
         // seeding internal RAM, so real search must exercise early quiet reads.
         .QUIET_THRESHOLD_1(EARLY_ONLY ? -2 : 8),
         .QUIET_THRESHOLD_2(EARLY_ONLY ? -1 : 32),
@@ -512,20 +519,23 @@ module tb_search_controller #(
         automatic Move best_move;
         automatic EvalScore score;
         automatic NodeCountType nodes;
+        automatic PlyIndex saved_depth;
 
         new_game();
+        saved_depth = PlyIndex'(dut.search_stack_top[0].remaining_depth);
         check(!dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " root score is cutoff-ineligible"});
         dut.search_ply[0] = PlyIndex'(1);
         dut.search_repetition_seen_before[0] = 1'b0;
         dut.search_board[0].halfmove_clock = 0;
-        force dut.search_stack_top[0].remaining_depth = 5'd1;
+        // These direct policy checks complete without a clock edge; restore the fixture afterward.
+        dut.search_stack_top[0].remaining_depth = 5'd1;
         check(dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " child score remains cutoff-eligible"});
         dut.search_repetition_seen_before[0] = 1'b1;
         check(!dut.tt_score_cutoff_eligible(ThreadID'(0)),
             {label, " repeated child rejects TT score cutoffs"});
-        release dut.search_stack_top[0].remaining_depth;
+        dut.search_stack_top[0].remaining_depth = saved_depth;
         dut.search_ply[0] = PlyIndex'(0);
         dut.search_repetition_seen_before[0] = 1'b0;
         preload_root_tt(cached_move, EvalScore'(600), TTDepth'(9));
@@ -695,7 +705,7 @@ module tb_search_controller #(
                 $sformatf("%s thread %0d retained selected root move on stack", label, idx));
             check(dut.search_thread_nodes[idx] > NodeCountType'(0),
                 $sformatf("%s thread %0d searched nonzero nodes", label, idx));
-            check(dut.search_thread_phase[idx] == dut.SEARCH_PHASE_DONE,
+            check(dut.search_thread_phase[idx] == SEARCH_PHASE_DONE,
                 $sformatf("%s thread %0d lifecycle done", label, idx));
             check(!dut.search_board_inflight[idx],
                 $sformatf("%s thread %0d board in-flight cleared", label, idx));
@@ -824,7 +834,7 @@ module tb_search_controller #(
         // candidate. Its move and score may be published without claiming that
         // the deeper iteration itself completed.
         while (!(dut.search_completed_depth != 0
-                && dut.search_thread_phase[0] != dut.SEARCH_PHASE_DONE
+                && dut.search_thread_phase[0] != SEARCH_PHASE_DONE
                 && dut.search_root_has_completed_move[0]
                 && dut.search_root_best_exact[0])
                 && completion_wait_cycles < 200_000) begin
@@ -877,7 +887,7 @@ module tb_search_controller #(
                 $sformatf("%s thread %0d reduced return canceled", label, tid));
             check(!dut.search_pvs_research[tid],
                 $sformatf("%s thread %0d PVS re-search canceled", label, tid));
-            check(dut.search_thread_phase[tid] == dut.SEARCH_PHASE_IDLE,
+            check(dut.search_thread_phase[tid] == SEARCH_PHASE_IDLE,
                 $sformatf("%s thread %0d phase idle after kill", label, tid));
         end
         check(nnue_metadata_clear, {label, " invalidates NNUE state metadata"});
@@ -1362,8 +1372,8 @@ module tb_search_controller #(
             set_tile(BLACK_PAWN, Position'(49), "early capture black pawn b7");
             set_tile(BLACK_PAWN, Position'(50), "early capture black pawn c7");
             run_search_depth(8'd1, "early noisy capture search");
-            check(early_noisy_reads > 0, "search receives bucket 7 before noisy generation completes");
-            check(early_quiet_reads > 0, "search receives bucket 5 before quiet generation completes");
+            check(early_noisy_reads > 0, "search receives highest noisy bucket before generation completes");
+            check(early_quiet_reads > 0, "search receives highest quiet bucket before generation completes");
             check(early_child_preparations > 0, "early candidates begin child preparation during generation");
             check(repaired_parents > 0, "completed generation publishes remaining moves to saved parents");
             check(early_child_search_requests > 0, "child TT lookup or evaluation overlaps parent generation");
@@ -1393,13 +1403,15 @@ module tb_search_controller #(
             "LMR 8-bit saturation bucket boundary");
         // Exercise bucket confidence independently of the configured base curve.
         for (int bucket = 0; bucket < move_generator_defs::MOVE_BUCKET_COUNT; bucket++) begin
-            automatic int expected = bucket >= 5 ? 1 : bucket == 2 ? 3 : 2;
+            automatic int expected = (bucket == move_generator_defs::QUIET_HIGHEST_BUCKET
+                || bucket == move_generator_defs::GOOD_NOISY_LOW_BUCKET || bucket == move_generator_defs::GOOD_NOISY_HIGH_BUCKET)
+                ? 1 : bucket == move_generator_defs::QUIET_LOW_BUCKET ? 3 : 2;
             check(dut.lmr_bucket_reduction(8'(2), 8'(6),
                     move_generator_defs::MoveBucketIndex'(bucket)) == 8'(expected),
                 $sformatf("LMR confidence adjustment for bucket %0d", bucket));
             check(dut.lmr_bucket_reduction(8'(0), 8'(6),
                     move_generator_defs::MoveBucketIndex'(bucket))
-                    == 8'(bucket == 2 ? 1 : 0),
+                    == 8'(bucket == move_generator_defs::QUIET_LOW_BUCKET ? 1 : 0),
                 $sformatf("LMR zero reduction cannot underflow for bucket %0d", bucket));
         end
         check(dut.lmr_bucket_reduction(8'(3), 8'(3),
@@ -1538,18 +1550,22 @@ module tb_search_controller #(
                     EvalScore'(-128), EvalScore'(384), PAWN,
                     1'b0, 1'b0, 1'b0, 1'b1, 1'b1),
             "qsearch delta pruning exempts promotions, non-captures, and recaptures");
-        force dut.search_stack_top[0].remaining_depth = 5'd6;
-        check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
-            "null reduction is two plies below depth seven");
-        force dut.search_stack_top[0].remaining_depth = 5'd7;
-        check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
-            "null reduction is three plies from depth seven");
-        release dut.search_stack_top[0].remaining_depth;
-        force dut.search_stack_top[0].remaining_depth = 5'd3;
-        force dut.search_stack_top[0].legal_move_count = 8'hff;
-        check(dut.lmr_child_depth(ThreadID'(0), move_generator_defs::QUIET_MEDIUM_BUCKET) <= 8'd2, "LMR clamps reduction to d-1 at saturated move count");
-        release dut.search_stack_top[0].remaining_depth;
-        release dut.search_stack_top[0].legal_move_count;
+        // Untimed function checks temporarily seed register fields without simulator-specific force/release.
+        begin
+            automatic PlyIndex saved_depth = PlyIndex'(dut.search_stack_top[0].remaining_depth);
+            automatic logic [7:0] saved_count = dut.search_stack_top[0].legal_move_count;
+            dut.search_stack_top[0].remaining_depth = 5'd6;
+            check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
+                "null reduction is two plies below depth seven");
+            dut.search_stack_top[0].remaining_depth = 5'd7;
+            check(dut.null_child_depth(ThreadID'(0)) == 5'd3,
+                "null reduction is three plies from depth seven");
+            dut.search_stack_top[0].remaining_depth = 5'd3;
+            dut.search_stack_top[0].legal_move_count = 8'hff;
+            check(dut.lmr_child_depth(ThreadID'(0), move_generator_defs::QUIET_MEDIUM_BUCKET) <= 8'd2, "LMR clamps reduction to d-1 at saturated move count");
+            dut.search_stack_top[0].remaining_depth = saved_depth;
+            dut.search_stack_top[0].legal_move_count = saved_count;
+        end
         for (int depth_bucket = 0; depth_bucket < dut.LMR_DEPTH_BUCKETS; depth_bucket++) begin
             for (int move_bucket = 1; move_bucket < 8; move_bucket++) begin
                 check(dut.lmr_reduction(3'(depth_bucket), 3'(move_bucket))
@@ -1800,7 +1816,7 @@ module tb_search_controller #(
             end
             lmr_bucket_check_pending[tid] = 1'b0;
         end
-        if (rst_n && dut.state == dut.ST_SEARCH_RUN && !dut.search_stop_requested()
+        if (rst_n && dut.state == CTRL_SEARCH_RUN && !dut.search_stop_requested()
                 && dut.move_pop_resp_valid && dut.move_pop_resp_found) begin
             lmr_bucket_check_pending[dut.move_pop_resp_thread] = 1'b1;
             lmr_expected_bucket[dut.move_pop_resp_thread] = dut.move_pop_resp_bucket;
@@ -1821,7 +1837,7 @@ module tb_search_controller #(
                 "direct rejection follow-up matches the actual noisy generator");
             direct_reject_followup_check_pending = 1'b0;
         end
-        if (rst_n && dut.state == dut.ST_SEARCH_RUN) begin
+        if (rst_n && dut.state == CTRL_SEARCH_RUN) begin
             for (int lane = 0; lane < 2; lane++) begin
                 if (dut.move_generator.live_active[lane]) begin
                     assert (dut.search_generation_inflight[
@@ -1844,7 +1860,7 @@ module tb_search_controller #(
             end
             if (dut.move_cmd_valid && dut.move_cmd_ready
                     && dut.move_cmd == move_generator_defs::MOVE_GEN_GENERATE_NOISY)
-                last_read_bucket[dut.move_cmd_thread][dut.move_cmd_ply] = 7;
+                last_read_bucket[dut.move_cmd_thread][dut.move_cmd_ply] = move_generator_defs::GOOD_NOISY_HIGH_BUCKET;
             if (dut.move_quiet_cmd_valid && dut.move_quiet_cmd_ready) begin
                 assert (dut.move_generator.reader.cache_state[dut.move_quiet_cmd_thread].phase
                         == move_generator_defs::MOVE_MEMORY_WAIT_QUIET)
@@ -1860,8 +1876,8 @@ module tb_search_controller #(
                     if (dut.move_generator.live_active[lane]
                             && dut.move_generator.live_thread[lane] == dut.move_pop_resp_thread
                             && dut.move_generator.live_ply[lane] == dut.move_pop_resp_ply) begin
-                        assert ((lane == 0 && dut.move_pop_resp_bucket == 7)
-                                || (lane == 1 && dut.move_pop_resp_bucket == 5))
+                        assert ((lane == 0 && dut.move_pop_resp_bucket == move_generator_defs::GOOD_NOISY_HIGH_BUCKET)
+                                || (lane == 1 && dut.move_pop_resp_bucket == move_generator_defs::QUIET_HIGHEST_BUCKET))
                             else $fatal(1, "early search read escaped the highest unfinished bucket");
                         if (lane == 0) early_noisy_reads++;
                         else early_quiet_reads++;
@@ -1897,7 +1913,7 @@ module tb_search_controller #(
         $fatal(1, "tb_search_controller timeout");
     end
 
-    always_ff @(posedge clk) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             stats_reset_pending <= 1'b0;
         end else begin
@@ -1974,11 +1990,11 @@ module tb_search_controller #(
                             completed_thread] === expected;
                 end
             end
-            if (dut.state == dut.ST_SEARCH_ROOT_INIT
+            if (dut.state == CTRL_SEARCH_ROOT_INIT
                     && dut.nnue_root_init_pos == Position'(0)
                     && dut.nnue_root_init_first)
                 nnue_root_initialization_correct &= dut.nnue_update_idle;
-            if (dut.state == dut.ST_SEARCH_RUN && dut.nnue_roots_initialized
+            if (dut.state == CTRL_SEARCH_RUN && dut.nnue_roots_initialized
                     && !nnue_root_initialization_seen) begin
                 nnue_root_initialization_seen = 1'b1;
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
@@ -1990,13 +2006,13 @@ module tb_search_controller #(
                         ] === dut.nnue_evaluator.accumulator_update_memory[0];
                 end
             end
-            if (dut.state == dut.ST_SEARCH_RUN && dut.nnue_build_busy
+            if (dut.state == CTRL_SEARCH_RUN && dut.nnue_build_busy
                     && dut.nnue_update_valid && dut.nnue_update_ready
                     && dut.nnue_update_req.clear)
                 nnue_recovery_rebuild_seen = 1'b1;
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                 if (dut.search_stack_top[idx].entered_by_null
-                        && dut.search_thread_phase[idx] == dut.SEARCH_PHASE_READY) begin
+                        && dut.search_thread_phase[idx] == SEARCH_PHASE_READY) begin
                     nnue_null_state_seen = 1'b1;
                     nnue_null_state_correct &= dut.nnue_state_valid[idx]
                         && !dut.nnue_plan_pending[idx];
@@ -2060,19 +2076,19 @@ module tb_search_controller #(
                 root_first_stack_move[idx] = dut.search_stack_top[idx].move;
                     root_stack_capture_pending[idx] = 1'b0;
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_READY) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_READY) begin
                     thread_ready_phase_seen[idx] = 1'b1;
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_MOVE_WAIT) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_MOVE_WAIT) begin
                     thread_move_phase_seen[idx] = 1'b1;
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_BOARD_WAIT) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_BOARD_WAIT) begin
                     thread_board_phase_seen[idx] = 1'b1;
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_EVAL_WAIT) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_EVAL_WAIT) begin
                     thread_eval_phase_seen[idx] = 1'b1;
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_STORE_PUBLISH) begin
                     thread_store_phase_seen[idx] = 1'b1;
                 end
                 if (dut.search_board_inflight[idx]) begin
@@ -2087,7 +2103,7 @@ module tb_search_controller #(
                         thread_move_cursor_seen[idx] = 1'b1;
                     end
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_EVAL_WAIT) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_EVAL_WAIT) begin
                     thread_eval_inflight_seen[idx] = 1'b1;
                     if (dut.search_dispatch.eval == expected_next_thread(idx)) begin
                         thread_eval_cursor_seen[idx] = 1'b1;
@@ -2099,7 +2115,7 @@ module tb_search_controller #(
                         thread_tt_lookup_cursor_seen[idx] = 1'b1;
                     end
                 end
-                if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH) begin
+                if (dut.search_thread_phase[idx] == SEARCH_PHASE_STORE_PUBLISH) begin
                     thread_tt_store_inflight_seen[idx] = 1'b1;
                 end
                 if (thread_tt_store_inflight_seen[idx]
@@ -2132,7 +2148,7 @@ module tb_search_controller #(
                     end
                 end
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_EVAL_WAIT) begin
+                    if (dut.search_thread_phase[idx] == SEARCH_PHASE_EVAL_WAIT) begin
                         active_pipeline_count += 1;
                         break;
                     end
@@ -2141,37 +2157,37 @@ module tb_search_controller #(
                     pipeline_overlap_seen = 1'b1;
                 end
             end
-            if (dut.state == dut.ST_SEARCH_RUN) begin
+            if (dut.state == CTRL_SEARCH_RUN) begin
                 search_dispatch_state_seen = 1'b1;
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_STORE_PUBLISH) begin
+                    if (dut.search_thread_phase[idx] == SEARCH_PHASE_STORE_PUBLISH) begin
                         store_wait_dispatch_seen = 1'b1;
                     end
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_MOVE_WAIT
+                    if (dut.search_thread_phase[idx] == SEARCH_PHASE_MOVE_WAIT
                             && dut.search_return_valid[idx]
                             && !dut.search_move_inflight[idx]) begin
                         return_pending_dispatch_seen = 1'b1;
                     end
                 end
             end
-            if (dut.state == dut.ST_SEARCH_RUN && dut.search_tt_consume_valid) begin
+            if (dut.state == CTRL_SEARCH_RUN && dut.search_tt_consume_valid) begin
                 tt_response_consume_seen = 1'b1;
                 if (dut.search_tt_response_pending[dut.search_tt_consume_thread])
                     tt_response_buffered_consume_seen = 1'b1;
                 thread_tt_response_cursor_seen[int'(dut.search_tt_consume_thread)] = 1'b1;
             end
-            if (dut.state == dut.ST_SEARCH_RUN && dut.move_followup_accepted)
+            if (dut.state == CTRL_SEARCH_RUN && dut.move_followup_accepted)
                 move_followup_seen = 1'b1;
-            if (dut.state == dut.ST_SEARCH_RUN) begin
+            if (dut.state == CTRL_SEARCH_RUN) begin
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                     if (dut.search_return_valid[idx]
                             && !dut.search_move_inflight[idx]
-                            && dut.search_thread_phase[idx] == dut.SEARCH_PHASE_MOVE_WAIT) begin
+                            && dut.search_thread_phase[idx] == SEARCH_PHASE_MOVE_WAIT) begin
                         thread_return_cursor_seen[idx] = 1'b1;
                     end
                 end
             end
-            if (dut.state == dut.ST_SEARCH_RUN
+            if (dut.state == CTRL_SEARCH_RUN
                     && dut.search_tt_store_issue_valid
                     && dut.tt_store_req_ready) begin
                 store_wait_issue_seen = 1'b1;
@@ -2225,7 +2241,7 @@ module tb_search_controller #(
                     && dut.repetition_resp_count != 2'd0) begin
                 tt_validation_repeat_reject_count += 1;
             end
-            if (dut.state == dut.ST_SEARCH_RUN && dut.search_tt_consume_valid) begin
+            if (dut.state == CTRL_SEARCH_RUN && dut.search_tt_consume_valid) begin
                 automatic ThreadID validation_tid = dut.search_tt_consume_thread;
                 automatic TTLookupResponse validation_resp =
                     dut.search_tt_consume_response;
@@ -2273,7 +2289,7 @@ module tb_search_controller #(
             // Null children use their own reduction and must not be checked
             // against the real-move LMR depth calculation.
             if (dut.search_board_issue_valid && !dut.search_board_issue_is_null
-                    && dut.search_thread_phase[int'(dut.search_board_issue_thread)] != dut.SEARCH_PHASE_REVERSE_WAIT) begin
+                    && dut.search_thread_phase[int'(dut.search_board_issue_thread)] != SEARCH_PHASE_REVERSE_WAIT) begin
                 automatic int lmr_tid;
                 lmr_tid = int'(dut.search_board_issue_thread);
                 lmr_issue_legal_count[lmr_tid] = dut.search_stack_top[lmr_tid].legal_move_count;
@@ -2305,13 +2321,13 @@ module tb_search_controller #(
                 if (dut.repetition_req_ply == PlyIndex'(0)) repetition_root_request_seen = 1'b1;
                 else repetition_child_request_seen = 1'b1;
             end
-            if (dut.state == dut.ST_SEARCH_RUN) begin
+            if (dut.state == CTRL_SEARCH_RUN) begin
                 automatic bit all_active;
 
                 all_active = 1'b1;
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_IDLE
-                            || dut.search_thread_phase[idx] == dut.SEARCH_PHASE_DONE) begin
+                    if (dut.search_thread_phase[idx] == SEARCH_PHASE_IDLE
+                            || dut.search_thread_phase[idx] == SEARCH_PHASE_DONE) begin
                         all_active = 1'b0;
                     end
                 end
@@ -2319,7 +2335,7 @@ module tb_search_controller #(
                     all_threads_root_active_seen = 1'b1;
                 end
             end
-            if (dut.state == dut.ST_SEARCH_RUN) begin
+            if (dut.state == CTRL_SEARCH_RUN) begin
                 if (dut.search_move_issue_valid) begin
                     thread_selected_active_seen[int'(dut.search_move_issue_thread)] = 1'b1;
                     thread_rr_cursor_seen[int'(dut.search_move_issue_thread)] = 1'b1;
@@ -2345,7 +2361,7 @@ module tb_search_controller #(
             if (dut.search_eval_result_valid) begin
                 thread_eval_tag_seen[int'(dut.search_eval_result_thread_id)] = 1'b1;
             end
-            if (dut.state == dut.ST_SEARCH_RUN && dut.search_board_issue_valid) begin
+            if (dut.state == CTRL_SEARCH_RUN && dut.search_board_issue_valid) begin
                 automatic int issue_tid = int'(dut.search_board_issue_thread);
                 thread_move_handoff_seen[int'(dut.search_board_issue_thread)] = 1'b1;
                 if (dut.board_update_op == BOARD_PUSH_MOVE_OP
@@ -2357,15 +2373,15 @@ module tb_search_controller #(
                         && dut.search_stack_top[dut.search_board_issue_thread].entered_by_null)
                     null_reverse_seen = 1'b1;
             end
-            if (dut.state == dut.ST_SEARCH_RUN) begin
+            if (dut.state == CTRL_SEARCH_RUN) begin
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
-                    if (dut.search_thread_phase[idx] == dut.SEARCH_PHASE_MOVE_WAIT
+                    if (dut.search_thread_phase[idx] == SEARCH_PHASE_MOVE_WAIT
                             && dut.search_return_valid[idx]) begin
                         thread_eval_handoff_seen[idx] = 1'b1;
                     end
                 end
             end
-            if (dut.state == dut.ST_SEARCH_RUN
+            if (dut.state == CTRL_SEARCH_RUN
                     && dut.search_board_issue_valid
                     && dut.search_ply[dut.search_board_issue_thread] == PlyIndex'(0)) begin
                 if (!root_push_seen[int'(dut.search_board_issue_thread)]) begin

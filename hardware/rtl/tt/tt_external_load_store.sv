@@ -76,8 +76,8 @@ module tt_external_load_store #(
     typedef struct packed { EntryIndex index; CacheWay way; logic store; } CacheFill;
     typedef struct packed { TTLookupRequest req; EntryIndex index; } ProbeTarget;
     typedef struct packed { TTStoreRequest req; EntryIndex index; } StoreTarget;
-    typedef enum logic [1:0] { S_IDLE, S_DRAIN, S_CLEAR_WAIT, S_CACHE_CLEAR } State;
-    State state;
+
+    TTFrontendState state;
     CacheIndex clear_index;
     logic clear_slot;
     logic clear_toggle, clear_ack, transport_idle;
@@ -215,8 +215,8 @@ module tt_external_load_store #(
     endfunction
     // Cache-hit stores own the single replacement datapath before memory stores.
     always_comb begin
-        active = state == S_IDLE && !clear && memory_ready && !memory_error;
-        clear_busy = state != S_IDLE || clear;
+        active = state == TT_FRONTEND_IDLE && !clear && memory_ready && !memory_error;
+        clear_busy = state != TT_FRONTEND_IDLE || clear;
         probe_index = entry_index(probe_buffer.zobrist_key);
         store_index = store_buffer.index;
         probe_match = cache_match(bank_read[probe_stage.index[0]], probe_stage.index, TAG_BITS'(probe_stage.req.zobrist_key));
@@ -229,7 +229,7 @@ module tt_external_load_store #(
         probe_stream_response = way_response(probe_meta.req, probe_next_way);
         // Register thread selection before address hashing and the bank RAM.
         // Accepted probes also drain during New Game before memory is cleared.
-        probe_issue = (state == S_IDLE || state == S_DRAIN)
+        probe_issue = (state == TT_FRONTEND_IDLE || state == TT_FRONTEND_DRAIN)
             && memory_ready && !memory_error && probe_buffer_valid && !probe_complete
             // Let the previous cache read retire, then give the stream a response slot.
             && !(probe_word_valid && probe_way_last && !probe_returned);
@@ -308,7 +308,7 @@ module tt_external_load_store #(
                 bank_lru_write_enable[b] = 1'b1; bank_lru_write_index[b] = cache_index(store_stage.index);
                 bank_lru_write_value[b] = !store_match.slot;
             end
-            if (state == S_CACHE_CLEAR) begin
+            if (state == TT_FRONTEND_CACHE_CLEAR) begin
                 bank_write_enable[b] = 1'b1; bank_write_index[b] = clear_index;
                 bank_write_slot[b] = clear_slot; bank_write_way[b] = '0;
                 bank_lru_write_enable[b] = 1'b1; bank_lru_write_index[b] = clear_index; bank_lru_write_value[b] = 1'b0;
@@ -352,7 +352,7 @@ module tt_external_load_store #(
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             cache_store_valid <= 1'b0; commit_valid <= 1'b0;
-            state <= S_CACHE_CLEAR; clear_index <= '0; clear_slot <= 1'b0; clear_toggle <= 1'b0; clear_prev <= 1'b0;
+            state <= TT_FRONTEND_CACHE_CLEAR; clear_index <= '0; clear_slot <= 1'b0; clear_toggle <= 1'b0; clear_prev <= 1'b0;
             probe_buffer_valid <= 1'b0; probe_buffer <= '0;
             probe_pending <= 1'b0; store_pending <= 1'b0; store_buffer_valid <= 1'b0;
             probe_complete <= 1'b0; store_complete <= 1'b0;
@@ -447,20 +447,20 @@ module tt_external_load_store #(
                 probe_returned <= 1'b0; probe_memory_way <= '0; probe_complete <= 1'b0;
             end
             case (state)
-                S_IDLE: if (clear && !clear_prev) state <= S_DRAIN;
-                S_DRAIN: if (!probe_buffer_valid && !probe_pending && !store_pending && !cache_store_valid && !commit_valid && probe_meta_count == 0
+                TT_FRONTEND_IDLE: if (clear && !clear_prev) state <= TT_FRONTEND_DRAIN;
+                TT_FRONTEND_DRAIN: if (!probe_buffer_valid && !probe_pending && !store_pending && !cache_store_valid && !commit_valid && probe_meta_count == 0
                         && store_meta_count == 0 && transport_idle && !fill_valid && !store_fill_valid && bank_fill_pending == 0) begin
-                    clear_toggle <= !clear_toggle; state <= S_CLEAR_WAIT;
+                    clear_toggle <= !clear_toggle; state <= TT_FRONTEND_CLEAR_WAIT;
                 end
-                S_CLEAR_WAIT: if (clear_ack == clear_toggle) begin clear_index <= '0; clear_slot <= 1'b0; state <= S_CACHE_CLEAR; end
-                S_CACHE_CLEAR: begin
+                TT_FRONTEND_CLEAR_WAIT: if (clear_ack == clear_toggle) begin clear_index <= '0; clear_slot <= 1'b0; state <= TT_FRONTEND_CACHE_CLEAR; end
+                TT_FRONTEND_CACHE_CLEAR: begin
                     clear_slot <= !clear_slot;
                     if (clear_slot) begin
-                        if (int'(clear_index) == BANK_SET_COUNT-1) state <= S_IDLE;
+                        if (int'(clear_index) == BANK_SET_COUNT-1) state <= TT_FRONTEND_IDLE;
                         else clear_index <= clear_index + 1'b1;
                     end
                 end
-                default: state <= S_IDLE;
+                default: state <= TT_FRONTEND_IDLE;
             endcase
         end
     end

@@ -24,12 +24,10 @@ from .common import (
     run_command,
     write_synth_metadata,
 )
+from .rtl_config import rtl_config_source, type_config_for_target, write_rtl_config
 from .generated_data import command_gen_data
-from .engine_config import (
-    engine_clock_mhz_for_target,
-    engine_config_for_target,
-    engine_rtl_parameter_values,
-)
+from .engine_config import engine_rtl_parameter_values
+from .clocks import clock_rtl_parameters
 from .manifest import ensure_existing, expand_source_set, load_manifest, repo_path
 
 
@@ -64,50 +62,41 @@ def qsf_relevant_pin_line(line: str) -> bool:
     )
 
 
-def engine_clock_values(engine_clock_mhz: float) -> tuple[str, int]:
-    """Quantize MHz to the PLL's micro-MHz precision and derive exact Hz for RTL."""
-    frequency_text = f"{engine_clock_mhz:.6f}"
-    return frequency_text, round(float(frequency_text) * 1_000_000)
-
-
-def materialize_intel_pll(template: Path, build_dir: Path, engine_clock_mhz: float, clock_config: dict) -> Path:
-    """Configure separate engine, memory, and communication PLLs from board-specific clock settings."""
+def materialize_intel_pll(template: Path, build_dir: Path, clocks: dict, clock_config: dict) -> Path:
+    """Render every PLL timing field from the engine profile and board oscillator."""
     destination = build_dir / "clock_generator"
     shutil.copytree(template, destination, dirs_exist_ok=True)
-    frequency_text, _ = engine_clock_values(engine_clock_mhz)
     implementation = destination / "pll_ip" / "pll_ip_0002.sv"
-    # Literal PLL primitive settings avoid packed-string truncation by vendor elaborators.
     source = implementation.read_text(encoding="utf-8")
-    engine_source, memory_source, communication_source = source.split("    altera_pll #(\n")[1:]
-    engine_source = re.sub(r'\.output_clock_frequency0\("[^"]+"\)',
-                           f'.output_clock_frequency0("{frequency_text} MHz")', engine_source)
-    memory_frequency = f"{clock_config['memory_frequency_hz'] / 1_000_000:.6f} MHz"
-    for index in range(2):
-        memory_source = re.sub(rf'\.output_clock_frequency{index}\("[^"]+"\)',
-                              f'.output_clock_frequency{index}("{memory_frequency}")', memory_source)
-    for index, key in [(1, "memory_output_phase_ps")]:
-        memory_source = re.sub(rf'\.phase_shift{index}\("[^"]+"\)',
-                              f'.phase_shift{index}("{clock_config[key]} ps")', memory_source)
-    memory_source = re.sub(r'\.duty_cycle1\(\d+\)',
-                           f'.duty_cycle1({clock_config["memory_output_duty_percent"]})', memory_source)
-    communication_frequency = f"{clock_config['communication_frequency_hz'] / 1_000_000:.6f} MHz"
-    communication_source = re.sub(r'\.output_clock_frequency0\("[^\"]+"\)',
-                                   f'.output_clock_frequency0("{communication_frequency}")', communication_source)
-    implementation.write_text(source.split("    altera_pll #(\n", 1)[0]
-                              + "    altera_pll #(\n" + engine_source
-                              + "    altera_pll #(\n" + memory_source
-                              + "    altera_pll #(\n" + communication_source, encoding="utf-8")
+    values = {"REFERENCE_MHZ": f"{clock_config['reference_frequency_hz'] / 1_000_000:.6f}"}
+    for role in ("engine", "memory", "communication", "memory_io"):
+        clock = clocks[role]
+        frequency = clocks["memory"]["frequency_hz"] if role == "memory_io" else clock["frequency_hz"]
+        phase = clock["phase_ps"] + (clocks["memory"]["phase_ps"] if role == "memory_io" else 0)
+        values.update({f"{role.upper()}_MHZ": f"{frequency / 1_000_000:.6f}",
+                       f"{role.upper()}_PHASE_PS": str(phase),
+                       f"{role.upper()}_DUTY": str(clock["duty_percent"])})
+    for name, value in values.items():
+        token = "@" + name + "@"
+        expected = 3 if name == "REFERENCE_MHZ" else 1
+        if source.count(token) != expected:
+            raise BuildError(f"PLL template must contain {expected} instances of {token}")
+        source = source.replace(token, value)
+    if "@" in source:
+        raise BuildError("Unresolved PLL template setting")
+    implementation.write_text(source, encoding="utf-8")
     return destination / "pll_ip.qip"
 
 
-def deterministic_build_id(manifest: dict, target: dict) -> int:
+def deterministic_build_id(manifest: dict, target: dict, resolved_config: dict | None = None) -> int:
     """Fingerprint the resolved target and every repository input used by Quartus."""
     digest = hashlib.sha256()
     resolved_target = dict(target)
-    engine_config = engine_config_for_target(target)
-    if engine_config is not None:
-        resolved_target["resolved_engine_config"] = engine_config
+    type_config = type_config_for_target(target) if resolved_config is None else resolved_config
+    if "engine_config" in target:
+        resolved_target["resolved_engine_config"] = type_config
     digest.update(json.dumps(resolved_target, sort_keys=True, separators=(",", ":")).encode())
+    digest.update(rtl_config_source(type_config).encode())
 
     inputs = set(expand_source_set(manifest, target["source_set"]))
     inputs.update(
@@ -115,7 +104,7 @@ def deterministic_build_id(manifest: dict, target: dict) -> int:
         for item in manifest.get("generated_data", {}).values()
         for output in item["outputs"]
     )
-    for key in ("sdc", "qsf_template"):
+    for key in ("sdc", "qsf_template", "type_config"):
         if key in target:
             inputs.add(repo_path(target[key]))
     inputs.update(repo_path(path) for path in target.get("qip_files", []))
@@ -134,25 +123,16 @@ def deterministic_build_id(manifest: dict, target: dict) -> int:
     return int.from_bytes(digest.digest()[:8], "big") or 1
 
 
-def write_engine_build_config(
-    build_dir: Path,
-    engine_clock_mhz: float,
-    build_id: int,
-    engine_config: dict | None = None,
-) -> Path:
-    """Generate constant engine metadata for the exact synthesized image."""
+def write_engine_build_config(build_dir: Path, build_id: int, engine_config: dict) -> Path:
+    """Generate metadata and all clock constants from the exact resolved profile."""
     config = build_dir / "engine_build_config.svh"
-    lines = [
-        "// Generated for this synthesis configuration; do not edit.\n"
-        f"localparam logic [63:0] FPGA_BUILD_ID = 64'h{build_id:016x};\n"
-        f"localparam int ENGINE_CLOCK_FREQ = {engine_clock_values(engine_clock_mhz)[1]:_};\n"
-    ]
-    if engine_config is not None:
-        lines.append(f"localparam logic [255:0] ENGINE_CONFIG_DIGEST = 256'h{engine_config['digest']};\n")
-        lines.extend(
-            f"localparam int ENGINE_{name} = {value};\n"
-            for name, value in engine_rtl_parameter_values(engine_config).items()
-        )
+    lines = ["// Generated for this synthesis configuration; do not edit.\n",
+             f"localparam logic [63:0] FPGA_BUILD_ID = 64'h{build_id:016x};\n",
+             f"localparam logic [255:0] ENGINE_CONFIG_DIGEST = 256'h{engine_config['digest']};\n"]
+    lines.extend(f"localparam int {name} = {value};\n"
+                 for name, value in clock_rtl_parameters(engine_config["clocks"]).items())
+    lines.extend(f"localparam int ENGINE_{name} = {value};\n"
+                 for name, value in engine_rtl_parameter_values(engine_config).items())
     config.write_text("".join(lines), encoding="utf-8")
     return config
 
@@ -226,21 +206,19 @@ def write_quartus_project(
     build_dir: Path,
     parallel_processors: int,
     build_id: int,
+    resolved_config: dict | None = None,
 ) -> Path:
     build_dir.mkdir(parents=True, exist_ok=True)
     project = build_dir / "fpga_chess"
     qpf = project.with_suffix(".qpf")
     qsf = project.with_suffix(".qsf")
-    sources = expand_source_set(manifest, target["source_set"])
+    if resolved_config is None:
+        resolved_config = type_config_for_target(target)
+    sources = [write_rtl_config(build_dir, resolved_config),
+               *expand_source_set(manifest, target["source_set"])]
     generated_build_config = None
-    engine_clock_mhz = engine_clock_mhz_for_target(target)
-    if engine_clock_mhz is not None:
-        generated_build_config = write_engine_build_config(
-            build_dir,
-            engine_clock_mhz,
-            build_id,
-            engine_config_for_target(target),
-        )
+    if "engine_config" in target:
+        generated_build_config = write_engine_build_config(build_dir, build_id, resolved_config)
     generated_outputs = [
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
@@ -270,15 +248,19 @@ def write_quartus_project(
         f'set_global_assignment -name SEARCH_PATH "{quote_tcl_path(build_dir)}"',
         f'set_global_assignment -name SDC_FILE "{quote_tcl_path(repo_path(target["sdc"]))}"',
     ]
-    resolved_engine_config = engine_config_for_target(target)
+    if "clock_generator" in target:
+        board_clock = target["clock_generator"]
+        reference_sdc = build_dir / "reference_clock.sdc"
+        reference_sdc.write_text(
+            f"create_clock -name {board_clock['reference_port']} -period {1e9 / board_clock['reference_frequency_hz']:.9f} "
+            f"[get_ports {{{board_clock['reference_port']}}}]\n", encoding="utf-8")
+        # The reference must exist before the board SDC derives the PLL clocks.
+        lines.insert(-1, f'set_global_assignment -name SDC_FILE "{quote_tcl_path(reference_sdc)}"')
+    resolved_engine_config = resolved_config if "engine_config" in target else None
     if resolved_engine_config is not None:
         (build_dir / "resolved_engine_config.json").write_text(
             json.dumps(resolved_engine_config, indent=2) + "\n", encoding="utf-8"
         )
-        lines.extend([
-            f"set_global_assignment -name VERILOG_MACRO \"FPGA_CHESS_THREAD_CAPACITY={resolved_engine_config['threads']}\"",
-            f"set_global_assignment -name VERILOG_MACRO \"FPGA_CHESS_SEARCH_STACK_CAPACITY={resolved_engine_config['stack_depth']}\"",
-        ])
     if "seed" in target:
         lines.append(f"set_global_assignment -name SEED {target['seed']}")
     if target.get("map_effort") == "fast":
@@ -321,14 +303,9 @@ def write_quartus_project(
     if "clock_generator" in target:
         qip_files.append(
             materialize_intel_pll(
-                repo_path(target["clock_generator"]["template"]), build_dir, engine_clock_mhz, target["clock_generator"]
+                repo_path(target["clock_generator"]["template"]), build_dir, resolved_config["clocks"], target["clock_generator"]
             )
         )
-    if "clock_generator" in target:
-        clock_config = target["clock_generator"]
-        with generated_build_config.open("a", encoding="utf-8") as config_file:
-            config_file.write(f"localparam int COMMUNICATION_CLOCK_FREQ = {clock_config['communication_frequency_hz']};\n")
-            config_file.write(f"localparam int MEMORY_CLOCK_FREQ = {clock_config['memory_frequency_hz']};\n")
     for qip in qip_files:
         lines.append(f'set_global_assignment -name QIP_FILE "{quote_tcl_path(qip)}"')
 
@@ -374,11 +351,12 @@ def synth_quartus(
             previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
-    build_id = deterministic_build_id(manifest, target)
-    project = write_quartus_project(manifest, target, build_dir, parallel_processors, build_id)
+    resolved_config = type_config_for_target(target)
+    build_id = deterministic_build_id(manifest, target, resolved_config)
+    project = write_quartus_project(manifest, target, build_dir, parallel_processors, build_id, resolved_config)
     artifact = project.with_suffix(".sof")
     metadata = begin_synth_metadata(build_dir, target_name, target)
-    resolved_engine_config = engine_config_for_target(target)
+    resolved_engine_config = resolved_config if "engine_config" in target else None
     if resolved_engine_config is not None:
         metadata["engine_profile"] = resolved_engine_config
     metadata["build_id"] = f"{build_id:016x}"
@@ -504,7 +482,8 @@ def synth_quartus(
 def write_vivado_project(manifest: dict, target_name: str, target: dict, part: str) -> Path:
     build_dir = BUILD_ROOT / target_name
     clean_dir(build_dir)
-    sources = expand_source_set(manifest, target["source_set"])
+    sources = [write_rtl_config(build_dir, type_config_for_target(target)),
+               *expand_source_set(manifest, target["source_set"])]
     xdc = build_dir / "generic_clock.xdc"
     tcl = build_dir / "synth.tcl"
 

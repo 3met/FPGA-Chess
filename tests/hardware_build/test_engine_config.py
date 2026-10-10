@@ -39,7 +39,7 @@ class EngineConfigTests(unittest.TestCase):
         config = load_engine_config("hardware/config/engine/de1-soc.json")
         self.assertEqual(config["threads"], engine["engine"]["threads"])
         self.assertEqual(config["stack_depth"], engine["engine"]["stack_depth"])
-        self.assertEqual(config["clock_frequency_hz"], engine["engine"]["clock_frequency_hz"])
+        self.assertEqual(config["clocks"], engine["clocks"])
         self.assertEqual(config["search"]["aspiration_delta_multiplier_q3"], round(search["aspiration"]["delta_multiplier"] * 8))
         self.assertEqual(config["search"]["lmr_a_q8"], round(search["lmr"]["base"] * 256))
         self.assertEqual(config["search"]["lmr_b_q8"], round(search["lmr"]["divisor"] * 256))
@@ -125,7 +125,8 @@ class EngineConfigTests(unittest.TestCase):
             engine_path.write_text(
                 json.dumps({
                     "search_config": str(search_path),
-                    "engine": {"threads": 17, "stack_depth": 65, "clock_frequency_hz": 1},
+                    "engine": {"threads": 17, "stack_depth": 65},
+                    "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"],
                     "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
                     "move_memory": {"entries_per_thread": 2048,
@@ -147,7 +148,8 @@ class EngineConfigTests(unittest.TestCase):
             engine_path.write_text(
                 json.dumps({
                     "search_config": "hardware/config/search/default.json",
-                    "engine": {"threads": 0, "stack_depth": 1, "clock_frequency_hz": 1},
+                    "engine": {"threads": 0, "stack_depth": 1},
+                    "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"],
                     "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
                     "move_memory": {"entries_per_thread": 2048,

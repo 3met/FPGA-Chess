@@ -35,7 +35,13 @@ module tb_time_management;
     always #5 clk = ~clk;
 
     time_management #(
-        .CLOCK_FREQ(1000)
+        // Golden allocations exercise a fixed fixture policy, independent of tuned defaults.
+        .CLOCK_FREQ(1000),
+        .MOVES_TO_GO_BUFFER(2), .DEFAULT_MOVES_DIVISOR(20),
+        .INCREMENT_NUMERATOR(4), .INCREMENT_DENOMINATOR(5),
+        .HARD_BASE_MULTIPLIER(4), .HARD_TIME_NUMERATOR(4), .HARD_TIME_DENOMINATOR(5),
+        .SOFT_FACTOR_DEFAULT(4), .NEXT_DEPTH_NUMERATOR(3), .NEXT_DEPTH_DENOMINATOR(5),
+        .SINGLE_LEGAL_MOVE_MS(10)
     ) dut (.*);
 
     task automatic check(input logic condition, input string label);

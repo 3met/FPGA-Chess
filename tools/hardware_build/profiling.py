@@ -1,4 +1,4 @@
-"""Cycle-accurate engine profiling with ModelSim/Questa."""
+"""Cycle-accurate engine profiling with Verilator or ModelSim/Questa."""
 
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ from software.engine.protocol import (
 )
 
 from .common import (
+    rtl_source_dependencies,
     BUILD_ROOT,
+    RTL_COMPILE_TIMEOUT_SECONDS,
     REPO_ROOT,
     BuildError,
     host_parallel_processors,
@@ -29,6 +31,7 @@ from .common import (
     require_tool,
     run_command,
 )
+from .clocks import clock_rtl_parameters, resolve_clocks
 from .engine_config import (
     engine_config_digest,
     engine_rtl_parameter_values,
@@ -45,6 +48,7 @@ from .profile_report import (
     build_profile_suite_report,
     parse_metric_records,
 )
+from .rtl_config import rtl_config_source, write_rtl_config
 from .simulation import has_sim_errors
 
 
@@ -60,7 +64,7 @@ def _profile_fingerprint(sources: list[Path], extra: str = "") -> str:
     digest = hashlib.sha256()
     digest.update(b"engine-profile-v2")
     digest.update(extra.encode())
-    for source in sources:
+    for source in rtl_source_dependencies(sources):
         digest.update(source.as_posix().encode())
         digest.update(source.read_bytes())
     return digest.hexdigest()
@@ -72,14 +76,9 @@ def _profile_parameter_args(config: dict, prefix: str) -> list[str]:
     return [f"{prefix}{name}={value}" for name, value in values.items()]
 
 
-def _profile_memory_parameter_args(args: argparse.Namespace, prefix: str) -> list[str]:
-    """Keep the SDRAM simulation clocks aligned with the selected board target."""
-    clock = getattr(args, "memory_clock_config", {})
-    values = {
-        "MEMORY_CLOCK_FREQ": clock.get("memory_frequency_hz", 133333333),
-        "MEMORY_OUTPUT_PHASE_PS": clock.get("memory_output_phase_ps", 1313),
-        "MEMORY_OUTPUT_DUTY_PERCENT": clock.get("memory_output_duty_percent", 40),
-    }
+def _profile_clock_parameter_args(args: argparse.Namespace, prefix: str) -> list[str]:
+    """Use the resolved engine profile for every simulated clock setting."""
+    values = clock_rtl_parameters(args.resolved_engine_config["clocks"], profiling=True)
     return [f"{prefix}{name}={value}" for name, value in values.items()]
 
 
@@ -95,24 +94,24 @@ def _resolve_profile_config(args: argparse.Namespace, manifest: dict | None = No
     if engine_config is None:
         raise BuildError(f"Synthesis target '{target_name}' has no engine configuration")
     args.synthesis_target = target_name
-    args.memory_clock_config = targets[target_name].get("clock_generator", {})
     config = load_engine_config(engine_config)
     if args.threads is None:
         args.threads = config["threads"]
     if args.stack_depth is None:
         args.stack_depth = config["stack_depth"]
     if args.engine_clock_hz is None:
-        args.engine_clock_hz = config["clock_frequency_hz"]
+        args.engine_clock_hz = config["clocks"]["engine"]["frequency_hz"]
     config["threads"] = args.threads
     config["stack_depth"] = args.stack_depth
-    config["clock_frequency_hz"] = args.engine_clock_hz
+    config["clocks"]["engine"]["frequency_hz"] = args.engine_clock_hz
+    config["clocks"] = resolve_clocks(config["clocks"])
     config["digest"] = engine_config_digest(config)
     return config
 
 
 def _compact_verilator_profile_build(build_dir: Path) -> None:
     """Keep only reusable outputs after Verilator has linked the simulator."""
-    keep = {"profile_sim.exe" if os.name == "nt" else "profile_sim", "fingerprint.txt", "compile.log"}
+    keep = {"profile_sim.exe" if os.name == "nt" else "profile_sim", "fingerprint.txt", "compile.log", "rtl_config.sv"}
     for path in build_dir.iterdir():
         if path.name in keep:
             continue
@@ -201,16 +200,17 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
     verilator_path = Path(verilator).resolve()
     verilator_stat = verilator_path.stat()
     native_flags, native_target, profile_guided = _verilator_native_flags(verilator)
-    half_period_ps = max(1, round(500_000_000_000 / args.engine_clock_hz))
     build_key = (
         f"threads={args.threads};stack={args.stack_depth};clock={args.engine_clock_hz};"
-        f"memory={_profile_memory_parameter_args(args, '')};half_ps={half_period_ps};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
+        f"clocks={_profile_clock_parameter_args(args, '')};sim_threads={args.simulator_threads};trace={int(args.waveform)};"
         f"verilator={verilator_path}:{verilator_stat.st_size}:{verilator_stat.st_mtime_ns};"
         f"config={args.resolved_engine_config['digest']};native_opt=o3-lto{native_flags};native_target={native_target}"
-        f";pgo={int(profile_guided)};training={VERILATOR_TRAINING_NODES}:{VERILATOR_TRAINING_FENS if profile_guided else ()}"
+        f";assertions=enabled;localize=0;pgo={int(profile_guided)};training={VERILATOR_TRAINING_NODES}:{VERILATOR_TRAINING_FENS if profile_guided else ()}"
     )
+    build_key += rtl_config_source(args.resolved_engine_config)
     fingerprint = _profile_fingerprint(sources, build_key)
     build_dir = BUILD_ROOT / "profile" / "compile" / "verilator" / fingerprint[:16]
+    config_source = write_rtl_config(build_dir, args.resolved_engine_config)
     executable = build_dir / ("profile_sim.exe" if os.name == "nt" else "profile_sim")
     fingerprint_path = build_dir / "fingerprint.txt"
     if (
@@ -240,6 +240,9 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         verilator,
         "--binary",
         "--timing",
+        "--assert",
+        "--localize-max-size",
+        "0",
         "--top-module",
         "tb_engine_profile",
         "--threads",
@@ -252,22 +255,18 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         "-j",
         "0",
         "-DFPGA_CHESS_PROFILE",
-        f"-DFPGA_CHESS_THREAD_CAPACITY={args.threads}",
-        f"-DFPGA_CHESS_SEARCH_STACK_CAPACITY={args.stack_depth}",
         "-Wno-fatal",
         *[f"-Wno-{warning}" for warning in warnings],
         "-Mdir",
         str(build_dir),
         "-o",
         executable.name,
-        f"-GENGINE_CLOCK_FREQ={args.engine_clock_hz}",
-        f"-GENGINE_HALF_PERIOD_PS={half_period_ps}",
         *_profile_parameter_args(args.resolved_engine_config, "-G"),
-        *_profile_memory_parameter_args(args, "-G"),
+        *_profile_clock_parameter_args(args, "-G"),
     ]
     if args.waveform:
         cmd.append("--trace-fst")
-    cmd.extend(str(path) for path in sources)
+    cmd.extend(str(path) for path in [config_source, *sources])
     if profile_guided:
         instrumented_cmd = cmd.copy()
         instrumented_cmd[instrumented_cmd.index("-CFLAGS") + 1] += " -fprofile-generate"
@@ -276,7 +275,8 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         instrumented_cmd[instrumented_cmd.index("-LDFLAGS") + 1] += " -fprofile-generate"
         instrumented_log = build_dir / "instrumented-compile.log"
         print("Building and training the optimized Verilator simulator...", flush=True)
-        code, output, _ = run_command(instrumented_cmd, REPO_ROOT, instrumented_log)
+        code, output, _ = run_command(instrumented_cmd, REPO_ROOT, instrumented_log,
+                                      timeout_seconds=RTL_COMPILE_TIMEOUT_SECONDS)
         if code != 0 or not executable.exists():
             print_failure_excerpt(output)
             raise BuildError(f"Verilator training build failed; see {rel(instrumented_log)}")
@@ -284,7 +284,8 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
         _clear_verilator_profile_objects(build_dir, executable)
         cmd[cmd.index("-CFLAGS") + 1] += " -fprofile-use -fprofile-correction"
         cmd[cmd.index("-LDFLAGS") + 1] += " -fprofile-use -fprofile-correction"
-    code, output, _ = run_command(cmd, REPO_ROOT, build_dir / "compile.log")
+    code, output, _ = run_command(cmd, REPO_ROOT, build_dir / "compile.log",
+                                  timeout_seconds=RTL_COMPILE_TIMEOUT_SECONDS)
     if code != 0 or not executable.exists():
         print_failure_excerpt(output)
         raise BuildError(f"Verilator profile build failed; see {rel(build_dir / 'compile.log')}")
@@ -295,9 +296,16 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
 
 
 def _compile_profile(manifest: dict, sources: list[Path], args: argparse.Namespace) -> Path:
+    vlog = require_tool("vlog")
+    tool = Path(vlog).resolve()
+    tool_stat = tool.stat()
     capacity_key = f"threads={args.threads};stack={args.stack_depth};config={args.resolved_engine_config['digest']}"
+    capacity_key += repr((str(tool), tool_stat.st_size, tool_stat.st_mtime_ns,
+                          manifest["simulator"]["modelsim"].get("vlog_args", ["-sv"])))
+    capacity_key += rtl_config_source(args.resolved_engine_config)
     fingerprint = _profile_fingerprint(sources, capacity_key)
     library_dir = BUILD_ROOT / "profile" / "compile" / "modelsim" / fingerprint[:16]
+    config_source = write_rtl_config(library_dir, args.resolved_engine_config)
     work_dir = library_dir / "modelsim_work"
     fingerprint_path = library_dir / "fingerprint.txt"
     if not args.force_rebuild and work_dir.exists() and fingerprint_path.exists():
@@ -305,25 +313,23 @@ def _compile_profile(manifest: dict, sources: list[Path], args: argparse.Namespa
             return work_dir
     library_dir.mkdir(parents=True, exist_ok=True)
     vlib = require_tool("vlib")
-    vlog = require_tool("vlog")
-    if work_dir.exists():
-        # vlib can safely refresh an existing ModelSim library in place.
-        pass
-    else:
-        code, output, _ = run_command([vlib, str(work_dir)], REPO_ROOT, library_dir / "vlib.log")
+    # Invalidate the receipt before a rebuild can alter this library.
+    fingerprint_path.unlink(missing_ok=True)
+    if not work_dir.exists():
+        code, output, _ = run_command([vlib, str(work_dir)], REPO_ROOT, library_dir / "vlib.log",
+                                      timeout_seconds=RTL_COMPILE_TIMEOUT_SECONDS)
         if code != 0:
             raise BuildError(f"Could not create profile simulator library:\n{output}")
     cmd = [
         vlog,
         *manifest["simulator"]["modelsim"].get("vlog_args", ["-sv"]),
         "+define+FPGA_CHESS_PROFILE",
-        f"+define+FPGA_CHESS_THREAD_CAPACITY={args.threads}",
-        f"+define+FPGA_CHESS_SEARCH_STACK_CAPACITY={args.stack_depth}",
         "-work",
         str(work_dir),
-        *[str(path) for path in sources],
+        *[str(path) for path in [config_source, *sources]],
     ]
-    code, output, _ = run_command(cmd, REPO_ROOT, library_dir / "compile.log")
+    code, output, _ = run_command(cmd, REPO_ROOT, library_dir / "compile.log",
+                                  timeout_seconds=RTL_COMPILE_TIMEOUT_SECONDS)
     if code != 0 or has_sim_errors(output):
         print_failure_excerpt(output)
         raise BuildError(f"Profile RTL compilation failed; see {rel(library_dir / 'compile.log')}")
@@ -396,7 +402,6 @@ def _run_profile_position(
     transient_wave = run_dir / ("wave.wlf" if args.waveform else "transient.wlf")
     board_path.write_text("".join(f"{value:02x}\n" for value in board_payload), encoding="ascii")
 
-    half_period_ps = max(1, round(500_000_000_000 / args.engine_clock_hz))
     kind_number = {"depth": 0, "nodes": 1, "time": 2}[search_kind]
     plusargs = [
         f"+BOARD_FILE={board_path}",
@@ -421,13 +426,11 @@ def _run_profile_position(
         )
         cmd = [
             vsim,
-            *manifest["simulator"]["modelsim"].get("vsim_args", ["-c", "-t", "ns"]),
+            *manifest["simulator"]["modelsim"].get("vsim_args", ["-batch", "-t", "ns"]),
             "-lib",
             str(library),
-            f"-gENGINE_CLOCK_FREQ={args.engine_clock_hz}",
-            f"-gENGINE_HALF_PERIOD_PS={half_period_ps}",
             *_profile_parameter_args(args.resolved_engine_config, "-g"),
-            *_profile_memory_parameter_args(args, "-g"),
+            *_profile_clock_parameter_args(args, "-g"),
             *plusargs,
         ]
         if not args.waveform:
@@ -452,10 +455,6 @@ def _run_profile_position(
         raise BuildError(f"Engine profile failed; see {transcript_label}")
 
     metrics, result_values = parse_metric_records(metrics_path.read_text(encoding="utf-8"))
-    tt_depth_bits = max(1, (args.stack_depth - 1).bit_length())
-    tt_payload_bits = 12 + 16 + tt_depth_bits + 2 + 5
-    tt_way_words = (args.resolved_engine_config["tt_tag_bits"] + tt_payload_bits + 15) // 16
-    tt_entry_words = 3 * tt_way_words
     configuration = {
         "fen": fen,
         "search_limit": {"kind": search_kind, "value": search_limit},
@@ -464,10 +463,10 @@ def _run_profile_position(
         "engine_clock_hz": args.engine_clock_hz,
         "engine_profile": args.resolved_engine_config,
         "synthesis_target": args.synthesis_target,
-        "memory_clock_hz": args.memory_clock_config.get("memory_frequency_hz", 133333333),
+        "memory_clock_hz": args.resolved_engine_config["clocks"]["memory"]["frequency_hz"],
         "tt_tag_bits": args.resolved_engine_config["tt_tag_bits"],
-        "tt_entry_words": tt_entry_words,
-        "tt_entries": 2 * ((1 << 25) // tt_entry_words // 2),
+        "tt_entry_words": metrics["tt.entry_words"],
+        "tt_entries": metrics["tt.external_entries"],
         "tt_cache_sets": 1 << args.resolved_engine_config["tt_cache_index_bits"],
         "tt_cache_ways": 2,
         "tt_initial_state": "cold",

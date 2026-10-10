@@ -4,16 +4,9 @@ from software.engine.protocol import Move, move_to_uci
 
 from .common import BuildError
 from .profile_schema import (
-    CONTROLLER_STATES,
-    ENGINE_STATES,
-    GENERATOR_STATES,
     MOVE_BUCKETS,
     MOVE_GENERATOR_OPERATIONS,
-    MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
-    SDRAM_STATES,
-    THREAD_PHASES,
-    TT_FRONTEND_STATES,
     TT_FIFOS,
 )
 
@@ -43,11 +36,11 @@ def _build_tt_memory_interface(metrics: dict[str, int]) -> dict:
     """Describe accepted memory bursts and the instantiated SDR SDRAM interface."""
     if metrics["sdram.probe_reads"] + metrics["sdram.store_reads"] != metrics["sdram.read_requests"]:
         raise BuildError("Probe and store memory reads do not match total SDRAM reads")
-    states = _named_series(metrics, "sdram.states", SDRAM_STATES)
+    states = _state_series(metrics, "sdram.states", ("idle", "read_data", "write_cmd", "write_data"))
     if any(count < 0 for count in states.values()) or not 0 <= metrics["sdram.idle_cycles"] <= states["idle"]:
         raise BuildError("Invalid SDRAM idle or state counters")
     samples = sum(states.values())
-    data_cycles = states["read_data"] + states["write_command"] + states["write_data"]
+    data_cycles = states["read_data"] + states["write_cmd"] + states["write_data"]
     duration = rate(samples, metrics["sdram.clock_hz"])
     return {
         "probe_reads": metrics["sdram.probe_reads"],
@@ -142,6 +135,16 @@ def _named_series(metrics: dict[str, int], prefix: str, names: list[str]) -> dic
     return {name: metrics.get(f"{prefix}.{index}", 0) for index, name in enumerate(names)}
 
 
+def _state_series(metrics: dict[str, int], prefix: str, required: tuple[str, ...] = ()) -> dict[str, int]:
+    """Read enum-named histograms without assuming an encoding or state count."""
+    stem = prefix + "."
+    states = {key[len(stem):]: value for key, value in metrics.items() if key.startswith(stem)}
+    if (not states or any(name not in states for name in required)
+            or any(not name.isidentifier() or count < 0 for name, count in states.items())):
+        raise BuildError(f"Invalid or missing named state histogram '{prefix}'")
+    return states
+
+
 def _build_tt_fifo_reports(metrics: dict[str, int], search_cycles: int) -> dict:
     """Derive cycle-weighted occupancy statistics from complete FIFO histograms."""
     fifos = {}
@@ -234,8 +237,8 @@ def build_profile_report(
     """Build the stable JSON and all derived measurements."""
     search_cycles = metrics["cycles.search"]
     nodes = result_values["nodes"]
-    engine_states = _named_series(metrics, "states.engine", ENGINE_STATES)
-    controller_states = _named_series(metrics, "states.controller", CONTROLLER_STATES)
+    engine_states = _state_series(metrics, "states.engine")
+    controller_states = _state_series(metrics, "states.controller", ("search_root_init",))
     if sum(engine_states.values()) != search_cycles:
         raise BuildError("Engine-state cycles do not match measured search cycles")
     if sum(controller_states.values()) != search_cycles:
@@ -244,7 +247,7 @@ def build_profile_report(
     memory_interface = _build_tt_memory_interface(metrics)
     threads = []
     for tid in range(configuration["threads"]):
-        phases = _named_series(metrics, f"threads.{tid}.phases", THREAD_PHASES)
+        phases = _state_series(metrics, f"threads.{tid}.phases", ("ready", "move_wait", "repetition_wait"))
         phase_total = sum(phases.values())
         if phase_total != search_cycles:
             raise BuildError(
@@ -286,9 +289,7 @@ def build_profile_report(
                 "ready_breakdown": ready_breakdown,
                 "move_wait_breakdown": move_wait_breakdown,
                 "repetition_wait_breakdown": repetition_wait_breakdown,
-                "move_order_cycles": _named_series(
-                    metrics, f"threads.{tid}.move_order", MOVE_ORDER_STATES
-                ),
+                "move_order_cycles": _state_series(metrics, f"threads.{tid}.move_order"),
                 "ply_cycles": {
                     key.rsplit(".", 1)[-1]: value
                     for key, value in metrics.items()
@@ -448,9 +449,7 @@ def build_profile_report(
             "pop_misses": metrics["components.move.pop_misses"],
             "operations": move_operations,
             "generation": move_generation,
-            "state_cycles": _named_series(
-                metrics, "components.move_generator.states", GENERATOR_STATES
-            ),
+            "state_cycles": _state_series(metrics, "components.move_generator.states"),
         },
         "nnue_evaluator": {
             "evaluations": metrics["components.eval.evaluations"],
@@ -601,9 +600,7 @@ def build_profile_report(
                 name: metrics[f"tt.bound_hits.{name}"] for name in ("exact", "lower", "upper")
             },
             "cache": _build_tt_cache_report(metrics, configuration["engine_clock_hz"]),
-            "frontend_state_cycles": _named_series(
-                metrics, "tt.frontend_states", TT_FRONTEND_STATES
-            ),
+            "frontend_state_cycles": _state_series(metrics, "tt.frontend_states"),
         },
         "sdram": {
             "read_requests": metrics["sdram.read_requests"],
@@ -620,7 +617,7 @@ def build_profile_report(
                 + metrics["sdram.row_conflicts"],
             ),
             "effective_bytes_per_simulated_second": memory_interface["average_payload_bytes_per_second"],
-            "state_cycles": _named_series(metrics, "sdram.states", SDRAM_STATES),
+            "state_cycles": _state_series(metrics, "sdram.states", ("idle", "read_data", "write_cmd", "write_data")),
         },
         "raw_metrics": metrics,
     }

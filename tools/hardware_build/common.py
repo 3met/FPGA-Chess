@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import signal
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +28,7 @@ QUARTUS_ERROR_RE = re.compile(
 # The full eight-thread search-controller regression is intentionally large
 # and can take several minutes in the free ModelSim edition.
 RTL_TEST_TIMEOUT_SECONDS = 600
+RTL_COMPILE_TIMEOUT_SECONDS = 600
 
 
 class BuildError(RuntimeError):
@@ -50,6 +53,63 @@ def require_tool(name: str) -> str:
     if not found:
         raise BuildError(f"Required tool '{name}' was not found on PATH")
     return found
+
+
+@contextmanager
+def simulation_lock(path: Path):
+    """Serialize runs sharing build artifacts; OS locks release on interruption."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        started = time.monotonic()
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.monotonic() - started >= RTL_COMPILE_TIMEOUT_SECONDS:
+                    raise BuildError(f"Timed out waiting for simulation artifacts: {path}") from error
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def rtl_source_dependencies(sources: list[Path]) -> list[Path]:
+    """Include transitive quoted headers in simulator cache identities."""
+    visited: dict[Path, None] = {}
+
+    def visit(source: Path) -> None:
+        source = source.resolve()
+        if source in visited:
+            return
+        visited[source] = None
+        text = re.sub(r"/\*.*?\*/|//[^\n]*", "", source.read_text(encoding="utf-8"), flags=re.DOTALL)
+        for name in re.findall(r'`include\s+"([^"\n]+)"', text):
+            candidates = (REPO_ROOT / name, source.parent / name)
+            header = next((path for path in candidates if path.is_file()), None)
+            if header is None:
+                raise BuildError(f"Cannot resolve RTL include {name!r} in {source}")
+            visit(header)
+
+    for source in sources:
+        visit(source)
+    return list(visited)
 
 
 def host_parallel_processors() -> int:

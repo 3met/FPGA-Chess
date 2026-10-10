@@ -3,6 +3,7 @@ import unittest
 from software.engine.protocol import Command, ProtocolError, STARTPOS_FEN
 from software.engine.uci_commands import (
     DEFAULT_MOVE_OVERHEAD_MS,
+    DEFAULT_SEARCH_DEPTH,
     parse_go_command,
     parse_position_args,
     split_command_line,
@@ -97,13 +98,13 @@ class UCICommandParsingTests(unittest.TestCase):
         self.assertFalse(parsed.wait_for_stop)
 
         parsed = parse_go_command(["infinite"], True)
-        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, DEFAULT_SEARCH_DEPTH]))
         self.assertTrue(parsed.wait_for_stop)
 
     def test_ponder_searches_to_max_depth_then_resumes_the_clock_limit(self):
         parsed = parse_go_command(["ponder", "wtime", "1000", "btime", "2000", "winc", "10"], True)
 
-        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, 31]))
+        self.assertEqual(parsed.command, bytes([Command.SEARCH_DEPTH, DEFAULT_SEARCH_DEPTH]))
         self.assertTrue(parsed.is_ponder)
         self.assertFalse(parsed.wait_for_stop)
         self.assertEqual(

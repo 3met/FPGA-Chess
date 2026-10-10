@@ -4,7 +4,7 @@ import move_generator_defs::*;
 
 module move_generator_read_pipeline #(
     parameter int THREAD_COUNT = 1,
-    parameter int SEARCH_STACK_DEPTH = 32,
+    parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int MEMORY_ENTRIES = 2048,
     parameter int BUCKET_RATIOS[MOVE_BUCKET_COUNT] = '{48,16,192,64,64,32,64,32}
 ) (

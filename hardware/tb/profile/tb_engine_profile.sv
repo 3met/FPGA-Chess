@@ -5,17 +5,22 @@ import board_update_pipeline_defs::*;
 import engine_defs::*;
 import move_generator_defs::*;
 import tt_defs::*;
+import sdram_defs::*;
 
 // Engine-only runtime profiler. This is measurement infrastructure, not a
 // chess-correctness testbench.
 module tb_engine_profile #(
-    parameter int ENGINE_CLOCK_FREQ = 75_000_000,
-    parameter int ENGINE_HALF_PERIOD_PS = 6667,
-    parameter int MEMORY_CLOCK_FREQ = 133333333,
-    parameter int MEMORY_OUTPUT_PHASE_PS = 1313,
-    parameter int MEMORY_OUTPUT_DUTY_PERCENT = 40,
-    parameter int SEARCH_THREAD_COUNT = 1,
-    parameter int SEARCH_STACK_DEPTH = 24,
+    // Required operating clocks are supplied by the resolved engine profile.
+    parameter int ENGINE_CLOCK_FREQ = 0,
+    parameter int ENGINE_PHASE_PS = 0,
+    parameter int ENGINE_DUTY_PERCENT = 0,
+    parameter int MEMORY_CLOCK_FREQ = 0,
+    parameter int MEMORY_PHASE_PS = 0,
+    parameter int MEMORY_DUTY_PERCENT = 0,
+    parameter int MEMORY_OUTPUT_PHASE_PS = 0,
+    parameter int MEMORY_OUTPUT_DUTY_PERCENT = 0,
+    parameter int SEARCH_THREAD_COUNT = chess_defs::THREAD_COUNT,
+    parameter int SEARCH_STACK_DEPTH = chess_defs::MAX_PLY_COUNT,
     parameter int TT_TAG_BITS = TT_DEFAULT_TAG_BITS,
     // Queue storage is selected by the device profile.
     parameter int TT_CACHE_INDEX_BITS = 10,
@@ -82,39 +87,41 @@ module tb_engine_profile #(
     localparam int TT_WAY_WORDS = (TT_COMPACT_BITS + TT_WORD_BITS - 1) / TT_WORD_BITS;
     localparam int TT_ENTRY_WORDS = TT_WAYS*TT_WAY_WORDS;
     localparam int TT_ENTRY_COUNT = 2 * (TT_EXTERNAL_WORD_COUNT / TT_ENTRY_WORDS / 2);
-    // Quantize once to prevent drift between the controller and pin clocks.
-    localparam realtime MEMORY_HALF_PERIOD_NS = $rtoi(500_000_000_000.0 / MEMORY_CLOCK_FREQ + 0.5) / 1000.0;
-    localparam realtime MEMORY_SOURCE_HIGH_NS = $rtoi(20.0 * MEMORY_HALF_PERIOD_NS * MEMORY_OUTPUT_DUTY_PERCENT + 0.5) / 1000.0;
-    localparam realtime MEMORY_SOURCE_LOW_NS = 2.0 * MEMORY_HALF_PERIOD_NS - MEMORY_SOURCE_HIGH_NS;
-    // Representative routed IO delays model the inverted DDR pin clock and
-    // rising-edge input capture relative to the memory controller clock.
-    localparam realtime MEMORY_PIN_PHASE_NS = MEMORY_OUTPUT_PHASE_PS / 1000.0 + MEMORY_SOURCE_HIGH_NS + 3.5;
-    localparam realtime MEMORY_CAPTURE_PHASE_NS = MEMORY_OUTPUT_PHASE_PS / 1000.0 - 0.5;
-    localparam int ENGINE_STATE_COUNT = 8;
-    localparam int CONTROLLER_STATE_COUNT = 24;
-    localparam int THREAD_PHASE_COUNT = 11;
-    // Profiler-local copies of the stable state encodings avoid hierarchical
-    // enum-item references, which trigger a Verilator width-analysis bug.
-    localparam int CONTROLLER_STATE_SEARCH_ROOT_INIT = 20;
-    localparam int CONTROLLER_STATE_SEARCH_RUN = 21;
-    localparam int THREAD_PHASE_IDLE = 0;
-    localparam int THREAD_PHASE_READY = 1;
-    localparam int THREAD_PHASE_EVAL_WAIT = 3;
-    localparam int THREAD_PHASE_MOVE_WAIT = 4;
-    localparam int THREAD_PHASE_REPETITION_WAIT = 7;
-    localparam int THREAD_PHASE_STORE_PUBLISH = 8;
-    localparam int THREAD_PHASE_DONE = 10;
-    localparam int MOVE_ORDER_STATE_COUNT = 7;
+    `include "hardware/tb/profile/clock_math.svh"
+    // Quantize each period once; all derived waveforms share its picosecond grid.
+    localparam int ENGINE_PERIOD_PS = 2 * $rtoi(500_000_000_000.0 / (ENGINE_CLOCK_FREQ > 0 ? ENGINE_CLOCK_FREQ : 1) + 0.5);
+    localparam int MEMORY_PERIOD_PS = 2 * $rtoi(500_000_000_000.0 / (MEMORY_CLOCK_FREQ > 0 ? MEMORY_CLOCK_FREQ : 1) + 0.5);
+    localparam realtime ENGINE_HIGH_NS = clock_high_ps(ENGINE_PERIOD_PS, ENGINE_DUTY_PERCENT) / 1000.0;
+    localparam realtime ENGINE_LOW_NS = ENGINE_PERIOD_PS / 1000.0 - ENGINE_HIGH_NS;
+    localparam realtime MEMORY_HIGH_NS = clock_high_ps(MEMORY_PERIOD_PS, MEMORY_DUTY_PERCENT) / 1000.0;
+    localparam realtime MEMORY_LOW_NS = MEMORY_PERIOD_PS / 1000.0 - MEMORY_HIGH_NS;
+    localparam realtime MEMORY_SOURCE_HIGH_NS = clock_high_ps(MEMORY_PERIOD_PS, MEMORY_OUTPUT_DUTY_PERCENT) / 1000.0;
+    localparam realtime MEMORY_SOURCE_LOW_NS = MEMORY_PERIOD_PS / 1000.0 - MEMORY_SOURCE_HIGH_NS;
+    // Phase zero shares an ideal reference edge at time zero across PLLs.
+    localparam realtime ENGINE_START_NS = normalized_phase_ps(ENGINE_PHASE_PS, ENGINE_PERIOD_PS) / 1000.0;
+    localparam realtime MEMORY_START_NS = normalized_phase_ps(MEMORY_PHASE_PS, MEMORY_PERIOD_PS) / 1000.0;
+    // IO phase is relative to the memory clock, before inverted DDR forwarding.
+    // Routed delays belong to the board timing model, not the operating profile.
+    localparam realtime MEMORY_IO_START_NS = MEMORY_START_NS + normalized_phase_ps(MEMORY_OUTPUT_PHASE_PS, MEMORY_PERIOD_PS) / 1000.0;
+    localparam realtime MEMORY_PIN_START_NS = MEMORY_IO_START_NS + MEMORY_SOURCE_HIGH_NS + 3.5;
+    localparam realtime MEMORY_CAPTURE_START_NS = MEMORY_IO_START_NS - 0.5;
+    // Size histograms from the actual enum widths, including sparse encodings.
+    typedef EngineState ProfileEngineState;
+    typedef GeneratorState ProfileGeneratorState;
+    typedef TTFrontendState ProfileTTState;
+    typedef SDRAMState ProfileSDRAMState;
+    localparam int ENGINE_STATE_COUNT = 2**$bits(ProfileEngineState);
+    localparam int CONTROLLER_STATE_COUNT = 2**$bits(SearchControllerState);
+    localparam int THREAD_PHASE_COUNT = 2**$bits(SearchThreadPhase);
+    localparam int MOVE_ORDER_STATE_COUNT = 2**$bits(MoveOrderState);
     localparam int ORDINAL_BUCKET_COUNT = 8;
-    localparam int GENERATOR_STATE_COUNT = 8;
+    localparam int GENERATOR_STATE_COUNT = 2**$bits(ProfileGeneratorState);
     localparam int MOVE_OPERATION_COUNT = 4;
     localparam int MOVE_OPERATION_BUCKET_POP = 3;
     localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1)
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
-    localparam int TT_STATE_COUNT = 4;
-    localparam int TT_STATE_IDLE = 0;
-    localparam int SDRAM_STATE_COUNT = 34;
-    localparam int SDRAM_STATE_IDLE = 16;
+    localparam int TT_STATE_COUNT = 2**$bits(ProfileTTState);
+    localparam int SDRAM_STATE_COUNT = 2**$bits(ProfileSDRAMState);
 
     logic engine_clk = 1'b0;
     logic memory_clk = 1'b0;
@@ -122,10 +129,27 @@ module tb_engine_profile #(
     logic memory_read_clk = 1'b0;
     logic system_rst_n = 1'b0;
     logic engine_rst_n;
-    always #(ENGINE_HALF_PERIOD_PS * 1ps) engine_clk = ~engine_clk;
-    always #(MEMORY_HALF_PERIOD_NS) memory_clk = ~memory_clk;
     initial begin
-        #(MEMORY_HALF_PERIOD_NS + MEMORY_PIN_PHASE_NS);
+        if (ENGINE_CLOCK_FREQ <= 0 || MEMORY_CLOCK_FREQ <= 0
+                || ENGINE_DUTY_PERCENT < 1 || ENGINE_DUTY_PERCENT > 99
+                || MEMORY_DUTY_PERCENT < 1 || MEMORY_DUTY_PERCENT > 99
+                || MEMORY_OUTPUT_DUTY_PERCENT < 1 || MEMORY_OUTPUT_DUTY_PERCENT > 99)
+            $fatal(1, "Profiling requires validated engine-profile clocks");
+        #(ENGINE_START_NS) engine_clk = 1'b1;
+        forever begin
+            #(ENGINE_HIGH_NS) engine_clk = 1'b0;
+            #(ENGINE_LOW_NS) engine_clk = 1'b1;
+        end
+    end
+    initial begin
+        #(MEMORY_START_NS) memory_clk = 1'b1;
+        forever begin
+            #(MEMORY_HIGH_NS) memory_clk = 1'b0;
+            #(MEMORY_LOW_NS) memory_clk = 1'b1;
+        end
+    end
+    initial begin
+        #(MEMORY_PIN_START_NS);
         memory_pin_clk = 1'b1;
         forever begin
             #(MEMORY_SOURCE_LOW_NS) memory_pin_clk = 1'b0;
@@ -133,7 +157,7 @@ module tb_engine_profile #(
         end
     end
     initial begin
-        #(MEMORY_HALF_PERIOD_NS + MEMORY_CAPTURE_PHASE_NS);
+        #(MEMORY_CAPTURE_START_NS >= 0 ? MEMORY_CAPTURE_START_NS : MEMORY_CAPTURE_START_NS + MEMORY_PERIOD_PS / 1000.0);
         memory_read_clk = 1'b1;
         forever begin
             #(MEMORY_SOURCE_HIGH_NS) memory_read_clk = 1'b0;
@@ -617,13 +641,13 @@ module tb_engine_profile #(
                 tt_store_fifo_high_water =
                     dut.controller.tt_frontend.store_fifo_count;
             if (int'(dut.controller.tt_frontend.state)
-                        == TT_STATE_IDLE
+                        == int'(TT_FRONTEND_IDLE)
                     && !dut.controller.tt_frontend.transport.probe_empty
                     && !dut.controller.tt_frontend.transport.write_empty)
                 tt_writeback_probe_queue_overlap_cycles = tt_writeback_probe_queue_overlap_cycles + 1;
 
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
-                if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_MOVE_WAIT
+                if (int'(dut.controller.search_thread_phase[tid]) == int'(SEARCH_PHASE_MOVE_WAIT)
                         && !dut.controller.search_move_inflight[tid]
                         && !dut.controller.search_return_valid[tid])
                     $fatal(1, "move wait without an outstanding operation: thread %0d cycle %0d", tid, search_cycles);
@@ -636,7 +660,7 @@ module tb_engine_profile #(
                     thread_phase_cycles[tid][int'(dut.controller.search_thread_phase[tid])] + 1;
                 // Attribute the shared move-wait phase to the ordering class
                 // that issued the generation or bucket-pop operation.
-                if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_MOVE_WAIT) begin
+                if (int'(dut.controller.search_thread_phase[tid]) == int'(SEARCH_PHASE_MOVE_WAIT)) begin
                     automatic MoveOrderState wait_order_state =
                         dut.controller.search_stack_top[tid].move_order_state;
                     if (wait_order_state == MOVE_ORDER_GENERATE_QUIET
@@ -649,7 +673,7 @@ module tb_engine_profile #(
                 // child state is prepared. Separate that work from an accepted,
                 // genuinely in-flight repetition lookup.
                 if (int'(dut.controller.search_thread_phase[tid])
-                        == THREAD_PHASE_REPETITION_WAIT) begin
+                        == int'(SEARCH_PHASE_REPETITION_WAIT)) begin
                     if (dut.controller.nnue_plan_pending[tid]
                             && dut.controller.search_repetition_pending[tid])
                         thread_repetition_overlap_wait[tid] =
@@ -663,7 +687,7 @@ module tb_engine_profile #(
                 end
                 // Split the broad READY phase into exclusive causes without
                 // adding profiler state to the synthesizable controller.
-                if (int'(dut.controller.search_thread_phase[tid]) == THREAD_PHASE_READY) begin
+                if (int'(dut.controller.search_thread_phase[tid]) == int'(SEARCH_PHASE_READY)) begin
                     automatic logic dispatched =
                         (dut.controller.search_tt_lookup_issue_valid
                             && dut.controller.tt_lookup_req_ready
@@ -684,9 +708,9 @@ module tb_engine_profile #(
                             && dut.controller.search_board_issue_thread == ThreadID'(tid));
                     automatic MoveOrderState order_state =
                         dut.controller.search_stack_top[tid].move_order_state;
-                    if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_ROOT_INIT) begin
+                    if (int'(dut.controller.state) == int'(CTRL_SEARCH_ROOT_INIT)) begin
                         thread_ready_nnue_init[tid] = thread_ready_nnue_init[tid] + 1;
-                    end else if (int'(dut.controller.state) != CONTROLLER_STATE_SEARCH_RUN
+                    end else if (int'(dut.controller.state) != int'(CTRL_SEARCH_RUN)
                             || order_state == MOVE_ORDER_DONE
                             || dut.controller.search_board[tid].halfmove_clock >= HalfmoveClock'(100)) begin
                         thread_ready_transition[tid] = thread_ready_transition[tid] + 1;
@@ -719,9 +743,9 @@ module tb_engine_profile #(
                         thread_ready_transition[tid] = thread_ready_transition[tid] + 1;
                     end
                 end
-                if (int'(dut.controller.search_thread_phase[tid]) != THREAD_PHASE_IDLE
+                if (int'(dut.controller.search_thread_phase[tid]) != int'(SEARCH_PHASE_IDLE)
                         && int'(dut.controller.search_thread_phase[tid])
-                            != THREAD_PHASE_DONE) begin
+                            != int'(SEARCH_PHASE_DONE)) begin
                     active_count++;
                     thread_move_order_cycles[tid][int'(dut.controller.search_stack_top[tid].move_order_state)] =
                         thread_move_order_cycles[tid][int'(dut.controller.search_stack_top[tid].move_order_state)] + 1;
@@ -735,10 +759,10 @@ module tb_engine_profile #(
                 if (dut.controller.search_board_inflight[tid]) inflight_count++;
                 if (dut.controller.search_move_inflight[tid]) inflight_count++;
                 if (int'(dut.controller.search_thread_phase[tid])
-                        == THREAD_PHASE_EVAL_WAIT) inflight_count++;
+                        == int'(SEARCH_PHASE_EVAL_WAIT)) inflight_count++;
                 if (dut.controller.search_tt_lookup_inflight[tid]) inflight_count++;
                 if (int'(dut.controller.search_thread_phase[tid])
-                        == THREAD_PHASE_STORE_PUBLISH) inflight_count++;
+                        == int'(SEARCH_PHASE_STORE_PUBLISH)) inflight_count++;
             end
             active_thread_histogram[active_count] = active_thread_histogram[active_count] + 1;
             if (inflight_count > 5) inflight_count = 5;
@@ -771,7 +795,7 @@ module tb_engine_profile #(
             // held valid tag there would count one completion multiple times.
             // The simulation result pulse is registered one cycle later, when
             // check status and the parent's legal-move ordinal have moved on.
-            if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_RUN
+            if (int'(dut.controller.state) == int'(CTRL_SEARCH_RUN)
                     && dut.controller.search_board_tag_valid_pipe[
                     SEARCH_BOARD_TAG_PIPE_LEN - 1
                 ]) begin
@@ -901,9 +925,9 @@ module tb_engine_profile #(
                 history_lookups = history_lookups + 1;
             if (dut.controller.move_generator.quiet_lane.generator_history_read)
                 history_lookups = history_lookups + 1;
-            if (int'(dut.controller.move_generator.noisy_lane.state) != 0)
+            if (int'(dut.controller.move_generator.noisy_lane.state) != int'(GEN_IDLE))
                 move_generation_cycles = move_generation_cycles + 1;
-            if (int'(dut.controller.move_generator.quiet_lane.state) != 0)
+            if (int'(dut.controller.move_generator.quiet_lane.state) != int'(GEN_IDLE))
                 move_generation_cycles = move_generation_cycles + 1;
             if (dut.controller.move_pop_resp_valid) begin
                 if (dut.controller.move_pop_resp_found) begin
@@ -957,7 +981,7 @@ module tb_engine_profile #(
             if (dut.controller.search_eval_result_valid) eval_completions <= eval_completions + 1;
             if (dut.controller.nnue_update_valid && dut.controller.nnue_update_ready) begin
                 nnue_update_requests = nnue_update_requests + 1;
-                if (int'(dut.controller.state) == CONTROLLER_STATE_SEARCH_ROOT_INIT) begin
+                if (int'(dut.controller.state) == int'(CTRL_SEARCH_ROOT_INIT)) begin
                     nnue_root_rows = nnue_root_rows + 1;
                 end else if (dut.controller.nnue_update_req.complete
                         && !dut.controller.nnue_update_req.apply) begin
@@ -1151,7 +1175,7 @@ module tb_engine_profile #(
         end
         if (profile_active || drain_active) begin
             // Idle excludes an arriving request, row timing, refresh, and completion overhead.
-            if (int'(memory_controller.state) == SDRAM_STATE_IDLE && !tt_mem_req_valid)
+            if (int'(memory_controller.state) == int'(SDRAM_IDLE) && !tt_mem_req_valid)
                 sdram_idle_cycles <= sdram_idle_cycles + 1;
             sdram_state_cycles[int'(memory_controller.state)] <=
                 sdram_state_cycles[int'(memory_controller.state)] + 1;
@@ -1182,6 +1206,8 @@ module tb_engine_profile #(
 
     task automatic write_metrics();
         tt_latency.write_metrics(metrics_fd);
+        emit("tt.entry_words", TT_ENTRY_WORDS);
+        emit("tt.external_entries", TT_ENTRY_COUNT);
         emit("cycles.setup", setup_cycles);
         emit("cycles.search", search_cycles);
         emit("cycles.output", output_cycles);
@@ -1195,14 +1221,51 @@ module tb_engine_profile #(
         emit_result("end_reason", search_result.end_reason);
         emit_result("error", search_result.error);
         emit_result("deepest_search_ply", deepest_search_ply);
-        for (int state_idx = 0; state_idx < ENGINE_STATE_COUNT; state_idx++)
-            emit($sformatf("states.engine.%0d", state_idx), engine_state_cycles[state_idx]);
-        for (int state_idx = 0; state_idx < CONTROLLER_STATE_COUNT; state_idx++)
-            emit($sformatf("states.controller.%0d", state_idx), controller_state_cycles[state_idx]);
+        // Enumerate declared members so sparse encodings never acquire a label.
+        begin
+            automatic ProfileEngineState sample;
+            automatic bit valid[ENGINE_STATE_COUNT] = '{default:0};
+            sample = sample.first();
+            for (int member = 0; member < sample.num(); member++) begin
+                automatic string label = sample.name();
+                valid[int'(sample)] = 1'b1;
+                emit($sformatf("states.engine.%s", label.substr(4, label.len()-1).tolower()), engine_state_cycles[int'(sample)]);
+                sample = sample.next();
+            end
+            for (int encoding = 0; encoding < ENGINE_STATE_COUNT; encoding++)
+                if (!valid[encoding] && engine_state_cycles[encoding] != 0)
+                    $fatal(1, "Invalid enum encoding in states.engine histogram");
+        end
+        begin
+            automatic SearchControllerState sample;
+            automatic bit valid[CONTROLLER_STATE_COUNT] = '{default:0};
+            sample = sample.first();
+            for (int member = 0; member < sample.num(); member++) begin
+                automatic string label = sample.name();
+                valid[int'(sample)] = 1'b1;
+                emit($sformatf("states.controller.%s", label.substr(5, label.len()-1).tolower()), controller_state_cycles[int'(sample)]);
+                sample = sample.next();
+            end
+            for (int encoding = 0; encoding < CONTROLLER_STATE_COUNT; encoding++)
+                if (!valid[encoding] && controller_state_cycles[encoding] != 0)
+                    $fatal(1, "Invalid enum encoding in states.controller histogram");
+        end
         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
             emit($sformatf("threads.%0d.nodes", tid), dut.controller.search_thread_nodes[tid]);
-            for (int phase = 0; phase < THREAD_PHASE_COUNT; phase++)
-                emit($sformatf("threads.%0d.phases.%0d", tid, phase), thread_phase_cycles[tid][phase]);
+            begin
+                automatic SearchThreadPhase sample;
+                automatic bit valid[THREAD_PHASE_COUNT] = '{default:0};
+                sample = sample.first();
+                for (int member = 0; member < sample.num(); member++) begin
+                    automatic string label = sample.name();
+                    valid[int'(sample)] = 1'b1;
+                    emit($sformatf("threads.%0d.phases.%s", tid, label.substr(13, label.len()-1).tolower()), thread_phase_cycles[tid][int'(sample)]);
+                    sample = sample.next();
+                end
+                for (int encoding = 0; encoding < THREAD_PHASE_COUNT; encoding++)
+                    if (!valid[encoding] && thread_phase_cycles[tid][encoding] != 0)
+                        $fatal(1, "Invalid enum encoding in threads.thread.phases histogram");
+            end
             emit($sformatf("threads.%0d.ready.nnue_init", tid), thread_ready_nnue_init[tid]);
             emit($sformatf("threads.%0d.ready.dispatch", tid), thread_ready_dispatch[tid]);
             emit($sformatf("threads.%0d.ready.arbitration", tid), thread_ready_arbitration[tid]);
@@ -1220,8 +1283,20 @@ module tb_engine_profile #(
                 thread_repetition_overlap_wait[tid]);
             emit($sformatf("threads.%0d.repetition_wait.checker", tid),
                 thread_repetition_checker_wait[tid]);
-            for (int order = 0; order < MOVE_ORDER_STATE_COUNT; order++)
-                emit($sformatf("threads.%0d.move_order.%0d", tid, order), thread_move_order_cycles[tid][order]);
+            begin
+                automatic MoveOrderState sample;
+                automatic bit valid[MOVE_ORDER_STATE_COUNT] = '{default:0};
+                sample = sample.first();
+                for (int member = 0; member < sample.num(); member++) begin
+                    automatic string label = sample.name();
+                    valid[int'(sample)] = 1'b1;
+                    emit($sformatf("threads.%0d.move_order.%s", tid, label.substr(11, label.len()-1).tolower()), thread_move_order_cycles[tid][int'(sample)]);
+                    sample = sample.next();
+                end
+                for (int encoding = 0; encoding < MOVE_ORDER_STATE_COUNT; encoding++)
+                    if (!valid[encoding] && thread_move_order_cycles[tid][encoding] != 0)
+                        $fatal(1, "Invalid enum encoding in threads.thread.move_order histogram");
+            end
             for (int ply = 0; ply < MAX_PLY_COUNT; ply++)
                 if (thread_ply_cycles[tid][ply] != 0)
                     emit($sformatf("threads.%0d.ply.%0d", tid, ply), thread_ply_cycles[tid][ply]);
@@ -1230,12 +1305,48 @@ module tb_engine_profile #(
             emit($sformatf("concurrency.active_threads.%0d", count), active_thread_histogram[count]);
         for (int count = 0; count <= 5; count++)
             emit($sformatf("concurrency.inflight.%0d", count), inflight_histogram[count]);
-        for (int state_idx = 0; state_idx < GENERATOR_STATE_COUNT; state_idx++)
-            emit($sformatf("components.move_generator.states.%0d", state_idx), generator_state_cycles[state_idx]);
-        for (int state_idx = 0; state_idx < TT_STATE_COUNT; state_idx++)
-            emit($sformatf("tt.frontend_states.%0d", state_idx), tt_state_cycles[state_idx]);
-        for (int state_idx = 0; state_idx < SDRAM_STATE_COUNT; state_idx++)
-            emit($sformatf("sdram.states.%0d", state_idx), sdram_state_cycles[state_idx]);
+        begin
+            automatic ProfileGeneratorState sample;
+            automatic bit valid[GENERATOR_STATE_COUNT] = '{default:0};
+            sample = sample.first();
+            for (int member = 0; member < sample.num(); member++) begin
+                automatic string label = sample.name();
+                valid[int'(sample)] = 1'b1;
+                emit($sformatf("components.move_generator.states.%s", label.substr(4, label.len()-1).tolower()), generator_state_cycles[int'(sample)]);
+                sample = sample.next();
+            end
+            for (int encoding = 0; encoding < GENERATOR_STATE_COUNT; encoding++)
+                if (!valid[encoding] && generator_state_cycles[encoding] != 0)
+                    $fatal(1, "Invalid enum encoding in components.move_generator.states histogram");
+        end
+        begin
+            automatic ProfileTTState sample;
+            automatic bit valid[TT_STATE_COUNT] = '{default:0};
+            sample = sample.first();
+            for (int member = 0; member < sample.num(); member++) begin
+                automatic string label = sample.name();
+                valid[int'(sample)] = 1'b1;
+                emit($sformatf("tt.frontend_states.%s", label.substr(12, label.len()-1).tolower()), tt_state_cycles[int'(sample)]);
+                sample = sample.next();
+            end
+            for (int encoding = 0; encoding < TT_STATE_COUNT; encoding++)
+                if (!valid[encoding] && tt_state_cycles[encoding] != 0)
+                    $fatal(1, "Invalid enum encoding in tt.frontend_states histogram");
+        end
+        begin
+            automatic ProfileSDRAMState sample;
+            automatic bit valid[SDRAM_STATE_COUNT] = '{default:0};
+            sample = sample.first();
+            for (int member = 0; member < sample.num(); member++) begin
+                automatic string label = sample.name();
+                valid[int'(sample)] = 1'b1;
+                emit($sformatf("sdram.states.%s", label.substr(6, label.len()-1).tolower()), sdram_state_cycles[int'(sample)]);
+                sample = sample.next();
+            end
+            for (int encoding = 0; encoding < SDRAM_STATE_COUNT; encoding++)
+                if (!valid[encoding] && sdram_state_cycles[encoding] != 0)
+                    $fatal(1, "Invalid enum encoding in sdram.states histogram");
+        end
         for (int depth = 0; depth < MAX_PLY_COUNT; depth++) begin
             if (depth_cycles[depth] != 0) begin
                 emit($sformatf("depths.%0d.cycles", depth), depth_cycles[depth]);
@@ -1391,6 +1502,10 @@ module tb_engine_profile #(
     endtask
 
     initial begin
+        // A profile must measure the exact capacities selected by its build.
+        if (SEARCH_THREAD_COUNT != chess_defs::THREAD_COUNT
+                || SEARCH_STACK_DEPTH != chess_defs::MAX_PLY_COUNT)
+            $fatal(1, "Profiler parameters do not match the selected RTL type configuration");
         data_in = '0;
         data_in_valid = 1'b0;
         ready_for_result = 1'b1;
@@ -1549,12 +1664,17 @@ module tb_engine_profile #(
                     && !dut.controller.tt_cache_access && !dut.controller.tt_cache_store_access
                     && dut.controller.tt_frontend.store_fifo_count == 0
                     && !dut.controller.tt_frontend.store_buffer_valid
-                    && !!dut.controller.tt_frontend.transport.write_empty
-                    && dut.controller.tt_frontend.state == 0
-                    && dut.controller.tt_frontend.transport_idle && int'(memory_controller.state) == SDRAM_STATE_IDLE)
+                    && dut.controller.tt_frontend.transport.write_empty
+                    && int'(dut.controller.tt_frontend.state) == int'(TT_FRONTEND_IDLE)
+                    && dut.controller.tt_frontend.transport_idle && int'(memory_controller.state) == int'(SDRAM_IDLE))
                 break;
         end
+        // Let all rising-edge monitors and nonblocking updates finish before snapshotting.
+        @(negedge engine_clk);
         drain_active = 1'b0;
+        // Independently scheduled cache and engine monitors must cover the same window.
+        if (tt_cache_port_cycles != search_cycles + drain_cycles)
+            $fatal(1, "profile cache sampling window disagrees with search and drain cycles");
         write_metrics();
         if (events_fd != 0) $fclose(events_fd);
         $fclose(metrics_fd);

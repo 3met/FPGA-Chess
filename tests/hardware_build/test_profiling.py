@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 import os
 import re
 import subprocess
@@ -24,18 +25,14 @@ from tools.hardware_build.profile_report import (
     rate,
 )
 from tools.hardware_build.profile_schema import (
-    CONTROLLER_STATES,
-    ENGINE_STATES,
     MOVE_BUCKETS,
     MOVE_GENERATOR_OPERATIONS,
-    MOVE_ORDER_STATES,
     ORDINAL_BUCKETS,
-    SDRAM_STATES,
-    THREAD_PHASES,
     TT_FIFOS,
 )
 from tools.hardware_build.profiling import (
     _compile_verilator,
+    _compile_profile,
     _compact_verilator_profile_build,
     _prune_verilator_profile_cache,
     _profile_job_count,
@@ -154,10 +151,12 @@ class ProfileGuidedBuildTests(unittest.TestCase):
             fingerprint.write_text("test-key\n", encoding="utf-8")
             args = argparse.Namespace(threads=2, stack_depth=8, engine_clock_hz=100,
                                       simulator_threads=1, waveform=False, force_rebuild=True,
-                                      resolved_engine_config={"digest": "configuration"})
+                                      resolved_engine_config={"digest": "configuration", "threads": 2, "stack_depth": 8,
+                                          "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"]})
 
-            def run(cmd, *unused):
+            def run(cmd, *unused, **kwargs):
                 """Create the instrumented executable before training fails."""
+                self.assertGreater(kwargs["timeout_seconds"], 0)
                 (build / ("profile_sim.exe" if os.name == "nt" else "profile_sim")).touch()
                 return 0, "", 0.1
 
@@ -181,6 +180,61 @@ class ProfileGuidedBuildTests(unittest.TestCase):
                 self.assertEqual(_compile_verilator([], args), executable)
                 self.assertEqual(compiler.call_count, calls_after_retry)
                 self.assertEqual(training.call_count, 2)
+
+
+class ModelSimProfileBuildTests(unittest.TestCase):
+    def test_failed_forced_rebuild_invalidates_receipt_and_retry_is_cached(self):
+        """A partially rebuilt library cannot retain an earlier successful receipt."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = root / "vlog"
+            tool.touch()
+            build = root / "profile/compile/modelsim/test-key"
+            (build / "modelsim_work").mkdir(parents=True)
+            receipt = build / "fingerprint.txt"
+            receipt.write_text("test-key\n")
+            args = argparse.Namespace(threads=2, stack_depth=8, force_rebuild=True,
+                                      resolved_engine_config={"digest": "fixture", "threads": 2, "stack_depth": 8})
+            manifest = {"simulator": {"modelsim": {"vlog_args": ["-sv"]}}}
+            with patch("tools.hardware_build.profiling.BUILD_ROOT", root), \
+                    patch("tools.hardware_build.profiling.require_tool", return_value=str(tool)), \
+                    patch("tools.hardware_build.profiling._profile_fingerprint", return_value="test-key"), \
+                    patch("tools.hardware_build.profiling.rel", side_effect=str), \
+                    patch("tools.hardware_build.profiling.run_command", return_value=(124, "compile timeout", 1)) as compiler:
+                with self.assertRaises(BuildError):
+                    _compile_profile(manifest, [], args)
+                self.assertGreater(compiler.call_args.kwargs["timeout_seconds"], 0)
+                self.assertFalse(receipt.exists())
+                args.force_rebuild = False
+                compiler.return_value = (0, "", 0.1)
+                _compile_profile(manifest, [], args)
+                self.assertTrue(receipt.exists())
+                calls = compiler.call_count
+                _compile_profile(manifest, [], args)
+                self.assertEqual(compiler.call_count, calls)
+
+    def test_compiler_and_flags_participate_in_library_identity(self):
+        """Tool replacement or compile-option changes require a new library."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = root / "vlog"
+            tool.touch()
+            args = argparse.Namespace(threads=2, stack_depth=8, force_rebuild=False,
+                                      resolved_engine_config={"digest": "fixture", "threads": 2, "stack_depth": 8})
+            manifest = {"simulator": {"modelsim": {"vlog_args": ["-sv"]}}}
+            def compile_command(command, *unused, **kwargs):
+                if len(command) == 2:
+                    Path(command[1]).mkdir(parents=True)
+                return 0, "", 0.1
+            with patch("tools.hardware_build.profiling.BUILD_ROOT", root), \
+                    patch("tools.hardware_build.profiling.require_tool", return_value=str(tool)), \
+                    patch("tools.hardware_build.profiling.run_command", side_effect=compile_command):
+                first = _compile_profile(manifest, [], args)
+                manifest["simulator"]["modelsim"]["vlog_args"].append("+define+FIXTURE")
+                changed_flags = _compile_profile(manifest, [], args)
+                tool.write_text("changed compiler")
+                changed_tool = _compile_profile(manifest, [], args)
+                self.assertEqual(len({first, changed_flags, changed_tool}), 3)
 
 
 def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
@@ -249,10 +303,10 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "sdram.read_words_per_request": 6,
         "sdram.clock_hz": 200,
         "sdram.idle_cycles": 4,
-        f"sdram.states.{SDRAM_STATES.index('idle')}": 5,
-        f"sdram.states.{SDRAM_STATES.index('read_data')}": 6,
-        f"sdram.states.{SDRAM_STATES.index('write_command')}": 1,
-        f"sdram.states.{SDRAM_STATES.index('write_data')}": 5,
+        "sdram.states.idle": 5,
+        "sdram.states.read_data": 6,
+        "sdram.states.write_cmd": 1,
+        "sdram.states.write_data": 5,
         "sdram.write_requests": 1,
         "sdram.read_words": 6,
         "sdram.write_words": 6,
@@ -291,14 +345,16 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
             f"components.move_generator.generation.{kind}.destinations_with_sources"
         ] = 0
         metrics[f"components.move_generator.generation.{kind}.candidates_emitted"] = 0
-    for index in range(len(ENGINE_STATES)):
-        metrics[f"states.engine.{index}"] = search_cycles if index == 5 else 0
-    for index in range(len(CONTROLLER_STATES)):
-        metrics[f"states.controller.{index}"] = search_cycles if index == 19 else 0
-    for index in range(len(THREAD_PHASES)):
-        metrics[f"threads.0.phases.{index}"] = search_cycles if index == 1 else 0
-    for index in range(len(MOVE_ORDER_STATES)):
-        metrics[f"threads.0.move_order.{index}"] = search_cycles if index == 0 else 0
+    metrics["states.engine.wait_result"] = search_cycles
+    metrics["states.controller.search_run"] = search_cycles
+    metrics["states.controller.search_root_init"] = 0
+    for phase in ("idle", "ready", "tt_wait", "eval_wait", "move_wait", "board_wait",
+                  "reverse_wait", "repetition_wait", "store_publish", "terminal_wait", "done",
+                  "time_scale", "time_scale_wait", "time_check"):
+        metrics[f"threads.0.phases.{phase}"] = search_cycles if phase == "ready" else 0
+    metrics["threads.0.move_order.direct"] = search_cycles
+    metrics["components.move_generator.states.idle"] = 2 * search_cycles
+    metrics["tt.frontend_states.idle"] = search_cycles
     metrics["threads.0.nodes"] = 5
     metrics["threads.0.ready.nnue_init"] = 0
     metrics["threads.0.ready.dispatch"] = search_cycles
@@ -373,23 +429,21 @@ class MetricRecordTests(unittest.TestCase):
             )
 
 
-class SDRAMStateMappingTests(unittest.TestCase):
-    def test_payload_state_indices_match_controller(self):
-        """Keep bandwidth counters aligned when the controller state machine changes."""
-        root = Path(__file__).resolve().parents[2]
-        controller = (root / "hardware/rtl/memory/sdr_sdram_controller.sv").read_text(encoding="utf-8")
-        bench = (root / "hardware/tb/profile/tb_engine_profile.sv").read_text(encoding="utf-8")
-        declaration = re.search(r"typedef enum logic \[5:0\] \{(.*?)\} State;", controller, re.S)
-        self.assertIsNotNone(declaration)
-        states = re.findall(r"\bS_[A-Z0-9_]+\b", declaration.group(1))
-        self.assertEqual(len(SDRAM_STATES), len(states))
-        for name, state in (("idle", "S_IDLE"), ("read_data", "S_READ_DATA"),
-                            ("write_command", "S_WRITE_CMD"), ("write_data", "S_WRITE_DATA")):
-            self.assertEqual(SDRAM_STATES.index(name), states.index(state))
-        for constant, expected in (("COUNT", len(states)), ("IDLE", states.index("S_IDLE"))):
-            value = re.search(rf"SDRAM_STATE_{constant} = (\d+);", bench)
-            self.assertIsNotNone(value)
-            self.assertEqual(int(value.group(1)), expected)
+class StateHistogramTests(unittest.TestCase):
+    def test_state_names_do_not_depend_on_order_or_known_state_count(self):
+        """Reordered and newly added states retain their identity and counts."""
+        from tools.hardware_build.profile_report import _state_series
+        self.assertEqual(_state_series({"states.controller.search_run": 7,
+                                        "states.controller.future_state": 3,
+                                        "states.controller.idle": 0}, "states.controller"),
+                         {"search_run": 7, "future_state": 3, "idle": 0})
+
+    def test_numeric_or_negative_state_histograms_fail(self):
+        """Refuse unlabeled encodings instead of silently attaching stale names."""
+        from tools.hardware_build.profile_report import _state_series
+        for metrics in ({}, {"states.controller.18": 7}, {"states.controller.search_run": -1}):
+            with self.subTest(metrics=metrics), self.assertRaises(BuildError):
+                _state_series(metrics, "states.controller")
 
 
 class ReportTests(unittest.TestCase):
@@ -463,7 +517,7 @@ class ReportTests(unittest.TestCase):
     def test_memory_suite_idle_and_bandwidth_pool_memory_cycles(self):
         first = self.build_sample_report()
         second = self.build_sample_report()
-        second["raw_metrics"][f"sdram.states.{SDRAM_STATES.index('idle')}"] *= 10
+        second["raw_metrics"]["sdram.states.idle"] *= 10
         second["raw_metrics"]["sdram.idle_cycles"] *= 10
         suite = build_profile_suite_report([("first", first), ("second", second)])
         memory = suite["aggregate_profile"]["transposition_table"]["memory_interface"]
@@ -639,9 +693,24 @@ class ReportTests(unittest.TestCase):
             text,
         )
 
+    def test_new_rtl_phase_is_counted_and_displayed(self):
+        """A new phase participates in totals and rendering without a Python label table."""
+        metrics = sample_metrics()
+        metrics["threads.0.phases.ready"] -= 3
+        metrics["threads.0.ready.dispatch"] -= 3
+        metrics["threads.0.phases.future_phase"] = 3
+        sample = self.build_sample_report()
+        report = build_profile_report(sample["configuration"], metrics, {
+            "best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
+            "score": 0, "nodes": 5, "completed_depth": 1, "deepest_search_ply": 1,
+            "end_reason": 0, "error": 0,
+        }, 0.5)
+        self.assertEqual(report["threads"][0]["phase_cycles"]["future_phase"], 3)
+        self.assertIn("Future phase", format_profile_topics(report, ["pipeline"]))
+
     def test_phase_total_mismatch_fails(self):
         metrics = sample_metrics()
-        metrics["threads.0.phases.1"] = 9
+        metrics["threads.0.phases.ready"] = 9
         with self.assertRaises(BuildError):
             build_profile_report(
                 {"fen": "x", "threads": 1, "engine_clock_hz": 100},
@@ -662,7 +731,7 @@ class ReportTests(unittest.TestCase):
 
     def test_controller_state_total_mismatch_fails(self):
         metrics = sample_metrics()
-        metrics["states.controller.19"] = 9
+        metrics["states.controller.search_run"] = 9
         with self.assertRaises(BuildError):
             build_profile_report(
                 {"fen": "x", "threads": 1, "engine_clock_hz": 100},
@@ -704,8 +773,8 @@ class ReportTests(unittest.TestCase):
 
     def test_move_wait_breakdown_is_reported_by_move_class(self):
         metrics = sample_metrics()
-        metrics["threads.0.phases.1"] = 4
-        metrics["threads.0.phases.4"] = 6
+        metrics["threads.0.phases.ready"] = 4
+        metrics["threads.0.phases.move_wait"] = 6
         metrics["threads.0.ready.dispatch"] = 4
         metrics["threads.0.move_wait.noisy"] = 2
         metrics["threads.0.move_wait.quiet"] = 4
@@ -729,8 +798,8 @@ class ReportTests(unittest.TestCase):
 
     def test_repetition_wait_excludes_nnue_child_update(self):
         metrics = sample_metrics()
-        metrics["threads.0.phases.1"] = 4
-        metrics["threads.0.phases.7"] = 6
+        metrics["threads.0.phases.ready"] = 4
+        metrics["threads.0.phases.repetition_wait"] = 6
         metrics["threads.0.ready.dispatch"] = 4
         metrics["threads.0.repetition_wait.nnue_update"] = 2
         metrics["threads.0.repetition_wait.overlap"] = 3
@@ -756,8 +825,8 @@ class ReportTests(unittest.TestCase):
 
     def test_repetition_wait_breakdown_mismatch_fails(self):
         metrics = sample_metrics()
-        metrics["threads.0.phases.1"] = 9
-        metrics["threads.0.phases.7"] = 1
+        metrics["threads.0.phases.ready"] = 9
+        metrics["threads.0.phases.repetition_wait"] = 1
         metrics["threads.0.ready.dispatch"] = 9
         with self.assertRaises(BuildError):
             build_profile_report(
@@ -1088,7 +1157,7 @@ class ProfileArgumentTests(unittest.TestCase):
         config = _resolve_profile_config(args)
         self.assertEqual(config["threads"], 17)
         self.assertEqual(config["stack_depth"], 65)
-        self.assertEqual(config["clock_frequency_hz"], 60_000_000)
+        self.assertEqual(config["clocks"]["engine"]["frequency_hz"], 60_000_000)
 
     def test_default_profile_comes_from_synthesis_target(self):
         args = self.namespace(threads=None, stack_depth=None, engine_clock_hz=None)

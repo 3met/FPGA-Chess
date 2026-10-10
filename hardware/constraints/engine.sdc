@@ -1,5 +1,5 @@
 
-create_clock -name CLOCK_50 -period 20 [get_ports CLOCK_50]
+# Reference clock is generated from the board target before this file is read.
 derive_pll_clocks -create
 
 # UART traffic and TT memory requests cross the engine boundary through
@@ -53,7 +53,7 @@ foreach fifo_prefix $fifo_prefixes {
 }
 
 # The DE1 SDRAM samples commands and write data on the phase-shifted memory
-# clock. Board-configured PLL phases place the read sample inside the SDRAM
+# clock. Engine-profile PLL phases place the read sample inside the SDRAM
 # data-valid window. These values cover the SDRAM setup/hold
 # requirements and retain board-routing margin.
 set sdram_clock_source [get_pins {pll_1|pll_ip_inst|memory_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}]

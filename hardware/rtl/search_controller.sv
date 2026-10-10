@@ -236,47 +236,6 @@ module search_controller #(
         logic [1:0] failed_quiet_count;
     } SearchStackEntry;
 
-    typedef enum logic [4:0] {
-        ST_IDLE,
-        ST_BOARD_ISSUE,
-        ST_BOARD_WAIT,
-        ST_DIRECT_DONE,
-        ST_NEW_CLEAR_START,
-        ST_NEW_CLEAR_WAIT,
-        ST_PERFT_GEN_ISSUE,
-        ST_PERFT_GEN_WAIT,
-        ST_PERFT_PUSH_ISSUE,
-        ST_PERFT_PUSH_WAIT,
-        ST_PERFT_REVERSE_ISSUE,
-        ST_PERFT_REVERSE_WAIT,
-        ST_SEARCH_TIME_SETUP,
-        ST_SEARCH_TIME_WAIT,
-        ST_REPETITION_INIT,
-        ST_REPETITION_ROOT_WAIT,
-        ST_SEARCH_ITER_START,
-        ST_SEARCH_ROOT_INIT,
-        ST_SEARCH_RUN,
-        ST_RESPOND,
-        ST_FLUSH_RESPOND
-    } SearchControllerState;
-
-    typedef enum logic [3:0] {
-        SEARCH_PHASE_IDLE,
-        SEARCH_PHASE_READY,
-        SEARCH_PHASE_TT_WAIT,
-        SEARCH_PHASE_EVAL_WAIT,
-        SEARCH_PHASE_MOVE_WAIT,
-        SEARCH_PHASE_BOARD_WAIT,
-        SEARCH_PHASE_REVERSE_WAIT,
-        SEARCH_PHASE_REPETITION_WAIT,
-        SEARCH_PHASE_STORE_PUBLISH,
-        SEARCH_PHASE_TERMINAL_WAIT,
-        SEARCH_PHASE_DONE,
-        SEARCH_PHASE_TIME_SCALE,
-        SEARCH_PHASE_TIME_SCALE_WAIT,
-        SEARCH_PHASE_TIME_CHECK
-    } SearchThreadPhase;
-
     // Chain the next move-order operation directly from a response when the
     // target generator lane is already ready on that response cycle.
     typedef enum logic [1:0] {
@@ -588,7 +547,7 @@ module search_controller #(
     // the controller's wide state decoder into cache-bank read controls.
     always_ff @(posedge clk) begin
         if (!rst_n) tt_clear <= 1'b0;
-        else tt_clear <= state == ST_NEW_CLEAR_START;
+        else tt_clear <= state == CTRL_NEW_CLEAR_START;
     end
 
     logic tt_store_bank_valid, tt_store_bank;
@@ -685,8 +644,8 @@ module search_controller #(
     logic [1:0] repetition_resp_count;
 
     assign resp = resp_reg;
-    assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
-        || state == ST_IDLE;
+    assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE)
+        || state == CTRL_IDLE;
 
     // Canceled searches still own their accepted TT probes until they return.
     // Prevent thread reuse from associating an old response with a new position.
@@ -726,7 +685,7 @@ module search_controller #(
 
     always_ff @(posedge clk) begin
         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
-            if (!rst_n || state != ST_SEARCH_RUN
+            if (!rst_n || state != CTRL_SEARCH_RUN
                     || (req_valid && req.operation == ENGINE_CTRL_KILL)) begin
                 search_generation_inflight[tid] <= 1'b0;
                 search_generation_ply[tid] <= '0;
@@ -811,7 +770,7 @@ module search_controller #(
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT), .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         .ACTIVE_HISTORY_DEPTH(ACTIVE_REPETITION_DEPTH), .EPOCH_BITS(REPETITION_EPOCH_BITS)
     ) repetition_checker_inst (
-        .clk(clk), .rst_n(rst_n), .flush(state == ST_FLUSH_RESPOND),
+        .clk(clk), .rst_n(rst_n), .flush(state == CTRL_FLUSH_RESPOND),
         .active_history_reset(repetition_history_reset), .active_history_write(repetition_history_write),
         .active_history_key(repetition_history_key), .init_start(repetition_init_start),
         .init_busy(), .init_done(repetition_init_done), .init_failed(repetition_init_failed),
@@ -850,9 +809,9 @@ module search_controller #(
     ) move_generator (
         .clk(clk),
         .rst_n(rst_n),
-        .clear(state == ST_NEW_CLEAR_START),
-        .flush((req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE)
-            || state == ST_NEW_CLEAR_START || state == ST_FLUSH_RESPOND),
+        .clear(state == CTRL_NEW_CLEAR_START),
+        .flush((req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE)
+            || state == CTRL_NEW_CLEAR_START || state == CTRL_FLUSH_RESPOND),
         .init_busy(move_init_busy),
         .noisy_cmd_valid(move_cmd_valid), .noisy_cmd_ready(move_cmd_ready),
         .noisy_cmd(move_cmd),
@@ -947,7 +906,7 @@ module search_controller #(
                             stat_phase_cycles[tid][phase] <= 40'd0;
                         end
                     end
-                end else if (state == ST_IDLE && req_valid
+                end else if (state == CTRL_IDLE && req_valid
                         && (req.operation == ENGINE_CTRL_SEARCH_DEPTH
                             || req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
                             || req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK
@@ -974,7 +933,7 @@ module search_controller #(
                         stat_cache_lookups <= stat_cache_lookups + 40'd1;
                         if (tt_cache_hit) stat_cache_hits <= stat_cache_hits + 40'd1;
                     end
-                    if (state == ST_SEARCH_RUN) begin
+                    if (state == CTRL_SEARCH_RUN) begin
                         stat_search_cycle <= stat_search_cycle + 40'd1;
                         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                             if (search_thread_phase[tid] >= SEARCH_PHASE_READY
@@ -1112,8 +1071,8 @@ module search_controller #(
 
     // Accumulator contents need not be erased because validity is tracked per
     // state, but queued and in-flight work must not cross lifecycle boundaries.
-    assign nnue_clear = state == ST_NEW_CLEAR_START || state == ST_FLUSH_RESPOND
-        || (state == ST_SEARCH_ITER_START && !nnue_roots_initialized);
+    assign nnue_clear = state == CTRL_NEW_CLEAR_START || state == CTRL_FLUSH_RESPOND
+        || (state == CTRL_SEARCH_ITER_START && !nnue_roots_initialized);
 
     function automatic logic is_null_move(input Move move);
         return move.from_pos == Position'(0) && move.to_pos == Position'(0);
@@ -2042,7 +2001,7 @@ module search_controller #(
     // Budget comparators have their own register boundary instead of gating
     // every search-state update. A reached budget is observed one clock later.
     always_ff @(posedge clk) begin
-        if (!rst_n || state != ST_SEARCH_RUN) begin
+        if (!rst_n || state != CTRL_SEARCH_RUN) begin
             search_node_stop_q <= 1'b0;
             search_time_stop_q <= 1'b0;
         end else begin
@@ -2062,7 +2021,7 @@ module search_controller #(
             parent_futility_eligible_q <= 1'b0;
             parent_futility_prunes_q <= 1'b0;
             parent_qdelta_prunes_q <= 1'b0;
-        end else if (state == ST_SEARCH_RUN
+        end else if (state == CTRL_SEARCH_RUN
                 && search_board_tag_valid_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 2]) begin
             automatic ThreadID thread_id =
                 search_board_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 2];
@@ -2161,12 +2120,12 @@ module search_controller #(
         // Always consume a registered response. Keeping backend response
         // routing separate from score/window decisions breaks the bypass path
         // through TT classification into the board and move schedulers.
-        search_tt_consume_valid = state == ST_SEARCH_RUN && |search_tt_response_mask;
+        search_tt_consume_valid = state == CTRL_SEARCH_RUN && |search_tt_response_mask;
         search_tt_consume_thread = search_select_thread(
             search_tt_response_mask, search_dispatch.tt_response);
         search_tt_consume_response = search_tt_response[search_tt_consume_thread];
 
-        move_board_bypass_valid = state == ST_SEARCH_RUN
+        move_board_bypass_valid = state == CTRL_SEARCH_RUN
             && ((move_pop_resp_valid && move_pop_resp_found)
                 || (move_cmd_resp_valid && move_cmd_resp_direct_valid));
         move_board_bypass_thread = move_pop_resp_valid && move_pop_resp_found
@@ -2179,12 +2138,12 @@ module search_controller #(
         // ordering does not spend a READY scheduler cycle between operations.
         move_followup_action = MOVE_FOLLOWUP_NONE;
         move_followup_thread = ThreadID'(0);
-        if (state == ST_SEARCH_RUN && move_cmd_resp_valid
+        if (state == CTRL_SEARCH_RUN && move_cmd_resp_valid
                 && !search_generation_inflight[move_cmd_resp_thread]
                 && !move_cmd_resp_direct_valid) begin
             move_followup_thread = move_cmd_resp_thread;
             move_followup_action = MOVE_FOLLOWUP_NOISY_CMD;
-        end else if (state == ST_SEARCH_RUN && move_pop_resp_valid
+        end else if (state == CTRL_SEARCH_RUN && move_pop_resp_valid
                 && !move_pop_resp_found
                 && !search_generation_inflight[move_pop_resp_thread]) begin
             move_followup_thread = move_pop_resp_thread;
@@ -2202,26 +2161,26 @@ module search_controller #(
             || move_followup_action == MOVE_FOLLOWUP_POP_BAD;
         move_followup_uses_quiet =
             move_followup_action == MOVE_FOLLOWUP_QUIET_CMD;
-        search_null_issue_valid = (state == ST_SEARCH_RUN)
+        search_null_issue_valid = (state == CTRL_SEARCH_RUN)
             && !move_board_bypass_valid
             && !(|search_board_mask)
             && |search_null_mask;
-        search_board_issue_valid = (state == ST_SEARCH_RUN)
+        search_board_issue_valid = (state == CTRL_SEARCH_RUN)
             && (move_board_bypass_valid
                 || |search_board_mask
                 || search_null_issue_valid);
-        search_move_issue_valid = (state == ST_SEARCH_RUN)
+        search_move_issue_valid = (state == CTRL_SEARCH_RUN)
             && !move_followup_uses_move
             && |search_move_mask;
-        search_quiet_issue_valid = (state == ST_SEARCH_RUN)
+        search_quiet_issue_valid = (state == CTRL_SEARCH_RUN)
             && !move_followup_uses_quiet
             && |search_quiet_mask;
-        search_eval_issue_valid = (state == ST_SEARCH_RUN)
+        search_eval_issue_valid = (state == CTRL_SEARCH_RUN)
             && !nnue_build_busy
             && |search_eval_mask;
-        search_tt_lookup_issue_valid = (state == ST_SEARCH_RUN)
+        search_tt_lookup_issue_valid = (state == CTRL_SEARCH_RUN)
             && |search_tt_lookup_mask;
-        search_tt_store_issue_valid = (state == ST_SEARCH_RUN)
+        search_tt_store_issue_valid = (state == CTRL_SEARCH_RUN)
             && |search_store_mask;
         // Keep null eligibility out of the normal move payload mux. A null
         // board operation ignores move_in, but allowing its thread choice to
@@ -2272,10 +2231,10 @@ module search_controller #(
         board_update_piece_count_in = active_piece_count;
         board_update_move = active_req.move;
         board_update_set_data = active_req.board_wr_data;
-        board_update_thread_id = (state == ST_SEARCH_RUN) ? search_board_issue_thread : ThreadID'(0);
+        board_update_thread_id = (state == CTRL_SEARCH_RUN) ? search_board_issue_thread : ThreadID'(0);
         board_update_ply = PlyIndex'(0);
 
-        if (state == ST_BOARD_ISSUE) begin
+        if (state == CTRL_BOARD_ISSUE) begin
             // New Game uses the same issue and writeback path as direct board updates.
             if (active_req.operation == ENGINE_CTRL_NEW_GAME) begin
                 board_update_op = setup_req_comb.board_op;
@@ -2284,7 +2243,7 @@ module search_controller #(
             end else begin
                 board_update_op = active_req.board_op;
             end
-        end else if (state == ST_PERFT_GEN_WAIT
+        end else if (state == CTRL_PERFT_GEN_WAIT
                 && move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)
                 && move_pop_resp_found) begin
             board_update_op = BOARD_PUSH_MOVE_OP;
@@ -2294,8 +2253,8 @@ module search_controller #(
             board_update_piece_count_in = search_piece_count[0];
             board_update_move = move_pop_resp_move;
             board_update_ply = search_ply[0];
-        end else if (state == ST_PERFT_PUSH_ISSUE || state == ST_PERFT_REVERSE_ISSUE) begin
-            board_update_op = (state == ST_PERFT_REVERSE_ISSUE) ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
+        end else if (state == CTRL_PERFT_PUSH_ISSUE || state == CTRL_PERFT_REVERSE_ISSUE) begin
+            board_update_op = (state == CTRL_PERFT_REVERSE_ISSUE) ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
             // Perft serially borrows search context zero instead of owning a duplicate position.
             board_update_in = search_board[0];
             board_update_zobrist_in = search_zobrist_key[0];
@@ -2367,7 +2326,7 @@ module search_controller #(
             end
         end
 
-        if (state == ST_PERFT_GEN_ISSUE) begin
+        if (state == CTRL_PERFT_GEN_ISSUE) begin
             move_cmd_thread = ThreadID'(0);
             move_cmd_ply = search_ply[0];
             move_cmd_board = search_board[0];
@@ -2428,7 +2387,7 @@ module search_controller #(
             end
         end
 
-        if (state == ST_SEARCH_RUN && move_followup_uses_quiet) begin
+        if (state == CTRL_SEARCH_RUN && move_followup_uses_quiet) begin
             move_quiet_cmd_valid = 1'b1;
             move_quiet_cmd_thread = move_followup_thread;
             move_quiet_cmd_ply = search_ply[move_followup_thread];
@@ -2437,7 +2396,7 @@ module search_controller #(
                 search_stack_top[move_followup_thread].direct_attempted;
             move_quiet_cmd_suppress_move =
                 search_stack_top[move_followup_thread].tt_move;
-        end else if (state == ST_SEARCH_RUN && search_quiet_issue_valid) begin
+        end else if (state == CTRL_SEARCH_RUN && search_quiet_issue_valid) begin
             move_quiet_cmd_valid = 1'b1;
             move_quiet_cmd_thread = search_quiet_issue_thread;
             move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
@@ -2450,7 +2409,7 @@ module search_controller #(
 
         nnue_update_valid = 1'b0;
         nnue_update_req = NnueUpdateRequest'('0);
-        if (state == ST_SEARCH_ROOT_INIT && !nnue_root_init_draining) begin
+        if (state == CTRL_SEARCH_ROOT_INIT && !nnue_root_init_draining) begin
             automatic Tile feature_tile =
                 search_board[nnue_root_init_thread].tiles[nnue_root_init_pos];
             if (feature_tile.piece_type != NULL_PIECE) begin
@@ -2618,7 +2577,7 @@ module search_controller #(
 
         tt_lookup_req_valid = search_tt_lookup_issue_valid;
         tt_lookup_req = TTLookupRequest'('0);
-        tt_lookup_req.thread_id = (state == ST_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
+        tt_lookup_req.thread_id = (state == CTRL_SEARCH_RUN) ? search_tt_lookup_issue_thread : search_thread_id;
         tt_lookup_req.zobrist_key = search_zobrist_key[tt_lookup_req.thread_id];
         tt_lookup_req.depth = search_remaining_depth(tt_lookup_req.thread_id);
         tt_lookup_req.alpha = search_stack_top[tt_lookup_req.thread_id].alpha;
@@ -2652,11 +2611,11 @@ module search_controller #(
             move_bad_noisy_enable[tid] = 1'b0;
             move_node_init_valid[tid] = 1'b0;
             move_node_init_ply[tid] = PlyIndex'(0);
-            if (state == ST_SEARCH_RUN && search_node_init_pending[tid]) begin
+            if (state == CTRL_SEARCH_RUN && search_node_init_pending[tid]) begin
                 move_node_init_valid[tid] = 1'b1;
                 move_node_init_ply[tid] = search_ply[tid];
             end
-            move_pop_valid_vec[tid] = state == ST_SEARCH_RUN
+            move_pop_valid_vec[tid] = state == CTRL_SEARCH_RUN
                 && search_thread_move_ready(tid) && move_state_uses_pop(order_state);
             move_pop_ply_vec[tid] = search_ply[tid];
             if (move_pop_valid && move_pop_thread == ThreadID'(tid)) begin
@@ -2666,25 +2625,25 @@ module search_controller #(
             move_pop_resp_ready_vec[tid] = move_pop_resp_valid
                 && move_pop_response_thread == ThreadID'(tid);
         end
-        timer_rst = (state == ST_IDLE);
-        timer_run = ((state == ST_PERFT_GEN_ISSUE)
-            || (state == ST_PERFT_GEN_WAIT)
-            || (state == ST_PERFT_PUSH_ISSUE)
-            || (state == ST_PERFT_PUSH_WAIT)
-            || (state == ST_PERFT_REVERSE_ISSUE)
-            || (state == ST_PERFT_REVERSE_WAIT))
-            || (state == ST_SEARCH_ITER_START)
-            || (state == ST_SEARCH_ROOT_INIT)
-            || (state == ST_SEARCH_RUN);
-        time_management_cancel = state != ST_SEARCH_TIME_SETUP
-            && state != ST_SEARCH_TIME_WAIT
-            && state != ST_SEARCH_RUN;
+        timer_rst = (state == CTRL_IDLE);
+        timer_run = ((state == CTRL_PERFT_GEN_ISSUE)
+            || (state == CTRL_PERFT_GEN_WAIT)
+            || (state == CTRL_PERFT_PUSH_ISSUE)
+            || (state == CTRL_PERFT_PUSH_WAIT)
+            || (state == CTRL_PERFT_REVERSE_ISSUE)
+            || (state == CTRL_PERFT_REVERSE_WAIT))
+            || (state == CTRL_SEARCH_ITER_START)
+            || (state == CTRL_SEARCH_ROOT_INIT)
+            || (state == CTRL_SEARCH_RUN);
+        time_management_cancel = state != CTRL_SEARCH_TIME_SETUP
+            && state != CTRL_SEARCH_TIME_WAIT
+            && state != CTRL_SEARCH_RUN;
     end
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             move_pop_response_rr <= ThreadID'(0);
-            state <= ST_IDLE;
+            state <= CTRL_IDLE;
             active_req <= EngineControllerRequest'('0);
             resp_reg <= EngineControllerResponse'('0);
             resp_valid <= 1'b0;
@@ -2888,7 +2847,7 @@ module search_controller #(
             profile_qdelta_prune_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
 `endif
-            if (state != ST_SEARCH_RUN) begin
+            if (state != CTRL_SEARCH_RUN) begin
                 nnue_build_busy <= 1'b0;
                 nnue_build_draining <= 1'b0;
                 nnue_build_first <= 1'b0;
@@ -2968,7 +2927,7 @@ module search_controller #(
                 end
             end
 
-            if (req_valid && req.operation == ENGINE_CTRL_KILL && state != ST_IDLE) begin
+            if (req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE) begin
                 automatic logic killing_search;
                 automatic logic primary_aspiration_failed;
                 automatic Move kill_best_move;
@@ -3055,10 +3014,10 @@ module search_controller #(
                     search_move_tag_valid_pipe[idx] <= 1'b0;
                     search_move_in_check_pipe[idx] <= 1'b0;
                 end
-                state <= ST_FLUSH_RESPOND;
+                state <= CTRL_FLUSH_RESPOND;
             end else begin
             case (state)
-                ST_IDLE: begin
+                CTRL_IDLE: begin
                     if (req_valid) begin
                         active_req <= req;
                         case (req.operation)
@@ -3067,9 +3026,9 @@ module search_controller #(
                                     resp_reg <= EngineControllerResponse'('0);
                                     resp_reg.error <= 1'b1;
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
-                                    state <= ST_DIRECT_DONE;
+                                    state <= CTRL_DIRECT_DONE;
                                 end else begin
-                                    state <= ST_BOARD_ISSUE;
+                                    state <= CTRL_BOARD_ISSUE;
                                 end
                             end
 
@@ -3115,7 +3074,7 @@ module search_controller #(
                                     search_move_in_check_pipe[idx] <= 1'b0;
                                 end
                                 tt_age <= TTAge'(0);
-                                state <= ST_NEW_CLEAR_START;
+                                state <= CTRL_NEW_CLEAR_START;
                             end
 
                             ENGINE_CTRL_PERFT: begin
@@ -3123,7 +3082,7 @@ module search_controller #(
                                     resp_reg <= EngineControllerResponse'('0);
                                     resp_reg.error <= 1'b1;
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
-                                    state <= ST_RESPOND;
+                                    state <= CTRL_RESPOND;
                                 end else begin
                                     // Perft borrows the idle first search context and leaves the game board intact.
                                     search_board[0] <= active_board;
@@ -3140,9 +3099,9 @@ module search_controller #(
                                         resp_reg.nodes_count <= NodeCountType'(1);
                                         resp_reg.completed_depth <= 8'd0;
                                         resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                        state <= ST_RESPOND;
+                                        state <= CTRL_RESPOND;
                                     end else begin
-                                        state <= ST_PERFT_GEN_ISSUE;
+                                        state <= CTRL_PERFT_GEN_ISSUE;
                                     end
                                 end
                             end
@@ -3155,7 +3114,7 @@ module search_controller #(
                                     resp_reg <= EngineControllerResponse'('0);
                                     resp_reg.error <= 1'b1;
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
-                                    state <= ST_RESPOND;
+                                    state <= CTRL_RESPOND;
                                 end else begin
                                     search_ply[search_thread_id] <= PlyIndex'(0);
                                     search_max_depth <= SearchDepth'(requested_search_depth(req));
@@ -3244,7 +3203,7 @@ module search_controller #(
                                     repetition_epoch <= repetition_epoch + 1'b1;
                                     // Time arithmetic starts from the registered request so the
                                     // command handshake cannot feed the timing-register muxes.
-                                    state <= ST_SEARCH_TIME_SETUP;
+                                    state <= CTRL_SEARCH_TIME_SETUP;
                                 end
                             end
 
@@ -3272,25 +3231,25 @@ module search_controller #(
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
                                     search_move_in_check_pipe[idx] <= 1'b0;
                                 end
-                                state <= ST_FLUSH_RESPOND;
+                                state <= CTRL_FLUSH_RESPOND;
                             end
 
                             default: begin
                                 resp_reg <= EngineControllerResponse'('0);
                                 resp_reg.error <= 1'b1;
                                 resp_reg.end_reason <= ENGINE_END_ERROR;
-                                state <= ST_RESPOND;
+                                state <= CTRL_RESPOND;
                             end
                         endcase
                     end
                 end
 
-                ST_BOARD_ISSUE: begin
+                CTRL_BOARD_ISSUE: begin
                     board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-                    state <= ST_BOARD_WAIT;
+                    state <= CTRL_BOARD_WAIT;
                 end
 
-                ST_BOARD_WAIT: begin
+                CTRL_BOARD_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
                         active_board <= board_update_out;
                         active_board_in_check <= board_update_side_in_check;
@@ -3303,10 +3262,10 @@ module search_controller #(
                                 repetition_history_reset <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
                                 resp_reg <= EngineControllerResponse'('0);
-                                state <= ST_DIRECT_DONE;
+                                state <= CTRL_DIRECT_DONE;
                             end else begin
                                 new_setup_index <= new_setup_index + 7'd1;
-                                state <= ST_BOARD_ISSUE;
+                                state <= CTRL_BOARD_ISSUE;
                             end
                         end else begin
                             if (active_req.board_op == BOARD_COMMIT_MOVE_OP) begin
@@ -3322,60 +3281,60 @@ module search_controller #(
                                 repetition_history_key <= board_update_zobrist_out;
                             end
                             resp_reg <= EngineControllerResponse'('0);
-                            state <= ST_DIRECT_DONE;
+                            state <= CTRL_DIRECT_DONE;
                         end
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
                     end
                 end
 
-                ST_DIRECT_DONE: begin
+                CTRL_DIRECT_DONE: begin
                     resp_valid <= 1'b1;
-                    state <= ST_IDLE;
+                    state <= CTRL_IDLE;
                 end
 
-                ST_NEW_CLEAR_START: begin
-                    state <= ST_NEW_CLEAR_WAIT;
+                CTRL_NEW_CLEAR_START: begin
+                    state <= CTRL_NEW_CLEAR_WAIT;
                 end
 
-                ST_NEW_CLEAR_WAIT: begin
+                CTRL_NEW_CLEAR_WAIT: begin
                     if (!tt_clear_busy && !move_init_busy) begin
                         new_setup_index <= 7'd0;
-                        state <= ST_BOARD_ISSUE;
+                        state <= CTRL_BOARD_ISSUE;
                     end
                 end
 
-                ST_PERFT_GEN_ISSUE: begin
+                CTRL_PERFT_GEN_ISSUE: begin
                     if (search_stack_top[0].move_order_state == MOVE_ORDER_DONE) begin
                         if (search_ply[0] == PlyIndex'(0)) begin
                             resp_reg <= EngineControllerResponse'('0);
                             resp_reg.nodes_count <= search_nodes;
                             resp_reg.completed_depth <= active_req.depth_limit;
                             resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                            state <= ST_RESPOND;
+                            state <= CTRL_RESPOND;
                         end else begin
-                            state <= ST_PERFT_REVERSE_ISSUE;
+                            state <= CTRL_PERFT_REVERSE_ISSUE;
                         end
                     end else if ((move_cmd_valid && move_cmd_ready)
                             || (move_quiet_cmd_valid && move_quiet_cmd_ready)
                             || (move_pop_valid && move_pop_ready)) begin
-                        state <= ST_PERFT_GEN_WAIT;
+                        state <= CTRL_PERFT_GEN_WAIT;
                     end
                 end
 
-                ST_PERFT_GEN_WAIT: begin
+                CTRL_PERFT_GEN_WAIT: begin
                     if (move_cmd_resp_valid && move_cmd_resp_thread == ThreadID'(0)) begin
                         search_stack_top[0].move_order_state <= MOVE_ORDER_GOOD_NOISY;
-                        state <= ST_PERFT_GEN_ISSUE;
+                        state <= CTRL_PERFT_GEN_ISSUE;
                     end else if (move_quiet_resp_valid
                             && move_quiet_resp_thread == ThreadID'(0)) begin
                         search_stack_top[0].move_order_state <= MOVE_ORDER_QUIET;
-                        state <= ST_PERFT_GEN_ISSUE;
+                        state <= CTRL_PERFT_GEN_ISSUE;
                     end else if (move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)) begin
                         if (move_pop_resp_found) begin
                             search_pending_move[0] <= move_pop_resp_move;
                             board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-                            state <= ST_PERFT_PUSH_WAIT;
+                            state <= CTRL_PERFT_PUSH_WAIT;
                         end else begin
                             if (search_stack_top[0].move_order_state == MOVE_ORDER_GOOD_NOISY)
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_QUIET;
@@ -3383,23 +3342,23 @@ module search_controller #(
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_BAD_NOISY;
                             else
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_DONE;
-                            state <= ST_PERFT_GEN_ISSUE;
+                            state <= CTRL_PERFT_GEN_ISSUE;
                         end
                     end
                 end
 
-                ST_PERFT_PUSH_ISSUE: begin
+                CTRL_PERFT_PUSH_ISSUE: begin
                     board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-                    state <= ST_PERFT_PUSH_WAIT;
+                    state <= CTRL_PERFT_PUSH_WAIT;
                 end
 
-                ST_PERFT_PUSH_WAIT: begin
+                CTRL_PERFT_PUSH_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
                         if (board_update_mover_in_check) begin
-                            state <= ST_PERFT_GEN_ISSUE;
+                            state <= CTRL_PERFT_GEN_ISSUE;
                         end else if (int'(search_ply[0]) + 1 >= int'(active_req.depth_limit)) begin
                             search_nodes <= search_nodes + NodeCountType'(1);
-                            state <= ST_PERFT_GEN_ISSUE;
+                            state <= CTRL_PERFT_GEN_ISSUE;
                         end else begin
                             search_board[0] <= board_update_out;
                             search_zobrist_key[0] <= board_update_zobrist_out;
@@ -3408,19 +3367,19 @@ module search_controller #(
                             search_stack_top[0] <= empty_search_stack_entry();
                             search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_NOISY;
                             search_ply[0] <= search_ply[0] + PlyIndex'(1);
-                            state <= ST_PERFT_GEN_ISSUE;
+                            state <= CTRL_PERFT_GEN_ISSUE;
                         end
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
                     end
                 end
 
-                ST_PERFT_REVERSE_ISSUE: begin
+                CTRL_PERFT_REVERSE_ISSUE: begin
                     board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-                    state <= ST_PERFT_REVERSE_WAIT;
+                    state <= CTRL_PERFT_REVERSE_WAIT;
                 end
 
-                ST_PERFT_REVERSE_WAIT: begin
+                CTRL_PERFT_REVERSE_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
                         search_board[0] <= board_update_out;
                         search_zobrist_key[0] <= board_update_zobrist_out;
@@ -3428,35 +3387,35 @@ module search_controller #(
                         search_piece_count[0] <= board_update_piece_count_out;
                         search_stack_top[0] <= search_stack_parent_q[0];
                         search_ply[0] <= search_ply[0] - PlyIndex'(1);
-                        state <= ST_PERFT_GEN_ISSUE;
+                        state <= CTRL_PERFT_GEN_ISSUE;
                     end else begin
                         board_wait_count <= board_wait_count - BoardWaitCount'(1);
                     end
                 end
 
                 // Time policy arithmetic is owned by the dedicated control-plane module.
-                ST_SEARCH_TIME_SETUP: begin
+                CTRL_SEARCH_TIME_SETUP: begin
                     time_setup_start <= 1'b1;
-                    state <= ST_SEARCH_TIME_WAIT;
+                    state <= CTRL_SEARCH_TIME_WAIT;
                 end
 
-                ST_SEARCH_TIME_WAIT: begin
+                CTRL_SEARCH_TIME_WAIT: begin
                     if (time_management_done) begin
                         search_base_ms <= allocated_base_ms;
                         search_soft_ms <= allocated_soft_ms;
                         search_next_depth_ms <= allocated_next_depth_ms;
                         search_hard_ms <= allocated_hard_ms;
                         repetition_init_start <= 1'b1;
-                        state <= ST_REPETITION_INIT;
+                        state <= CTRL_REPETITION_INIT;
                     end
                 end
 
-                ST_REPETITION_INIT: begin
+                CTRL_REPETITION_INIT: begin
                     if (repetition_init_failed) begin
                         resp_reg <= EngineControllerResponse'('0);
                         resp_reg.error <= 1'b1;
                         resp_reg.end_reason <= ENGINE_END_ERROR;
-                        state <= ST_RESPOND;
+                        state <= CTRL_RESPOND;
                     // A repeated search starts from INIT_READY; wait for the
                     // one-cycle start pulse to be consumed before accepting done.
                     end else if (repetition_init_done && !repetition_init_start) begin
@@ -3465,25 +3424,25 @@ module search_controller #(
                         repetition_req_ply <= PlyIndex'(0);
                         repetition_req_start_ply <= PlyIndex'(0);
                         repetition_req_key <= active_zobrist_key;
-                        state <= ST_REPETITION_ROOT_WAIT;
+                        state <= CTRL_REPETITION_ROOT_WAIT;
                     end
                 end
 
-                ST_REPETITION_ROOT_WAIT: begin
+                CTRL_REPETITION_ROOT_WAIT: begin
                     if (repetition_resp_valid && repetition_resp_epoch == repetition_epoch) begin
                         if (repetition_resp_is_draw) begin
                             resp_reg <= EngineControllerResponse'('0);
                             resp_reg.score <= DRAW_EVAL_SCORE;
                             resp_reg.best_move <= NULL_MOVE;
                             resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                            state <= ST_RESPOND;
+                            state <= CTRL_RESPOND;
                         end else begin
-                            state <= ST_SEARCH_ITER_START;
+                            state <= CTRL_SEARCH_ITER_START;
                         end
                     end
                 end
 
-                ST_SEARCH_ITER_START: begin
+                CTRL_SEARCH_ITER_START: begin
                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                         search_thread_phase[tid] <= SEARCH_PHASE_READY;
                         search_board[tid] <= active_board;
@@ -3542,13 +3501,13 @@ module search_controller #(
                         nnue_root_init_pos <= Position'(0);
                         nnue_root_init_first <= 1'b1;
                         nnue_root_init_draining <= 1'b0;
-                        state <= ST_SEARCH_ROOT_INIT;
+                        state <= CTRL_SEARCH_ROOT_INIT;
                     end else begin
-                        state <= ST_SEARCH_RUN;
+                        state <= CTRL_SEARCH_RUN;
                     end
                 end
 
-                ST_SEARCH_ROOT_INIT: begin
+                CTRL_SEARCH_ROOT_INIT: begin
                     automatic Tile root_tile =
                         search_board[nnue_root_init_thread].tiles[nnue_root_init_pos];
                     if (!nnue_root_init_draining) begin
@@ -3566,7 +3525,7 @@ module search_controller #(
                         if (int'(nnue_root_init_thread) == SEARCH_THREAD_COUNT - 1) begin
                             nnue_roots_initialized <= 1'b1;
                             nnue_root_init_draining <= 1'b0;
-                            state <= ST_SEARCH_RUN;
+                            state <= CTRL_SEARCH_RUN;
                         end else begin
                             nnue_root_init_thread <= nnue_root_init_thread + ThreadID'(1);
                             nnue_root_init_pos <= Position'(0);
@@ -3576,7 +3535,7 @@ module search_controller #(
                     end
                 end
 
-                ST_SEARCH_RUN: begin
+                CTRL_SEARCH_RUN: begin
                     automatic ThreadCount active_count_next;
                     automatic NodeCountType nodes_next;
                     automatic logic nnue_eval_enqueued;
@@ -3800,7 +3759,7 @@ module search_controller #(
                             resp_reg.nodes_count <= search_nodes;
                             resp_reg.completed_depth <= search_completed_depth;
                             resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
-                            state <= ST_FLUSH_RESPOND;
+                            state <= CTRL_FLUSH_RESPOND;
                         end else begin
                             search_thread_target_depth[0]
                                 <= search_thread_target_depth[0] + SearchDepth'(1);
@@ -3896,7 +3855,7 @@ module search_controller #(
                                 resp_reg.nodes_count <= search_nodes;
                                 resp_reg.completed_depth <= search_thread_target_depth[tid];
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                state <= ST_FLUSH_RESPOND;
+                                state <= CTRL_FLUSH_RESPOND;
                             end else if ((!depth_finished || aspiration_failed)
                                     && !(primary_thread && !aspiration_failed
                                         && active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)) begin
@@ -3974,7 +3933,7 @@ module search_controller #(
                         resp_reg.end_reason <= search_node_stop_q
                             ? ENGINE_END_NODE_LIMIT
                             : ENGINE_END_TIME_LIMIT;
-                        state <= ST_FLUSH_RESPOND;
+                        state <= CTRL_FLUSH_RESPOND;
                     end else begin
                         if (terminal_result_valid_pipe) begin
                             automatic ThreadID terminal_thread_id;
@@ -5095,21 +5054,21 @@ module search_controller #(
                     end
                 end
 
-                ST_RESPOND: begin
+                CTRL_RESPOND: begin
                     resp_valid <= 1'b1;
-                    state <= ST_IDLE;
+                    state <= CTRL_IDLE;
                 end
 
-                ST_FLUSH_RESPOND: begin
+                CTRL_FLUSH_RESPOND: begin
                     resp_valid <= 1'b1;
-                    state <= ST_IDLE;
+                    state <= CTRL_IDLE;
                 end
 
                 default: begin
                     resp_reg <= EngineControllerResponse'('0);
                     resp_reg.error <= 1'b1;
                     resp_reg.end_reason <= ENGINE_END_ERROR;
-                    state <= ST_RESPOND;
+                    state <= CTRL_RESPOND;
                 end
             endcase
             end

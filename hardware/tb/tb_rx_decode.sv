@@ -26,7 +26,7 @@ module tb_rx_decode;
     always #(ENGINE_CLK_NS / 2.0) clk = ~clk;
     always #(UART_CLK_NS / 2.0) uart_clk = ~uart_clk;
 
-    always_ff @(posedge clk) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             remote_reset_seen <= 1'b0;
         end else if (remote_reset) begin

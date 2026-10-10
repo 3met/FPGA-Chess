@@ -4,7 +4,7 @@
 
 ## Simulated Hardware
 
-The profiling testbench instantiates the vendor-neutral engine and the production external-TT path, including its cache, clock-domain bridge, and DE1 SDR SDRAM controller. A sparse chip model supplies persistent SDRAM contents, checks command timing, and models SDRAM read access, representative FPGA input delay, and routed forwarded-clock delay. Memory frequency, output phase, and duty cycle follow the selected synthesis target. Every returned memory word is checked against that storage. UART, PLL, displays, and the board wrapper are outside the profiling boundary.
+The profiling testbench instantiates the vendor-neutral engine and the production external-TT path, including its cache, clock-domain bridge, and DE1 SDR SDRAM controller. A sparse chip model supplies persistent SDRAM contents, checks command timing, and models SDRAM read access, representative FPGA input delay, and routed forwarded-clock delay. Engine and memory frequencies, phases, and duty cycles come from the selected engine profile, including `--engine-config` overrides. The memory IO clock inherits the memory frequency; its phase is relative to the controller clock before DDR inversion. Every returned memory word is checked against that storage. UART, PLL, displays, and the board wrapper are outside the profiling boundary. Clock periods and duty intervals use a shared picosecond grid; the `profile-clocks` RTL bench checks signed phase wrapping and duty-cycle rounding.
 
 ## Usage
 
@@ -50,7 +50,7 @@ Overall profiling wall time includes configuration, simulator preparation or com
 
 Reports cover search throughput, pipeline stalls, thread activity, move ordering, pruning, TT/cache behavior, SDRAM traffic, and simulator speed. Per-depth data follows the primary thread; helpers may be searching another depth.
 
-Profiler instrumentation is testbench-only. Optional hardware search statistics are a separate diagnostic interface.
+Profiler instrumentation is testbench-only. FSM comparisons use shared RTL enum definitions, histogram storage follows enum widths, and state metrics carry enum names rather than numeric encodings. Reports retain newly added states and lifecycle phases automatically; sampled invalid encodings fail profiling. Optional hardware search statistics are a separate diagnostic interface.
 
 ## Interpretation
 
@@ -71,3 +71,5 @@ Average payload bandwidth is executed read and write data cycles multiplied by b
 Writebacks queued alongside probe reads counts engine cycles during search when both queues are nonempty and the TT frontend is idle. It describes queue overlap, not arbitration decisions or interrupted writes; in-progress memory writes are not preempted.
 
 The profiler does not enforce a particular best move, score, or node count. It fails for invalid input, simulator errors, timeouts, incomplete output, engine or memory faults, and broken measurement invariants.
+
+The final metrics snapshot occurs on the engine clock falling edge after all rising-edge monitors settle. A sampling-window invariant checks that cache-port observations span exactly the recorded search and drain cycles.

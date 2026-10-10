@@ -1,11 +1,12 @@
 {
   "simulator": {
     "modelsim": {
+      "type_config": "hardware/config/types/standalone.json",
       "vlog_args": [
         "-sv"
       ],
       "vsim_args": [
-        "-c",
+        "-batch",
         "-t",
         "ps"
       ],
@@ -16,6 +17,10 @@
     "common": [
       "hardware/rtl/chess_defs.sv",
       "hardware/rtl/chess_helpers.sv"
+    ],
+    "rtl-types": [
+      "@common",
+      "hardware/rtl/tt/tt_defs.sv"
     ],
     "async-fifo": [
       "hardware/rtl/memory/async_fifo.sv"
@@ -71,12 +76,14 @@
     "tt-sdram-controller": [
       "@common",
       "hardware/rtl/tt/tt_defs.sv",
+      "hardware/rtl/memory/sdram_defs.sv",
       "hardware/rtl/memory/sdr_sdram_controller.sv"
     ],
     "repetition-checker": [
       "@common",
       "hardware/rtl/zobrist_defs.sv",
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
+      "hardware/rtl/repetition_defs.sv",
       "hardware/rtl/repetition_checker.sv"
     ],
     "time-management": [
@@ -122,6 +129,7 @@
       "@portable-rtl",
       "hardware/rtl/reset_release.sv",
       "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
+      "hardware/rtl/memory/sdram_defs.sv",
       "hardware/rtl/memory/sdr_sdram_controller.sv",
       "hardware/rtl/de1_soc.sv"
     ],
@@ -134,6 +142,7 @@
     "engine-profile": [
       "@portable-rtl",
       "hardware/rtl/memory/tt_memory_cdc_bridge.sv",
+      "hardware/rtl/memory/sdram_defs.sv",
       "hardware/rtl/memory/sdr_sdram_controller.sv",
       "hardware/tb/profile/sdram_chip_model.sv",
       "hardware/tb/profile/cache_wait_profiler.sv",
@@ -160,9 +169,15 @@
     "tt-cache-bank": [
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/tt/tt_cache_bank.sv"
-    ]
+    ],
+    "profile-clocks": []
   },
   "tests": {
+    "rtl-types": {
+      "source_set": "rtl-types",
+      "testbench": "hardware/tb/tb_rtl_types.sv",
+      "top": "tb_rtl_types"
+    },
     "tt-latency-profiler": {
       "source_set": "tt-latency-profiler",
       "testbench": "hardware/tb/profile/tb_tt_latency_profiler.sv",
@@ -186,7 +201,12 @@
     "board-update-pipeline": {
       "source_set": "board-update-pipeline",
       "testbench": "hardware/tb/board_update_pipeline/tb_board_update_pipeline.sv",
-      "top": "tb_board_update_pipeline"
+      "top": "tb_board_update_pipeline",
+      "verilator_args": [
+        "-O0",
+        "-CFLAGS",
+        "-O0"
+      ]
     },
     "move-reader": {
       "source_set": "move-generator",
@@ -312,6 +332,11 @@
       "source_set": "tt-cache-bank",
       "testbench": "hardware/tb/tt/tb_tt_cache_bank.sv",
       "top": "tb_tt_cache_bank"
+    },
+    "profile-clocks": {
+      "source_set": "profile-clocks",
+      "top": "tb_profile_clocks",
+      "testbench": "hardware/tb/profile/tb_profile_clocks.sv"
     }
   },
   "generated_data": {
@@ -352,23 +377,38 @@
       "clock_generator": {
         "kind": "intel-pll",
         "template": "hardware/ip/pll",
-        "memory_frequency_hz": 133333333,
-        "memory_output_phase_ps": 1313,
-        "memory_output_duty_percent": 40,
-        "communication_frequency_hz": 100000000
+        "reference_frequency_hz": 50000000,
+        "reference_port": "CLOCK_50"
       },
       "seed": 4,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",
       "fit_timing_optimization": true,
-      "message_disable": [10008, 10264, 12021, 12022, 12128, 12130, 12133, 12134, 144001, 169065, 169070, 286033, 292013, 334003, 334004],
+      "message_disable": [
+        10008,
+        10264,
+        12021,
+        12022,
+        12128,
+        12130,
+        12133,
+        12134,
+        144001,
+        169065,
+        169070,
+        286033,
+        292013,
+        334003,
+        334004
+      ],
       "sdc": "hardware/constraints/engine.sdc",
       "qsf_template": "hardware/constraints/DE1_SoC.qsf",
       "qip_files": []
     },
     "vivado-generic": {
       "tool": "vivado",
+      "type_config": "hardware/config/types/standalone.json",
       "top": "board_update_pipeline",
       "source_set": "vivado-generic",
       "seed": 1,
@@ -377,6 +417,7 @@
     },
     "vivado-nnue": {
       "tool": "vivado",
+      "type_config": "hardware/config/types/standalone.json",
       "top": "nnue_evaluator",
       "source_set": "vivado-nnue",
       "seed": 1,

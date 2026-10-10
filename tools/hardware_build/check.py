@@ -19,16 +19,18 @@ def command_check(args: argparse.Namespace) -> int:
         return 1
 
     suites = [
-        ("Engine host", "tests/engine"),
-        ("Live FPGA tooling", "tests/live_fpga"),
-        ("Hardware build", "tests/hardware_build"),
+        ("Engine host", "tests/engine", "test_*.py"),
+        ("Live FPGA tooling", "tests/live_fpga", "test_*.py"),
+        ("Hardware build", "tests/hardware_build", "test_*.py"),
+        ("Stockfish benchmark", "tests", "test_stockfish_benchmark.py"),
+        ("Search tuning", "tests/search_tuning", "test_*.py"),
     ]
     if args.tuning:
-        suites.append(("Evaluation tuning", "tests/tuning"))
+        suites.append(("Evaluation tuning", "tests/tuning", "test_*.py"))
 
     print("\n== Python tests ==")
-    for label, directory in suites:
-        cmd = [sys.executable, "-m", "unittest", "discover", "-s", directory, "-p", "test_*.py"]
+    for label, directory, pattern in suites:
+        cmd = [sys.executable, "-m", "unittest", "discover", "-s", directory, "-p", pattern]
         code, output, elapsed = run_command(cmd, REPO_ROOT)
         if output.strip():
             print(output.rstrip())
@@ -38,4 +40,5 @@ def command_check(args: argparse.Namespace) -> int:
             return 1
 
     print("\n== RTL tests ==")
-    return command_test(argparse.Namespace(names=None, jobs=args.jobs, timeout=args.timeout))
+    return command_test(argparse.Namespace(names=None, jobs=args.jobs, timeout=args.timeout,
+                                           simulator=getattr(args, "simulator", "auto")))
