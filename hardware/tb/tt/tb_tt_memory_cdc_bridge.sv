@@ -33,7 +33,8 @@ module tb_tt_memory_cdc_bridge;
     logic [1:0] read_fault = 0;
     int pass_count = 0, fail_count = 0;
     int accepted = 0;
-    logic reservations_safe = 1;
+    logic reservations_safe = 1, bursts_unstalled = 1;
+    logic probe_streamed_early = 0, store_streamed_early = 0;
     int addresses[32], lengths[32];
     logic writes[32];
     tt_memory_cdc_bridge #(.ENTRY_COUNT(ENTRIES), .READ_FIFO_DEPTH(4), .RESPONSE_FIFO_DEPTH(RESPONSE_DEPTH)) dut (
@@ -62,10 +63,16 @@ module tb_tt_memory_cdc_bridge;
     end
     // Observe actual capacity when staged eligibility advances a request FIFO.
     always @(posedge mem_clk) if (rst_n) begin
+        if (backend_read_valid) bursts_unstalled &= backend_read_ready;
         if (dut.probe_pop) reservations_safe &= int'(dut.probe_free) >= ENTRY_WORDS;
         if (dut.store_pop) reservations_safe &= int'(dut.store_free) >= ENTRY_WORDS;
         reservations_safe &= !(dut.probe_response_push && dut.probe_response_full)
             && !(dut.store_response_push && dut.store_response_full);
+    end
+    // Observe FIFO visibility before physical capture finishes, for both response classes.
+    always @(posedge clk) if (rst_n && memory.busy && !memory.writing && memory.remaining > 1) begin
+        if (dut.operation_probe && probe_response_valid) probe_streamed_early = 1;
+        if (!dut.operation_probe && store_response_valid) store_streamed_early = 1;
     end
     task automatic check(input logic condition, input string label);
         if (condition) pass_count++; else begin fail_count++; $error("[FAIL] %s", label); end
@@ -82,13 +89,13 @@ module tb_tt_memory_cdc_bridge;
     function automatic logic [TT_WORD_BITS-1:0] expected_word(input int address);
         return TT_WORD_BITS'(16'h1357 + address * 17);
     endfunction
-    task automatic consume_response(input logic probe, input int count, input int start_address, input logic invalid_entry = 0);
+    task automatic consume_response(input logic probe, input int count, input int start_address, input int valid_words = ENTRY_WORDS);
         logic ordered;
         ordered = 1;
         for (int i = 0; i < count; i++) begin
             while (!(probe ? probe_response_valid : store_response_valid)) @(negedge clk);
             ordered &= (probe ? probe_response_data : store_response_data)
-                == (invalid_entry ? TT_WORD_BITS'(0) : expected_word(start_address + i % ENTRY_WORDS));
+                == (i % ENTRY_WORDS >= valid_words ? TT_WORD_BITS'(0) : expected_word(start_address + i % ENTRY_WORDS));
             if (probe) probe_response_ready = 1; else store_response_ready = 1;
             @(negedge clk);
             probe_response_ready = 0; store_response_ready = 0;
@@ -102,6 +109,7 @@ module tb_tt_memory_cdc_bridge;
         enqueue(1,1,1); repeat (8) @(negedge clk); enabled = 1; settle();
         check(accepted == 3 && !writes[0] && addresses[0] == 0
             && !writes[1] && addresses[1] == ENTRY_WORDS && writes[2], "probe then store then one-way write priority");
+        check(probe_streamed_early && store_streamed_early, "both response FIFOs stream before the backend burst finishes");
         check(lengths[0] == ENTRY_WORDS && lengths[1] == ENTRY_WORDS && lengths[2] == WAY_WORDS, "reads whole groups and writes one way");
         begin
             logic preserved; preserved = 1;
@@ -120,12 +128,12 @@ module tb_tt_memory_cdc_bridge;
         check(accepted == 8, "store resumes after response space becomes available");
         consume_response(0, ENTRY_WORDS, ENTRY_WORDS);
         while (!idle) @(negedge clk);
-        // Every failed/short read must retire a full invalid entry, then allow recovery.
+        // Short reads preserve streamed words and pad the tail; late errors cannot retract data.
         for (int fault = 1; fault <= 3; fault++) begin
             read_fault = 2'(fault);
             enqueue(1, 1, 0);
-            consume_response(1, ENTRY_WORDS, 0, 1);
-            consume_response(0, ENTRY_WORDS, ENTRY_WORDS, 1);
+            consume_response(1, ENTRY_WORDS, 0, fault == 1 ? 0 : fault == 2 ? ENTRY_WORDS/2 : ENTRY_WORDS);
+            consume_response(0, ENTRY_WORDS, ENTRY_WORDS, fault == 1 ? 0 : fault == 2 ? ENTRY_WORDS/2 : ENTRY_WORDS);
             while (!idle) @(negedge clk);
         end
         read_fault = 0;
@@ -140,9 +148,9 @@ module tb_tt_memory_cdc_bridge;
             repeat (3) enqueue(1,0,0);
             enabled = 1; settle();
             check(accepted == baseline+2, "pending response words reserve capacity for fast consecutive reads");
-            consume_response(1, 2*ENTRY_WORDS, 0, 1); settle();
+            consume_response(1, 2*ENTRY_WORDS, 0, 0); settle();
             check(accepted == baseline+3, "reserved read resumes after complete response space is freed");
-            consume_response(1, ENTRY_WORDS, 0, 1);
+            consume_response(1, ENTRY_WORDS, 0, 0);
             while (!idle) @(negedge clk);
             read_fault = 0;
         end
@@ -194,13 +202,13 @@ module tb_tt_memory_cdc_bridge;
             enabled = 0;
             repeat (2) enqueue(1,0,0);
             drain_words = 2*ENTRY_WORDS - 1 - (RESPONSE_DEPTH - groups*ENTRY_WORDS);
-            consume_response(1, drain_words, 0, 1); settle();
+            consume_response(1, drain_words, 0, 0); settle();
             enabled = 1; settle();
             check(accepted == baseline + groups + 1,
                 "last response push revoked eligibility before another read was selected");
-            consume_response(1, (groups+1)*ENTRY_WORDS - drain_words, 0, 1); settle();
+            consume_response(1, (groups+1)*ENTRY_WORDS - drain_words, 0, 0); settle();
             check(accepted == baseline + groups + 2, "threshold-blocked read resumed after draining space");
-            consume_response(1, ENTRY_WORDS, 0, 1);
+            consume_response(1, ENTRY_WORDS, 0, 0);
             while (!idle) @(negedge clk);
             read_fault = 0;
         end
@@ -216,6 +224,7 @@ module tb_tt_memory_cdc_bridge;
             for (int i = 0; i < ENTRIES*TT_WAYS; i++) cleared &= memory.memory[i*WAY_WORDS][1:0] == 0;
             check(cleared, "clear invalidates every external way");
         end
+        check(bursts_unstalled, "reserved responses accept every backend word without stalls");
         check(reservations_safe, "registered eligibility always reserves actual whole-response capacity");
         $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);
         if (fail_count) $fatal(1, "TT transport test failed"); $finish;

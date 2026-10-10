@@ -148,6 +148,9 @@ module tb_tt_external_load_store;
         check(lookup_resp.hit == hit && lookup_resp.thread_id == tid, $sformatf("probe %h hit and routing", key));
         if (hit) check(lookup_resp.score == EvalScore'(score), $sformatf("probe %h score", key));
         if (stream_way >= 0) begin
+            if (stream_way == 0)
+                check(memory.busy && !memory.writing && memory.remaining != 0,
+                    "first-way hit returns while the external read is still in flight");
             if (stream_way < TT_WAYS-1)
                 check(!dut.probe_complete && int'(dut.probe_word_count) == (stream_way+1)*WAY_WORDS,
                     "hit returns at its way boundary before the complete entry");

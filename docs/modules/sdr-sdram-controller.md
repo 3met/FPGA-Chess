@@ -26,7 +26,7 @@ Transactions crossing a row boundary are divided into legal physical segments wh
 
 Runtime accesses use a closed-row policy: each physical read or write segment ends with burst termination and explicit bank precharge as soon as minimum active time and write recovery permit. Queued requests do not suppress closing, and there is no post-write grace period. Captured read words continue draining during precharge; terminal completion may release the scheduler to deliver buffered responses before precharge recovery finishes, but the controller accepts the next transaction only after the bank has closed. Initialization reuses rows during its serial validity sweep, then closes all banks before runtime requests begin.
 
-Every accepted request terminates with one completion. Invalid lengths, malformed write termination, or memory-controller faults set the persistent error output and mark the completion as failed.
+Every accepted request terminates with one completion. Invalid lengths, malformed write termination, set the persistent error output and mark the completion as failed.
 
 ## Clocking Boundary
 

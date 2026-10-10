@@ -49,14 +49,13 @@ module tt_memory_cdc_bridge #(
 );
     localparam int WAY_WORDS = WAY_BITS / TT_WORD_BITS;
     localparam int ENTRY_WORDS = TT_WAYS * WAY_WORDS;
-    localparam int ENTRY_BITS = TT_WAYS * WAY_BITS;
     localparam int COUNT_BITS = $clog2(ENTRY_WORDS + 1);
     localparam int WAY_INDEX_BITS = $clog2(TT_WAYS);
     typedef logic [ENTRY_INDEX_BITS-1:0] EntryIndex;
     typedef logic [WAY_INDEX_BITS-1:0] WayIndex;
     typedef struct packed { EntryIndex entry_index; WayIndex way_index; logic [WAY_BITS-1:0] data; } WayWrite;
     typedef enum logic [3:0] {
-        S_IDLE, S_READ, S_READ_DONE, S_RESPONSE, S_WRITE, S_WRITE_DONE,
+        S_IDLE, S_READ, S_READ_DONE, S_READ_PAD, S_WRITE, S_WRITE_DONE,
         S_CLEAR_REQ, S_CLEAR_DATA, S_CLEAR_DONE, S_REQUEST
     } State;
     State state;
@@ -73,10 +72,9 @@ module tt_memory_cdc_bridge #(
     logic probe_space_available, store_space_available;
     logic operation_probe, operation_write;
     TTWordAddress request_address;
-    logic [ENTRY_BITS-1:0] read_entry;
+    logic [TT_WORD_BITS-1:0] response_word;
     logic [WAY_BITS-1:0] active_way;
     logic [COUNT_BITS-1:0] word_count;
-    logic read_malformed;
     TTWordAddress clear_address;
     logic clear_done_toggle;
     (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
@@ -100,12 +98,12 @@ module tt_memory_cdc_bridge #(
     // These two FIFOs contain exactly one external memory word per transfer.
     async_fifo #(.DATA_WIDTH(TT_WORD_BITS), .DEPTH(RESPONSE_FIFO_DEPTH)) probe_response_fifo (
         .wr_clk(mem_clk), .wr_rst_n(mem_rst_n), .wr_en(probe_response_push),
-        .wr_data(read_entry[word_count*TT_WORD_BITS +: TT_WORD_BITS]), .full(probe_response_full), .wr_free(probe_free),
+        .wr_data(response_word), .full(probe_response_full), .wr_free(probe_free),
         .rd_clk(req_clk), .rd_rst_n(req_rst_n), .rd_en(probe_response_valid && probe_response_ready),
         .rd_data(probe_response_data), .empty(probe_response_empty));
     async_fifo #(.DATA_WIDTH(TT_WORD_BITS), .DEPTH(RESPONSE_FIFO_DEPTH)) store_response_fifo (
         .wr_clk(mem_clk), .wr_rst_n(mem_rst_n), .wr_en(store_response_push),
-        .wr_data(read_entry[word_count*TT_WORD_BITS +: TT_WORD_BITS]), .full(store_response_full), .wr_free(store_free),
+        .wr_data(response_word), .full(store_response_full), .wr_free(store_free),
         .rd_clk(req_clk), .rd_rst_n(req_rst_n), .rd_en(store_response_valid && store_response_ready),
         .rd_data(store_response_data), .empty(store_response_empty));
 
@@ -137,12 +135,18 @@ module tt_memory_cdc_bridge #(
         backend_write_valid = state == S_WRITE || state == S_CLEAR_DATA;
         backend_write_data = state == S_CLEAR_DATA ? '0 : active_way[word_count*TT_WORD_BITS +: TT_WORD_BITS];
         backend_write_last = state == S_CLEAR_DATA || int'(word_count) == WAY_WORDS - 1;
-        backend_read_ready = state == S_READ;
+        // Whole-burst reservation guarantees room; retain ready/valid at the interface.
+        backend_read_ready = state == S_READ
+            && !(operation_probe ? probe_response_full : store_response_full);
+        response_word = state == S_READ_PAD || (backend_done_valid && backend_done_error)
+            ? TT_WORD_BITS'(0) : backend_read_data;
         backend_done_ready = state == S_READ || state == S_READ_DONE
             || state == S_WRITE || state == S_WRITE_DONE
             || state == S_CLEAR_DONE;
-        probe_response_push = state == S_RESPONSE && operation_probe && !probe_response_full;
-        store_response_push = state == S_RESPONSE && !operation_probe && !store_response_full;
+        probe_response_push = operation_probe && !probe_response_full
+            && (state == S_READ_PAD || (state == S_READ && backend_read_valid));
+        store_response_push = !operation_probe && !store_response_full
+            && (state == S_READ_PAD || (state == S_READ && backend_read_valid));
     end
 
     // Pipeline capacity decoding before arbitration and FIFO pointer advancement.
@@ -159,7 +163,7 @@ module tt_memory_cdc_bridge #(
         end
     end
 
-    // Commit read words only after successful completion; errors become all-invalid entries.
+    // Stream captured words immediately; short completions pad the reserved response.
     always_ff @(posedge mem_clk) begin
         if (!mem_rst_n) begin
             state <= S_IDLE; word_count <= '0;
@@ -177,7 +181,7 @@ module tt_memory_cdc_bridge #(
                         operation_write <= selected_write;
                         request_address <= TTWordAddress'(selected_entry_index * ENTRY_WORDS)
                             + TTWordAddress'(selected_way_index * WAY_WORDS);
-                        active_way <= write_head.data; read_entry <= '0; read_malformed <= 1'b0;
+                        active_way <= write_head.data;
                         state <= S_REQUEST;
                     end
                 end
@@ -185,25 +189,21 @@ module tt_memory_cdc_bridge #(
                     state <= operation_write ? S_WRITE : S_READ;
                 S_READ: begin
                     if (backend_read_valid && backend_read_ready) begin
-                        read_entry[word_count*TT_WORD_BITS +: TT_WORD_BITS] <= backend_read_data;
-                        read_malformed <= backend_read_last != (int'(word_count) == ENTRY_WORDS-1);
-                        if (backend_read_last || int'(word_count) == ENTRY_WORDS-1) state <= S_READ_DONE;
-                        else word_count <= word_count + 1'b1;
+                        word_count <= word_count + 1'b1;
+                        if (backend_read_last || int'(word_count) == ENTRY_WORDS-1)
+                            state <= S_READ_DONE;
                     end
-                    // A failed backend may terminate before supplying any/all words.
-                    // Still publish the reserved full group so engine metadata drains.
+                    // Published words cannot be withdrawn. Pad only missing words so
+                    // even a prematurely completed backend cannot strand engine metadata.
                     if (backend_done_valid) begin
-                        if (backend_done_error || read_malformed
-                                || !(backend_read_valid && backend_read_last
-                                    && int'(word_count) == ENTRY_WORDS-1)) read_entry <= '0;
-                        word_count <= '0; state <= S_RESPONSE;
+                        if (backend_read_valid && backend_read_ready
+                                && int'(word_count) == ENTRY_WORDS-1) state <= S_IDLE;
+                        else state <= S_READ_PAD;
                     end
                 end
-                S_READ_DONE: if (backend_done_valid) begin
-                    if (backend_done_error || read_malformed) read_entry <= '0;
-                    word_count <= '0; state <= S_RESPONSE;
-                end
-                S_RESPONSE: if (probe_response_push || store_response_push) begin
+                S_READ_DONE: if (backend_done_valid)
+                    state <= int'(word_count) == ENTRY_WORDS ? S_IDLE : S_READ_PAD;
+                S_READ_PAD: if (probe_response_push || store_response_push) begin
                     if (int'(word_count) == ENTRY_WORDS-1) state <= S_IDLE;
                     else word_count <= word_count + 1'b1;
                 end
