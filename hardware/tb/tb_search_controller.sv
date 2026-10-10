@@ -1972,9 +1972,6 @@ module tb_search_controller #(
                     nnue_special_state_correct &=
                         dut.nnue_evaluator.accumulator_update_memory[
                             completed_thread] === expected;
-                    nnue_special_state_correct &=
-                        dut.nnue_evaluator.accumulator_eval_memory[
-                            completed_thread] === expected;
                 end
             end
             if (dut.state == dut.ST_SEARCH_ROOT_INIT
@@ -1991,10 +1988,6 @@ module tb_search_controller #(
                         dut.nnue_evaluator.accumulator_update_memory[
                             idx
                         ] === dut.nnue_evaluator.accumulator_update_memory[0];
-                    nnue_root_initialization_correct &=
-                        dut.nnue_evaluator.accumulator_eval_memory[
-                            idx
-                        ] === dut.nnue_evaluator.accumulator_eval_memory[0];
                 end
             end
             if (dut.state == dut.ST_SEARCH_RUN && dut.nnue_build_busy

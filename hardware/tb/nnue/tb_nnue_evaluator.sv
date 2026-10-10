@@ -316,7 +316,7 @@ module tb_nnue_evaluator;
         evaluate(EvalScore'(0),
             "first delta reads the live parent without a standalone copy request");
 
-        // The mirrored state store must support an evaluation read while a
+        // The shared state store must support an evaluation read while a
         // different thread commits its next accumulator update.
         update_req = '0;
         update_req.thread_id = ThreadID'(3);

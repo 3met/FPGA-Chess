@@ -51,15 +51,10 @@ module nnue_evaluator #(
     logic update_busy;
     logic [NNUE_FEATURE_ROW_BITS-1:0] feature_row_white, feature_row_black;
 
-    // These are generic inferred memories; the paired attributes are advisory
-    // hints for Intel and AMD tools and unsupported hints may be ignored.
-    // The update mirror uses distributed RAM for its wide asynchronous read,
-    // while the evaluation mirror uses block RAM for its synchronous read.
-    // Both copies are written together to provide two independent read ports.
+    // Share live state between the update and evaluation reads. Two independent
+    // read addresses preserve concurrent work without a wide block-RAM mirror.
     (* ramstyle = "MLAB", ram_style = "distributed" *)
     logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_update_memory[STATE_COUNT];
-    (* ramstyle = "no_rw_check", ram_style = "block" *)
-    logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_eval_memory[STATE_COUNT];
     logic [ACCUMULATOR_WORD_BITS-1:0] eval_accumulators;
     NnueOutputBucket eval_output_bucket;
     logic eval_busy;
@@ -260,7 +255,6 @@ module nnue_evaluator #(
                         end
                     end
                     accumulator_update_memory[destination_address] <= committed_state;
-                    accumulator_eval_memory[destination_address] <= committed_state;
 `ifdef FPGA_CHESS_PROFILE
                     profile_accumulator_wrap_lanes <=
                         profile_accumulator_wrap_lanes + wrapped_lanes;
@@ -374,24 +368,15 @@ module nnue_evaluator #(
                 eval_busy <= 1'b1;
             end
 
-            // Keep the evaluation-memory read in one syntactic location so
-            // Intel and AMD tools infer a single synchronous read port. Order
-            // the two perspectives once, then shift one MAC row per cycle.
+            // Snapshot and order both perspectives before shifting MAC rows.
             if (eval_valid && eval_ready) begin
                 automatic logic [ACCUMULATOR_WORD_BITS-1:0] selected_state;
                 pst_first_q <= eval_pst.first;
                 pst_endgame_q <= eval_pst.endgame;
                 pst_weight_q <= pst_first_weight;
 
-                // A single-thread build has no other state to update while it
-                // evaluates, so reuse the update mirror and avoid a very wide,
-                // one-word block RAM. Multi-thread builds keep the independent
-                // mirror so another thread may update concurrently.
-                if (STATE_COUNT == 1)
-                    selected_state = accumulator_update_memory[0];
-                else
-                    selected_state = accumulator_eval_memory[
-                        state_address(eval_thread_id)];
+                selected_state = accumulator_update_memory[
+                    state_address(eval_thread_id)];
                 if (eval_turn == WHITE)
                     eval_accumulators <= selected_state;
                 else
