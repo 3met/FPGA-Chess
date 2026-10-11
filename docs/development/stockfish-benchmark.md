@@ -4,6 +4,8 @@ Run `python -m tools.stockfish_benchmark` from the repository root to play the F
 
 The default opening book is `../fastchess/books/UHO_Lichess_4852_v1.epd`. Fastchess shuffles its positions with a fixed seed and plays each selected position with both colors. The same seed keeps opening selection consistent across runs and resumes. If the book is absent, the tool downloads the official Stockfish opening suite into `work/books/`. Pass `--book PATH` to use another local book. Use `--fastchess` and `--stockfish` to select other executables.
 
+New tournaments use Fastchess adjudication with `-resign movecount=3 score=1500 twosided=true` and `-draw movenumber=50 movecount=10 score=10`. Search tuning inherits these defaults through the shared benchmark runner. Resumed tournaments retain their saved adjudication settings.
+
 Matching openings does not guarantee identical search results: threads share TT publications, and memory timing can change the search tree even with a fixed node limit. Compare matched opening pairs when estimating rating differences, and record the flashed image identity separately because the tournament metadata does not identify it.
 
 ```text

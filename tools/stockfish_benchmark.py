@@ -175,6 +175,9 @@ def _fresh_command(config: BenchmarkConfig, run_dir: Path, name: str, rounds: in
         f"start={config.opening_start}", "-srand", str(OPENING_SEED), *sprt,
         "-rounds", str(rounds if rounds is not None else (config.matches or 500)),
         "-repeat", "-concurrency", "1", "-recover",
+        # Adjudicate sustained decisive or drawn evaluations to shorten games.
+        "-resign", "movecount=3", "score=1500", "twosided=true",
+        "-draw", "movenumber=50", "movecount=10", "score=10",
         "-report", "penta=true", "-ratinginterval", "10", "-autosaveinterval", "10",
         "-config", f"outname={run_dir / 'state.json'}", "-event", f"FPGA benchmark {name}",
         "-pgnout", f"file={run_dir / 'games.pgn'}", "append=false",
