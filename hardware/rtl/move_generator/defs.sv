@@ -38,13 +38,14 @@ package move_generator_defs;
         MOVE_MEMORY_WAIT_QUIET = 3'd1,
         MOVE_MEMORY_QUIET = 3'd2,
         MOVE_MEMORY_BAD_NOISY = 3'd3,
-        MOVE_MEMORY_DONE = 3'd4,
+        MOVE_MEMORY_LOW_QUIET = 3'd4,
+        MOVE_MEMORY_DONE = 3'd6,
         MOVE_MEMORY_INITIALIZED = 3'd5
     } MoveMemoryPhase;
 
-    localparam MoveBucketIndex BAD_NOISY_LOW_BUCKET = MoveBucketIndex'(0);
-    localparam MoveBucketIndex BAD_NOISY_HIGH_BUCKET = MoveBucketIndex'(1);
-    localparam MoveBucketIndex QUIET_LOW_BUCKET = MoveBucketIndex'(2);
+    localparam MoveBucketIndex BAD_NOISY_LOW_BUCKET = MoveBucketIndex'(1);
+    localparam MoveBucketIndex BAD_NOISY_HIGH_BUCKET = MoveBucketIndex'(2);
+    localparam MoveBucketIndex QUIET_LOW_BUCKET = MoveBucketIndex'(0);
     localparam MoveBucketIndex QUIET_MEDIUM_BUCKET = MoveBucketIndex'(3);
     localparam MoveBucketIndex QUIET_HIGH_BUCKET = MoveBucketIndex'(4);
     localparam MoveBucketIndex QUIET_HIGHEST_BUCKET = MoveBucketIndex'(5);
@@ -52,8 +53,10 @@ package move_generator_defs;
     localparam MoveBucketIndex GOOD_NOISY_HIGH_BUCKET = MoveBucketIndex'(7);
 
     localparam MoveBucketMask GOOD_NOISY_BUCKET_MASK = MoveBucketMask'(8'b1100_0000);
-    localparam MoveBucketMask QUIET_BUCKET_MASK = MoveBucketMask'(8'b0011_1100);
-    localparam MoveBucketMask BAD_NOISY_BUCKET_MASK = MoveBucketMask'(8'b0000_0011);
+    localparam MoveBucketMask QUIET_BUCKET_MASK = MoveBucketMask'(8'b0011_1001);
+    localparam MoveBucketMask BAD_NOISY_BUCKET_MASK = MoveBucketMask'(8'b0000_0110);
+    localparam MoveBucketMask REGULAR_QUIET_BUCKET_MASK = MoveBucketMask'(8'b0011_1000);
+    localparam MoveBucketMask LOW_QUIET_BUCKET_MASK = MoveBucketMask'(8'b0000_0001);
     localparam MoveBucketMask ALL_BUCKET_MASK = MoveBucketMask'('1);
 
     typedef enum logic [1:0] {
@@ -69,6 +72,7 @@ package move_generator_defs;
         MOVE_ORDER_GENERATE_QUIET,
         MOVE_ORDER_QUIET,
         MOVE_ORDER_BAD_NOISY,
+        MOVE_ORDER_LOW_QUIET,
         MOVE_ORDER_DONE
     } MoveOrderState;
 

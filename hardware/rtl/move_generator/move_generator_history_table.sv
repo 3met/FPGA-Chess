@@ -7,10 +7,10 @@ module move_generator_history_table #(
     input logic clk,
     input logic rd_en,
     input logic [$clog2(HISTORY_ENTRY_COUNT)-1:0] rd_addr,
-    output logic signed [HISTORY_ENTRY_BITS-1:0] rd_data,
+    output logic [HISTORY_ENTRY_BITS-1:0] rd_data,
     input logic wr_en,
     input logic [$clog2(HISTORY_ENTRY_COUNT)-1:0] wr_addr,
-    input logic signed [HISTORY_ENTRY_BITS-1:0] wr_data
+    input logic [HISTORY_ENTRY_BITS-1:0] wr_data
 );
 
     sync_read_simple_dual_port_ram #(

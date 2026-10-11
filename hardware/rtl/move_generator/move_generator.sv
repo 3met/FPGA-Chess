@@ -7,22 +7,23 @@ module move_generator #(
     parameter int THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int MOVE_MEMORY_ENTRIES = 2048,
-    parameter int MOVE_BUCKET_0_RATIO = 48,
-    parameter int MOVE_BUCKET_1_RATIO = 16,
-    parameter int MOVE_BUCKET_2_RATIO = 192,
-    parameter int MOVE_BUCKET_3_RATIO = 64,
+    parameter int MOVE_BUCKET_0_RATIO = 64,
+    parameter int MOVE_BUCKET_1_RATIO = 48,
+    parameter int MOVE_BUCKET_2_RATIO = 16,
+    parameter int MOVE_BUCKET_3_RATIO = 192,
     parameter int MOVE_BUCKET_4_RATIO = 64,
     parameter int MOVE_BUCKET_5_RATIO = 32,
     parameter int MOVE_BUCKET_6_RATIO = 64,
     parameter int MOVE_BUCKET_7_RATIO = 32,
     parameter int HISTORY_ENTRY_COUNT = 8192,
     parameter int HISTORY_ENTRY_BITS = 8,
+    parameter int HISTORY_DEFAULT_SCORE = 32,
     parameter int HISTORY_REWARD_PER_DEPTH = 2,
     parameter int HISTORY_MAXIMUM_REWARD = 31,
     parameter int HISTORY_MALUS_DIVISOR = 2,
-    parameter int QUIET_THRESHOLD_1 = 8,
-    parameter int QUIET_THRESHOLD_2 = 32,
-    parameter int QUIET_THRESHOLD_3 = 64,
+    parameter int QUIET_THRESHOLD_1 = 32,
+    parameter int QUIET_THRESHOLD_2 = 64,
+    parameter int QUIET_THRESHOLD_3 = 128,
     parameter int CASTLING_HISTORY_BONUS = 8,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -127,7 +128,7 @@ module move_generator #(
     ThreadID quiet_history_lookup_thread;
     Color quiet_history_lookup_color;
     Position quiet_history_lookup_from, quiet_history_lookup_to;
-    logic signed [HISTORY_ENTRY_BITS-1:0] quiet_history_lookup_value;
+    logic [HISTORY_ENTRY_BITS-1:0] quiet_history_lookup_value;
 
     assign init_busy = noisy_init_busy || quiet_init_busy || history_init_busy;
     // Each thread has one write port. Arbitrate jobs before accepting them;
@@ -205,6 +206,7 @@ module move_generator #(
     move_generator_quiet_history #(
         .HISTORY_ENTRY_COUNT(HISTORY_ENTRY_COUNT),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
+        .DEFAULT_SCORE(HISTORY_DEFAULT_SCORE),
         .REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
         .MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
         .MALUS_DIVISOR(HISTORY_MALUS_DIVISOR)
@@ -248,7 +250,8 @@ module move_generator #(
         .GENERATION_COMMAND(MOVE_GEN_GENERATE_NOISY),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1), .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
-        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3), .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
+        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3),
+        .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
         .ENABLE_STATS(ENABLE_STATS)
     ) noisy_lane (
         .clk, .rst_n, .clear, .flush, .init_busy(noisy_init_busy),
@@ -280,7 +283,8 @@ module move_generator #(
         .GENERATION_COMMAND(MOVE_GEN_GENERATE_QUIET),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
         .QUIET_THRESHOLD_1(QUIET_THRESHOLD_1), .QUIET_THRESHOLD_2(QUIET_THRESHOLD_2),
-        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3), .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
+        .QUIET_THRESHOLD_3(QUIET_THRESHOLD_3),
+        .CASTLING_HISTORY_BONUS(CASTLING_HISTORY_BONUS),
         .ENABLE_STATS(ENABLE_STATS)
     ) quiet_lane (
         .clk, .rst_n, .clear, .flush, .init_busy(quiet_init_busy),

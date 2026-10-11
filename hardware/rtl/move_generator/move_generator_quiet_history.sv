@@ -6,6 +6,7 @@ import move_generator_defs::*;
 module move_generator_quiet_history #(
     parameter int HISTORY_ENTRY_COUNT = 8192,
     parameter int HISTORY_ENTRY_BITS = 8,
+    parameter int DEFAULT_SCORE = 32,
     parameter int REWARD_PER_DEPTH = 2,
     parameter int MAXIMUM_REWARD = 31,
     parameter int MALUS_DIVISOR = 2
@@ -20,7 +21,7 @@ module move_generator_quiet_history #(
     input Color lookup_color,
     input Position lookup_from,
     input Position lookup_to,
-    output logic signed [HISTORY_ENTRY_BITS-1:0] lookup_value,
+    output logic [HISTORY_ENTRY_BITS-1:0] lookup_value,
 
     input logic update_valid,
     output logic update_ready,
@@ -36,20 +37,16 @@ module move_generator_quiet_history #(
 );
 
     localparam int HISTORY_ADDRESS_BITS = $clog2(HISTORY_ENTRY_COUNT);
-    localparam int HISTORY_LIMIT_SHIFT = HISTORY_ENTRY_BITS - 1;
+    localparam int HISTORY_LIMIT_SHIFT = HISTORY_ENTRY_BITS;
     localparam int KEY_BITS = $bits(ThreadID) + 13;
     localparam int REWARD_BITS = (MAXIMUM_REWARD < 1) ? 1 : $clog2(MAXIMUM_REWARD + 1);
     localparam int REWARD_PER_DEPTH_BITS = (REWARD_PER_DEPTH < 1)
         ? 1 : $clog2(REWARD_PER_DEPTH + 1);
     localparam int DEPTH_REWARD_BITS = $bits(PlyIndex) + REWARD_PER_DEPTH_BITS;
-    localparam int PRODUCT_BITS = HISTORY_ENTRY_BITS + REWARD_BITS;
-    // The constrained bonus can move a history entry at most one step beyond
-    // its signed range, so one guard bit is sufficient for saturation.
-    localparam int UPDATE_BITS = HISTORY_ENTRY_BITS + 1;
-    localparam logic signed [HISTORY_ENTRY_BITS-1:0] HISTORY_MINIMUM =
-        {1'b1, {(HISTORY_ENTRY_BITS-1){1'b0}}};
-    localparam logic signed [HISTORY_ENTRY_BITS-1:0] HISTORY_MAXIMUM =
-        {1'b0, {(HISTORY_ENTRY_BITS-1){1'b1}}};
+    localparam int PRODUCT_BITS = HISTORY_ENTRY_BITS + 1 + REWARD_BITS;
+    // Unsigned storage needs a sign bit and a carry bit during centered updates.
+    localparam int UPDATE_BITS = HISTORY_ENTRY_BITS + 2;
+    localparam logic [HISTORY_ENTRY_BITS-1:0] HISTORY_MAXIMUM = '1;
 
     // XOR folding is only wiring, preserves all move bits for the default
     // 13-bit address, and spreads thread/color aliases without added latency.
@@ -70,10 +67,10 @@ module move_generator_quiet_history #(
     logic [HISTORY_ADDRESS_BITS-1:0] clear_address;
     logic read_en;
     logic [HISTORY_ADDRESS_BITS-1:0] read_address;
-    logic signed [HISTORY_ENTRY_BITS-1:0] read_data;
+    logic [HISTORY_ENTRY_BITS-1:0] read_data;
     logic write_en;
     logic [HISTORY_ADDRESS_BITS-1:0] write_address;
-    logic signed [HISTORY_ENTRY_BITS-1:0] write_data;
+    logic [HISTORY_ENTRY_BITS-1:0] write_data;
 
     ThreadID active_thread;
     Color active_color;
@@ -86,7 +83,7 @@ module move_generator_quiet_history #(
     logic [1:0] failed_count;
     logic [1:0] update_entry;
     logic update_is_malus;
-    logic signed [HISTORY_ENTRY_BITS-1:0] captured_value;
+    logic [HISTORY_ENTRY_BITS-1:0] captured_value;
     logic [HISTORY_ADDRESS_BITS-1:0] active_address;
     logic [HISTORY_ADDRESS_BITS-1:0] lookup_address;
     logic write_conflicts_with_lookup;
@@ -98,7 +95,8 @@ module move_generator_quiet_history #(
             $fatal(1, "history entry count must be a power of two");
         if (HISTORY_ENTRY_BITS < 2 || REWARD_PER_DEPTH < 1
                 || MAXIMUM_REWARD < 1
-                || MAXIMUM_REWARD > (2 ** (HISTORY_ENTRY_BITS - 1) - 1)
+                || MAXIMUM_REWARD > (2 ** HISTORY_ENTRY_BITS - 1)
+                || DEFAULT_SCORE < 0 || DEFAULT_SCORE > (2 ** HISTORY_ENTRY_BITS - 1)
                 || MALUS_DIVISOR < 1)
             $fatal(1, "history parameters do not fit the configured entry width");
     end
@@ -120,7 +118,7 @@ module move_generator_quiet_history #(
         read_address = '0;
         write_en = init_busy;
         write_address = clear_address;
-        write_data = '0;
+        write_data = HISTORY_ENTRY_BITS'(DEFAULT_SCORE);
 
         // Generator lookups always own the read port. Update reads wait in
         // their private pipeline and never apply backpressure to generation.
@@ -137,6 +135,7 @@ module move_generator_quiet_history #(
             automatic logic [REWARD_BITS-1:0] magnitude;
             automatic logic [DEPTH_REWARD_BITS-1:0] depth_reward;
             automatic logic signed [REWARD_BITS:0] signed_bonus;
+            automatic logic signed [HISTORY_ENTRY_BITS:0] relative_history;
             automatic logic signed [PRODUCT_BITS-1:0] gravity_product;
             automatic logic signed [UPDATE_BITS-1:0] updated_history;
             depth_reward = active_depth * REWARD_PER_DEPTH_BITS'(REWARD_PER_DEPTH);
@@ -148,18 +147,20 @@ module move_generator_quiet_history #(
                 : reward_magnitude;
             signed_bonus = update_is_malus
                 ? -$signed({1'b0, magnitude}) : $signed({1'b0, magnitude});
-            // Gravity scales with the configured signed range:
-            // H' = H + B - H*|B|/2^(entry_bits-1).
-            gravity_product = $signed(captured_value) * $signed({1'b0, magnitude});
-            updated_history = UPDATE_BITS'($signed(captured_value))
+            // Center gravity on the reset default, using the full unsigned range:
+            // H' = clamp(H + B - floor((H-default)*|B|/2^entry_bits), 0, max).
+            relative_history = $signed({1'b0, captured_value})
+                - (HISTORY_ENTRY_BITS+1)'(DEFAULT_SCORE);
+            gravity_product = relative_history * $signed({1'b0, magnitude});
+            updated_history = UPDATE_BITS'($signed({1'b0, captured_value}))
                 + UPDATE_BITS'(signed_bonus)
                 - UPDATE_BITS'(gravity_product >>> HISTORY_LIMIT_SHIFT);
             write_en = 1'b1;
             write_address = active_address;
-            if (updated_history > UPDATE_BITS'($signed(HISTORY_MAXIMUM)))
+            if (updated_history > UPDATE_BITS'($signed({1'b0, HISTORY_MAXIMUM})))
                 write_data = HISTORY_MAXIMUM;
-            else if (updated_history < UPDATE_BITS'($signed(HISTORY_MINIMUM)))
-                write_data = HISTORY_MINIMUM;
+            else if (updated_history < 0)
+                write_data = '0;
             else
                 write_data = HISTORY_ENTRY_BITS'(updated_history);
         end

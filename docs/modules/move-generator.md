@@ -36,18 +36,20 @@ Candidates are divided into eight global-priority buckets:
 | ------ | ------- |
 | 7 | Queen promotions and favorable captures of rooks or queens. |
 | 6 | Other favorable captures and underpromotions. |
-| 5 | Highest-history quiet moves. |
-| 4 | High-history quiet moves. |
-| 3 | Moderate-history quiet moves, including castling. |
-| 2 | Remaining quiet moves. |
-| 1 | Unfavorable captures of rooks or queens. |
-| 0 | Other unfavorable captures. |
+| 5 | Highest-score quiet moves. |
+| 4 | High-score quiet moves. |
+| 3 | Medium-score quiet moves, including untouched moves. |
+| 2 | Unfavorable captures of rooks or queens. |
+| 1 | Other unfavorable captures. |
+| 0 | Low-score quiet moves. |
 
-Capture classification uses a bounded static-exchange approximation. Quiet ordering uses shared history scores updated by quiet beta-cutoff moves and earlier failed quiets. Storage is configured by the engine profile and update policy by the search profile.
+Capture classification uses a bounded static-exchange approximation. Quiet ordering sums unsigned history and the castling bonus in a wide signed score before classification. Three configured thresholds divide the quiet buckets; the lowest-score bucket follows both bad-noisy buckets. History entries saturate to their unsigned range and initialize to a configured default. Depth-scaled gravity updates reward quiet beta-cutoff moves and penalize up to three earlier quiets that failed to cut off. Storage is configured by the engine profile and update policy by the search profile.
+
+Updates use `H′ = clamp(H + B − floor((H − default) × |B| / 2^entry_bits), 0, 2^entry_bits − 1)`, where the reward is bounded by remaining depth and the configured maximum, and a failed quiet receives the reward divided by the malus divisor with a negative sign. Gravity is centered on the default so both directions can use the unsigned storage range.
 
 History lookups take priority over best-effort updates, so history maintenance does not stall generation.
 
-Move memory tracks each node's progress through good noisy, quiet, and bad noisy buckets. Noisy generation enables buckets 7–6. After they are exhausted, search may stop or generate quiet moves in buckets 5–2; exhausting quiet moves enables buckets 1–0. Search issues `pop(thread, ply)` without supplying bucket state, and each pop consumes the returned move even if later legality checks reject it.
+Move memory tracks each node's progress through good noisy, regular quiet, bad noisy, and low quiet buckets. Noisy generation enables buckets 7–6. After they are exhausted, search may stop or generate quiet moves in buckets 5–3 and 0; exhausting regular quiets enables bad noisy buckets 2–1, followed by low quiet bucket 0. Search issues `pop(thread, ply)` without supplying bucket state, and each pop consumes the returned move even if later legality checks reject it.
 
 Only the encoded `Move` is stored. Ordering within a bucket is deterministic FIFO, so center-first generation makes central moves available earlier and preserves that preference among otherwise equal moves without overriding bucket priority.
 
@@ -61,6 +63,6 @@ A write beyond its bucket partition sets a sticky overflow error bit but is not 
 
 ## Lifecycle and Instrumentation
 
-Move RAM and pointer-stack contents need not be cleared because node initialization defines the live range. Reset and New Game clear quiet-history state; Kill and New Game cancel active generation and pop work.
+Move RAM and pointer-stack contents need not be cleared because node initialization defines the live range. Reset and New Game restore the quiet-history default; Kill and New Game cancel active generation and pop work.
 
 Optional counters expose generation work, history lookups, bucket traffic, high-water marks, and overflow information without affecting search semantics.

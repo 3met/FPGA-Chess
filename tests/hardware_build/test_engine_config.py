@@ -165,7 +165,14 @@ class EngineConfigTests(unittest.TestCase):
 
     def test_history_reward_must_fit_configured_entry_width(self):
         with self.assertRaisesRegex(BuildError, "fit the configured history entry width"):
-            self.load_temporary_config({"history": {"maximum_reward": 128}})
+            self.load_temporary_config({"history": {"maximum_reward": 256}})
+
+    def test_history_default_must_fit_unsigned_entry_width(self):
+        with self.assertRaisesRegex(BuildError, "default_score must fit"):
+            self.load_temporary_config({"history": {"default_score": 256}})
+        with self.assertRaisesRegex(BuildError, "default_score must be an integer"):
+            self.load_temporary_config({"history": {"default_score": -1}})
+        self.load_temporary_config({"history": {"maximum_reward": 128}})
 
     def test_history_entry_count_must_be_a_power_of_two(self):
         with self.assertRaisesRegex(BuildError, "must be a power of two"):
@@ -176,9 +183,23 @@ class EngineConfigTests(unittest.TestCase):
     def test_history_policy_must_fit_entry_width(self):
         with self.assertRaisesRegex(BuildError, "castling_bonus must fit"):
             self.load_temporary_config(
-                {"history": {"maximum_reward": 15, "castling_bonus": 16}},
+                {"history": {"default_score": 16, "maximum_reward": 15, "castling_bonus": 32}},
                 {"history_heuristic": {"entry_bits": 5}},
             )
+
+    def test_quiet_thresholds_require_three_positive_ascending_boundaries(self):
+        for thresholds in ([0, 8, 16], [-8, 8, 16], [8, 8, 16], [16, 8, 32], [8], [8, 16]):
+            with self.subTest(thresholds=thresholds):
+                with self.assertRaisesRegex(BuildError, "three positive ascending integers"):
+                    self.load_temporary_config({"history": {"quiet_bucket_thresholds": thresholds}})
+
+    def test_quiet_thresholds_can_exceed_history_range_for_combined_scores(self):
+        self.load_temporary_config(
+            {"history": {"default_score": 16, "maximum_reward": 15, "quiet_bucket_thresholds": [16, 32, 64]}},
+            {"history_heuristic": {"entry_bits": 5}},
+        )
+        with self.assertRaisesRegex(BuildError, "must fit the signed ordering score"):
+            self.load_temporary_config({"history": {"quiet_bucket_thresholds": [8, 16, 1 << 31]}})
 
     def test_aspiration_multiplier_must_grow_the_delta(self):
         with self.assertRaisesRegex(BuildError, "must be greater than one"):

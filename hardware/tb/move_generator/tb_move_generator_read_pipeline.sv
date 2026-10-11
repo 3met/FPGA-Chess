@@ -195,6 +195,33 @@ module tb_move_generator_read_pipeline;
         request(0, 0);
         expect_response(0, 1, 501, 1, "bad noisy phase follows policy command");
 
+        // Low-score quiets must survive generation and wait until both bad-noisy buckets finish.
+        reset_inputs();
+        start_generation(0, 0, 0);
+        push(0, int'(BAD_NOISY_HIGH_BUCKET), 701);
+        push(0, int'(BAD_NOISY_LOW_BUCKET), 702);
+        finish_generation(0);
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "good noisy ends before quiet generation");
+        start_generation(1, 0, 0);
+        push(1, int'(QUIET_LOW_BUCKET), 704);
+        push(1, int'(QUIET_MEDIUM_BUCKET), 703);
+        finish_generation(1);
+        request(0, 0);
+        expect_response(0, 1, 703, int'(QUIET_MEDIUM_BUCKET), "neutral quiet precedes bad captures");
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "nonlow-score quiet phase exhausted");
+        request(0, 0);
+        expect_response(0, 1, 701, int'(BAD_NOISY_HIGH_BUCKET), "bad high capture precedes low-score quiet");
+        request(0, 0);
+        expect_response(0, 1, 702, int'(BAD_NOISY_LOW_BUCKET), "bad low capture precedes low-score quiet");
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "bad noisy phase exhausted");
+        request(0, 0);
+        expect_response(0, 1, 704, int'(QUIET_LOW_BUCKET), "low-score quiet searched last");
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "final quiet phase exhausted");
+
         // A child begins at the parent's tails, and loading the parent restores
         // its unconsumed FIFO heads without any pointer payload from the caller.
         reset_inputs();

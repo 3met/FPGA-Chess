@@ -1232,10 +1232,10 @@ class ProfileSuiteTests(unittest.TestCase):
         self.assertEqual(aggregate["timing"]["setup_cycles"], 4)
         self.assertEqual(aggregate["components"]["board_update"]["issues"], 4)
         self.assertEqual(
-            aggregate["move_ordering"]["bucket_max_occupancy"]["quiet_low"], 1
+            aggregate["move_ordering"]["bucket_max_occupancy"]["bad_noisy_high"], 1
         )
         self.assertEqual(
-            aggregate["move_ordering"]["bucket_arena_high_water"]["quiet_low"], 2
+            aggregate["move_ordering"]["bucket_arena_high_water"]["bad_noisy_high"], 2
         )
         self.assertEqual(aggregate["transposition_table"]["store_fifo_high_water"], 1)
         self.assertEqual(

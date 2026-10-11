@@ -6,7 +6,7 @@ module move_generator_read_pipeline #(
     parameter int THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int MEMORY_ENTRIES = 2048,
-    parameter int BUCKET_RATIOS[MOVE_BUCKET_COUNT] = '{48,16,192,64,64,32,64,32}
+    parameter int BUCKET_RATIOS[MOVE_BUCKET_COUNT] = '{64,48,16,192,64,32,64,32}
 ) (
     input logic clk, rst_n, clear, flush,
     input logic pop_valid[THREAD_COUNT], output logic pop_ready[THREAD_COUNT],
@@ -146,8 +146,9 @@ module move_generator_read_pipeline #(
     function automatic MoveBucketMask phase_mask(input MoveMemoryPhase phase);
         case (phase)
             MOVE_MEMORY_GOOD_NOISY: return GOOD_NOISY_BUCKET_MASK;
-            MOVE_MEMORY_QUIET: return QUIET_BUCKET_MASK;
+            MOVE_MEMORY_QUIET: return REGULAR_QUIET_BUCKET_MASK;
             MOVE_MEMORY_BAD_NOISY: return BAD_NOISY_BUCKET_MASK;
+            MOVE_MEMORY_LOW_QUIET: return LOW_QUIET_BUCKET_MASK;
             default: return MoveBucketMask'(0);
         endcase
     endfunction
@@ -156,7 +157,8 @@ module move_generator_read_pipeline #(
         case (phase)
             MOVE_MEMORY_GOOD_NOISY: return MOVE_MEMORY_WAIT_QUIET;
             MOVE_MEMORY_QUIET: return MOVE_MEMORY_BAD_NOISY;
-            MOVE_MEMORY_BAD_NOISY: return MOVE_MEMORY_DONE;
+            MOVE_MEMORY_BAD_NOISY: return MOVE_MEMORY_LOW_QUIET;
+            MOVE_MEMORY_LOW_QUIET: return MOVE_MEMORY_DONE;
             default: return phase;
         endcase
     endfunction

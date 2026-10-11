@@ -22,7 +22,7 @@ READY_BREAKDOWN_LABELS = {
     "transition": "Node/iteration transition",
 }
 MOVE_BUCKETS = [
-    "bad_noisy_low", "bad_noisy_high", "quiet_low", "quiet_medium",
+    "quiet_low", "bad_noisy_low", "bad_noisy_high", "quiet_medium",
     "quiet_high", "quiet_highest", "good_noisy_low", "good_noisy_high",
 ]
 ORDINAL_BUCKETS = ["1", "2", "3", "4", "5-8", "9-16", "17-32", "33+"]

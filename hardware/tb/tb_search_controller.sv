@@ -170,9 +170,9 @@ module tb_search_controller #(
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         // The focused variant puts ordinary quiets in the highest quiet bucket without
         // seeding internal RAM, so real search must exercise early quiet reads.
-        .QUIET_THRESHOLD_1(EARLY_ONLY ? -2 : 8),
-        .QUIET_THRESHOLD_2(EARLY_ONLY ? -1 : 32),
-        .QUIET_THRESHOLD_3(EARLY_ONLY ? 0 : 64),
+        .QUIET_THRESHOLD_1(EARLY_ONLY ? 1 : 32),
+        .QUIET_THRESHOLD_2(EARLY_ONLY ? 2 : 64),
+        .QUIET_THRESHOLD_3(EARLY_ONLY ? 3 : 128),
         .ENABLE_SEARCH_STATS(1'b1)
     ) dut (
         .clk(clk),
@@ -1727,6 +1727,14 @@ module tb_search_controller #(
         new_game();
         setup_qsearch_quiet_evasion_position();
         run_qsearch_quiet_evasion_test("qsearch quiet check evasion");
+
+        // Force all quiet evasions into the final phase to guard against false mate.
+        new_game();
+        setup_qsearch_quiet_evasion_position();
+        for (int entry = 0; entry < dut.HISTORY_ENTRY_COUNT; entry++)
+            dut.move_generator.quiet_history.history_table.history_ram.mem[entry] = 0;
+        run_qsearch_quiet_evasion_test("qsearch low-score quiet check evasion");
+
 
         new_game();
         apply_game_move(make_move(Position'(12), Position'(28), PROMO_QUEEN), "make e2e4");

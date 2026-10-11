@@ -38,7 +38,8 @@ def semantic_leaf_paths(value, prefix=""):
             for key, item in value.items()
             for path in semantic_leaf_paths(item, f"{prefix}.{key}" if prefix else key)
         }
-    if isinstance(value, list) and not (len(value) == 2 and all(isinstance(item, int) for item in value)):
+    if isinstance(value, list) and not (prefix.endswith("_fraction") and len(value) == 2
+            and all(isinstance(item, int) for item in value)):
         return {
             path
             for index, item in enumerate(value)
@@ -104,7 +105,6 @@ class SearchSpaceTests(unittest.TestCase):
     def test_default_space_round_trips_every_search_leaf(self):
         vector = vector_from_json(self.baseline, self.parameters)
 
-        self.assertEqual(len(self.parameters), 39)
         self.assertEqual({parameter.path for parameter in self.parameters}, semantic_leaf_paths(self.baseline))
         self.assertEqual(json_from_vector(self.baseline, vector, self.parameters), self.baseline)
 
@@ -118,7 +118,7 @@ class SearchSpaceTests(unittest.TestCase):
         self.assertLess(null["shallow_reduction"], null["minimum_depth"])
         self.assertLess(null["deep_reduction"], null["deep_depth_threshold"])
         thresholds = candidate["history"]["quiet_bucket_thresholds"]
-        self.assertTrue(thresholds[0] < thresholds[1] < thresholds[2])
+        self.assertTrue(0 < thresholds[0] < thresholds[1] < thresholds[2])
 
     def test_all_configured_paths_exist(self):
         for parameter in self.parameters:

@@ -58,22 +58,23 @@ module search_controller #(
     parameter int NEXT_DEPTH_DENOMINATOR = 5,
     parameter int SINGLE_LEGAL_MOVE_MS = 10,
     parameter int MOVE_MEMORY_ENTRIES = 2048,
-    parameter int MOVE_BUCKET_0_RATIO = 48,
-    parameter int MOVE_BUCKET_1_RATIO = 16,
-    parameter int MOVE_BUCKET_2_RATIO = 192,
-    parameter int MOVE_BUCKET_3_RATIO = 64,
+    parameter int MOVE_BUCKET_0_RATIO = 64,
+    parameter int MOVE_BUCKET_1_RATIO = 48,
+    parameter int MOVE_BUCKET_2_RATIO = 16,
+    parameter int MOVE_BUCKET_3_RATIO = 192,
     parameter int MOVE_BUCKET_4_RATIO = 64,
     parameter int MOVE_BUCKET_5_RATIO = 32,
     parameter int MOVE_BUCKET_6_RATIO = 64,
     parameter int MOVE_BUCKET_7_RATIO = 32,
     parameter int HISTORY_ENTRY_COUNT = 8192,
     parameter int HISTORY_ENTRY_BITS = 8,
+    parameter int HISTORY_DEFAULT_SCORE = 32,
     parameter int HISTORY_REWARD_PER_DEPTH = 2,
     parameter int HISTORY_MAXIMUM_REWARD = 31,
     parameter int HISTORY_MALUS_DIVISOR = 2,
-    parameter int QUIET_THRESHOLD_1 = 8,
-    parameter int QUIET_THRESHOLD_2 = 32,
-    parameter int QUIET_THRESHOLD_3 = 64,
+    parameter int QUIET_THRESHOLD_1 = 32,
+    parameter int QUIET_THRESHOLD_2 = 64,
+    parameter int QUIET_THRESHOLD_3 = 128,
     parameter int CASTLING_HISTORY_BONUS = 8,
     parameter int TT_VALIDATE_MINIMUM_DEPTH = 8,
     parameter int TT_VALIDATE_BYPASS_HALFMOVES = 4,
@@ -798,6 +799,7 @@ module search_controller #(
         .MOVE_BUCKET_7_RATIO(MOVE_BUCKET_7_RATIO),
         .HISTORY_ENTRY_COUNT(HISTORY_ENTRY_COUNT),
         .HISTORY_ENTRY_BITS(HISTORY_ENTRY_BITS),
+        .HISTORY_DEFAULT_SCORE(HISTORY_DEFAULT_SCORE),
         .HISTORY_REWARD_PER_DEPTH(HISTORY_REWARD_PER_DEPTH),
         .HISTORY_MAXIMUM_REWARD(HISTORY_MAXIMUM_REWARD),
         .HISTORY_MALUS_DIVISOR(HISTORY_MALUS_DIVISOR),
@@ -1934,7 +1936,8 @@ module search_controller #(
     function automatic logic move_state_uses_pop(input MoveOrderState move_state);
         return move_state == MOVE_ORDER_GOOD_NOISY
             || move_state == MOVE_ORDER_QUIET
-            || move_state == MOVE_ORDER_BAD_NOISY;
+            || move_state == MOVE_ORDER_BAD_NOISY
+            || move_state == MOVE_ORDER_LOW_QUIET;
     endfunction : move_state_uses_pop
 
     function automatic logic is_promotion_move(input FullBoard board, input Move move);
@@ -2157,7 +2160,7 @@ module search_controller #(
                     if (!(search_in_qsearch(move_pop_resp_thread)
                             && !search_board_in_check[move_pop_resp_thread]))
                         move_followup_action = MOVE_FOLLOWUP_QUIET_CMD;
-                MOVE_ORDER_QUIET:
+                MOVE_ORDER_QUIET, MOVE_ORDER_BAD_NOISY:
                     move_followup_action = MOVE_FOLLOWUP_POP_BAD;
                 default: begin end
             endcase
@@ -2354,7 +2357,7 @@ module search_controller #(
                 MOVE_ORDER_QUIET: begin
                     move_pop_valid = 1'b1;
                 end
-                MOVE_ORDER_BAD_NOISY: begin
+                MOVE_ORDER_BAD_NOISY, MOVE_ORDER_LOW_QUIET: begin
                     move_pop_valid = 1'b1;
                 end
                 default: begin end
@@ -3345,6 +3348,8 @@ module search_controller #(
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_QUIET;
                             else if (search_stack_top[0].move_order_state == MOVE_ORDER_QUIET)
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_BAD_NOISY;
+                            else if (search_stack_top[0].move_order_state == MOVE_ORDER_BAD_NOISY)
+                                search_stack_top[0].move_order_state <= MOVE_ORDER_LOW_QUIET;
                             else
                                 search_stack_top[0].move_order_state <= MOVE_ORDER_DONE;
                             state <= CTRL_PERFT_GEN_ISSUE;
@@ -4445,6 +4450,8 @@ module search_controller #(
                                                     ? MOVE_ORDER_QUIET : MOVE_ORDER_GENERATE_QUIET;
                                     MOVE_ORDER_QUIET:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_BAD_NOISY;
+                                    MOVE_ORDER_BAD_NOISY:
+                                        search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_LOW_QUIET;
                                     default:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_DONE;
                                 endcase

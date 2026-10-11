@@ -8,9 +8,9 @@ module move_generator_lane #(
     parameter int THREAD_COUNT = 1,
     parameter MoveGenCommand GENERATION_COMMAND = MOVE_GEN_GENERATE_NOISY,
     parameter int HISTORY_ENTRY_BITS = 8,
-    parameter int QUIET_THRESHOLD_1 = 8,
-    parameter int QUIET_THRESHOLD_2 = 32,
-    parameter int QUIET_THRESHOLD_3 = 64,
+    parameter int QUIET_THRESHOLD_1 = 32,
+    parameter int QUIET_THRESHOLD_2 = 64,
+    parameter int QUIET_THRESHOLD_3 = 128,
     parameter int CASTLING_HISTORY_BONUS = 8,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -49,7 +49,7 @@ module move_generator_lane #(
     output Color history_lookup_color,
     output Position history_lookup_from,
     output Position history_lookup_to,
-    input logic signed [HISTORY_ENTRY_BITS-1:0] history_lookup_value,
+    input logic [HISTORY_ENTRY_BITS-1:0] history_lookup_value,
 
     output logic [39:0] stat_noisy_count,
     output logic [39:0] stat_quiet_count,
@@ -65,11 +65,10 @@ module move_generator_lane #(
     initial begin
         if (THREAD_COUNT < 1 || THREAD_COUNT > chess_defs::THREAD_COUNT)
             $fatal(1, "move_generator THREAD_COUNT exceeds ThreadID capacity");
-        if (!(QUIET_THRESHOLD_1 < QUIET_THRESHOLD_2
-                && QUIET_THRESHOLD_2 < QUIET_THRESHOLD_3))
+        if (!(QUIET_THRESHOLD_1 < QUIET_THRESHOLD_2 && QUIET_THRESHOLD_2 < QUIET_THRESHOLD_3))
             $fatal(1, "quiet history thresholds must be strictly increasing");
         if (CASTLING_HISTORY_BONUS < 0
-                || CASTLING_HISTORY_BONUS > (2 ** (HISTORY_ENTRY_BITS - 1) - 1))
+                || CASTLING_HISTORY_BONUS > (2 ** HISTORY_ENTRY_BITS - 1))
             $fatal(1, "castling history bonus must fit the configured entry width");
         if (GENERATION_COMMAND != MOVE_GEN_GENERATE_NOISY
                 && GENERATION_COMMAND != MOVE_GEN_GENERATE_QUIET)
@@ -548,13 +547,14 @@ module move_generator_lane #(
         return victim == ROOK || victim == QUEEN ? BAD_NOISY_HIGH_BUCKET : BAD_NOISY_LOW_BUCKET;
     endfunction
 
+    // Classify the combined score, reserving the final bucket for low-score quiets.
     function automatic MoveBucketIndex quiet_bucket(
-        input logic signed [HISTORY_ENTRY_BITS:0] score
+        input int signed score
     );
+        if (score < QUIET_THRESHOLD_1) return QUIET_LOW_BUCKET;
         if (score >= QUIET_THRESHOLD_3) return QUIET_HIGHEST_BUCKET;
         if (score >= QUIET_THRESHOLD_2) return QUIET_HIGH_BUCKET;
-        if (score >= QUIET_THRESHOLD_1) return QUIET_MEDIUM_BUCKET;
-        return QUIET_LOW_BUCKET;
+        return QUIET_MEDIUM_BUCKET;
     endfunction
 
     function automatic logic same_move(input Move left, input Move right);
@@ -775,8 +775,9 @@ module move_generator_lane #(
         if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY) begin
             bucket_wr_select = noisy_bucket();
         end else begin
-            automatic logic signed [HISTORY_ENTRY_BITS:0] score;
-            score = $signed(history_lookup_value);
+            // Sum ordering heuristics before classification; keep headroom beyond history RAM.
+            automatic int signed score;
+            score = int'($unsigned(history_lookup_value));
             if (candidate_is_castle) score += CASTLING_HISTORY_BONUS;
             bucket_wr_select = quiet_bucket(score);
         end
