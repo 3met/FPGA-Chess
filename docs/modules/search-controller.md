@@ -64,7 +64,7 @@ Move generation produces pseudo-legal candidates. The controller applies each ca
 
 Generation and move reads can overlap. Generation and direct-validation commands share lane arbitration; each thread accepts bucket pops through its own ready/valid channel independently of command selection. The controller initializes a node's move storage before descent and waits for parent generation to complete before a child can allocate move storage, descend, or reverse the parent. Cancellation covers both generation and reads. Bucket ordering and storage ownership are defined in [move-generator.md](move-generator.md).
 
-TT moves pass through the same legality checks as generated moves. The controller enforces the root and repetition-sensitive cutoff restrictions described in [transposition-table.md](transposition-table.md).
+TT moves pass through the same legality checks as generated moves. Retained TT responses complete child validation before entry-time pruning or evaluation can run, preserving the probed node's board, depth, and history context until the response is resolved. The controller enforces the root and repetition-sensitive cutoff restrictions described in [transposition-table.md](transposition-table.md).
 
 Perft uses the same generation, legality, and reversal paths but counts fixed-depth leaves instead of evaluating positions.
 

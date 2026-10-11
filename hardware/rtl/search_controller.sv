@@ -1746,6 +1746,9 @@ module search_controller #(
 
     function automatic logic search_thread_rfp_ready(input int thread_index);
         return search_thread_ready(thread_index)
+            // Resolve the retained TT move before any entry-time pruning can
+            // return this node or replace its probe context with a null child.
+            && !search_tt_validation_pending[thread_index]
             && !search_thread_terminal_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
             && search_stack_top[thread_index].tt_checked
@@ -1760,6 +1763,7 @@ module search_controller #(
 
     function automatic logic search_thread_null_ready(input int thread_index);
         return search_thread_ready(thread_index)
+            && !search_tt_validation_pending[thread_index]
             && !search_generation_inflight[thread_index]
             && !search_thread_terminal_ready(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
@@ -1773,6 +1777,7 @@ module search_controller #(
 
     function automatic logic search_thread_eval_ready(input int thread_index);
         return search_thread_ready(thread_index)
+            && !search_tt_validation_pending[thread_index]
             && !search_thread_terminal_ready(thread_index)
             && search_board[thread_index].halfmove_clock < HalfmoveClock'(100)
             && !search_thread_tt_lookup_ready(thread_index)
@@ -4632,7 +4637,7 @@ module search_controller #(
 `ifndef SYNTHESIS
                             assert (search_tt_history_required[lookup_thread_id]
                                     == tt_history_validation_required(lookup_thread_id))
-                                else $fatal(1, "TT history eligibility changed during response validation");
+                                else $fatal(1, "TT history eligibility changed during response validation: thread=%0d ply=%0d", lookup_thread_id, lookup_ply);
                             if (tt_cutoff
                                     && tt_history_validation_required(lookup_thread_id)) begin
                                 assert (search_tt_validation_passed[lookup_thread_id])

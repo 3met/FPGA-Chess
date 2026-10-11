@@ -545,6 +545,61 @@ module tb_search_controller #(
         check(score != EvalScore'(600), {label, " root hit ignores cached score"});
     endtask : run_root_tt_score_policy_test
 
+    // A retained TT hit must validate its real move before pruning can change
+    // the node or overwrite the response context with a synthetic child probe.
+    task automatic run_tt_validation_priority_test();
+        new_game();
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            automatic FullBoard saved_board = dut.search_board[tid];
+            automatic SearchThreadPhase saved_phase = dut.search_thread_phase[tid];
+            automatic PlyIndex saved_ply = dut.search_ply[tid];
+            automatic logic saved_null_candidate = dut.search_null_candidate[tid];
+            automatic logic saved_node_init_done = dut.search_node_init_done[tid];
+            automatic logic [$bits(dut.search_stack_top[tid])-1:0] saved_stack = dut.search_stack_top[tid];
+
+            // No clock edge occurs during these scheduler policy checks.
+            dut.search_thread_phase[tid] = SEARCH_PHASE_READY;
+            dut.search_ply[tid] = PlyIndex'(1);
+            dut.search_board[tid].halfmove_clock = HalfmoveClock'(0);
+            dut.search_stack_top[tid].tt_checked = 1'b1;
+            dut.search_stack_top[tid].has_tt_move = 1'b1;
+            dut.search_stack_top[tid].tt_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
+            dut.search_stack_top[tid].move_order_state = MOVE_ORDER_DIRECT;
+            dut.search_stack_top[tid].beta = EvalScore'(100);
+            dut.search_stack_top[tid].alpha = EvalScore'(99);
+            dut.search_stack_top[tid].unit_window = 1'b1;
+            dut.search_stack_top[tid].zero_window_node = 1'b1;
+            dut.search_stack_top[tid].rfp_checked = 1'b1;
+            dut.search_stack_top[tid].null_attempted = 1'b0;
+            dut.search_stack_top[tid].remaining_depth = $bits(dut.search_stack_top[tid].remaining_depth)'(dut.NULL_MINIMUM_DEPTH);
+            dut.search_null_candidate[tid] = 1'b1;
+            dut.search_node_init_done[tid] = 1'b1;
+            dut.search_tt_validation_pending[tid] = 1'b0;
+            check(dut.search_thread_null_ready(tid), "fixture permits a null probe before TT validation");
+            dut.search_tt_validation_pending[tid] = 1'b1;
+            check(!dut.search_thread_null_ready(tid) && dut.search_thread_move_ready(tid),
+                "pending TT validation selects the real move before a null probe");
+
+            dut.search_stack_top[tid].remaining_depth = $bits(dut.search_stack_top[tid].remaining_depth)'(dut.RFP_MAXIMUM_DEPTH);
+            dut.search_stack_top[tid].rfp_checked = 1'b0;
+            dut.search_tt_validation_pending[tid] = 1'b0;
+            check(dut.search_thread_rfp_ready(tid) && dut.search_thread_eval_ready(tid),
+                "fixture permits reverse futility evaluation before TT validation");
+            dut.search_tt_validation_pending[tid] = 1'b1;
+            check(!dut.search_thread_rfp_ready(tid) && !dut.search_thread_eval_ready(tid)
+                    && dut.search_thread_move_ready(tid),
+                "pending TT validation selects the real move before pruning evaluation");
+
+            dut.search_tt_validation_pending[tid] = 1'b0;
+            dut.search_board[tid] = saved_board;
+            dut.search_thread_phase[tid] = saved_phase;
+            dut.search_ply[tid] = saved_ply;
+            dut.search_null_candidate[tid] = saved_null_candidate;
+            dut.search_node_init_done[tid] = saved_node_init_done;
+            dut.search_stack_top[tid] = saved_stack;
+        end
+    endtask : run_tt_validation_priority_test
+
     // Reject an impossible TT move through the real direct-validation lane and
     // require its same-cycle noisy follow-up to retain generation ownership.
     task automatic run_direct_reject_followup_test(input string label);
@@ -1723,6 +1778,7 @@ module tb_search_controller #(
         run_repetition_draw_search("threefold root search");
 
         run_root_tt_score_policy_test("root TT score policy");
+        run_tt_validation_priority_test();
         run_direct_reject_followup_test("direct rejection generation tracking");
         check_underpromotion_publication();
 
