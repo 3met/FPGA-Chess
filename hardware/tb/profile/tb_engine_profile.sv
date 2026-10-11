@@ -3,6 +3,7 @@
 import chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
+import search_defs::*;
 import move_generator_defs::*;
 import tt_defs::*;
 import sdram_defs::*;
@@ -990,8 +991,8 @@ module tb_engine_profile #(
                     nnue_completion_markers = nnue_completion_markers + 1;
                 end else if (dut.controller.nnue_delta_busy
                         && dut.controller.nnue_delta_replay
-                        && dut.controller.nnue_plan_kind[dut.controller.nnue_delta_thread]
-                            == dut.controller.NNUE_PLAN_REBUILD) begin
+                        && dut.controller.nnue_plan[dut.controller.nnue_delta_thread].kind
+                            == NNUE_PLAN_REBUILD) begin
                     nnue_rebuild_rows = nnue_rebuild_rows + 1;
                     if (dut.controller.nnue_update_req.clear)
                         nnue_rebuilds = nnue_rebuilds + 1;
@@ -1006,8 +1007,8 @@ module tb_engine_profile #(
                 nnue_update_completions = nnue_update_completions + 1;
             if (dut.controller.nnue_delta_busy && dut.controller.nnue_delta_draining
                     && dut.controller.nnue_update_idle
-                    && dut.controller.nnue_plan_kind[dut.controller.nnue_delta_thread]
-                        == dut.controller.NNUE_PLAN_REBUILD)
+                    && dut.controller.nnue_plan[dut.controller.nnue_delta_thread].kind
+                        == NNUE_PLAN_REBUILD)
                 nnue_update_completions = nnue_update_completions + 1;
             if (dut.controller.repetition_req_valid) repetition_requests <= repetition_requests + 1;
             if (dut.controller.repetition_resp_valid) repetition_responses <= repetition_responses + 1;

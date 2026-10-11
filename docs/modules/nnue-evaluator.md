@@ -16,6 +16,8 @@ Before search, the controller builds the root accumulator for every thread. An o
 
 The final request in an update plan marks completion and returns the tagged thread and ply. Requests from different threads share the update path, while evaluation has an independent accumulator read path. Both paths read the same live-state storage; evaluation captures a snapshot before processing its output rows, so another thread can update concurrently without a duplicate accumulator memory.
 
+Search constructs these requests with `hardware/rtl/search/search_nnue_update_encoder.sv`, a combinational encoder for forward and inverse move deltas, rebuild rows, and ordered completion markers. The search controller retains sequencing and plan ownership, including immediate handoff between pending threads.
+
 Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumulator RAM contents need not be erased because the controller tracks which per-thread state is valid.
 
 ## Output Layer

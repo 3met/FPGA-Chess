@@ -14,7 +14,7 @@ from typing import Callable
 # These host constants mirror the named RTL constants shown in each comment.
 # Keep the assertions here so changes which exceed their wire representation fail loudly.
 BAUD_RATE = 2_000_000  # hardware/rtl/de1_soc.sv BAUD_RATE
-MAX_SEARCH_DEPTH = 31  # 5-bit search depth used by hardware/rtl/search_controller.sv
+MAX_SEARCH_DEPTH = 31  # 5-bit search depth used by hardware/rtl/search/search_controller.sv
 MATE_THRESHOLD = 0x4000  # hardware/rtl/tt/tt_defs.sv MATE_THRESHOLD
 MATE_SCORE = 0x4100  # hardware/rtl/tt/tt_defs.sv MATE_SCORE
 FULL_BOARD_BYTES = 36  # hardware/rtl/engine_command_layer.sv Set Board payload

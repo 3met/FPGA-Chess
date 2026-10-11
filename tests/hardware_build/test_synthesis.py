@@ -45,6 +45,22 @@ class EngineBuildConfigTests(unittest.TestCase):
             for role in ("memory", "communication"):
                 self.assertIn(f"{role.upper()}_CLOCK_FREQ = {profile['clocks'][role]['frequency_hz']};", text)
 
+    def test_build_id_tracks_nested_search_implementation_headers(self):
+        """Editing a nested controller include must prevent reuse of an old bitstream."""
+        manifest = load_manifest()
+        target = manifest["synthesis_targets"]["quartus-de1-soc"]
+        original_id = deterministic_build_id(manifest, target)
+        header = Path("hardware/rtl/search/search_run.svh").resolve()
+        read_bytes = Path.read_bytes
+
+        def changed_header_bytes(path):
+            # Simulate an edit without modifying tracked RTL during the test.
+            contents = read_bytes(path)
+            return contents + b"\n// changed search implementation\n" if path.resolve() == header else contents
+
+        with mock.patch.object(Path, "read_bytes", changed_header_bytes):
+            self.assertNotEqual(deterministic_build_id(manifest, target), original_id)
+
     def test_engine_frequency_change_keeps_board_memory_clock_settings(self):
         """Independent PLLs retain memory timing when an engine profile changes."""
         manifest = load_manifest()

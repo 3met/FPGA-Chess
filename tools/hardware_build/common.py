@@ -90,8 +90,8 @@ def simulation_lock(path: Path):
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def rtl_source_dependencies(sources: list[Path]) -> list[Path]:
-    """Include transitive quoted headers in simulator cache identities."""
+def rtl_source_dependencies(sources: list[Path], *, generated_includes: tuple[str, ...] = ()) -> list[Path]:
+    """Collect transitive headers, excluding generated inputs fingerprinted by the caller."""
     visited: dict[Path, None] = {}
 
     def visit(source: Path) -> None:
@@ -101,6 +101,8 @@ def rtl_source_dependencies(sources: list[Path]) -> list[Path]:
         visited[source] = None
         text = re.sub(r"/\*.*?\*/|//[^\n]*", "", source.read_text(encoding="utf-8"), flags=re.DOTALL)
         for name in re.findall(r'`include\s+"([^"\n]+)"', text):
+            if name in generated_includes:
+                continue
             candidates = (REPO_ROOT / name, source.parent / name)
             header = next((path for path in candidates if path.is_file()), None)
             if header is None:

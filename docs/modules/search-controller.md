@@ -2,6 +2,28 @@
 
 The search controller owns the active position, search threads and stacks, repetition state, shared-pipeline scheduling, and result selection. The search algorithm is specified in [search-design.md](../architecture/search-design.md); this document defines the controller boundary and orchestration responsibilities.
 
+## RTL Organization
+
+The implementation lives in `hardware/rtl/search/`. `search_controller.sv` defines the module parameters and ports; `defs.sv` owns the search FSM enums and packed NNUE plan and routing metadata. Public operation requests and responses remain in `engine_defs.sv`.
+
+| File | Responsibility |
+| ---- | -------------- |
+| `search_state.svh` | Local types, configuration checks, thread state, and pipeline signals. |
+| `search_pipelines.svh` | Shared pipeline instances, stack RAMs, transport ownership, and statistics. |
+| `search_policy.svh` | Scoring, pruning, aspiration windows, and LMR helpers. |
+| `search_helpers.svh` | Thread readiness, move classification, TT policy, and iteration restart. |
+| `search_results.svh` | Shared completed/partial result selection for Kill and budget stops. |
+| `search_scheduler.svh` | Registered stop/pruning checks, eligibility masks, and arbitration. |
+| `search_requests.svh` | Board, move, TT, and timer request construction from selected tags. |
+| `search_nnue_requests.svh` | NNUE plan arbitration, common plan launch, and replay/update request selection. |
+| `search_nnue_control.svh` | NNUE replay progress, evaluation tags, plan handoff, and completion routing. |
+| `search_nnue_update_encoder.sv` | Combinational module encoding incremental/undo features, rebuild rows, and completion markers. |
+| `search_control.svh` | Reset, cancellation, response routing, command handling, and initialization. |
+| `search_run.svh` | Active-search node lifecycle and shared-pipeline completions. |
+| `search_iterations.svh` | Independent iterative-deepening passes, aspiration retries, and primary time decisions. |
+
+The headers are implementation fragments, not standalone modules. `search_run.svh` is included inside the state case in `search_control.svh` and includes NNUE control and iteration handling; sequential updates retain one clocked process and their precedence. The NNUE encoder adds no register boundary, and controller-owned launch state preserves immediate child preparation and plan handoff. Plan payloads travel together in a struct while pending, in-flight, and accumulator-valid flags remain separate. Compile the package and modules through the manifest; build fingerprints include the transitive headers.
+
 ## Operations
 
 | Operation | Behavior |

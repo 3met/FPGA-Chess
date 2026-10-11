@@ -92,6 +92,19 @@
       "hardware/rtl/time_management/unsigned_iterative_divider.sv",
       "hardware/rtl/time_management/time_management.sv"
     ],
+    "search-nnue-updates": [
+      "@common",
+      "hardware/rtl/nnue/defs.sv",
+      "hardware/rtl/search/defs.sv",
+      "hardware/rtl/search/search_nnue_update_encoder.sv"
+    ],
+    "search-results-test": [
+      "@common",
+      "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
+      "hardware/rtl/engine_defs.sv",
+      "hardware/rtl/tt/tt_defs.sv",
+      "hardware/rtl/search/defs.sv"
+    ],
     "search-controller": [
       "@board-update-pipeline",
       "@move-generator",
@@ -100,7 +113,8 @@
       "@repetition-checker",
       "hardware/rtl/engine_defs.sv",
       "@time-management",
-      "hardware/rtl/search_controller.sv"
+      "@search-nnue-updates",
+      "hardware/rtl/search/search_controller.sv"
     ],
     "engine-rtl": [
       "@common",
@@ -278,29 +292,39 @@
       "testbench": "hardware/tb/tb_host_link.sv",
       "top": "tb_host_link"
     },
+    "search-nnue-updates": {
+      "source_set": "search-nnue-updates",
+      "testbench": "hardware/tb/search/tb_search_nnue_update_encoder.sv",
+      "top": "tb_search_nnue_update_encoder"
+    },
+    "search-results": {
+      "source_set": "search-results-test",
+      "testbench": "hardware/tb/search/tb_search_results.sv",
+      "top": "tb_search_results"
+    },
     "search-controller": {
       "source_set": "search-controller-test",
-      "testbench": "hardware/tb/tb_search_controller.sv",
+      "testbench": "hardware/tb/search/tb_search_controller.sv",
       "top": "tb_search_controller"
     },
     "search-controller-early-reads": {
       "source_set": "search-controller-test",
-      "testbench": "hardware/tb/tb_search_controller.sv",
+      "testbench": "hardware/tb/search/tb_search_controller.sv",
       "top": "tb_search_controller_early_reads"
     },
     "search-controller-multithread": {
       "source_set": "search-controller-test",
-      "testbench": "hardware/tb/tb_search_controller.sv",
+      "testbench": "hardware/tb/search/tb_search_controller.sv",
       "top": "tb_search_controller_multithread"
     },
     "search-controller-fifty-move-mate": {
       "source_set": "search-controller-test",
-      "testbench": "hardware/tb/tb_search_controller.sv",
+      "testbench": "hardware/tb/search/tb_search_controller.sv",
       "top": "tb_search_controller_fifty_move_mate"
     },
     "search-controller-fifty-move-mate-multithread": {
       "source_set": "search-controller-test",
-      "testbench": "hardware/tb/tb_search_controller.sv",
+      "testbench": "hardware/tb/search/tb_search_controller.sv",
       "top": "tb_search_controller_fifty_move_mate_multithread"
     },
     "tt-memory-cdc": {

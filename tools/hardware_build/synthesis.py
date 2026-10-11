@@ -22,6 +22,7 @@ from .common import (
     rel,
     require_tool,
     run_command,
+    rtl_source_dependencies,
     write_synth_metadata,
 )
 from .rtl_config import rtl_config_source, type_config_for_target, write_rtl_config
@@ -98,7 +99,13 @@ def deterministic_build_id(manifest: dict, target: dict, resolved_config: dict |
     digest.update(json.dumps(resolved_target, sort_keys=True, separators=(",", ":")).encode())
     digest.update(rtl_config_source(type_config).encode())
 
-    inputs = set(expand_source_set(manifest, target["source_set"]))
+    # Included controller logic must invalidate synthesis reuse just like RTL modules.
+    # The generated build header derives from the configuration and build ID above.
+    generated_includes = ("engine_build_config.svh",) if "engine_config" in target else ()
+    inputs = set(rtl_source_dependencies(
+        expand_source_set(manifest, target["source_set"]),
+        generated_includes=generated_includes,
+    ))
     inputs.update(
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
