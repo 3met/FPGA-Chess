@@ -764,170 +764,172 @@
                             end
                         end
 
-                        if (|search_return_mask) begin
-                            automatic ThreadID return_thread_id;
-                            automatic EvalScore parent_score;
-                            automatic PlyIndex return_ply;
+                        // Keep score and history decisions local to each thread; arbitration
+                        // enables one update without muxing the parent state through its result.
+                        for (int return_idx = 0; return_idx < SEARCH_THREAD_COUNT; return_idx++) begin
+                            if (search_return_mask[return_idx]
+                                    && search_select_thread(search_return_mask,
+                                        search_dispatch.return_result) == ThreadID'(return_idx)) begin
+                                automatic ThreadID return_thread_id = ThreadID'(return_idx);
+                                automatic EvalScore parent_score;
+                                automatic PlyIndex return_ply;
 
-                            return_thread_id = search_select_thread(
-                                search_return_mask,
-                                search_dispatch.return_result
-                            );
-                            return_ply = search_ply[return_thread_id];
-                            parent_score = -search_return_score[return_thread_id];
-                            search_thread_id <= return_thread_id;
-                            search_dispatch.return_result <= search_thread_after(return_thread_id);
-                            if (search_return_was_null[return_thread_id]) begin
-                                // A null probe is evidence only: cut off at the
-                                // parent's beta bound or resume real moves.
-                                search_return_was_null[return_thread_id] <= 1'b0;
-                                search_return_was_scout[return_thread_id] <= 1'b0;
-                                search_return_was_reduced[return_thread_id] <= 1'b0;
-                                if (parent_score >= search_stack_top[return_thread_id].beta) begin
-                                    search_return_score[return_thread_id]
-                                        <= search_stack_top[return_thread_id].beta;
-                                    search_return_valid[return_thread_id] <= 1'b1;
-                                    if (should_store_search_tt(return_thread_id, return_ply)) begin
-                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_STORE_PUBLISH;
+                                return_ply = search_ply[return_thread_id];
+                                parent_score = -search_return_score[return_thread_id];
+                                search_thread_id <= return_thread_id;
+                                search_dispatch.return_result <= search_thread_after(return_thread_id);
+                                if (search_return_was_null[return_thread_id]) begin
+                                    // A null probe is evidence only: cut off at the
+                                    // parent's beta bound or resume real moves.
+                                    search_return_was_null[return_thread_id] <= 1'b0;
+                                    search_return_was_scout[return_thread_id] <= 1'b0;
+                                    search_return_was_reduced[return_thread_id] <= 1'b0;
+                                    if (parent_score >= search_stack_top[return_thread_id].beta) begin
+                                        search_return_score[return_thread_id]
+                                            <= search_stack_top[return_thread_id].beta;
+                                        search_return_valid[return_thread_id] <= 1'b1;
+                                        if (should_store_search_tt(return_thread_id, return_ply)) begin
+                                            search_thread_phase[return_thread_id] <= SEARCH_PHASE_STORE_PUBLISH;
+                                        end else begin
+                                            search_thread_phase[return_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
+                                        end
                                     end else begin
-                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
+                                        search_return_valid[return_thread_id] <= 1'b0;
+                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_READY;
                                     end
-                                end else begin
+                                end else if (search_needs_research(
+                                        search_return_was_scout[return_thread_id],
+                                        search_return_was_reduced[return_thread_id],
+                                        parent_score,
+                                        search_stack_top[return_thread_id].alpha,
+                                        search_stack_top[return_thread_id].beta)) begin
+                                    // A scout fail-high that does not cut off must be searched again
+                                    // with the parent's original full window before it can be folded.
+                                    search_pending_move[return_thread_id] <= search_return_move[return_thread_id];
                                     search_return_valid[return_thread_id] <= 1'b0;
-                                    search_thread_phase[return_thread_id] <= SEARCH_PHASE_READY;
-                                end
-                            end else if (search_needs_research(
-                                    search_return_was_scout[return_thread_id],
-                                    search_return_was_reduced[return_thread_id],
-                                    parent_score,
-                                    search_stack_top[return_thread_id].alpha,
-                                    search_stack_top[return_thread_id].beta)) begin
-                                // A scout fail-high that does not cut off must be searched again
-                                // with the parent's original full window before it can be folded.
-                                search_pending_move[return_thread_id] <= search_return_move[return_thread_id];
-                                search_return_valid[return_thread_id] <= 1'b0;
-                                search_return_was_scout[return_thread_id] <= 1'b0;
-                                search_return_was_reduced[return_thread_id] <= 1'b0;
-                                search_pvs_research[return_thread_id] <= 1'b1;
-                                search_pending_child_depth[return_thread_id]
-                                    <= search_stack_top[return_thread_id].remaining_depth == SearchDepth'(0)
-                                        ? SearchDepth'(0)
-                                        : search_stack_top[return_thread_id].remaining_depth - SearchDepth'(1);
-                                search_thread_phase[return_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
-                            end else begin
-                                if (return_ply == PlyIndex'(0))
-                                    search_root_has_completed_move[return_thread_id] <= 1'b1;
-                                if (!search_stack_top[return_thread_id].has_legal
-                                        || parent_score > search_stack_top[return_thread_id].best_score) begin
-                                    search_stack_top[return_thread_id].best_score <= parent_score;
-                                    search_stack_top[return_thread_id].best_move <= search_return_move[return_thread_id];
-                                    if (return_ply == PlyIndex'(0)) begin
-                                        search_best_move[return_thread_id] <= search_return_move[return_thread_id];
-                                        search_ponder_move[return_thread_id]
-                                            <= search_return_ponder_move[return_thread_id];
-                                        search_root_best_score[return_thread_id] <= parent_score;
-                                        search_root_best_exact[return_thread_id]
-                                            <= tt_bound_for_score(
-                                                parent_score,
-                                                search_stack_top[return_thread_id].orig_alpha,
-                                                search_stack_top[return_thread_id].beta
-                                            ) == TT_BOUND_EXACT;
-                                        if (return_thread_id == ThreadID'(0)) begin
-                                            current_best_move_root_nodes
-                                                <= total_root_nodes
-                                                    - current_root_move_start_nodes;
+                                    search_return_was_scout[return_thread_id] <= 1'b0;
+                                    search_return_was_reduced[return_thread_id] <= 1'b0;
+                                    search_pvs_research[return_thread_id] <= 1'b1;
+                                    search_pending_child_depth[return_thread_id]
+                                        <= search_stack_top[return_thread_id].remaining_depth == SearchDepth'(0)
+                                            ? SearchDepth'(0)
+                                            : search_stack_top[return_thread_id].remaining_depth - SearchDepth'(1);
+                                    search_thread_phase[return_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
+                                end else begin
+                                    if (return_ply == PlyIndex'(0))
+                                        search_root_has_completed_move[return_thread_id] <= 1'b1;
+                                    if (!search_stack_top[return_thread_id].has_legal
+                                            || parent_score > search_stack_top[return_thread_id].best_score) begin
+                                        search_stack_top[return_thread_id].best_score <= parent_score;
+                                        search_stack_top[return_thread_id].best_move <= search_return_move[return_thread_id];
+                                        if (return_ply == PlyIndex'(0)) begin
+                                            search_best_move[return_thread_id] <= search_return_move[return_thread_id];
+                                            search_ponder_move[return_thread_id]
+                                                <= search_return_ponder_move[return_thread_id];
+                                            search_root_best_score[return_thread_id] <= parent_score;
+                                            search_root_best_exact[return_thread_id]
+                                                <= tt_bound_for_score(
+                                                    parent_score,
+                                                    search_stack_top[return_thread_id].orig_alpha,
+                                                    search_stack_top[return_thread_id].beta
+                                                ) == TT_BOUND_EXACT;
+                                            if (return_thread_id == ThreadID'(0)) begin
+                                                current_best_move_root_nodes
+                                                    <= total_root_nodes
+                                                        - current_root_move_start_nodes;
+                                            end
                                         end
                                     end
-                                end
-                                search_stack_top[return_thread_id].has_legal <= 1'b1;
-                                if (parent_score > search_stack_top[return_thread_id].alpha) begin
-                                    search_stack_top[return_thread_id].alpha <= parent_score;
-                                    search_stack_top[return_thread_id].unit_window
-                                        <= search_stack_top[return_thread_id].beta
-                                            == parent_score + EvalScore'(1);
-                                end
-                                search_return_valid[return_thread_id] <= 1'b0;
-                                search_return_was_scout[return_thread_id] <= 1'b0;
-                                search_return_was_reduced[return_thread_id] <= 1'b0;
-                                if (parent_score >= search_stack_top[return_thread_id].beta) begin
-`ifdef FPGA_CHESS_PROFILE
-                                    profile_beta_cutoff_event <= 1'b1;
-                                    profile_beta_cutoff_thread <= return_thread_id;
-                                    profile_beta_cutoff_ply <= return_ply;
-                                    profile_beta_cutoff_rank
-                                        <= search_stack_top[return_thread_id].legal_move_count;
-                                    profile_beta_cutoff_move <= search_return_move[return_thread_id];
-`endif
-                                    if (is_quiet_move(
-                                            search_board[return_thread_id],
-                                            search_return_move[return_thread_id]
-                                        ) && !history_update_pending[return_thread_id]) begin
-                                        history_update_pending[return_thread_id] <= 1'b1;
-                                        history_update_pending_color[return_thread_id]
-                                            <= search_board[return_thread_id].turn;
-                                        history_update_pending_from[return_thread_id]
-                                            <= search_return_move[return_thread_id].from_pos;
-                                        history_update_pending_to[return_thread_id]
-                                            <= search_return_move[return_thread_id].to_pos;
-                                        history_update_pending_depth[return_thread_id]
-                                            <= PlyIndex'(search_stack_top[return_thread_id].remaining_depth);
-                                        history_update_pending_failed0[return_thread_id]
-                                            <= search_stack_top[return_thread_id].failed_quiet0;
-                                        history_update_pending_failed1[return_thread_id]
-                                            <= search_stack_top[return_thread_id].failed_quiet1;
-                                        history_update_pending_failed2[return_thread_id]
-                                            <= search_stack_top[return_thread_id].failed_quiet2;
-                                        history_update_pending_failed_count[return_thread_id]
-                                            <= search_stack_top[return_thread_id].failed_quiet_count;
+                                    search_stack_top[return_thread_id].has_legal <= 1'b1;
+                                    if (parent_score > search_stack_top[return_thread_id].alpha) begin
+                                        search_stack_top[return_thread_id].alpha <= parent_score;
+                                        search_stack_top[return_thread_id].unit_window
+                                            <= search_stack_top[return_thread_id].beta
+                                                == parent_score + EvalScore'(1);
                                     end
-                                    search_return_score[return_thread_id] <= parent_score;
-                                    search_return_valid[return_thread_id] <= 1'b1;
-                                    if (should_store_search_tt(return_thread_id, return_ply)) begin
-                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_STORE_PUBLISH;
-                                    end else if (return_ply == PlyIndex'(0)) begin
-                                        automatic Move root_move;
-
-                                        root_move = (is_null_move(search_best_move[return_thread_id]) && !is_null_move(search_return_move[return_thread_id]))
-                                            ? search_return_move[return_thread_id]
-                                            : search_best_move[return_thread_id];
-                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
-                                        search_thread_iteration_score[return_thread_id] <= parent_score;
-                                        search_thread_iteration_best_move[return_thread_id] <= root_move;
-                                        search_thread_iteration_ponder_move[return_thread_id]
-                                            <= is_null_move(search_best_move[return_thread_id])
-                                                ? search_return_ponder_move[return_thread_id]
-                                                : search_ponder_move[return_thread_id];
-`ifndef SYNTHESIS
-                                        search_thread_completed_best_move[return_thread_id] <= root_move;
-`endif
-                                        if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
-                                    end else begin
-                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
-                                    end
-                                end else begin
-                                    // Record a quiet only after its complete logical search, including
-                                    // any PVS/LMR recovery, has definitively failed to cut off.
-                                    if (!search_in_qsearch(return_thread_id)
-                                            && is_quiet_move(
+                                    search_return_valid[return_thread_id] <= 1'b0;
+                                    search_return_was_scout[return_thread_id] <= 1'b0;
+                                    search_return_was_reduced[return_thread_id] <= 1'b0;
+                                    if (parent_score >= search_stack_top[return_thread_id].beta) begin
+    `ifdef FPGA_CHESS_PROFILE
+                                        profile_beta_cutoff_event <= 1'b1;
+                                        profile_beta_cutoff_thread <= return_thread_id;
+                                        profile_beta_cutoff_ply <= return_ply;
+                                        profile_beta_cutoff_rank
+                                            <= search_stack_top[return_thread_id].legal_move_count;
+                                        profile_beta_cutoff_move <= search_return_move[return_thread_id];
+    `endif
+                                        if (is_quiet_move(
                                                 search_board[return_thread_id],
                                                 search_return_move[return_thread_id]
-                                            )
-                                            && search_stack_top[return_thread_id].failed_quiet_count < 2'd3) begin
-                                        case (search_stack_top[return_thread_id].failed_quiet_count)
-                                            2'd0: search_stack_top[return_thread_id].failed_quiet0
-                                                <= {search_return_move[return_thread_id].from_pos,
-                                                    search_return_move[return_thread_id].to_pos};
-                                            2'd1: search_stack_top[return_thread_id].failed_quiet1
-                                                <= {search_return_move[return_thread_id].from_pos,
-                                                    search_return_move[return_thread_id].to_pos};
-                                            default: search_stack_top[return_thread_id].failed_quiet2
-                                                <= {search_return_move[return_thread_id].from_pos,
-                                                    search_return_move[return_thread_id].to_pos};
-                                        endcase
-                                        search_stack_top[return_thread_id].failed_quiet_count
-                                            <= search_stack_top[return_thread_id].failed_quiet_count + 2'd1;
+                                            ) && !history_update_pending[return_thread_id]) begin
+                                            history_update_pending[return_thread_id] <= 1'b1;
+                                            history_update_pending_color[return_thread_id]
+                                                <= search_board[return_thread_id].turn;
+                                            history_update_pending_from[return_thread_id]
+                                                <= search_return_move[return_thread_id].from_pos;
+                                            history_update_pending_to[return_thread_id]
+                                                <= search_return_move[return_thread_id].to_pos;
+                                            history_update_pending_depth[return_thread_id]
+                                                <= PlyIndex'(search_stack_top[return_thread_id].remaining_depth);
+                                            history_update_pending_failed0[return_thread_id]
+                                                <= search_stack_top[return_thread_id].failed_quiet0;
+                                            history_update_pending_failed1[return_thread_id]
+                                                <= search_stack_top[return_thread_id].failed_quiet1;
+                                            history_update_pending_failed2[return_thread_id]
+                                                <= search_stack_top[return_thread_id].failed_quiet2;
+                                            history_update_pending_failed_count[return_thread_id]
+                                                <= search_stack_top[return_thread_id].failed_quiet_count;
+                                        end
+                                        search_return_score[return_thread_id] <= parent_score;
+                                        search_return_valid[return_thread_id] <= 1'b1;
+                                        if (should_store_search_tt(return_thread_id, return_ply)) begin
+                                            search_thread_phase[return_thread_id] <= SEARCH_PHASE_STORE_PUBLISH;
+                                        end else if (return_ply == PlyIndex'(0)) begin
+                                            automatic Move root_move;
+
+                                            root_move = (is_null_move(search_best_move[return_thread_id]) && !is_null_move(search_return_move[return_thread_id]))
+                                                ? search_return_move[return_thread_id]
+                                                : search_best_move[return_thread_id];
+                                            search_thread_phase[return_thread_id] <= SEARCH_PHASE_DONE;
+                                            search_thread_iteration_score[return_thread_id] <= parent_score;
+                                            search_thread_iteration_best_move[return_thread_id] <= root_move;
+                                            search_thread_iteration_ponder_move[return_thread_id]
+                                                <= is_null_move(search_best_move[return_thread_id])
+                                                    ? search_return_ponder_move[return_thread_id]
+                                                    : search_ponder_move[return_thread_id];
+    `ifndef SYNTHESIS
+                                            search_thread_completed_best_move[return_thread_id] <= root_move;
+    `endif
+                                            if (active_count_next != ThreadCount'(0)) active_count_next -= ThreadCount'(1);
+                                        end else begin
+                                            search_thread_phase[return_thread_id] <= SEARCH_PHASE_REVERSE_WAIT;
+                                        end
+                                    end else begin
+                                        // Record a quiet only after its complete logical search, including
+                                        // any PVS/LMR recovery, has definitively failed to cut off.
+                                        if (!search_in_qsearch(return_thread_id)
+                                                && is_quiet_move(
+                                                    search_board[return_thread_id],
+                                                    search_return_move[return_thread_id]
+                                                )
+                                                && search_stack_top[return_thread_id].failed_quiet_count < 2'd3) begin
+                                            case (search_stack_top[return_thread_id].failed_quiet_count)
+                                                2'd0: search_stack_top[return_thread_id].failed_quiet0
+                                                    <= {search_return_move[return_thread_id].from_pos,
+                                                        search_return_move[return_thread_id].to_pos};
+                                                2'd1: search_stack_top[return_thread_id].failed_quiet1
+                                                    <= {search_return_move[return_thread_id].from_pos,
+                                                        search_return_move[return_thread_id].to_pos};
+                                                default: search_stack_top[return_thread_id].failed_quiet2
+                                                    <= {search_return_move[return_thread_id].from_pos,
+                                                        search_return_move[return_thread_id].to_pos};
+                                            endcase
+                                            search_stack_top[return_thread_id].failed_quiet_count
+                                                <= search_stack_top[return_thread_id].failed_quiet_count + 2'd1;
+                                        end
+                                        search_thread_phase[return_thread_id] <= SEARCH_PHASE_READY;
                                     end
-                                    search_thread_phase[return_thread_id] <= SEARCH_PHASE_READY;
                                 end
                             end
                         end

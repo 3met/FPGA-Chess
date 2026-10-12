@@ -92,7 +92,18 @@
             automatic PlyIndex saved_ply = dut.search_ply[tid];
             automatic logic saved_null_candidate = dut.search_null_candidate[tid];
             automatic logic saved_node_init_done = dut.search_node_init_done[tid];
-            automatic logic [$bits(dut.search_stack_top[tid])-1:0] saved_stack = dut.search_stack_top[tid];
+            // Save the mutated fields without a simulator-dependent hierarchical type lookup.
+            automatic logic saved_tt_checked = dut.search_stack_top[tid].tt_checked;
+            automatic logic saved_has_tt_move = dut.search_stack_top[tid].has_tt_move;
+            automatic Move saved_tt_move = dut.search_stack_top[tid].tt_move;
+            automatic MoveOrderState saved_move_order_state = dut.search_stack_top[tid].move_order_state;
+            automatic EvalScore saved_beta = dut.search_stack_top[tid].beta;
+            automatic EvalScore saved_alpha = dut.search_stack_top[tid].alpha;
+            automatic logic saved_unit_window = dut.search_stack_top[tid].unit_window;
+            automatic logic saved_zero_window_node = dut.search_stack_top[tid].zero_window_node;
+            automatic logic saved_rfp_checked = dut.search_stack_top[tid].rfp_checked;
+            automatic logic saved_null_attempted = dut.search_stack_top[tid].null_attempted;
+            automatic int saved_remaining_depth = int'(dut.search_stack_top[tid].remaining_depth);
 
             // No clock edge occurs during these scheduler policy checks.
             dut.search_thread_phase[tid] = SEARCH_PHASE_READY;
@@ -108,7 +119,7 @@
             dut.search_stack_top[tid].zero_window_node = 1'b1;
             dut.search_stack_top[tid].rfp_checked = 1'b1;
             dut.search_stack_top[tid].null_attempted = 1'b0;
-            dut.search_stack_top[tid].remaining_depth = $bits(dut.search_stack_top[tid].remaining_depth)'(dut.NULL_MINIMUM_DEPTH);
+            dut.search_stack_top[tid].remaining_depth = dut.NULL_MINIMUM_DEPTH;
             dut.search_null_candidate[tid] = 1'b1;
             dut.search_node_init_done[tid] = 1'b1;
             dut.search_tt_validation_pending[tid] = 1'b0;
@@ -117,7 +128,7 @@
             check(!dut.search_thread_null_ready(tid) && dut.search_thread_move_ready(tid),
                 "pending TT validation selects the real move before a null probe");
 
-            dut.search_stack_top[tid].remaining_depth = $bits(dut.search_stack_top[tid].remaining_depth)'(dut.RFP_MAXIMUM_DEPTH);
+            dut.search_stack_top[tid].remaining_depth = dut.RFP_MAXIMUM_DEPTH;
             dut.search_stack_top[tid].rfp_checked = 1'b0;
             dut.search_tt_validation_pending[tid] = 1'b0;
             check(dut.search_thread_rfp_ready(tid) && dut.search_thread_eval_ready(tid),
@@ -133,7 +144,17 @@
             dut.search_ply[tid] = saved_ply;
             dut.search_null_candidate[tid] = saved_null_candidate;
             dut.search_node_init_done[tid] = saved_node_init_done;
-            dut.search_stack_top[tid] = saved_stack;
+            dut.search_stack_top[tid].tt_checked = saved_tt_checked;
+            dut.search_stack_top[tid].has_tt_move = saved_has_tt_move;
+            dut.search_stack_top[tid].tt_move = saved_tt_move;
+            dut.search_stack_top[tid].move_order_state = saved_move_order_state;
+            dut.search_stack_top[tid].beta = saved_beta;
+            dut.search_stack_top[tid].alpha = saved_alpha;
+            dut.search_stack_top[tid].unit_window = saved_unit_window;
+            dut.search_stack_top[tid].zero_window_node = saved_zero_window_node;
+            dut.search_stack_top[tid].rfp_checked = saved_rfp_checked;
+            dut.search_stack_top[tid].null_attempted = saved_null_attempted;
+            dut.search_stack_top[tid].remaining_depth = saved_remaining_depth;
         end
     endtask : run_tt_validation_priority_test
 

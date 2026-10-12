@@ -112,33 +112,33 @@ module move_generator_read_pipeline #(
         end
     end
 
-    // Register ownership against the cache state that will be live next cycle.
-    // This keeps ply comparisons ahead of FIFO selection and pointer increments
-    // without delaying a generator's first write or a restored parent's reads.
+    // Compare ownership against each possible cache context before selecting the
+    // next match bit. FIFO service then controls a one-bit mux, not a ply mux
+    // followed by equality, without delaying writes or restored-parent reads.
     always_ff @(posedge clk) begin
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
-            automatic logic next_cache_valid = cache_valid[tid];
-            automatic PlyIndex next_cache_ply = cache_ply[tid];
-            if (pointer_load_pending[tid] && !pointer_load_issue[tid]) begin
-                next_cache_valid = 1'b1;
-                next_cache_ply = pointer_load_tag[tid];
-            end
-            if (state_update[tid]) begin
-                next_cache_valid = 1'b1;
-                next_cache_ply = state_update_ply[tid];
-            end
             for (int lane = 0; lane < 2; lane++) begin
+                automatic logic start_matches = cache_valid[tid]
+                    && generation_start_ply[lane] == cache_ply[tid];
+                automatic logic running_matches = cache_valid[tid]
+                    && generation_ply_q[lane] == cache_ply[tid];
+                if (pointer_load_pending[tid] && !pointer_load_issue[tid]) begin
+                    start_matches = generation_start_ply[lane] == pointer_load_tag[tid];
+                    running_matches = generation_ply_q[lane] == pointer_load_tag[tid];
+                end
+                if (state_update[tid]) begin
+                    start_matches = generation_start_ply[lane] == state_update_ply[tid];
+                    running_matches = generation_ply_q[lane] == state_update_ply[tid];
+                end
                 if (!rst_n || clear || flush)
                     generation_owns_cache_q[tid][lane] <= 1'b0;
                 else if (generation_start_valid[lane])
-                    generation_owns_cache_q[tid][lane] <= next_cache_valid
-                        && generation_start_thread[lane] == ThreadID'(tid)
-                        && generation_start_ply[lane] == next_cache_ply;
+                    generation_owns_cache_q[tid][lane] <= start_matches
+                        && generation_start_thread[lane] == ThreadID'(tid);
                 else
-                    generation_owns_cache_q[tid][lane] <= next_cache_valid
+                    generation_owns_cache_q[tid][lane] <= running_matches
                         && generation_active_q[lane] && live_active[lane]
-                        && generation_thread_q[lane] == ThreadID'(tid)
-                        && generation_ply_q[lane] == next_cache_ply;
+                        && generation_thread_q[lane] == ThreadID'(tid);
             end
         end
     end
@@ -288,15 +288,23 @@ module move_generator_read_pipeline #(
             // A forwarded empty-FIFO write is consumed without allocating an
             // arena entry, so neither FIFO pointer advances.
             if (thread_write_valid[tid] && !bypass[tid]) begin
-                next_state[tid].tops[thread_write_bucket[tid]]
-                    = next_state[tid].tops[thread_write_bucket[tid]] + MoveBucketTop'(1);
+                // Increment each bucket locally so selection does not precede the carry chain.
+                for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+                    if (thread_write_bucket[tid] == MoveBucketIndex'(bucket))
+                        next_state[tid].tops[bucket]
+                            = next_state[tid].tops[bucket] + MoveBucketTop'(1);
+                end
                 state_update[tid] = 1'b1;
             end
             if (service[tid]) begin
                 if (found[tid]) begin
                     if (!bypass[tid]) begin
-                        next_state[tid].heads[selected[tid]]
-                            = next_state[tid].heads[selected[tid]] + MoveBucketTop'(1);
+                        // The selected head advances without a shared bucket-data mux.
+                        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+                            if (selected[tid] == MoveBucketIndex'(bucket))
+                                next_state[tid].heads[bucket]
+                                    = next_state[tid].heads[bucket] + MoveBucketTop'(1);
+                        end
                         state_update[tid] = 1'b1;
                     end
                 end else begin

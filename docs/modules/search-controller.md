@@ -80,7 +80,7 @@ Reset, New Game, Kill, and search restart prevent outstanding responses from cha
 
 ## Node Lifecycle
 
-The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent.
+The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent. Return-score and quiet-history decisions use each thread's local parent state; arbitration enables only the selected thread's update in the same cycle.
 
 Move generation produces pseudo-legal candidates. The controller applies each candidate speculatively and rejects it if the moving side remains in check. Accepted children update repetition and NNUE state; returning from a child restores the parent position and folds the child score into its result.
 

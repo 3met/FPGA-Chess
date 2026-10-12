@@ -59,6 +59,8 @@ Each thread has separate move storage and a per-ply pointer stack. Engine profil
 
 Each pointer-stack entry records the FIFO bounds and bucket progress for one ply. A child begins at its parent's write tails, preventing it from reading or overwriting unsearched ancestor moves. Restoring a parent restores its unread moves, while later siblings may reuse descendant storage.
 
+FIFO heads and tails increment locally within each bucket, with bucket selection enabling the update after the increment. This preserves same-cycle write forwarding and pointer-stack updates. Registered generator ownership compares the candidate cache contexts before selecting the match bit, keeping FIFO service decisions off the ply-comparison path.
+
 A write beyond its bucket partition sets a sticky overflow error bit but is not blocked or redirected. Contents for that thread are not guaranteed after overflow. Reset and New Game clear the bit; no overflow location or count is tracked.
 
 ## Lifecycle and Instrumentation

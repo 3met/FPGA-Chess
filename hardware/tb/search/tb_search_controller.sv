@@ -4,6 +4,7 @@ import chess_defs::*;
 import board_update_pipeline_defs::*;
 import engine_defs::*;
 import search_defs::*;
+import move_generator_defs::*;
 import nnue_defs::*;
 import tt_defs::*;
 

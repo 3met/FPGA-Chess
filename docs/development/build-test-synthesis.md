@@ -49,7 +49,7 @@ Automated ModelSim tests and profiling use `-batch` to run the simulation kernel
 
 Run `python -m tests.live_fpga` to execute the complete timing, repetition, fifty-move rule, and perft suite against a connected FPGA. Connection and diagnostic options include `--port`, `--startup-timeout`, `--search-timeout`, and `--verbose`; `--depth` controls repetition search depth subject to the suite's minimum. Live hardware checks are separate from `check`.
 
-Synthesis verifies generated data before invoking the vendor tools. Quartus reuses valid build results; `--clean` forces a full build. Other options include `--stream-logs`, `--jobs <count>`, and `--update-generated-data`. Use `synth-report` to inspect results and timing. After changing the material/PST datapath, verify that both parameter sets remain connected in synthesis; simulation alone does not establish ROM connectivity.
+Synthesis verifies generated data before invoking the vendor tools. Quartus reuses valid build results; `--clean` forces a full build. Other options include `--stream-logs`, `--jobs <count>`, `--seed <seed>` for Quartus fitter selection, and `--update-generated-data`. Use `synth-report` to inspect results and timing. After changing the material/PST datapath, verify that both parameter sets remain connected in synthesis; simulation alone does not establish ROM connectivity.
 
 Targets with an engine profile also accept `--engine-config <path>` to synthesize an isolated profile without modifying the manifest target. This is used by search-parameter tuning and records the resolved override in normal synthesis metadata.
 
