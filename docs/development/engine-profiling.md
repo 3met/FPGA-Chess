@@ -1,75 +1,115 @@
 # Engine Runtime Profiling
 
-`python -m tools.hardware_build profile` runs the named test-position suite under Verilator or ModelSim/Questa and prints a short aggregate summary. `python -m tools.hardware_build profile-position` profiles one FEN and prints its summary. Measurements are collected in the testbench rather than synthesized into the FPGA.
+Use the profiler to measure search throughput, pipeline stalls, and transposition-table (TT) behavior in cycle-accurate simulation. Run commands from the repository root with Python 3.10 or newer and either Verilator or ModelSim/Questa on `PATH`. No FPGA is required.
 
-## Simulated Hardware
+## Run a Profile
 
-The profiling testbench instantiates the vendor-neutral engine and the production external-TT path, including its cache, clock-domain bridge, and DE1 SDR SDRAM controller. A sparse chip model supplies persistent SDRAM contents, checks command timing, and models SDRAM read access, representative FPGA input delay, and routed forwarded-clock delay. Engine and memory frequencies, phases, and duty cycles come from the selected engine profile, including `--engine-config` overrides. The memory IO clock inherits the memory frequency; its phase is relative to the controller clock before DDR inversion. Every returned memory word is checked against that storage. UART, PLL, displays, and the board wrapper are outside the profiling boundary. Clock periods and duty intervals use a shared picosecond grid; the `profile-clocks` RTL bench checks signed phase wrapping and duty-cycle rounding.
-
-## Usage
+Profile the standard position suite and save a baseline:
 
 ```text
 python -m tools.hardware_build profile --name baseline
-python -m tools.hardware_build profile --name experiment --time-ms 100 --jobs 8
-python -m tools.hardware_build profile --nodes 10000 --threads 4 --stack-depth 32
-python -m tools.hardware_build profile-position --fen "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1" --depth 4
 ```
 
-Use `--name` to save a run under `work/build/profile/<name>/`; unnamed runs receive a timestamped name. Names use letters, digits, underscores, hyphens, and dots and must be valid on Windows and Linux; `compile` is reserved for simulator builds. Existing names are rejected unless `--replace` is supplied. Replacement clears the entire previous run, including logs, traces, and waveforms. Interrupted runs can also be replaced. `--output` selects an explicit artifact directory instead of a name; replacement is allowed only for directories allocated by the profiler. `--replace` requires an explicit name or output directory.
+Profile a single position:
 
 ```text
-python -m tools.hardware_build profile --name baseline --replace
+python -m tools.hardware_build profile-position --name castling --fen "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1" --depth 8
+```
+
+Both commands print a summary and save the full measurements. Suite positions and their names are defined in [`profile_positions.py`](../../tools/hardware_build/profile_positions.py).
+
+| Option | Use |
+| ------ | --- |
+| `--depth <plies>` | Search to a fixed depth, smaller than the configured stack depth. |
+| `--nodes <count>` | Search with a node limit. |
+| `--time-ms <milliseconds>` | Set the simulated search-time limit. This is the default limit type. |
+| `--target <target>` | Use a synthesis target's engine profile; defaults to `quartus-de1-soc`. |
+| `--engine-config <path>` | Use another engine profile. |
+| `--threads <count>`, `--stack-depth <plies>`, `--engine-clock-hz <Hz>` | Override the corresponding hardware settings for this run. |
+| `--simulator auto\|verilator\|modelsim` | Select the simulator; `auto` prefers Verilator. |
+| `--jobs <count>` | Run suite positions concurrently; applies to `profile` only. |
+| `--simulator-threads <count>` | Set Verilator execution threads within each position simulation. |
+| `--timeout <seconds>` | Limit simulator wall time per position; disabled by default. |
+| `--force-rebuild` | Rebuild the cached simulator. |
+| `--event-trace`, `--waveform` | Save event traces or complete waveforms for debugging. |
+
+Choose at most one of `--depth`, `--nodes`, and `--time-ms`. Simulated search time and simulator wall time are separate: a short search can take much longer to simulate.
+
+For example, compare a baseline with a longer search while limiting concurrent simulations:
+
+```text
+python -m tools.hardware_build profile --name longer-search --time-ms 100 --jobs 4
+```
+
+`--threads` changes the simulated engine. `--jobs` and `--simulator-threads` control host CPU usage. Suite concurrency defaults to available CPUs for Verilator, accounting for simulator threads, and one position for ModelSim. Keep the default single Verilator execution thread unless measurements show an improvement; this design partitions poorly across simulator threads.
+
+Simulator builds are cached. The first Verilator run can include compiler optimization training before the final build; those training searches are excluded from the report. Omit traces and waveforms when measuring simulation speed.
+
+## View Saved Results
+
+```text
 python -m tools.hardware_build profile-view baseline
-python -m tools.hardware_build profile-view baseline --topic tt
-python -m tools.hardware_build profile-view --topic search pipeline
+python -m tools.hardware_build profile-view baseline --topic search pipeline
 python -m tools.hardware_build profile-view baseline --topic tt --position undermining
 python -m tools.hardware_build profile-view baseline --topic all
 python -m tools.hardware_build profile-view --list-runs
-python -m tools.hardware_build profile-view --list-topics
 ```
 
-`profile-view` reads saved measurements without running a simulator. It defaults to the summary topic and the latest completed run under `work/build/profile/`, and prints the selected run name and path. `--topic` accepts multiple topics and may be repeated. `--position` selects a named suite position; omit it for aggregate results. Runs stored with `--output` can be viewed using `profile-view --run <directory>`. Incomplete runs are excluded from listing and latest-run selection.
+`profile-view` reads saved results without running a simulator. With no run name, it selects the latest completed run. With no topic, it shows `summary`. Topics may be combined or supplied through repeated `--topic` options. Use `--list-topics` to list them. `--position` selects one suite position; omit it for aggregate results.
 
-| Topic | Measurements |
-| ----- | ------------ |
-| `summary` | Throughput, results, depths, faults, average simulated search time per position, and overall profiling wall time. Suite position details are shown only for failures. |
-| `search` | Per-depth measurements, move generation, ordering, and pruning. |
+| Topic | Contents |
+| ----- | -------- |
+| `summary` | Search throughput, results, depths, faults, simulated search time, and total profiling wall time. |
+| `search` | Per-depth results, move generation, ordering, and pruning. |
 | `pipeline` | Thread lifecycle, component activity, and stalls. |
-| `tt` | TT probes, cache size/access counts/hit rates/wait times/idle time, probe/store latency distributions, FIFO occupancy distributions, memory backpressure, and SDRAM traffic. |
-| `simulation` | Simulator speed, elapsed time, setup, serialization, and drain overhead. |
+| `tt` | Probes, cache behavior, request latency, FIFO occupancy, backpressure, and SDRAM traffic. |
+| `simulation` | Simulator speed and time spent on setup, search, response serialization, and drain. |
 
-Use at most one of `--depth`, `--nodes`, or `--time-ms` to override the search limit. `--timeout` sets a wall-clock limit per position. `--target` selects the engine profile; `--engine-config`, `--threads`, `--stack-depth`, and `--engine-clock-hz` override it. `--simulator` selects the backend and `--jobs` controls concurrency. Use `--event-trace` or `--waveform` for additional diagnostics.
+## Files and Run Names
 
-Verilator simulator builds use host CPU instructions when its configured C++ compiler supports `-march=native`, with a portable fallback otherwise. GCC builds also use profile-guided optimization: an instrumented simulator runs short opening, tactical, and pawn-endgame searches before the final compilation. This adds preparation time on a cache miss; cached runs skip both training and compilation. Training searches do not enter the profiling measurements. The compile cache includes compiler, CPU feature, and training configuration information so a run on another host rebuilds when necessary. These optimizations change simulation wall time without changing simulated clocks or hardware behavior. Independent suite positions can run concurrently with `--jobs`; omit waveforms and event traces when measuring simulation speed.
+Named runs live under `work/build/profile/<name>/`; unnamed runs receive a timestamp. A name must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens. Trailing dots and reserved names, including `compile` and Windows device names, are rejected.
 
-## Artifacts and Measurements
+| Path within a run | Contents |
+| ----------------- | -------- |
+| `report.json` | Complete measurements. |
+| `reports/<topic>.txt` | Text reports for each topic. |
+| `run.json` | Completion metadata. |
+| `positions/<position-name>/` | Per-position reports and logs for suite runs. |
 
-Each run saves complete measurements in `report.json`, topic reports in `reports/<topic>.txt`, and completion metadata in `run.json`, alongside simulator logs and optional traces. Suites also save the same measurements and topic reports under `positions/<position-name>/`. Topic text is generated from JSON, so viewing results does not depend on the saved text files. Suite ratios use aggregate counts; peak occupancy and maximum latency remain maxima across positions.
+Simulator logs and requested traces or waveforms are saved with the reports. Waveforms use FST for Verilator and WLF for ModelSim. The viewer generates its text from `report.json`.
 
-Overall profiling wall time includes configuration, simulator preparation or compilation, and the position simulations, measured before final suite-report output. Simulated search time per position is the average across the suite. Search measurements cover request acceptance through response presentation. Setup, response serialization, and post-search TT-store drain are reported separately.
+Existing run directories are rejected. To rerun a baseline, use `--name baseline --replace`; this deletes its previous reports, logs, traces, and waveforms. Interrupted runs can be replaced too, but cannot be viewed or selected as completed runs.
 
-Reports cover search throughput, pipeline stalls, thread activity, move ordering, pruning, TT/cache behavior, SDRAM traffic, and simulator speed. Per-depth data follows the primary thread; helpers may be searching another depth.
+Use `--output <directory>` instead of `--name` to choose another location, then view it with `profile-view --run <directory>`. `--replace` requires an explicit name or output directory and only replaces directories created by the profiler.
 
-Profiler instrumentation is testbench-only. FSM comparisons use shared RTL enum definitions, histogram storage follows enum widths, and state metrics carry enum names rather than numeric encodings. Reports retain newly added states and lifecycle phases automatically; sampled invalid encodings fail profiling. Optional hardware search statistics are a separate diagnostic interface.
+## Read the Measurements
 
-## Interpretation
+The simulated design includes the portable engine and production external-TT path: cache, clock-domain bridge, and SDR SDRAM controller. Engine and memory clocks come from the selected profile. The SDRAM model checks timing and returned data and models memory and IO delays. UART, PLL, displays, and the board wrapper are outside the measurement boundary. Instrumentation runs in the testbench.
 
-The pipeline lifecycle table shows exclusive top-level phases that sum to the full search duration for each thread. Indented rows partition their parent phase; their percentages also use full search time, so do not add them to the parent totals. Node control and dispatch includes initialization, request acceptance, node/iteration transitions, and waits to submit requests; it is not a measure of productive work alone. Zero-cycle phases are omitted when unused by every thread. Suite tables pool each thread's cycles across positions. Interface stall categories may overlap unless the report labels them exclusive, so overlapping percentages should not be added. TT ordering hits are valid entries that supply a move but cannot return a score because their depth or bound is insufficient.
+For comparisons, use the same positions and search limit and record any engine-profile overrides. Engine throughput measures simulated hardware performance; simulator speed measures how fast the host runs that simulation. Total profiling wall time includes configuration, simulator preparation, and all position simulations. Search timing runs from request acceptance to response presentation; setup, serialization, and TT-store drain are reported separately.
 
-The TT cache section reports capacity in individual TT ways and two-way sets across both banks, probe/store cache-access counts and hit rates, and average waits in engine cycles and nanoseconds. A hit requires both the cache tag and a matching position way. Cache measurements include search and post-search drain. Waits run from successful frontend acceptance to the cache-bank read, including registered staging, store FIFO queuing, and bank arbitration; they exclude cache-result and external-memory latency. Dropped stores and unfinished accesses do not enter wait averages. Suite rates and waits use pooled access counts and wait-cycle totals.
+### Search and Pipeline
 
-Cache operation idle percentages count engine cycles with no probe read, probe write, store read, or store write on either bank. Read activity includes initial lookups and idle-slot admission reads. Probe writes admit matching ways from external reads; store writes publish replacements. Each percentage describes that operation rather than overall shared-port availability: another operation may use the same port. Measurements include search and drain, and suite percentages use pooled cycles.
+Per-depth measurements follow the primary thread; helpers may be searching another depth. Thread lifecycle phases partition the search duration. Indented rows partition their parent phase but still express percentages of the full search duration, so do not add them to parent totals. Control and dispatch include initialization, transitions, and request waits. Stall categories can overlap unless labeled exclusive.
 
-The TT latency section shows average and P99 completion latency for probes and stores, both overall and split by the initial cache hit/miss result. Values are nanoseconds from exact picosecond timestamps during search and post-search drain. Probes run from frontend acceptance to response, including an early matching-way response before the remaining memory words drain. Stores run from frontend acceptance to SDRAM write acknowledgement, including store and writeback queues; a store requiring no replacement completes at that decision. Cache-hit stores still write through to SDRAM. Completed fast-miss probe responses are included even when no external read could be queued. Dropped stores and unfinished requests are excluded and reported separately. Empty groups display undefined statistics. P99 uses nearest rank, and suites pool request histograms before computing means and percentiles.
+### TT and Memory
 
-The TT FIFO table covers the store queue, probe/store metadata queues, and all five CDC FIFOs. Depth is configured storage capacity; average, median, P90, P99, P99.9, and peak describe sampled occupancy in entries or external memory words. Samples include empty cycles during search and exclude setup and post-search drain. Each FIFO is sampled before transfers on its producer clock: response FIFOs use the memory clock and the other queues use the engine clock. CDC occupancy uses the actual read/write pointers, excluding synchronized-pointer delay. Percentiles use nearest rank; peak is the highest sampled occupancy. Suite statistics pool histogram counts across positions rather than averaging position percentiles.
+| Measurement | Meaning |
+| ----------- | ------- |
+| Cache hit | Both the cache tag and a position way match. An ordering hit supplies a move but cannot supply a usable score. |
+| Cache wait | Engine cycles from frontend acceptance to the cache-bank read, including staging, queuing, and arbitration. Excludes cache-result and external-memory latency. |
+| Cache operation idle | Cycles without the named read or write operation on either bank. Another operation may still use the shared port. |
+| Probe latency | Time from frontend acceptance to response, including an early response before the remaining memory words drain. |
+| Store latency | Time from frontend acceptance to SDRAM write acknowledgement, or to the decision that no replacement is needed. Cache-hit stores write through to SDRAM. |
+| FIFO occupancy | Entries or memory words queued, sampled before transfers on the producer clock. Includes empty search cycles; excludes setup and drain. CDC counts use actual pointers. |
+| Controller idle | Memory cycles in the idle state without a pending request. Timing waits, refresh, and completion count as busy. |
+| Data-bus idle | Memory cycles without read or write payload. |
+| Payload bandwidth | Delivered read/write bytes divided by sampled memory time, including idle time and controller overhead. |
+| Row hit/miss/conflict | SDRAM open-row state when a request is accepted, independent of TT cache hits. The closed-row policy produces misses. |
+| Writebacks queued alongside probe reads | Search cycles with both queues nonempty and the TT frontend idle. Measures queue overlap. |
 
-The TT memory-interface section counts accepted SDRAM requests during search and post-search drain, split into probe reads, store reads, and store writes. Bus width is the physical data-bus width. Store writes include stores that hit the cache. Clock frequency is the simulated memory-interface clock; single data rate means one transfer per clock cycle. Controller idle counts cycles in the idle state with no pending backend request; row timing, refresh, and completion are busy. Data-bus idle counts cycles without read or write payload data. Suite request counts add, while bus width and frequency retain the common interface configuration.
+Cache accesses, waits, request latency, and SDRAM traffic include search and post-search drain. Dropped and unfinished requests are reported separately and excluded from completion-latency and wait averages. Empty latency groups have undefined statistics.
 
-Average payload bandwidth is executed read and write data cycles multiplied by bus width in bytes, divided by the sampled memory-domain duration during search and drain. It includes idle time, row timing, refresh, and completion overhead in the denominator; command and address bits are not payload. This measures average delivered data bandwidth rather than the device's theoretical bus rate. Row hits, misses, and conflicts describe the controller's open-row state when a backend request is accepted. The closed-row runtime policy should report misses for every request; these counters describe row state rather than TT cache hits.
+Suite counts add across positions. Ratios, averages, and percentiles use pooled counts or histograms; maxima remain maxima. Percentiles use nearest rank. Do not average per-position hit rates or percentiles to reproduce suite results.
 
-Writebacks queued alongside probe reads counts engine cycles during search when both queues are nonempty and the TT frontend is idle. It describes queue overlap, not arbitration decisions or interrupted writes; in-progress memory writes are not preempted.
-
-The profiler does not enforce a particular best move, score, or node count. It fails for invalid input, simulator errors, timeouts, incomplete output, engine or memory faults, and broken measurement invariants.
-
-The final metrics snapshot occurs on the engine clock falling edge after all rising-edge monitors settle. A sampling-window invariant checks that cache-port observations span exactly the recorded search and drain cycles.
+Profiling fails on invalid input, simulator errors, timeouts, incomplete output, engine or memory faults, and measurement-invariant failures. It does not assert a particular best move, score, or node count; use [the test workflow](build-test-synthesis.md) for correctness checks.

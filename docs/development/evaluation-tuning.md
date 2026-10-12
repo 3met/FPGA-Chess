@@ -1,38 +1,68 @@
 # Evaluation and NNUE Tuning
 
-Install the optional dependencies with `python -m pip install -r requirements-tuning.txt`. Tuning commands use `tools/tuning/default_config.json` unless `--config <path>` is supplied.
+Use `tools.tuning` to train material, piece-square tables (PSTs), and NNUE parameters, inspect validation results, and export parameters to the engine. Run commands from the repository root.
 
-## Workflow
+## Setup and Training
 
-| Command | Purpose |
-| ------- | ------- |
-| `python -m tools.tuning train [--rebuild-cache]` | Build or reuse dataset caches and train material, PST, and NNUE parameters. |
-| `python -m tools.tuning view-report` | Show training progress, latest versus selected validation metrics, and material/PST values by piece. |
-| `python -m tools.tuning quantization-report [--sample-positions N]` | Analyze the selected checkpoint's integer parameters and nodes on validation positions. |
-| `python -m tools.tuning engine-commit [--dry-run]` | Export a completed run to engine parameters and regenerate hardware data. |
+Install the optional dependencies:
 
-Training reads the configured Lichess JSONL or JSONL.ZST dataset and writes caches, checkpoints, metrics, parameters, and reports under `work/tuning/`. Training settings live in the configuration file; `--initialize <run>` preserves compatible parameters from another model without reusing its optimizer state. Use `--rebuild-cache` only when an existing cache must be regenerated.
+```text
+python -m pip install -r requirements-tuning.txt
+```
 
-Use `python -m tools.tuning.benchmark --run <run-id>` to measure training and validation throughput using an existing cache and checkpoint. Compare runs with the same checkpoint and machine conditions. `--profile-steps N` adds a CPU operator profile.
+Settings default to [`tools/tuning/default_config.json`](../../tools/tuning/default_config.json). Copy that file to customize the dataset path, filtering, training device, training schedule, or output directory. The dataset must be a local Lichess evaluation file in JSONL or JSONL.ZST format.
 
-`engine-commit` exports a completed run, validates the deployed widths, updates both material/PST sets in `hardware/data/pst_values/pst_values.json`, and regenerates the tracked hardware data. Pass `--run <id>` to select a specific run. Export and hardware verification should use a checkpoint trained for the current RTL activation.
+```text
+python -m tools.tuning train --config <config-path>
+```
 
-## Model Constraints
+Training builds or reuses a dataset cache and saves runs under the configured output root, which defaults to `work/tuning/`. Use `--rebuild-cache` when a matching cache needs regeneration.
 
-Opening and endgame material/PST values are learned separately, with pawn and king material fixed. Symmetry and centering constraints remove redundant offsets, and unreachable pawn squares remain zero. The model uses the engine's piece-count blend described in [evaluation-design.md](../architecture/evaluation-design.md).
+Resume from a run's latest checkpoint, or start a new run from its best model:
 
-Scratch runs start material/PST values from the checked-in engine table. Warm starts preserve learned material, PST, and NNUE parameters.
+```text
+python -m tools.tuning train --config <config-path> --resume <run-id-or-path>
+python -m tools.tuning train --config <config-path> --initialize <run-id-or-path>
+```
 
-The NNUE training model follows the hardware feature encoding, perspective ordering, output buckets, and integer arithmetic described in [nnue-evaluator.md](../modules/nnue-evaluator.md). Quantization-aware training retains high-precision parameters while using the deployed integer arithmetic in its forward pass.
+Resume restores training state; the configuration must match the original run except for `training.max_steps`. Initialization keeps compatible model parameters and starts a fresh optimizer. The two options are mutually exclusive. Training from scratch starts material/PST values from the checked-in engine table.
 
-The correction is invariant under simultaneously flipping the board vertically, swapping piece colors, and changing the side to move. Exported scores use the engine's 1/128-pawn units.
+## Inspect and Export
 
-The quantization report covers parameter ranges, accumulator wrapping, activation occupancy, output clipping, and validation coverage by phase bucket.
+```text
+python -m tools.tuning view-report --run <run-id-or-path>
+python -m tools.tuning quantization-report --run <run-id-or-path>
+python -m tools.tuning engine-commit --run <run-id-or-path> --dry-run
+python -m tools.tuning engine-commit --run <run-id-or-path>
+```
 
-`view-report` reads the saved training report and distinguishes the latest state from the checkpoint selected by validation loss; during training, it shows both sets of piece values. `quantization-report` performs a separate validation-position analysis and saves its full results in `quantization.json` under the run directory.
+These commands also accept `--config <path>`. Omit `--run` to select the latest run under that configuration's output root.
 
-## Dataset Filtering
+| Command | Result |
+| ------- | ------ |
+| `view-report` | Shows training progress, latest and best-checkpoint validation metrics, and material/PST values. |
+| `quantization-report` | Analyzes integer ranges, accumulator wrapping, activation occupancy, output clipping, and phase-bucket coverage. Saves `quantization.json` in the run directory. Use `--sample-positions <count>` to control sample size. |
+| `engine-commit --dry-run` | Shows the exported material values without changing engine files. |
+| `engine-commit` | Validates hardware widths, updates opening/endgame material and PST data, writes NNUE ROM images, and regenerates tracked hardware data. |
 
-Cache construction rejects invalid, terminal, and mate-scored standard-chess positions. Roots in check and positions whose selected principal-variation move is a capture are excluded because quiescence search resolves those tactical transitions before relying on a quiet static score. The validation split is deterministic and groups positions by the piece placement and side to move visible to the model, ignoring castling and en-passant fields it cannot consume. Color-flipped positions are placed in the same group because the model enforces that symmetry exactly, preventing equivalent positions from leaking across training and validation.
+Despite its name, `engine-commit` writes files; it does not create a Git commit. Without `--run`, export requires the latest run to be complete. An explicit run can export saved parameters or its best checkpoint. Use a model compatible with the current RTL, review the generated changes, and run [build and verification](build-test-synthesis.md) before deploying them.
 
-The dataset split is stable across training seeds, and shuffling is deterministic for a fixed seed. Symmetry-equivalent positions receive no additional mirrored samples. Duplicates within a split are retained. WandB logging is optional.
+Runs contain `report.json`, `metrics.jsonl`, `latest.pt` for resuming, `best.pt` for the checkpoint selected by validation loss, and `parameters.json` after successful completion.
+
+## Measure Training Speed
+
+With an existing dataset cache:
+
+```text
+python -m tools.tuning.benchmark --config <config-path> --run <run-id-or-path>
+```
+
+The benchmark measures optimizer throughput and full validation time after warmup. Use `--steps`, `--warmup`, and `--repeats` to control the measurement, or `--profile-steps <count>` to add a CPU operator profile. Compare runs using the same checkpoint, configuration, and machine conditions.
+
+## Model and Dataset
+
+Training follows the engine's [evaluation blend](../architecture/evaluation-design.md) and [NNUE feature encoding and integer arithmetic](../modules/nnue-evaluator.md). Quantization-aware training uses deployed integer arithmetic in the forward pass while retaining high-precision parameters. Opening and endgame material/PST values are learned separately; pawn and king material stay fixed.
+
+Cache construction rejects invalid, terminal, and mate-scored positions. The default filters also exclude roots in check and positions whose selected principal-variation move is a capture, leaving quiet positions for static evaluation. Filtering thresholds are configured in the JSON file.
+
+The validation split groups positions by the inputs visible to the model and keeps color-flipped equivalents together to prevent leakage. The split is deterministic; training shuffling is deterministic for a fixed seed. WandB logging is optional and configured in the same file.

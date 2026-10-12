@@ -1,70 +1,124 @@
 # Build, Test, and Synthesis
 
-The hardware workflow entrypoint is `python -m tools.hardware_build`. It uses only the Python standard library and supports Windows and Linux when the required simulator or vendor tools are on `PATH`.
+Run `python -m tools.hardware_build` from the repository root with Python 3.10 or newer. The CLI uses the standard library and supports Windows and Linux. Generated projects, simulator output, logs, and reports live under `work/build/`.
 
-## Manifest
+## Requirements
 
-Build metadata lives in `hardware/build/manifest.json`.
+| Task | Required tools |
+| ---- | -------------- |
+| List or validate build metadata; generate data | Python |
+| Compile RTL source sets | ModelSim/Questa: `vlib`, `vlog`, and `vsim` on `PATH` |
+| Run RTL tests or profiles | Verilator with a C++ build toolchain, or ModelSim/Questa, on `PATH` |
+| Synthesize Intel/Altera targets; program the DE1-SoC | Quartus tools on `PATH` |
+| Synthesize Xilinx targets | Vivado on `PATH` |
 
-| Section | Purpose |
-| ------- | ------- |
-| `source_sets` | Ordered RTL file groups and references to other groups. Compile order is significant. |
-| `tests` | Test names, source sets, testbench files, and simulator top modules. |
-| `generated_data` | Deterministic generators and their expected tracked outputs. |
-| `synthesis_targets` | Vendor, device, top module, source set, constraints, and target-specific settings. |
-| `programming_targets` | Programming backend and artifact information, kept separate from synthesis configuration. |
+## Inspect and Validate
 
-Generated projects, simulator libraries, logs, and reports are written under `work/build/`.
+```text
+python -m tools.hardware_build list
+python -m tools.hardware_build validate
+```
 
-## Engine Configuration
+`list` shows source sets, tests, generated data, and targets from [`hardware/build/manifest.json`](../../hardware/build/manifest.json). `validate` checks the manifest and referenced files. Use `python -m tools.hardware_build <command> --help` for a command's options.
 
-Reusable search policies live under `hardware/config/search/`. Engine profiles live under `hardware/config/engine/` and select structural settings such as thread count, stack depth, operating clocks, TT sizing, per-thread move memory sizing and bucket ratios, and instrumentation. Synthesis targets reference an engine profile while vendor, device, source, constraint, and fitter settings remain in the build manifest.
+## Run Tests
 
-The engine profile requires a `clocks` object with `engine`, `memory`, and `communication` entries containing integer `frequency_hz`, `phase_ps`, and `duty_percent` fields. `memory_io` contains `phase_ps` and `duty_percent`, inherits the memory frequency, and specifies phase relative to the memory clock before DDR inversion. Other phases refer to the PLL reference. Engine frequency must support the integer millisecond timer. Missing or unknown settings fail validation. The board target owns the fixed oscillator frequency and reference port; generated reference constraints precede the board constraints, which derive PLL clocks and retain physical IO timing. Standalone unit-test clocks and generic synthesis clock constraints are independent verification fixtures. Clock changes participate in configuration digests, synthesis build IDs, and profiler cache fingerprints.
+Run generated-data checks, core Python tests, and all RTL tests:
 
-Synthesis and runtime profiling resolve profiles through the same path so they use matching structural and search settings. Every compiler reads a generated `rtl_config.sv` package before shared RTL types. Engine builds derive its thread and stack capacities from the resolved engine profile, including profiling overrides; standalone compilation, RTL tests, and generic module synthesis explicitly select `hardware/config/types/standalone.json` through the manifest. Missing configuration is an error. Generated packages stay in each build directory, and their content participates in profiling cache and synthesis build identities. A board target may define its own engine profile while reusing an existing search policy.
+```text
+python -m tools.hardware_build check
+```
 
-## Commands
+Run only RTL tests, or select tests by name from `list`:
 
-| Command | Purpose |
-| ------- | ------- |
-| `python -m tools.hardware_build list` | List source sets, tests, generated data, and targets. |
-| `python -m tools.hardware_build validate` | Validate the manifest graph and required files. |
-| `python -m tools.hardware_build gen-data` | Regenerate deterministic data and fail if tracked outputs drift. |
-| `python -m tools.hardware_build gen-data --update` | Keep intentional generated-data changes. |
-| `python -m tools.hardware_build compile --set portable-rtl` | Compile one RTL source set with ModelSim/Questa. |
-| `python -m tools.hardware_build test` | Run SystemVerilog tests. Use repeated `--name` options to select tests. |
-| `python -m tools.hardware_build check` | Run generated-data checks, core Python suites, and all RTL tests. |
-| `python -m tools.hardware_build profile` | Profile the standard named position suite and print a short summary. |
-| `python -m tools.hardware_build profile-view <name> --topic tt` | View a saved profiling topic without rerunning the simulator. |
-| `python -m tools.hardware_build profile-position --fen "..."` | Profile one position and print a short summary; see [engine-profiling.md](engine-profiling.md). |
-| `python -m tools.hardware_build synth --target <target>` | Synthesize a configured target. |
-| `python -m tools.hardware_build flash --target quartus-de1-soc` | Program a volatile Quartus image through JTAG. |
-| `python -m tools.hardware_build synth-report` | Summarize the selected or most recent synthesis result. |
-| `python -m tools.hardware_build timing-paths --target quartus-de1-soc` | Report the worst or tightest setup paths from an existing Quartus fit. |
+```text
+python -m tools.hardware_build test
+python -m tools.hardware_build test --name <test-name> --simulator verilator
+```
 
-Test and check commands accept `--simulator auto|verilator|modelsim|both`, `--jobs <count>`, and an RTL `--timeout <seconds>`. Auto prefers Verilator when installed; both runs the same benches in each simulator. Backend failures remain failures and never trigger fallback. Verilator uses timing and assertions, preserves shared bench variables across monitors, and caches executables by sources, transitive includes, selected capacities, compiler flags, and toolchain identity. Per-test `verilator_args` in the manifest select compiler settings; the large board-update reference bench disables Verilator optimization to avoid the observed compiler stall and skips native optimization to reduce build time. Successful builds discard intermediate objects while retaining the executable and logs. Simulator builds have a bounded wall-clock timeout; failed builds cannot reuse stale executables. Backend libraries, executables, and logs are isolated under `work/build/sim/`; OS file locks serialize overlapping commands that use the same bench artifacts. `check` runs the engine host, live FPGA tooling, hardware build, Stockfish benchmark, and search-tuning Python suites before the RTL tests; the live FPGA tests mock the device. `check --tuning` also includes the optional tuning tests when `requirements-tuning.txt` is installed.
+Repeat `--name` to select multiple tests. Both `test` and `check` accept these options:
 
-Automated ModelSim tests and profiling use `-batch` to run the simulation kernel directly. ModelSim Intel FPGA Starter Edition 2020.1 can terminate concurrent `-c` runs after approximately five minutes with an uncounted nodelocked license-lock error; batch mode avoids the command-line frontend involved in the observed failure. The runner reports this error explicitly if it occurs. Long tests remain subject to the separate wall-clock timeout.
+| Option | Use |
+| ------ | --- |
+| `--simulator auto\|verilator\|modelsim\|both` | `auto` prefers Verilator; `both` runs every selected bench in both simulators. |
+| `--jobs <count>` | Set the number of concurrent RTL tests. |
+| `--timeout <seconds>` | Set the wall-clock limit per RTL simulation. |
 
-Run `python -m tests.live_fpga` to execute the complete timing, repetition, fifty-move rule, and perft suite against a connected FPGA. Connection and diagnostic options include `--port`, `--startup-timeout`, `--search-timeout`, and `--verbose`; `--depth` controls repetition search depth subject to the suite's minimum. Live hardware checks are separate from `check`.
+A selected backend's failure is reported as a failure. Simulator builds are cached and logs are kept under `work/build/sim/`.
 
-Synthesis verifies generated data before invoking the vendor tools. Quartus reuses valid build results; `--clean` forces a full build. Other options include `--stream-logs`, `--jobs <count>`, `--seed <seed>` for Quartus fitter selection, and `--update-generated-data`. Use `synth-report` to inspect results and timing. After changing the material/PST datapath, verify that both parameter sets remain connected in synthesis; simulation alone does not establish ROM connectivity.
+`check` includes host, build-tool, benchmark, search-tuning, and mocked live-FPGA Python tests. To include evaluation-tuning tests, install `requirements-tuning.txt` and run `check --tuning`.
 
-Targets with an engine profile also accept `--engine-config <path>` to synthesize an isolated profile without modifying the manifest target. This is used by search-parameter tuning and records the resolved override in normal synthesis metadata.
+Compile source sets without running a testbench:
 
-The DE1-SoC target generates its Quartus project under `work/build/quartus-de1-soc/` and derives engine constants and independent engine/memory/communication PLL settings from its selected profile. The portable RTL and TT memory protocol remain independent of board-specific clocks, pins, and external-memory wiring.
+```text
+python -m tools.hardware_build compile --set portable-rtl
+```
 
-Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
+This command requires ModelSim/Questa. Repeat `--set` to select more source sets.
 
-RTL uses `unique` on disjoint case decoders, with local comments explaining exclusivity. Complete, mutually exclusive if/else chains are expressed as `unique case (1'b1)` because Quartus does not accept qualified if statements. Defaults remain explicit so idle, unused-index, and error recovery behavior stays defined. The final board-operation transform remains an ordinary case to preserve pass-through for unspecified encodings. Enables, reset/cancel precedence, and overlapping arbitration conditions retain their ordinary if semantics; the recapturer classifier uses `priority case (1'b1)` because multiple attacker classes may coexist and the cheapest must win. Run RTL tests with assertions enabled after changing these assumptions, and use synthesis reports to establish any area benefit.
+## Generate Hardware Data
 
-## Adding Tests or Targets
+```text
+python -m tools.hardware_build gen-data
+```
 
-To add an RTL test, add or reuse the smallest complete source set, register the testbench and top module in the manifest, and run it by name. Python tests belong under the matching subsystem directory in `tests/`.
+The command runs the manifest's deterministic generators and fails if their outputs differ from tracked files. Use `gen-data --update` to keep intentional changes. Synthesis checks generated data before invoking vendor tools; `synth --update-generated-data` keeps regenerated changes as part of that build.
 
-Golden-result tests select their fixture policy explicitly rather than assuming production defaults. FSM checks use shared enum names rather than numeric encodings. Testbenches should use deterministic directed scenarios tied to a documented module contract, drive synchronous inputs away from the DUT sampling edge, and keep setup traffic distinct from behavioral assertions. Repeated observations of one invariant should produce one summarized result, while protocol waits must remain covered by a bench-level timeout. Every registered RTL bench prints a positive `Pass Count` and a zero `Fail Count` because the test runner requires both completion markers and rejects benches with no passing checks.
+## Synthesize and Inspect Results
 
-Search benches live under `hardware/tb/search/`. The shared controller bench includes separate fixture, driver, position, scenario, execution-sequence, policy-check, and monitor files; its variant tops retain the same integration coverage. `search-results` compiles the production result helper in a small primary-thread fixture to check eligibility and stop snapshots without building the search pipelines. `search-nnue-updates` independently checks physical NNUE feature requests and reversal.
+```text
+python -m tools.hardware_build synth --target quartus-de1-soc
+python -m tools.hardware_build synth-report --target quartus-de1-soc
+python -m tools.hardware_build timing-paths --target quartus-de1-soc
+```
 
-To add a board target, define its source set, top module, constraints, device, and vendor settings in the manifest. Keep vendor-specific IP in target source sets or behind stable wrappers so the portable RTL remains usable by Intel/Altera and Xilinx flows.
+Quartus reuses valid build results. Use `--clean` to delete the target build directory and force a full build, `--jobs <count>` to limit parallel processors, `--seed <seed>` to choose a fitter seed, or `--stream-logs` to show vendor output while building.
+
+`synth-report` shows utilization and timing from an existing result; omit `--target` to select the most recently modified result. Add `--verbose` for the complete component hierarchy. `timing-paths` reads an existing Quartus fit and reports failing setup paths, or the tightest passing paths when timing is met; `--limit <count>` controls the number shown.
+
+Generic Xilinx targets require a device part:
+
+```text
+python -m tools.hardware_build synth --target vivado-generic --part <xilinx-part>
+python -m tools.hardware_build synth --target vivado-nnue --part <xilinx-part>
+```
+
+`vivado-generic` checks the portable design with clock-only constraints; `vivado-nnue` isolates the NNUE evaluator. These targets do not provide a complete Xilinx board build.
+
+## Program the FPGA
+
+After a successful DE1-SoC build:
+
+```text
+python -m tools.hardware_build flash --target quartus-de1-soc
+```
+
+This programs the volatile `.sof` image over JTAG. Use `--dry-run` to inspect the programmer command, `--file <path>` to select an image, `--cable <name-or-number>` to select a cable, or `--device-index <index>` to override JTAG device detection. See [DE1-SoC setup](../usage/de1-soc-uci.md) for wiring and host connection.
+
+## Select Engine Settings
+
+Search policies live under `hardware/config/search/`; engine profiles under `hardware/config/engine/` select the policy, hardware capacities, clocks, and instrumentation. Vendor, device, constraints, and fitter settings belong to the manifest target.
+
+For a target with an engine profile, use another profile without editing the manifest:
+
+```text
+python -m tools.hardware_build synth --target quartus-de1-soc --engine-config <path>
+```
+
+Synthesis and [runtime profiling](engine-profiling.md) resolve engine profiles through the same configuration loader. Each build generates its own `rtl_config.sv`; do not edit generated packages. Standalone compilation, tests, and module synthesis use the manifest's standalone type configuration.
+
+## Check a Connected FPGA
+
+Install the host dependencies and program the board as described in [DE1-SoC setup](../usage/de1-soc-uci.md), then run:
+
+```text
+python -m tests.live_fpga --port <serial-port>
+```
+
+This runs timing, repetition, fifty-move rule, and perft checks against hardware. If `--port` is omitted, it uses `FPGA_CHESS_PORT` or USB-UART auto-detection. Use `--startup-timeout`, `--search-timeout`, and `--verbose` to diagnose connection or search failures. `--depth` controls the repetition search depth, subject to the suite's minimum. These hardware checks are separate from `check`.
+
+## Add a Test or Target
+
+Register RTL tests in the manifest with the smallest complete source set, testbench files, and top module. Each bench must print a positive `Pass Count` and zero `Fail Count`; missing completion markers fail the run. Use deterministic scenarios, explicit fixture policies, shared enum names, and a bench-level timeout. Place Python tests under the matching subsystem in `tests/`.
+
+Register new synthesis targets with their source set, top module, device, constraints, and vendor settings. Keep vendor-specific IP in target source sets or behind wrappers so portable RTL remains usable by Intel/Altera and Xilinx.

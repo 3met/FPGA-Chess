@@ -49,7 +49,7 @@ Run a specific RTL test:
 python -m tools.hardware_build test --name <test-name>
 ```
 
-Python 3.10 or newer is required. ModelSim or Questa supplies `vlib`, `vlog`, and `vsim` for RTL compilation and tests. The Python build CLI itself uses only the standard library and supports Windows and Linux.
+Python 3.10 or newer is required. RTL tests use Verilator or ModelSim/Questa; `compile` requires ModelSim/Questa. The Python build CLI itself uses only the standard library and supports Windows and Linux. See [tool requirements and options](docs/development/build-test-synthesis.md) for setup.
 
 ## Synthesis and Hardware
 
@@ -91,6 +91,6 @@ When `--port` is omitted, the host uses `FPGA_CHESS_PORT` or attempts to identif
 
 ## Profiling, Tuning, and Live FPGA Checks
 
-Cycle-accurate simulation profiling is documented in [Engine Runtime Profiling](docs/development/engine-profiling.md). Evaluation training is documented in [Evaluation Tuning](docs/development/evaluation-tuning.md).
+See [Engine Runtime Profiling](docs/development/engine-profiling.md) for simulation measurements, [Evaluation Tuning](docs/development/evaluation-tuning.md) for training and parameter export, [Stockfish Benchmark](docs/development/stockfish-benchmark.md) for hardware matches, and [Search-Parameter Tuning](docs/development/search-parameter-tuning.md) for automated policy experiments.
 
 `python -m tests.live_fpga` runs timing, repetition, fifty-move rule, and perft checks against a connected FPGA. This hardware-dependent command is not part of the normal `check` workflow. It accepts `--port <serial-port>`; when it is omitted, the host uses `FPGA_CHESS_PORT` or USB-UART auto-detection.

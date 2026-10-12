@@ -1,35 +1,46 @@
 # Search-Parameter Tuning
 
-`python -m tools.search_tuning run` tunes the synthesized search policy against Stockfish. It measures the baseline in `hardware/config/search/default.json`, proposes candidates, synthesizes and programs them, and evaluates them through the shared [Stockfish benchmark](stockfish-benchmark.md).
+Use `python -m tools.search_tuning run` to tune the synthesized search policy against Stockfish. The tuner benchmarks a baseline, proposes policies, synthesizes and programs each candidate, and evaluates it through the [Stockfish benchmark](stockfish-benchmark.md). It requires a connected FPGA and can reprogram it repeatedly.
 
-## Configuration and Commands
+## Setup and Run
 
-Settings live in `tools/search_tuning/default_config.json`. Copy the configuration to customize parameters, ranges, match length, executable paths, synthesis settings, or optimizer effort. Iteration count, progress frequency, synthesis jobs, and acquisition-pool sizes may change on resume. Changes to selected parameters or experiment semantics require a new output directory or `--clean`.
+Run commands from the repository root. Copy [`tools/search_tuning/default_config.json`](../../tools/search_tuning/default_config.json) and set the baseline policy, parameter selection and ranges, output directory, synthesis/programming targets, executable paths, and opening book. Ensure vendor tools, Fastchess, Stockfish, and the [FPGA host connection](../usage/de1-soc-uci.md) are available.
 
-- `python -m tools.search_tuning run --dry-run` validates the setup and creates the first candidate without synthesizing or programming hardware.
-- `python -m tools.search_tuning status` reports progress.
-- Re-running `python -m tools.search_tuning run` resumes interrupted work.
-- After changing RTL or engine behavior, `python -m tools.search_tuning run --clean` archives the existing output and starts from the current baseline.
+Validate the setup and prepare the next candidate before starting hardware work:
 
-Build and programming targets, vendor tools, benchmark executables, and the opening book must be available. Programming requires a successful build matching the candidate. Incompatible experiment inputs are rejected on resume.
+```text
+python -m tools.search_tuning run --config <config-path> --dry-run
+python -m tools.search_tuning run --config <config-path>
+python -m tools.search_tuning status --config <config-path>
+```
 
-## Results
+Omit `--config` to use the checked-in configuration. `--dry-run` creates or inspects a candidate without synthesizing, programming, or playing games. Programming requires a successful build matching that candidate.
 
-Outputs live under `work/search-tuning/`:
+## Resume or Restart
+
+Re-run the same `run` command to resume saved work, including interrupted builds and tournaments. Iteration count, progress frequency, synthesis jobs, and acquisition-pool sizes may change on resume. Changes to selected parameters or experiment semantics require a fresh experiment; incompatible inputs are rejected.
+
+After changing RTL or engine behavior, archive the old output and restart from the configured baseline:
+
+```text
+python -m tools.search_tuning run --config <config-path> --clean
+```
+
+The tuner leaves tracked search and engine profiles unchanged.
+
+## Read the Results
+
+Outputs default to `work/search-tuning/`:
 
 | Path | Contents |
 | ---- | -------- |
 | `candidate.json` | Current trial policy. |
-| `best.json` | Strongest policy accepted by validation. |
-| `provisional.json` | Most promising validated challenger. |
+| `best.json` | Policy accepted by validation. |
+| `provisional.json` | Leading challenger pending promotion. |
 | `trials/` | Saved trial policies. |
 | `logs/` | Synthesis, programming, and tournament output. |
 | `report.json` | Rankings, validation results, rejected trials, and parameter consensus. |
 
-The tuner leaves the tracked search and engine profiles unchanged. Interrupted builds and tournaments resume from saved state.
+Candidates use matched opening blocks. Promising policies receive separate validation games against the baseline; `best.json` changes only when the configured promotion criterion is met. A provisional lead does not establish an improvement.
 
-## Evaluation
-
-Candidate selection accounts for noisy Elo estimates. Every tournament uses the same shuffled opening block, and promising candidates are validated against the baseline on those matched openings; `best.json` changes only when the configured promotion criterion is met. Validation games are separate from exploration trials.
-
-The `early_stopping` setting can reject inferior exploration candidates before a full match. Validation matches run to their configured length. Synthesis failures and tournaments exceeding the configured runtime-failure limit are excluded from playing-strength estimates. Repeated synthesis rejection stops the run at the configured limit.
+Configured early stopping can reject inferior exploration candidates; validation matches run to their configured length. Synthesis failures and tournaments exceeding the runtime-failure limit are excluded from strength estimates. Repeated synthesis rejection stops the run at its configured limit.
