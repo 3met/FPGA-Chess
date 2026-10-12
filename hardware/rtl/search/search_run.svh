@@ -533,7 +533,8 @@
                                 search_pending_move_bucket[move_thread_id] <= move_pop_resp_bucket;
                                 search_thread_phase[move_thread_id] <= SEARCH_PHASE_BOARD_WAIT;
                             end else begin
-                                case (search_stack_top[move_thread_id].move_order_state)
+                                // Move-order states have distinct encodings.
+                                unique case (search_stack_top[move_thread_id].move_order_state)
                                     MOVE_ORDER_GOOD_NOISY:
                                         search_stack_top[move_thread_id].move_order_state
                                             <= search_in_qsearch(move_thread_id)
@@ -914,7 +915,8 @@
                                                     search_return_move[return_thread_id]
                                                 )
                                                 && search_stack_top[return_thread_id].failed_quiet_count < 2'd3) begin
-                                            case (search_stack_top[return_thread_id].failed_quiet_count)
+                                            // Failed-quiet counts select distinct storage slots.
+                                            unique case (search_stack_top[return_thread_id].failed_quiet_count)
                                                 2'd0: search_stack_top[return_thread_id].failed_quiet0
                                                     <= {search_return_move[return_thread_id].from_pos,
                                                         search_return_move[return_thread_id].to_pos};

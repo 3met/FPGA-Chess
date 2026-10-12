@@ -330,11 +330,13 @@
                 end
                 state <= CTRL_FLUSH_RESPOND;
             end else begin
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 CTRL_IDLE: begin
                     if (req_valid) begin
                         active_req <= req;
-                        case (req.operation)
+                        // Controller operation encodings are disjoint, including grouped search operations.
+                        unique case (req.operation)
                             ENGINE_CTRL_BOARD_UPDATE: begin
                                 if (req.board_op == BOARD_REVERSE_MOVE_OP) begin
                                     resp_reg <= EngineControllerResponse'('0);
@@ -650,14 +652,17 @@
                             board_wait_count <= BoardWaitCount'(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
                             state <= CTRL_PERFT_PUSH_WAIT;
                         end else begin
-                            if (search_stack_top[0].move_order_state == MOVE_ORDER_GOOD_NOISY)
-                                search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_QUIET;
-                            else if (search_stack_top[0].move_order_state == MOVE_ORDER_QUIET)
-                                search_stack_top[0].move_order_state <= MOVE_ORDER_BAD_NOISY;
-                            else if (search_stack_top[0].move_order_state == MOVE_ORDER_BAD_NOISY)
-                                search_stack_top[0].move_order_state <= MOVE_ORDER_LOW_QUIET;
-                            else
-                                search_stack_top[0].move_order_state <= MOVE_ORDER_DONE;
+                            // Move-order state comparisons select distinct enum values.
+                            unique case (1'b1)
+                                (search_stack_top[0].move_order_state == MOVE_ORDER_GOOD_NOISY):
+                                    search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_QUIET;
+                                (search_stack_top[0].move_order_state == MOVE_ORDER_QUIET):
+                                    search_stack_top[0].move_order_state <= MOVE_ORDER_BAD_NOISY;
+                                (search_stack_top[0].move_order_state == MOVE_ORDER_BAD_NOISY):
+                                    search_stack_top[0].move_order_state <= MOVE_ORDER_LOW_QUIET;
+                                default:
+                                    search_stack_top[0].move_order_state <= MOVE_ORDER_DONE;
+                            endcase
                             state <= CTRL_PERFT_GEN_ISSUE;
                         end
                     end

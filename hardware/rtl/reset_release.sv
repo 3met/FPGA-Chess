@@ -89,7 +89,8 @@ module pll_startup_controller #(
             delay_lfsr <= DELAY_SEED;
             pll_reset <= 1'b1;
         end else begin
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 PLL_HOLD_RESET: begin
                     pll_reset <= 1'b1;
                     if (delay_done) begin

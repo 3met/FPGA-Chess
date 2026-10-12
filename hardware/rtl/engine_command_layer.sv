@@ -88,7 +88,8 @@ module engine_command_layer #(
     endfunction : status_byte
 
     function automatic logic command_known(input logic [7:0] opcode);
-        case (opcode)
+        // Command opcodes are distinct; default retains handling of other bytes.
+        unique case (opcode)
             ENGINE_CMD_GET_STATUS,
             ENGINE_CMD_SET_BOARD,
             ENGINE_CMD_MAKE_MOVE,
@@ -107,7 +108,8 @@ module engine_command_layer #(
     endfunction : command_known
 
     function automatic logic [5:0] payload_len(input logic [7:0] opcode);
-        case (opcode)
+        // Command opcodes are distinct; default retains handling of other bytes.
+        unique case (opcode)
             ENGINE_CMD_SET_BOARD:         return 6'd36;
             ENGINE_CMD_MAKE_MOVE:         return 6'd2;
             ENGINE_CMD_SEARCH_DEPTH:      return 6'd1;
@@ -121,7 +123,8 @@ module engine_command_layer #(
     endfunction : payload_len
 
     function automatic logic [3:0] response_len(input ResponseKind kind);
-        case (kind)
+        // Response kinds have distinct encodings.
+        unique case (kind)
             RESP_STATUS: return 4'd4;
             RESP_ACK:    return 4'd2;
             RESP_SEARCH: return 4'd14;
@@ -134,7 +137,8 @@ module engine_command_layer #(
     endfunction : response_len
 
     function automatic logic [7:0] response_type_for(input ResponseKind kind);
-        case (kind)
+        // Response kinds have distinct encodings.
+        unique case (kind)
             RESP_STATUS: return ENGINE_RESP_STATUS;
             RESP_ACK:    return ENGINE_RESP_ACK;
             RESP_SEARCH: return ENGINE_RESP_SEARCH_RESULT;
@@ -151,7 +155,8 @@ module engine_command_layer #(
         input logic [5:0] idx,
         input logic [7:0] value
     );
-        case (opcode)
+        // Command opcodes are distinct; default retains handling of other bytes.
+        unique case (opcode)
             ENGINE_CMD_SET_BOARD: begin
                 if (idx < 6'd32) begin
                     return (value[2:0] == SPARE_PIECE) || (value[6:4] == SPARE_PIECE);
@@ -210,24 +215,31 @@ module engine_command_layer #(
         req.operation = ENGINE_CTRL_BOARD_UPDATE;
         req.move = Move'('0);
 
-        if (idx < 7'd64) begin
-            tile_byte = payload[idx[6:1]];
-            req.board_op = BOARD_SET_TILE_OP;
-            req.move.to_pos = Position'(idx[5:0]);
-            req.board_wr_data = idx[0] ? {3'b000, tile_byte[7:4]} : {3'b000, tile_byte[3:0]};
-        end else if (idx == 7'd64) begin
-            req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
-            req.board_wr_data = {3'b000, payload[32][3:0]};
-        end else if (idx == 7'd65) begin
-            req.board_op = BOARD_SET_TURN_OP;
-            req.board_wr_data = {6'b000000, payload[34][0]};
-        end else if (idx == 7'd66) begin
-            req.board_op = BOARD_SET_EN_PASSANT_OP;
-            req.board_wr_data = {3'b000, payload[33][3:0]};
-        end else begin
-            req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
-            req.board_wr_data = payload[35][6:0];
-        end
+        // Tile indices and the three explicit metadata indices are disjoint.
+        unique case (1'b1)
+            (idx < 7'd64): begin
+                tile_byte = payload[idx[6:1]];
+                req.board_op = BOARD_SET_TILE_OP;
+                req.move.to_pos = Position'(idx[5:0]);
+                req.board_wr_data = idx[0] ? {3'b000, tile_byte[7:4]} : {3'b000, tile_byte[3:0]};
+            end
+            (idx == 7'd64): begin
+                req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
+                req.board_wr_data = {3'b000, payload[32][3:0]};
+            end
+            (idx == 7'd65): begin
+                req.board_op = BOARD_SET_TURN_OP;
+                req.board_wr_data = {6'b000000, payload[34][0]};
+            end
+            (idx == 7'd66): begin
+                req.board_op = BOARD_SET_EN_PASSANT_OP;
+                req.board_wr_data = {3'b000, payload[33][3:0]};
+            end
+            default: begin
+                req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+                req.board_wr_data = payload[35][6:0];
+            end
+        endcase
 
         return req;
     endfunction : set_board_request
@@ -253,9 +265,11 @@ module engine_command_layer #(
         if (response_index == 4'd0) begin
             data_out = response_type_for(response_kind);
         end else begin
-            case (response_kind)
+            // Response kinds have distinct encodings.
+            unique case (response_kind)
                 RESP_STATUS: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1: data_out = {4'b0000, response_status};
                         5'd2: data_out = {5'b00000, response_error};
                         5'd3: data_out = response_active_op;
@@ -264,14 +278,16 @@ module engine_command_layer #(
                 end
 
                 RESP_ACK: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1: data_out = {4'b0000, response_status};
                         default: data_out = 'x;
                     endcase
                 end
 
                 RESP_SEARCH: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1:  data_out = {
                             last_move.to_pos,
                             (last_move.from_pos == Position'(0) && last_move.to_pos == Position'(0))
@@ -299,7 +315,8 @@ module engine_command_layer #(
                 end
 
                 RESP_PERFT: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1: data_out = last_node_count[7:0];
                         5'd2: data_out = last_node_count[15:8];
                         5'd3: data_out = last_node_count[23:16];
@@ -311,7 +328,8 @@ module engine_command_layer #(
                 end
 
                 RESP_DEBUG: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1: data_out = debug_stat_address_reg;
                         5'd2: data_out = debug_stat_value[7:0];
                         5'd3: data_out = debug_stat_value[15:8];
@@ -323,7 +341,8 @@ module engine_command_layer #(
                 end
 
                 RESP_ERROR: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1: data_out = {5'b00000, response_error};
                         5'd2: data_out = {4'b0000, response_status};
                         default: data_out = 'x;
@@ -332,7 +351,8 @@ module engine_command_layer #(
 
                 // Build metadata is constant-folded from engine parameters and needs no storage RAM.
                 RESP_BUILD_INFO: begin
-                    case (response_index)
+                    // Explicit byte indices are distinct; default retains unused-index behavior.
+                    unique case (response_index)
                         5'd1:  data_out = BUILD_ID[7:0];
                         5'd2:  data_out = BUILD_ID[15:8];
                         5'd3:  data_out = BUILD_ID[23:16];
@@ -406,7 +426,8 @@ module engine_command_layer #(
         automatic EngineControllerRequest req;
 
         req = zero_request();
-        case (opcode)
+        // Command opcodes are distinct; default retains handling of other bytes.
+        unique case (opcode)
             ENGINE_CMD_GET_STATUS: begin
                 start_response(RESP_STATUS, error_code, 1'b1, search_active);
             end
@@ -447,7 +468,8 @@ module engine_command_layer #(
         if (payload_error) begin
             latch_error(ENGINE_ERR_MALFORMED_PAYLOAD);
         end else begin
-            case (curr_opcode)
+            // Command opcodes are distinct; default retains handling of other bytes.
+            unique case (curr_opcode)
                 ENGINE_CMD_SET_BOARD: begin
                     active_operation <= ENGINE_CMD_SET_BOARD;
                     board_update_index <= 7'd0;
@@ -542,7 +564,8 @@ module engine_command_layer #(
             last_end_reason <= ENGINE_END_NORMAL[2:0];
             debug_stat_address_reg <= 8'd0;
         end else begin
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 CMD_IDLE: begin
                     response_kind <= RESP_NONE;
                     response_index <= 4'd0;

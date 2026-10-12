@@ -90,7 +90,8 @@
             move_cmd_board = search_board[0];
             move_pop_thread = ThreadID'(0);
             move_pop_ply = search_ply[0];
-            case (search_stack_top[0].move_order_state)
+            // Move-order states have distinct encodings.
+            unique case (search_stack_top[0].move_order_state)
                 MOVE_ORDER_GENERATE_NOISY: begin
                     move_cmd = MOVE_GEN_GENERATE_NOISY;
                     move_cmd_valid = 1'b1;
@@ -118,7 +119,8 @@
             move_cmd_board = search_board[move_followup_thread];
             move_pop_thread = move_followup_thread;
             move_pop_ply = search_ply[move_followup_thread];
-            case (move_followup_action)
+            // Follow-up action encodings are disjoint.
+            unique case (move_followup_action)
                 MOVE_FOLLOWUP_NOISY_CMD: begin
                     move_cmd = MOVE_GEN_GENERATE_NOISY;
                     move_cmd_valid = 1'b1;

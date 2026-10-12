@@ -144,7 +144,8 @@ module move_generator_read_pipeline #(
     end
 
     function automatic MoveBucketMask phase_mask(input MoveMemoryPhase phase);
-        case (phase)
+        // Move-memory phase encodings select disjoint actions.
+        unique case (phase)
             MOVE_MEMORY_GOOD_NOISY: return GOOD_NOISY_BUCKET_MASK;
             MOVE_MEMORY_QUIET: return REGULAR_QUIET_BUCKET_MASK;
             MOVE_MEMORY_BAD_NOISY: return BAD_NOISY_BUCKET_MASK;
@@ -154,7 +155,8 @@ module move_generator_read_pipeline #(
     endfunction
 
     function automatic MoveMemoryPhase exhausted_phase(input MoveMemoryPhase phase);
-        case (phase)
+        // Move-memory phase encodings select disjoint actions.
+        unique case (phase)
             MOVE_MEMORY_GOOD_NOISY: return MOVE_MEMORY_WAIT_QUIET;
             MOVE_MEMORY_QUIET: return MOVE_MEMORY_BAD_NOISY;
             MOVE_MEMORY_BAD_NOISY: return MOVE_MEMORY_LOW_QUIET;

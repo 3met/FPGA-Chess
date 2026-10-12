@@ -133,7 +133,8 @@
                 && !move_pop_resp_found
                 && !search_generation_inflight[move_pop_resp_thread]) begin
             move_followup_thread = move_pop_resp_thread;
-            case (search_stack_top[move_pop_resp_thread].move_order_state)
+            // Move-order states have distinct encodings.
+            unique case (search_stack_top[move_pop_resp_thread].move_order_state)
                 MOVE_ORDER_GOOD_NOISY:
                     if (!(search_in_qsearch(move_pop_resp_thread)
                             && !search_board_in_check[move_pop_resp_thread]))

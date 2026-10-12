@@ -36,7 +36,8 @@
     endfunction : terminal_no_move_score
 
     function automatic Tile initial_tile(input int pos);
-        case (pos)
+        // Initial-position square groups are disjoint; default supplies empty squares.
+        unique case (pos)
             0: return WHITE_ROOK;
             1: return WHITE_KNIGHT;
             2: return WHITE_BISHOP;
@@ -75,23 +76,30 @@
         setup_req = EngineControllerRequest'('0);
         setup_req.operation = ENGINE_CTRL_BOARD_UPDATE;
         setup_req.board_op = BOARD_IDLE_OP;
-        if (idx < 7'd64) begin
-            setup_req.board_op = BOARD_SET_TILE_OP;
-            setup_req.move.to_pos = Position'(idx[5:0]);
-            setup_req.board_wr_data = {3'b000, initial_tile_bits(int'(idx))};
-        end else if (idx == 7'd64) begin
-            setup_req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
-            setup_req.board_wr_data = 7'b000_1111;
-        end else if (idx == 7'd65) begin
-            setup_req.board_op = BOARD_SET_TURN_OP;
-            setup_req.board_wr_data = 7'd0;
-        end else if (idx == 7'd66) begin
-            setup_req.board_op = BOARD_SET_EN_PASSANT_OP;
-            setup_req.board_wr_data = 7'd0;
-        end else begin
-            setup_req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
-            setup_req.board_wr_data = 7'd0;
-        end
+        // Tile indices and the three explicit metadata indices are disjoint.
+        unique case (1'b1)
+            (idx < 7'd64): begin
+                setup_req.board_op = BOARD_SET_TILE_OP;
+                setup_req.move.to_pos = Position'(idx[5:0]);
+                setup_req.board_wr_data = {3'b000, initial_tile_bits(int'(idx))};
+            end
+            (idx == 7'd64): begin
+                setup_req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
+                setup_req.board_wr_data = 7'b000_1111;
+            end
+            (idx == 7'd65): begin
+                setup_req.board_op = BOARD_SET_TURN_OP;
+                setup_req.board_wr_data = 7'd0;
+            end
+            (idx == 7'd66): begin
+                setup_req.board_op = BOARD_SET_EN_PASSANT_OP;
+                setup_req.board_wr_data = 7'd0;
+            end
+            default: begin
+                setup_req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+                setup_req.board_wr_data = 7'd0;
+            end
+        endcase
         return setup_req;
     endfunction : new_game_setup_request
 
@@ -419,7 +427,8 @@
         input logic [2:0] depth_bucket,
         input logic [2:0] move_bucket
     );
-        case ({depth_bucket, move_bucket})
+        // Reduction-table addresses are distinct; default retains zero reduction.
+        unique case ({depth_bucket, move_bucket})
             6'o00: return SearchDepth'(lmr_table_value(0, 0));
             6'o01: return SearchDepth'(lmr_table_value(0, 1));
             6'o02: return SearchDepth'(lmr_table_value(0, 2));
@@ -487,7 +496,8 @@
         input MoveBucketIndex bucket
     );
         automatic logic [SEARCH_DEPTH_BITS:0] adjusted = {1'b0, base_reduction};
-        case (bucket)
+        // Bucket groups are disjoint; default retains the unadjusted reduction.
+        unique case (bucket)
             GOOD_NOISY_HIGH_BUCKET, GOOD_NOISY_LOW_BUCKET, QUIET_HIGHEST_BUCKET:
                 if (adjusted != 0) adjusted = adjusted - 1'b1;
             QUIET_LOW_BUCKET: adjusted = adjusted + 1'b1;

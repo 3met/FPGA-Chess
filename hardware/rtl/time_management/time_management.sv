@@ -160,7 +160,8 @@ module time_management #(
         end else begin
             done <= 1'b0;
             div_start <= 1'b0;
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 TM_IDLE: begin
                     if (setup_start) begin
                         automatic TimeType usable;

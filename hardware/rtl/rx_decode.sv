@@ -95,7 +95,8 @@ module uart_receiver #(
                 rx_shift <= '0;
                 sample_high_count <= '0;
             end else begin
-                case (uart_stage)
+                // UART state encodings are mutually exclusive; default retains idle/recovery behavior.
+                unique case (uart_stage)
                     UART_IDLE: begin
                         rx_timer <= '0;
                         rx_data_pos <= '0;

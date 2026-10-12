@@ -238,7 +238,8 @@ module move_generator_lane #(
     function automatic logic [2:0] ray_max_distance(input Position pos, input Direction dir);
         automatic BoardRank rank = get_rank(pos);
         automatic BoardFile file = get_file(pos);
-        case (dir)
+        // Direction encodings select disjoint direction groups.
+        unique case (dir)
             NORTH:      return 3'd7 - rank;
             NORTH_EAST: return ((3'd7 - rank) < (3'd7 - file))
                 ? (3'd7 - rank) : (3'd7 - file);
@@ -269,9 +270,10 @@ module move_generator_lane #(
             occupied[index] = on_ray
                 && candidates[index].piece_type != NULL_PIECE;
         end
-        // A priority mux avoids carrying the selected tile through seven
-        // dependent conditional assignments on long rays.
-        casez (occupied)
+        // Decode the nearest occupied square without carrying the selected tile
+        // through seven dependent conditional assignments on long rays.
+        // Each ray pattern requires all nearer bits to be zero, so patterns cannot overlap.
+        unique casez (occupied)
             7'b??????1: begin result.tile = candidates[0]; result.distance = 3'd0; end
             7'b?????10: begin result.tile = candidates[1]; result.distance = 3'd1; end
             7'b????100: begin result.tile = candidates[2]; result.distance = 3'd2; end
@@ -387,7 +389,8 @@ module move_generator_lane #(
     endfunction
 
     function automatic logic castle_pseudo_legal(input FullBoard board, input Move move);
-        case ({move.from_pos, move.to_pos})
+        // The four standard castling square pairs are distinct.
+        unique case ({move.from_pos, move.to_pos})
             {Position'(4), Position'(6)}: return white_kingside_castle_pseudo_legal(board);
             {Position'(4), Position'(2)}: return white_queenside_castle_pseudo_legal(board);
             {Position'(60), Position'(62)}: return black_kingside_castle_pseudo_legal(board);
@@ -417,7 +420,8 @@ module move_generator_lane #(
                 || source.piece_color != board.turn
                 || (destination.piece_type != NULL_PIECE && destination.piece_color == board.turn))
             return 1'b0;
-        case (source.piece_type)
+        // Piece type encodings select disjoint movement rules.
+        unique case (source.piece_type)
             PAWN: begin
                 if (board.turn == WHITE) begin
                     if (df == 0 && destination.piece_type == NULL_PIECE
@@ -460,7 +464,8 @@ module move_generator_lane #(
         input Direction dir,
         input logic [2:0] distance
     );
-        case (source.piece_type)
+        // Piece type encodings select disjoint movement rules.
+        unique case (source.piece_type)
             PAWN: return distance == 0 && ((source.piece_color == WHITE
                     && (dir == SOUTH_WEST || dir == SOUTH_EAST))
                 || (source.piece_color == BLACK
@@ -475,7 +480,8 @@ module move_generator_lane #(
     endfunction
 
     function automatic logic [3:0] exchange_value(input PieceType piece);
-        case (piece)
+        // Piece value groups contain distinct piece encodings.
+        unique case (piece)
             PAWN: return 4'd1;
             KNIGHT, BISHOP: return 4'd3;
             ROOK: return 4'd5;
@@ -505,7 +511,8 @@ module move_generator_lane #(
                     && ray_piece_attacks(tile, Direction'(dir), context_ray[dir].distance)) begin
                 if (tile.piece_color == job_board.turn) friendly_defender = 1'b1;
                 else begin
-                    case (tile.piece_type)
+                    // Each piece encoding belongs to only one exchange-value class.
+                    unique case (tile.piece_type)
                         PAWN: enemy_classes[0] = 1'b1;
                         KNIGHT, BISHOP: enemy_classes[1] = 1'b1;
                         ROOK: enemy_classes[2] = 1'b1;
@@ -526,11 +533,14 @@ module move_generator_lane #(
         end
         if (enemy_classes == '0) return 1'b1;
         if (!friendly_defender) return 1'b0;
-        if (enemy_classes[0]) recapturer_value = 4'd1;
-        else if (enemy_classes[1]) recapturer_value = 4'd3;
-        else if (enemy_classes[2]) recapturer_value = 4'd5;
-        else if (enemy_classes[3]) recapturer_value = 4'd9;
-        else recapturer_value = 4'd15;
+        // Several attacker classes may coexist; select the least valuable class first.
+        priority case (1'b1)
+            (enemy_classes[0]): recapturer_value = 4'd1;
+            (enemy_classes[1]): recapturer_value = 4'd3;
+            (enemy_classes[2]): recapturer_value = 4'd5;
+            (enemy_classes[3]): recapturer_value = 4'd9;
+            default: recapturer_value = 4'd15;
+        endcase
         return 5'(exchange_value(victim)) + 5'(recapturer_value)
             >= 5'(exchange_value(attacker.piece_type));
     endfunction
@@ -606,7 +616,8 @@ module move_generator_lane #(
 
         if (source.piece_type == NULL_PIECE || source.piece_color != board.turn)
             return 1'b0;
-        case (source.piece_type)
+        // Piece type encodings select disjoint movement rules.
+        unique case (source.piece_type)
             PAWN: begin
                 if (board.turn == WHITE) begin
                     if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY)
@@ -841,7 +852,8 @@ module move_generator_lane #(
                         candidate_promo_counter <= candidate_promo_counter - 2'd1;
                         // Emit promotions in search order while retaining the
                         // remaining-variants counter used by candidate control.
-                        case (candidate_promo_counter)
+                        // Promotion counter values select disjoint variants.
+                        unique case (candidate_promo_counter)
                             2'd3: candidate_move.promo_piece <= PROMO_KNIGHT;
                             2'd2: candidate_move.promo_piece <= PROMO_ROOK;
                             default: candidate_move.promo_piece <= PROMO_BISHOP;
@@ -850,7 +862,8 @@ module move_generator_lane #(
                         candidate_valid <= 1'b0;
                     end
                 end
-                case (state)
+                // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+                unique case (state)
                     GEN_IDLE: begin
                         // Payload is irrelevant until a command is accepted.
                         // Preload it while idle so command validity controls

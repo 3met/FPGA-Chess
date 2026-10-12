@@ -216,7 +216,8 @@ module board_update_pipeline #(
     endfunction : pst_addr
 
     function automatic PieceType promo_to_piece(input PromoType promo);
-        case (promo)
+        // Promotion encodings select exactly one resulting piece.
+        unique case (promo)
             PROMO_QUEEN:  return QUEEN;
             PROMO_KNIGHT: return KNIGHT;
             PROMO_ROOK:   return ROOK;
@@ -226,7 +227,8 @@ module board_update_pipeline #(
     endfunction : promo_to_piece
 
     function automatic Position castle_rook_from(input Position king_to);
-        case (king_to)
+        // The four standard castling destinations are distinct squares.
+        unique case (king_to)
             Position'('d2):  return Position'('d0);
             Position'('d6):  return Position'('d7);
             Position'('d58): return Position'('d56);
@@ -236,7 +238,8 @@ module board_update_pipeline #(
     endfunction : castle_rook_from
 
     function automatic Position castle_rook_to(input Position king_to);
-        case (king_to)
+        // The four standard castling destinations are distinct squares.
+        unique case (king_to)
             Position'('d2):  return Position'('d3);
             Position'('d6):  return Position'('d5);
             Position'('d58): return Position'('d59);
@@ -442,7 +445,8 @@ module board_update_pipeline #(
         effects.from_pos = in.move.from_pos;
         effects.to_pos = in.move.to_pos;
 
-        case (in.board_op)
+        // Board operation encodings are disjoint, including grouped move operations.
+        unique case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 effects = decode_push_effects(in.board, in.move);
             end
@@ -534,13 +538,16 @@ module board_update_pipeline #(
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = move_record_out;
         next_ctx_pipe[0].mover_king_square = '0;
-        if (board_op == BOARD_PUSH_MOVE_OP || board_op == BOARD_COMMIT_MOVE_OP
-                || board_op == BOARD_PUSH_NULL_OP || board_op == BOARD_REVERSE_MOVE_OP)
-            next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(~board_in.turn)];
-        else if (board_op == BOARD_SET_TURN_OP)
-            next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(set_data[0])];
-        else
-            next_ctx_pipe[0].side_king_square = board_in.king_positions[board_in.turn];
+        // Turn-changing move operations exclude the explicit set-turn operation.
+        unique case (1'b1)
+            (board_op == BOARD_PUSH_MOVE_OP || board_op == BOARD_COMMIT_MOVE_OP
+                    || board_op == BOARD_PUSH_NULL_OP || board_op == BOARD_REVERSE_MOVE_OP):
+                next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(~board_in.turn)];
+            (board_op == BOARD_SET_TURN_OP):
+                next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(set_data[0])];
+            default:
+                next_ctx_pipe[0].side_king_square = board_in.king_positions[board_in.turn];
+        endcase
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
 
@@ -596,7 +603,8 @@ module board_update_pipeline #(
         zobrist_old_ep_address = BoardFile'(0);
         zobrist_new_ep_address = BoardFile'(0);
 
-        case (in.board_op)
+        // Board operation encodings are disjoint, including grouped move operations.
+        unique case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic MoveEffects effects = move_effects;
                 automatic Position from_pos = effects.from_pos;
@@ -739,7 +747,8 @@ module board_update_pipeline #(
         automatic BoardUpdatePipelineCtx in = ctx_pipe[0];
         automatic PstReadPlan plan = PstReadPlan'(0);
 
-        case (in.board_op)
+        // Board operation encodings are disjoint, including grouped move operations.
+        unique case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic MoveEffects effects = move_effects;
                 automatic Position from_pos = effects.from_pos;
@@ -860,6 +869,7 @@ module board_update_pipeline #(
                 ^ (tile_delta[2] ^ tile_delta[3]))
             ^ (old_ep_delta ^ new_ep_delta);
 
+        // Preserve pass-through for unspecified operations; unique without default would make them don't-cares.
         case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
                 automatic MoveEffects effects = move_effects_q;

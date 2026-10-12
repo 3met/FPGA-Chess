@@ -57,6 +57,8 @@ The DE1-SoC target generates its Quartus project under `work/build/quartus-de1-s
 
 Generic Vivado targets accept `--part <xilinx-part>`. `vivado-generic` checks the portable design with clock-only constraints, while `vivado-nnue` isolates the NNUE evaluator for resource and timing checks.
 
+RTL uses `unique` on disjoint case decoders, with local comments explaining exclusivity. Complete, mutually exclusive if/else chains are expressed as `unique case (1'b1)` because Quartus does not accept qualified if statements. Defaults remain explicit so idle, unused-index, and error recovery behavior stays defined. The final board-operation transform remains an ordinary case to preserve pass-through for unspecified encodings. Enables, reset/cancel precedence, and overlapping arbitration conditions retain their ordinary if semantics; the recapturer classifier uses `priority case (1'b1)` because multiple attacker classes may coexist and the cheapest must win. Run RTL tests with assertions enabled after changing these assumptions, and use synthesis reports to establish any area benefit.
+
 ## Adding Tests or Targets
 
 To add an RTL test, add or reuse the smallest complete source set, register the testbench and top module in the manifest, and run it by name. Python tests belong under the matching subsystem directory in `tests/`.

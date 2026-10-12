@@ -300,7 +300,8 @@ module de1_soc(input CLOCK_50,
 	);
 
 	function automatic logic [6:0] hex_digit(input logic [3:0] value);
-		case (value)
+		// Hex digit encodings are disjoint; default supplies the remaining digit.
+		unique case (value)
 			4'h0: hex_digit = 7'b1000000;
 			4'h1: hex_digit = 7'b1111001;
 			4'h2: hex_digit = 7'b0100100;

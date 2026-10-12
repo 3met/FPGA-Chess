@@ -26,7 +26,8 @@
                     end
                     if (nnue_eval_dequeued)
                         nnue_eval_tag_read_ptr <= !nnue_eval_tag_read_ptr;
-                    case ({nnue_eval_enqueued, nnue_eval_dequeued})
+                    // Enqueue-only and dequeue-only are disjoint; default holds the count.
+                    unique case ({nnue_eval_enqueued, nnue_eval_dequeued})
                         2'b10: nnue_eval_tag_count <= nnue_eval_tag_count + 2'd1;
                         2'b01: nnue_eval_tag_count <= nnue_eval_tag_count - 2'd1;
                         default: nnue_eval_tag_count <= nnue_eval_tag_count;

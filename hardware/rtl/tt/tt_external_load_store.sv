@@ -446,7 +446,8 @@ module tt_external_load_store #(
                 // Keep metadata until all words drain, even after an early hit.
                 probe_returned <= 1'b0; probe_memory_way <= '0; probe_complete <= 1'b0;
             end
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 TT_FRONTEND_IDLE: if (clear && !clear_prev) state <= TT_FRONTEND_DRAIN;
                 TT_FRONTEND_DRAIN: if (!probe_buffer_valid && !probe_pending && !store_pending && !cache_store_valid && !commit_valid && probe_meta_count == 0
                         && store_meta_count == 0 && transport_idle && !fill_valid && !store_fill_valid && bank_fill_pending == 0) begin

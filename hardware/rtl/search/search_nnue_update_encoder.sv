@@ -58,7 +58,8 @@ module search_nnue_update_encoder (
             req.apply = 1'b1;
             req.clear = first;
         end else if (!delta_reverse) begin
-            case (step)
+            // Feature-update step indices are distinct; default retains completion behavior.
+            unique case (step)
                 3'd0: begin
                     feature_tile = plan.mover;
                     feature_pos = plan.from_pos;
@@ -93,7 +94,8 @@ module search_nnue_update_encoder (
         end else begin
             // Undo exactly the same physical rows in reverse order so a
             // thread's single live accumulator returns to its parent.
-            case (step)
+            // Feature-update step indices are distinct; default retains completion behavior.
+            unique case (step)
                 3'd0: begin
                     feature_tile = plan.placed;
                     feature_pos = plan.to_pos;

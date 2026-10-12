@@ -65,13 +65,15 @@ package chess_helpers;
 
 		if (distance == 0) return 1'b1;
 
-		case (dir)
+		// Direction encodings select disjoint direction groups.
+		unique case (dir)
 			NORTH, NORTH_EAST, NORTH_WEST: if (new_rank <= old_rank) return 1'b0;
 			SOUTH, SOUTH_EAST, SOUTH_WEST: if (new_rank >= old_rank) return 1'b0;
 			default: ;
 		endcase
 
-		case (dir)
+		// Direction encodings select disjoint direction groups.
+		unique case (dir)
 			WEST, SOUTH_WEST, NORTH_WEST:  if (new_file >= old_file) return 1'b0;
 			EAST, SOUTH_EAST, NORTH_EAST:  if (new_file <= old_file) return 1'b0;
 			default: ;
@@ -90,7 +92,8 @@ package chess_helpers;
 
 	// Return whether a knight move remains on the board.
 	function automatic bit is_knight_shift_on_board(Position pos, KnightDirection dir);
-		case (dir)
+		// Direction encodings select disjoint direction groups.
+		unique case (dir)
 			NNE: return (is_shift_on_board(pos, NORTH, 2) && is_shift_on_board(pos, EAST, 1));
 			NEE: return (is_shift_on_board(pos, NORTH, 1) && is_shift_on_board(pos, EAST, 2));
 			SEE: return (is_shift_on_board(pos, SOUTH, 1) && is_shift_on_board(pos, EAST, 2));
@@ -181,7 +184,8 @@ package chess_helpers;
 
     // Return the FEN character for a tile.
     function automatic string piece_to_char(Tile t);
-		case (t)
+		// Each color/piece encoding selects one character.
+		unique case (t)
 			WHITE_PAWN:   return "P";
 			WHITE_KNIGHT: return "N";
 			WHITE_BISHOP: return "B";

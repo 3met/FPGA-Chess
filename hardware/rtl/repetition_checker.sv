@@ -107,7 +107,8 @@ module repetition_checker #(
         for (int byte_index = 0; byte_index < 8; byte_index++) begin
             automatic logic [7:0] value;
             value = key[byte_index*8 +: 8];
-            case (seed[byte_index*2 +: 2])
+            // Rotation selectors are disjoint; default supplies the fourth rotation.
+            unique case (seed[byte_index*2 +: 2])
                 2'd0: rotated[byte_index] = value;
                 2'd1: rotated[byte_index] = {value[0], value[7:1]};
                 2'd2: rotated[byte_index] = {value[1:0], value[7:2]};
@@ -225,7 +226,8 @@ module repetition_checker #(
                         else $fatal(1, "repetition scan received overlapping requests for one thread");
 `endif
                 end
-                case (history_scan_state)
+                // Scan state encodings are disjoint; default retains idle recovery.
+                unique case (history_scan_state)
                     SCAN_IDLE: begin
                         for (int tid = SEARCH_THREAD_COUNT-1; tid >= 0; tid--) begin
                             if (history_scan_pending[tid]) begin
@@ -302,7 +304,8 @@ module repetition_checker #(
             else if (active_history_write && active_history_count < ACTIVE_HISTORY_DEPTH)
                 active_history_count <= active_history_count + 1'b1;
 
-            case (init_state)
+            // Initialization states are disjoint; default retains failure handling.
+            unique case (init_state)
                 REP_INIT_IDLE: if (init_start) begin
                     clear_index <= '0;
                     init_seed <= 16'h1;

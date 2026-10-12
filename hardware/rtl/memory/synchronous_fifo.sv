@@ -68,7 +68,8 @@ module synchronous_fifo #(
                 read_ptr <= next_ptr(read_ptr);
             end
 
-            case ({push, fetch})
+            // Increment and decrement event encodings are disjoint; default holds the count.
+            unique case ({push, fetch})
                 2'b10: memory_count <= memory_count + FifoCount'(1);
                 2'b01: memory_count <= memory_count - FifoCount'(1);
                 default: begin

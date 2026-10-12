@@ -157,12 +157,12 @@ module move_generator_quiet_history #(
                 - UPDATE_BITS'(gravity_product >>> HISTORY_LIMIT_SHIFT);
             write_en = 1'b1;
             write_address = active_address;
-            if (updated_history > UPDATE_BITS'($signed({1'b0, HISTORY_MAXIMUM})))
-                write_data = HISTORY_MAXIMUM;
-            else if (updated_history < 0)
-                write_data = '0;
-            else
-                write_data = HISTORY_ENTRY_BITS'(updated_history);
+            // History values above the unsigned maximum cannot also be negative.
+            unique case (1'b1)
+                (updated_history > UPDATE_BITS'($signed({1'b0, HISTORY_MAXIMUM}))): write_data = HISTORY_MAXIMUM;
+                (updated_history < 0): write_data = '0;
+                default: write_data = HISTORY_ENTRY_BITS'(updated_history);
+            endcase
         end
     end
 
@@ -190,7 +190,8 @@ module move_generator_quiet_history #(
             else
                 clear_address <= clear_address + HISTORY_ADDRESS_BITS'(1);
         end else begin
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 HISTORY_UPDATE_IDLE: begin
                     // The input is best-effort: ready remains asserted and
                     // any update arriving while this pipeline is occupied
@@ -222,7 +223,8 @@ module move_generator_quiet_history #(
                     // A same-address generator lookup wins; drop this one
                     // write instead of exposing ambiguous read-during-write data.
                     if (update_entry < failed_count) begin
-                        case (update_entry)
+                        // Failed-move indices are distinct; default selects the final stored failure.
+                        unique case (update_entry)
                             2'd0: {active_from, active_to} <= failed0;
                             2'd1: {active_from, active_to} <= failed1;
                             default: {active_from, active_to} <= failed2;

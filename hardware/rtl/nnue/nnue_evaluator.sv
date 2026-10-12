@@ -79,9 +79,12 @@ module nnue_evaluator #(
     // Compute the phase outside a function so Quartus preserves the PST data
     // path. The reciprocal is exact for the signed-16-bit score range.
     always_comb begin
-        if (eval_piece_count <= PieceCount'(2)) pst_first_weight = 6'd0;
-        else if (eval_piece_count >= PieceCount'(32)) pst_first_weight = 6'd30;
-        else pst_first_weight = 6'(eval_piece_count - PieceCount'(2));
+        // Low and high piece-count clamps cannot both apply.
+        unique case (1'b1)
+            (eval_piece_count <= PieceCount'(2)): pst_first_weight = 6'd0;
+            (eval_piece_count >= PieceCount'(32)): pst_first_weight = 6'd30;
+            default: pst_first_weight = 6'(eval_piece_count - PieceCount'(2));
+        endcase
     end
     assign pst_magnitude = pst_numerator_q[20]
         ? 20'(-pst_numerator_q) : 20'(pst_numerator_q);
@@ -131,7 +134,8 @@ module nnue_evaluator #(
     function automatic logic signed [3:0] screlu(input NnueAccumulator accumulator);
         if (accumulator < 0) return 4'sd0;
         if (accumulator >= NnueAccumulator'(8)) return 4'sd7;
-        case (accumulator)
+        // Activation lookup values are distinct; default retains zero output.
+        unique case (accumulator)
             NnueAccumulator'(3): return 4'sd1;
             NnueAccumulator'(4): return 4'sd2;
             NnueAccumulator'(5): return 4'sd3;
@@ -270,12 +274,12 @@ module nnue_evaluator #(
             // Clip from a dedicated result register so output timing is
             // independent of the fourth MAC tree.
             if (result_pending) begin
-                if (result_sum > 24'sd16383)
-                    result <= MAX_NON_MATE_EVAL_SCORE;
-                else if (result_sum < -24'sd16383)
-                    result <= -MAX_NON_MATE_EVAL_SCORE;
-                else
-                    result <= EvalScore'(result_sum);
+                // Positive and negative score saturation ranges cannot overlap.
+                unique case (1'b1)
+                    (result_sum > 24'sd16383): result <= MAX_NON_MATE_EVAL_SCORE;
+                    (result_sum < -24'sd16383): result <= -MAX_NON_MATE_EVAL_SCORE;
+                    default: result <= EvalScore'(result_sum);
+                endcase
                 result_valid <= 1'b1;
                 result_pst <= pst_blend_pending;
                 result_pending <= 1'b0;

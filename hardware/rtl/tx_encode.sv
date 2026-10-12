@@ -44,7 +44,8 @@ module uart_transmitter #(
         || (uart_stage == UART_STOP && tx_timer == TIMER_BITS'(CLKS_PER_BIT - 1));
 
     always_comb begin
-        case (uart_stage)
+        // UART state encodings are mutually exclusive; default retains idle/recovery behavior.
+        unique case (uart_stage)
             UART_IDLE:  uart_tx = 1'b1;
             UART_START: uart_tx = 1'b0;
             UART_DATA:  uart_tx = data_packet[bit_index];
@@ -60,7 +61,8 @@ module uart_transmitter #(
             bit_index <= '0;
             tx_timer <= '0;
         end else begin
-            case (uart_stage)
+            // UART state encodings are mutually exclusive; default retains idle/recovery behavior.
+            unique case (uart_stage)
                 UART_IDLE: begin
                     tx_timer <= '0;
                     bit_index <= '0;

@@ -323,7 +323,8 @@
     // Debug reads are intentionally a slow combinational mux used only between searches.
     always_comb begin
         debug_stat_value = 40'd0;
-        case (debug_stat_address)
+        // Explicit statistic addresses are distinct; default retains indexed statistics.
+        unique case (debug_stat_address)
             ENGINE_STAT_ENABLED:          debug_stat_value = {39'd0, ENABLE_SEARCH_STATS};
             ENGINE_STAT_THREAD_COUNT:     debug_stat_value = 40'(SEARCH_THREAD_COUNT);
             ENGINE_STAT_PHASE_COUNT:      debug_stat_value = 40'(ENGINE_STAT_PHASE_COUNT_VALUE);

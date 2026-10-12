@@ -171,7 +171,8 @@ module tt_memory_cdc_bridge #(
             clear_address <= '0; operation_probe <= 1'b0; operation_write <= 1'b0; request_address <= '0;
         end else begin
             clear_meta <= clear_toggle; clear_sync <= clear_meta;
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 S_IDLE: begin
                     if (clear_sync != clear_done_toggle && memory_idle) begin
                         clear_address <= '0; state <= S_CLEAR_REQ;

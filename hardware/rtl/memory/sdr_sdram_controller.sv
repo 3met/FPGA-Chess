@@ -161,7 +161,8 @@ module sdr_sdram_controller #(
         // still holds the entire transaction when the receiver applies backpressure.
         read_valid = ready && !transaction_write && read_emit_count < read_capture_count;
 
-        case (state)
+        // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+        unique case (state)
             SDRAM_INIT_PRE: begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b1; end
             SDRAM_REFRESH_PRE: if (all_can_precharge) begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b1; end
             SDRAM_CLEAR_PRE: if (bank_can_precharge) begin dram_ras_n_next = 1'b0; dram_we_n_next = 1'b0; dram_addr_next[10] = 1'b0; end
@@ -230,7 +231,8 @@ module sdr_sdram_controller #(
             // Drain captured words while later SDRAM words are still arriving.
             if (read_valid && read_ready)
                 read_emit_count <= read_emit_count + BURST_COUNT_BITS'(1);
-            case (state)
+            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
+            unique case (state)
                 SDRAM_POWERUP: if (wait_count == 0) state <= SDRAM_INIT_PRE; else wait_count <= wait_count - 1'b1;
                 SDRAM_INIT_PRE: begin invalidate_rows(); wait_count <= WAIT_COUNT_BITS'(TRP - 1); state <= SDRAM_INIT_PRE_WAIT; end
                 SDRAM_INIT_PRE_WAIT: if (wait_count == 0) state <= SDRAM_INIT_REF1; else wait_count <= wait_count - 1'b1;
