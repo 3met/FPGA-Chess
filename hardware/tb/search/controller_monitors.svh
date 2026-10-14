@@ -246,6 +246,9 @@
                     nnue_null_state_seen = 1'b1;
                     nnue_null_state_correct &= dut.nnue_state_valid[idx]
                         && !dut.nnue_plan_pending[idx];
+                    check(dut.search_stack_top[idx].repetition_start
+                            == dut.search_ply[idx] + PlyIndex'(1),
+                        "null child excludes its unwritten repetition slot");
                 end
                 if (dut.nnue_plan_pending[idx])
                     nnue_pending_state_invalid &=
@@ -645,7 +648,8 @@
                             dut.search_board_in_check[tid], dut.search_stack_top[tid].beta),
                         "cached RFP eligibility matches the node entry window");
                     check(dut.search_stack_top[tid].null_beta_allowed
-                            == (dut.search_stack_top[tid].beta > dut.NULL_MIN_BETA),
+                            == (dut.search_stack_top[tid].beta > -MATE_THRESHOLD
+                                && dut.search_stack_top[tid].beta < MATE_THRESHOLD),
                         "cached null-move bound eligibility matches the node beta");
                 end
             end

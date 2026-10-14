@@ -13,9 +13,7 @@
     localparam int SEARCH_INF_VALUE = 32767;
     localparam int MAX_ASPIRATION_THREAD_OFFSET = (SEARCH_THREAD_COUNT < 8)
         ? SEARCH_THREAD_COUNT - 1 : 7;
-    localparam int NULL_MIN_BETA_VALUE = -16640 + MAX_PLY_COUNT;
     localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
-    localparam EvalScore NULL_MIN_BETA = EvalScore'(NULL_MIN_BETA_VALUE);
     localparam int LMR_LN2_Q8 = 177;
     localparam int LMR_MAX_REMAINING_DEPTH = SEARCH_STACK_DEPTH - 1;
     // Only floor-log2 buckets reachable by a legal configured search depth exist.

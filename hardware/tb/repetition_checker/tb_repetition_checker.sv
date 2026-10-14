@@ -190,6 +190,19 @@ module tb_repetition_checker;
         request(0, 5, 1, 64'haaaa, 2, "two line occurrences");
         request(0, 5, 4, 64'haaaa, 0, "irreversible lower boundary");
 
+        // A null at ply 2 leaves an old branch's key in that slot. Its
+        // descendants begin history at ply 3 and retain only real occurrences.
+        line_sample(0, 2, 64'hdddd);
+        request(0, 4, 3, 64'hdddd, 0, "null boundary excludes stale synthetic slot");
+        line_sample(0, 4, 64'hdddd);
+        request(0, 6, 3, 64'hdddd, 1, "post-null occurrence does not falsely draw");
+        // Check the opposite parity while preserving two real occurrences.
+        line_sample(0, 1, 64'heeee);
+        line_sample(0, 3, 64'heeee);
+        line_sample(0, 5, 64'heeee);
+        request(0, 5, 2, 64'heeee, 1, "odd null boundary excludes stale synthetic slot");
+        request(0, 7, 2, 64'heeee, 2, "post-null real threefold remains detectable");
+
         // Reinitialize with a unique root, then count root -> ply 4 -> ply 6.
         history_sample(64'h7777, 1);
         initialize();

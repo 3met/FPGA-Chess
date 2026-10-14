@@ -116,7 +116,7 @@
             dut.search_stack_top[tid].tt_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
             dut.search_stack_top[tid].move_order_state = MOVE_ORDER_DIRECT;
             dut.search_stack_top[tid].beta = EvalScore'(100);
-            dut.search_stack_top[tid].null_beta_allowed = dut.search_stack_top[tid].beta > dut.NULL_MIN_BETA;
+            dut.search_stack_top[tid].null_beta_allowed = dut.null_beta_eligible(dut.search_stack_top[tid].beta);
             dut.search_stack_top[tid].alpha = EvalScore'(99);
             dut.search_stack_top[tid].unit_window = 1'b1;
             dut.search_stack_top[tid].zero_window_node = 1'b1;

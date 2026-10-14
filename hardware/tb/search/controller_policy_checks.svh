@@ -1,6 +1,19 @@
 // Existing untimed search-policy checks under the controller fixture policy.
 // Included inside the main integration sequence.
 
+        // Probe both mate-range boundaries and the adjacent finite scores.
+        check(dut.null_beta_eligible(MATE_THRESHOLD - EvalScore'(1))
+                && dut.null_beta_eligible(-MATE_THRESHOLD + EvalScore'(1))
+                && dut.null_beta_eligible(DRAW_EVAL_SCORE),
+            "null pruning accepts finite beta bounds");
+        check(!dut.null_beta_eligible(MATE_THRESHOLD)
+                && !dut.null_beta_eligible(-MATE_THRESHOLD)
+                && !dut.null_beta_eligible(MATE_SCORE)
+                && !dut.null_beta_eligible(-MATE_SCORE)
+                && !dut.null_beta_eligible(dut.SEARCH_INF)
+                && !dut.null_beta_eligible(-dut.SEARCH_INF),
+            "null pruning excludes winning and losing mate bounds and infinity");
+
         check(dut.lmr_table_value_for_params(128, 256, 1, 1) == 8'd1,
             "LMR non-default half-ply offset rounds the complete curve once");
         check(dut.lmr_table_value_for_params(0, 256, 2, 2) == 8'd2,

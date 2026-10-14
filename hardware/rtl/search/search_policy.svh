@@ -5,6 +5,11 @@
         return move.from_pos == Position'(0) && move.to_pos == Position'(0);
     endfunction : is_null_move
 
+    // A synthetic pass cannot establish a mate-valued cutoff bound.
+    function automatic logic null_beta_eligible(input EvalScore beta);
+        return beta > -MATE_THRESHOLD && beta < MATE_THRESHOLD;
+    endfunction : null_beta_eligible
+
     function automatic logic is_setup_op(input BoardOp op);
         return op == BOARD_SET_TILE_OP
             || op == BOARD_SET_TURN_OP

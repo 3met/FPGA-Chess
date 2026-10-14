@@ -20,7 +20,7 @@ Ordinary futility pruning may skip late quiet moves at shallow, non-root nodes o
 
 RFP evaluates eligible non-checking main-search nodes after the TT probe and before null-move pruning. At a shallow zero-window node with a finite non-mate beta bound, it returns the fail-soft static evaluation when the configured depth-scaled margin proves a beta cutoff.
 
-Null-move pruning may search a reduced synthetic child at eligible non-root nodes that are not in check. Null children change only turn-dependent state, cannot follow another null move, and do not count as legal moves, update move ordering, enter repetition history, or become best moves.
+Null-move pruning may search a reduced synthetic child at eligible non-root, zero-window nodes that are not in check and have a finite non-mate beta bound. Null children change only turn-dependent state, cannot follow another null move, and do not count as legal moves, update move ordering, enter repetition history, or become best moves. Descendant repetition checks begin after the synthetic ply, excluding both pre-null history and the unwritten null slot.
 
 Quiescence search considers captures and promotions in the good-noisy buckets. A checked quiescence node has no stand-pat option and searches all legal evasions, including quiet and bad-noisy moves. Outside check, delta pruning skips captures that cannot raise alpha under the configured material margin; checking moves, promotions, and immediate recaptures are exempt. Quiescence does not apply PVS, LMR, or null-move pruning to its own moves.
 

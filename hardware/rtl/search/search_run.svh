@@ -224,7 +224,9 @@
                                 search_stack_top[board_thread_id].legal_move_count <= 8'd0;
                                 search_stack_top[board_thread_id].count_move_on_return <= 1'b0;
                                 search_stack_top[board_thread_id].tt_move <= NULL_MOVE;
-                                search_stack_top[board_thread_id].repetition_start <= child_ply;
+                                // The synthetic ply has no line-history write; exclude
+                                // its stale RAM slot as well as all pre-null history.
+                                search_stack_top[board_thread_id].repetition_start <= child_ply + PlyIndex'(1);
                                 search_stack_top[board_thread_id].has_legal <= 1'b0;
                                 search_stack_top[board_thread_id].move_order_state <= MOVE_ORDER_DIRECT;
                                 search_node_init_pending[board_thread_id] <= 1'b0;
@@ -1015,7 +1017,7 @@
                                     search_board_in_check[search_tt_lookup_issue_thread],
                                     search_stack_top[search_tt_lookup_issue_thread].beta);
                             search_stack_top[search_tt_lookup_issue_thread].null_beta_allowed
-                                <= search_stack_top[search_tt_lookup_issue_thread].beta > NULL_MIN_BETA;
+                                <= null_beta_eligible(search_stack_top[search_tt_lookup_issue_thread].beta);
                             // Board history and depth remain fixed while this
                             // probe and any retained-response validation run.
                             search_tt_history_required[search_tt_lookup_issue_thread]
