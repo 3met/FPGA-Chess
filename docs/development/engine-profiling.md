@@ -49,7 +49,7 @@ Simulator builds are cached. The first Verilator run can include compiler optimi
 
 ```text
 python -m tools.hardware_build profile-view baseline
-python -m tools.hardware_build profile-view baseline --topic search pipeline
+python -m tools.hardware_build profile-view baseline --topic search moves
 python -m tools.hardware_build profile-view baseline --topic tt --position undermining
 python -m tools.hardware_build profile-view baseline --topic all
 python -m tools.hardware_build profile-view --list-runs
@@ -60,7 +60,8 @@ python -m tools.hardware_build profile-view --list-runs
 | Topic | Contents |
 | ----- | -------- |
 | `summary` | Search throughput, results, depths, faults, simulated search time, and total profiling wall time. |
-| `search` | Per-depth results, move generation, ordering, and pruning. |
+| `search` | Per-depth results and subsections for PVS, LMR, reverse and ordinary futility pruning, null moves, quiescence, TT cutoffs, terminal positions, and draws. |
+| `moves` | Move generation counts, latency, and efficiency; ordering bucket activity, occupancy, searched move ranks, and beta cutoffs. |
 | `pipeline` | Thread lifecycle, component activity, and stalls. |
 | `tt` | Probes, cache behavior, request latency, FIFO occupancy, backpressure, and SDRAM traffic. |
 | `simulation` | Simulator speed and time spent on setup, search, response serialization, and drain. |
@@ -89,6 +90,10 @@ The simulated design includes the portable engine and production external-TT pat
 For comparisons, use the same positions and search limit and record any engine-profile overrides. Engine throughput measures simulated hardware performance; simulator speed measures how fast the host runs that simulation. Total profiling wall time includes configuration, simulator preparation, and all position simulations. Search timing runs from request acceptance to response presentation; setup, serialization, and TT-store drain are reported separately.
 
 ### Search and Pipeline
+
+PVS scout and re-search counters measure issued real main-search move pushes, excluding quiescence and null moves. They include speculative attempts that may later fail legality checks.
+
+Search heuristic counters include null-move probes issued and null returns that cause a beta cutoff. Missing counters are shown as unrecorded rather than zero.
 
 Per-depth measurements follow the primary thread; helpers may be searching another depth. Thread lifecycle phases partition the search duration. Indented rows partition their parent phase but still express percentages of the full search duration, so do not add them to parent totals. Control and dispatch include initialization, transitions, and request waits. Stall categories can overlap unless labeled exclusive.
 

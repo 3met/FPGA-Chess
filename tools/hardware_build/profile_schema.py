@@ -40,6 +40,8 @@ ALGORITHM_LABELS = {
     "pvs_scouts": "PVS scout searches",
     "pvs_researches": "PVS full-window re-searches",
     "lmr_reduced_issues": "LMR reduced move pushes",
+    "null_searches": "Null-move searches",
+    "null_cutoffs": "Null-move beta cutoffs",
     "rfp_cutoffs": "Reverse futility pruning cutoffs",
     "futility_pruned_moves": "Ordinary futility-pruned moves",
     "qdelta_pruned_moves": "Quiescence delta-pruned moves",

@@ -114,9 +114,10 @@ def command_profile_view(args: argparse.Namespace) -> int:
     if args.name and args.run:
         raise BuildError("Choose a run name or --run directory, not both")
     if args.list_topics:
+        width = max(map(len, PROFILE_TOPICS))
         for topic, description in PROFILE_TOPICS.items():
-            print(f"{topic:<12} {description}")
-        print(f"{'all':<12} Every topic")
+            print(f"{topic:<{width}} {description}")
+        print(f"{'all':<{width}} Every topic")
         return 0
     if args.list_runs:
         runs = _completed_runs()

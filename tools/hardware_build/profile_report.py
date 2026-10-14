@@ -340,6 +340,10 @@ def build_profile_report(
     )
     if board_reverses + forward_board_issues != board_issues:
         raise BuildError("Board-update issue classifications do not match total issues")
+    # Scout and full-window retries are disjoint subsets of main-search pushes.
+    pvs_pushes = metrics.get("algorithm.pvs_scouts", 0) + metrics.get("algorithm.pvs_researches", 0)
+    if pvs_pushes > metrics.get("algorithm.main_board_issues", 0):
+        raise BuildError("PVS scout and re-search issues exceed main-search move pushes")
     legal_ordinal_total = sum(
         metrics.get(f"move_order.legal_ordinal.{index}", 0)
         for index in range(len(ORDINAL_BUCKETS))

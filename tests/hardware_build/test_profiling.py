@@ -659,6 +659,28 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["algorithm"]["rfp_cutoffs"], 3)
         self.assertLess(text.index("Good noisy high"), text.index("Bad noisy low"))
 
+    def test_moves_topic_is_separate_from_search_heuristics(self):
+        report = self.build_sample_report()
+        report["algorithm"].update(null_searches=7, null_cutoffs=2, future_heuristic=3)
+        search = format_profile_topics(report, ["search"])
+        moves = format_profile_topics(report, ["moves"])
+
+        self.assertIn("Per-depth breakdown", search)
+        self.assertIn("Late-move reductions (LMR)", search)
+        self.assertIn("Principal variation search (PVS)", search)
+        self.assertIn("Null-move searches: 7", search)
+        self.assertIn("Null-move beta cutoffs: 2", search)
+        self.assertIn("TT score cutoffs", search)
+        self.assertIn("Future heuristic: 3", search)
+        self.assertNotIn("Move generator operations", search)
+        self.assertNotIn("Searched move ranks", search)
+        self.assertNotIn("Search algorithm", search)
+        self.assertIn("\nLate-move reductions (LMR)\n", search)
+        self.assertIn("Move generator operations", moves)
+        self.assertIn("Move generation work", moves)
+        self.assertIn("Searched move ranks", moves)
+        self.assertIn("Good noisy high", moves)
+
     def test_move_generator_operation_table_is_dense_and_aligned(self):
         metrics = sample_metrics()
         counts = [1_890_533, 26_132_510, 5_124_774, 129_484_860]
@@ -881,6 +903,24 @@ class ReportTests(unittest.TestCase):
                 },
                 0,
             )
+
+    def test_pvs_issues_cannot_exceed_main_search_pushes(self):
+        report = self.build_sample_report()
+        for scouts, researches in ((1, 0), (0, 1), (2, 0), (0, 2), (1, 1)):
+            with self.subTest(scouts=scouts, researches=researches):
+                metrics = sample_metrics()
+                metrics.update({"algorithm.pvs_scouts": scouts, "algorithm.pvs_researches": researches})
+                args = (report["configuration"], metrics,
+                        {"best_move.from": 0, "best_move.to": 0, "best_move.promotion": 0,
+                         "score": 0, "nodes": 0, "completed_depth": 0,
+                         "deepest_search_ply": 0, "end_reason": 0, "error": 0}, 0)
+                if scouts + researches <= metrics["algorithm.main_board_issues"]:
+                    built = build_profile_report(*args)
+                    self.assertEqual(built["algorithm"]["pvs_scouts"], scouts)
+                    self.assertEqual(built["algorithm"]["pvs_researches"], researches)
+                else:
+                    with self.assertRaisesRegex(BuildError, "PVS scout and re-search"):
+                        build_profile_report(*args)
 
     def test_incomplete_board_request_at_search_end_is_allowed(self):
         metrics = sample_metrics()

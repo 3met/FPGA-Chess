@@ -274,7 +274,7 @@ def _compile_verilator(sources: list[Path], args: argparse.Namespace) -> Path:
             instrumented_cmd[instrumented_cmd.index("-CFLAGS") + 1] += " -fprofile-update=atomic"
         instrumented_cmd[instrumented_cmd.index("-LDFLAGS") + 1] += " -fprofile-generate"
         instrumented_log = build_dir / "instrumented-compile.log"
-        print("Building and training the optimized Verilator simulator...", flush=True)
+        print("Preparing Verilator simulator...", flush=True)
         code, output, _ = run_command(instrumented_cmd, REPO_ROOT, instrumented_log,
                                       timeout_seconds=RTL_COMPILE_TIMEOUT_SECONDS)
         if code != 0 or not executable.exists():

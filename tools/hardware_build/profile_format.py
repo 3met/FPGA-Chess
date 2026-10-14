@@ -229,8 +229,8 @@ def _format_components(report: dict) -> str:
     return "\n".join(lines).strip("\n") + "\n"
 
 
-def _format_moves(report: dict) -> str:
-    """Format the moves measurements."""
+def _format_move_generation(report: dict) -> str:
+    """Show move generator operation latency and generation work."""
     lines = []
     move_generator = report["components"]["move_generator"]
     operation_rows = []
@@ -311,8 +311,8 @@ def _format_stalls(report: dict) -> str:
     return "\n".join(lines).strip("\n") + "\n"
 
 
-def _format_search(report: dict) -> str:
-    """Format the search measurements."""
+def _format_move_ordering(report: dict) -> str:
+    """Show ordering buckets and the ranks of searched moves and cutoffs."""
     lines = []
     lines += [
         "",
@@ -352,14 +352,42 @@ def _format_search(report: dict) -> str:
         f"{report['move_ordering']['direct_move_cutoffs']:,}"
     )
 
-    lines += ["", "Search algorithm"]
-    algorithm_names = [name for name in ALGORITHM_LABELS if name in report["algorithm"]]
-    algorithm_names += sorted(name for name in report["algorithm"] if name not in ALGORITHM_LABELS)
-    for name in algorithm_names:
-        value = report["algorithm"][name]
-        lines.append(f"  {ALGORITHM_LABELS.get(name, name.replace('_', ' ').capitalize())}: {value:,}")
-
     return "\n".join(lines).strip("\n") + "\n"
+
+
+def _format_search(report: dict) -> str:
+    """Group search measurements by heuristic, keeping unclassified counters visible."""
+    groups = (
+        ("Main search", ("main_board_issues",)),
+        ("Principal variation search (PVS)", ("pvs_scouts", "pvs_researches")),
+        ("Late-move reductions (LMR)", ("lmr_reduced_issues",)),
+        ("Reverse futility pruning", ("rfp_cutoffs",)),
+        ("Futility pruning", ("futility_pruned_moves",)),
+        ("Null-move pruning", ("null_searches", "null_cutoffs")),
+        ("Quiescence search", ("qsearch_board_issues", "qdelta_pruned_moves")),
+        ("Terminal positions", ("terminal_checkmates", "terminal_stalemates",
+                                "terminal_main_exhausted", "terminal_qsearch_exhausted")),
+        ("Draw detection", ("repetition_draws", "fifty_move_draws")),
+    )
+    lines = [_format_depths(report).rstrip()]
+    algorithm = report["algorithm"]
+    for title, names in groups:
+        lines += ["", title]
+        available = [name for name in names if name in algorithm]
+        if not available:
+            lines.append("  No measurements recorded")
+        for name in available:
+            lines.append(f"  {ALGORITHM_LABELS[name]}: {algorithm[name]:,}")
+    tt = report["transposition_table"]
+    lines += ["", "Transposition-table cutoffs", f"  TT score cutoffs: {tt['cutoff_hits']:,}"]
+    classified = {name for _, names in groups for name in names}
+    remaining = sorted(algorithm.keys() - classified)
+    if remaining:
+        lines += ["", "Other search measurements"]
+        for name in remaining:
+            label = ALGORITHM_LABELS.get(name, name.replace("_", " ").capitalize())
+            lines.append(f"  {label}: {algorithm[name]:,}")
+    return "\n".join(lines) + "\n"
 
 
 def _format_tt_fifos(fifos: dict) -> str:
@@ -513,7 +541,8 @@ def _format_tt(report: dict) -> str:
 
 PROFILE_TOPICS = {
     "summary": "Throughput, search results, completed depths, and faults",
-    "search": "Depth breakdown, move generation, ordering, and pruning",
+    "search": "Depth breakdown and search heuristics",
+    "moves": "Move generation, ordering buckets, searched move ranks, and beta cutoffs",
     "pipeline": "Thread lifecycle, component activity, and stalls",
     "tt": "TT probes, cache, latency, queues, and SDRAM traffic",
     "simulation": "Simulator speed, wall time, setup, and drain overhead",
@@ -591,7 +620,8 @@ def format_profile_topics(report: dict, topics: list[str] | None = None) -> str:
     aggregate = report.get("aggregate_profile", report)
     formatters = {
         "summary": lambda: _format_summary(report),
-        "search": lambda: _format_depths(aggregate) + "\n" + _format_moves(aggregate) + "\n" + _format_search(aggregate),
+        "search": lambda: _format_search(aggregate),
+        "moves": lambda: _format_move_generation(aggregate) + "\n" + _format_move_ordering(aggregate),
         "pipeline": lambda: _format_lifecycle(aggregate) + "\n" + _format_components(aggregate) + "\n" + _format_stalls(aggregate),
         "tt": lambda: _format_tt(aggregate),
         "simulation": lambda: _format_simulation(report),

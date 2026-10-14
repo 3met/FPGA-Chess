@@ -408,6 +408,7 @@ module tb_engine_profile #(
     longint unsigned tt_cache_store_read_cycles, tt_cache_store_write_cycles;
     longint unsigned pvs_scouts, pvs_researches, lmr_reduced_issues, rfp_cutoffs;
     longint unsigned futility_pruned_moves, qdelta_pruned_moves;
+    longint unsigned null_searches, null_cutoffs;
     longint unsigned terminal_checkmates, terminal_stalemates;
     longint unsigned terminal_main_exhausted, terminal_qsearch_exhausted;
     longint unsigned repetition_draws, fifty_move_draws;
@@ -773,6 +774,24 @@ module tb_engine_profile #(
             if (any_ready_move_blocked) move_stall_cycles <= move_stall_cycles + 1;
             if (any_ready_tt_blocked) tt_request_stall_cycles <= tt_request_stall_cycles + 1;
 
+            // Count synthetic probes separately from real move ordering work.
+            if (dut.controller.search_board_issue_valid
+                    && dut.controller.board_update_op == BOARD_PUSH_NULL_OP)
+                null_searches <= null_searches + 1;
+            // Observe the selected null return at the same parent-score decision as search.
+            if (int'(dut.controller.state) == int'(CTRL_SEARCH_RUN)
+                    && !dut.controller.search_stop_requested()) begin
+                for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                    if (dut.controller.search_return_mask[tid]
+                            && dut.controller.search_select_thread(
+                                dut.controller.search_return_mask,
+                                dut.controller.search_dispatch.return_result) == ThreadID'(tid)
+                            && dut.controller.search_return_was_null[tid]
+                            && -dut.controller.search_return_score[tid]
+                                >= dut.controller.search_stack_top[tid].beta)
+                        null_cutoffs <= null_cutoffs + 1;
+                end
+            end
             if (dut.controller.search_board_issue_valid) begin
                 board_issues <= board_issues + 1;
                 if (dut.controller.board_update_op == BOARD_REVERSE_MOVE_OP) begin
@@ -782,10 +801,15 @@ module tb_engine_profile #(
                         qsearch_board_issues <= qsearch_board_issues + 1;
                     else
                         main_search_board_issues <= main_search_board_issues + 1;
-                    if (dut.controller.search_pvs_research[dut.controller.search_board_issue_thread])
-                        pvs_researches <= pvs_researches + 1;
-                    else if (dut.controller.search_stack_top[dut.controller.search_board_issue_thread].legal_move_count != 0)
-                        pvs_scouts <= pvs_scouts + 1;
+                    // PVS applies only to real main-search moves. Match the
+                    // child-window decision's has_legal test for scout attempts.
+                    if (dut.controller.board_update_op != BOARD_PUSH_NULL_OP
+                            && !dut.controller.search_in_qsearch(dut.controller.search_board_issue_thread)) begin
+                        if (dut.controller.search_pvs_research[dut.controller.search_board_issue_thread])
+                            pvs_researches <= pvs_researches + 1;
+                        else if (dut.controller.search_stack_top[dut.controller.search_board_issue_thread].has_legal)
+                            pvs_scouts <= pvs_scouts + 1;
+                    end
                     if (dut.controller.search_ply[dut.controller.search_board_issue_thread] != 0
                             && dut.controller.search_stack_top[dut.controller.search_board_issue_thread].remaining_depth >= 3
                             && dut.controller.search_stack_top[dut.controller.search_board_issue_thread].legal_move_count >= 3
@@ -1444,6 +1468,8 @@ module tb_engine_profile #(
         emit("algorithm.pvs_scouts", pvs_scouts);
         emit("algorithm.pvs_researches", pvs_researches);
         emit("algorithm.lmr_reduced_issues", lmr_reduced_issues);
+        emit("algorithm.null_searches", null_searches);
+        emit("algorithm.null_cutoffs", null_cutoffs);
         emit("algorithm.rfp_cutoffs", rfp_cutoffs);
         emit("algorithm.futility_pruned_moves", futility_pruned_moves);
         emit("algorithm.qdelta_pruned_moves", qdelta_pruned_moves);
@@ -1576,6 +1602,8 @@ module tb_engine_profile #(
         nnue_update_backpressure_cycles = 0;
         repetition_requests = 0;
         repetition_responses = 0;
+        null_searches = 0;
+        null_cutoffs = 0;
         rfp_cutoffs = 0;
         futility_pruned_moves = 0;
         qdelta_pruned_moves = 0;
