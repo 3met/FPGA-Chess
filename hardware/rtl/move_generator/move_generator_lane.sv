@@ -81,6 +81,7 @@ module move_generator_lane #(
     ThreadID job_thread;
     PlyIndex job_ply;
     FullBoard job_board;
+    logic [63:0] job_occupied;
     logic job_suppress_valid;
     Move job_suppress_move;
     logic [63:0] destination_mask;
@@ -286,8 +287,9 @@ module move_generator_lane #(
         return result;
     endfunction
 
+    // Path checks share the decoded occupancy map and avoid full-tile muxes.
     function automatic logic line_path_clear(
-        input FullBoard board,
+        input logic [63:0] board_occupied,
         input Position from_pos,
         input Position to_pos
     );
@@ -309,7 +311,7 @@ module move_generator_lane #(
                 $signed({1'b0, from_file}) + file_step * 4'(step);
             automatic Position path_pos = Position'({path_rank[2:0], path_file[2:0]});
             if (step < distance
-                    && board.tiles[path_pos].piece_type != NULL_PIECE)
+                    && board_occupied[path_pos])
                 return 1'b0;
         end
         return 1'b1;
@@ -402,6 +404,7 @@ module move_generator_lane #(
     // Direct moves use the same pseudo-legality contract as generated candidates.
     function automatic logic move_pseudo_legal(
         input FullBoard board,
+        input logic [63:0] board_occupied,
         input Move move
     );
         automatic Tile source = board.tiles[move.from_pos];
@@ -426,7 +429,7 @@ module move_generator_lane #(
                 if (board.turn == WHITE) begin
                     if (df == 0 && destination.piece_type == NULL_PIECE
                             && (dr == 1 || (dr == 2 && from_rank == 1
-                                && board.tiles[Position'(move.from_pos + Position'(8))].piece_type == NULL_PIECE)))
+                                && !board_occupied[Position'(move.from_pos + Position'(8))])))
                         return 1'b1;
                     if (dr == 1 && abs_df == 1
                             && ((destination.piece_type != NULL_PIECE && destination.piece_color == BLACK)
@@ -436,7 +439,7 @@ module move_generator_lane #(
                 end else begin
                     if (df == 0 && destination.piece_type == NULL_PIECE
                             && (dr == -1 || (dr == -2 && from_rank == 6
-                                && board.tiles[Position'(move.from_pos - Position'(8))].piece_type == NULL_PIECE)))
+                                && !board_occupied[Position'(move.from_pos - Position'(8))])))
                         return 1'b1;
                     if (dr == -1 && abs_df == 1
                             && ((destination.piece_type != NULL_PIECE && destination.piece_color == WHITE)
@@ -447,10 +450,10 @@ module move_generator_lane #(
                 return 1'b0;
             end
             KNIGHT: return (abs_dr == 2 && abs_df == 1) || (abs_dr == 1 && abs_df == 2);
-            BISHOP: return abs_dr == abs_df && line_path_clear(board, move.from_pos, move.to_pos);
-            ROOK: return (dr == 0 || df == 0) && line_path_clear(board, move.from_pos, move.to_pos);
+            BISHOP: return abs_dr == abs_df && line_path_clear(board_occupied, move.from_pos, move.to_pos);
+            ROOK: return (dr == 0 || df == 0) && line_path_clear(board_occupied, move.from_pos, move.to_pos);
             QUEEN: return (dr == 0 || df == 0 || abs_dr == abs_df)
-                && line_path_clear(board, move.from_pos, move.to_pos);
+                && line_path_clear(board_occupied, move.from_pos, move.to_pos);
             KING: begin
                 if (abs_dr <= 1 && abs_df <= 1) return 1'b1;
                 return castle_pseudo_legal(board, move);
@@ -665,6 +668,9 @@ module move_generator_lane #(
     // Build ray and knight context from a registered destination so the fixed
     // priority encoder and board scan occupy separate timing stages.
     always_comb begin
+        // Share square occupancy across direct-move path checks.
+        for (int square = 0; square < 64; square++)
+            job_occupied[square] = job_board.tiles[square].piece_type != NULL_PIECE;
         selected_destination = first_destination(destination_mask);
         selected_source_mask = 16'd0;
         for (int dir = 0; dir < 8; dir++) begin
@@ -891,7 +897,7 @@ module move_generator_lane #(
                         cmd_resp_valid <= 1'b1;
                         cmd_resp_thread <= job_thread;
                         cmd_resp_ply <= job_ply;
-                        cmd_resp_direct_valid <= move_pseudo_legal(job_board, job_suppress_move);
+                        cmd_resp_direct_valid <= move_pseudo_legal(job_board, job_occupied, job_suppress_move);
                         cmd_resp_direct_move <= job_suppress_move;
                         state <= GEN_IDLE;
                     end

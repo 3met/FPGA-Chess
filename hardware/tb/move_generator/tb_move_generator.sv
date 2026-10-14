@@ -590,6 +590,68 @@ module tb_move_generator;
         history_update_valid = 1'b0;
     endtask
 
+    // Compare direct slider validation with an independent coordinate walk;
+    // vary every intervening blocker pattern and destination capture state.
+    task automatic check_direct_clearance();
+        automatic FullBoard board;
+        automatic logic [63:0] occupied;
+        automatic Move move;
+        automatic bit all_match = 1'b1;
+        for (int source = 0; source < 64; source++) begin
+            for (int destination = 0; destination < 64; destination++) begin
+                automatic int dr = destination / 8 - source / 8;
+                automatic int df = destination % 8 - source % 8;
+                automatic int abs_dr = dr < 0 ? -dr : dr;
+                automatic int abs_df = df < 0 ? -df : df;
+                automatic int distance = abs_dr > abs_df ? abs_dr : abs_df;
+                if (source != destination && (dr == 0 || df == 0 || abs_dr == abs_df)) begin
+                    for (int pattern = 0; pattern < 128; pattern++) begin
+                        automatic bit expected = 1'b1;
+                        empty_board(board);
+                        board.tiles[source] = WHITE_QUEEN;
+                        if ((pattern & 64) != 0) board.tiles[destination] = BLACK_ROOK;
+                        for (int step = 1; step < distance; step++) begin
+                            automatic int rank = source / 8 + (dr < 0 ? -step : dr > 0 ? step : 0);
+                            automatic int file = source % 8 + (df < 0 ? -step : df > 0 ? step : 0);
+                            if ((pattern & (1 << (step - 1))) != 0) begin
+                                board.tiles[rank * 8 + file] = (step & 1) ? BLACK_PAWN : WHITE_KNIGHT;
+                                expected = 1'b0;
+                            end
+                        end
+                        for (int square = 0; square < 64; square++)
+                            occupied[square] = board.tiles[square].piece_type != NULL_PIECE;
+                        move = Move'({Position'(source), Position'(destination), PROMO_QUEEN});
+                        all_match &= dut.noisy_lane.move_pseudo_legal(board, occupied, move) == expected;
+                        board.tiles[source] = (dr == 0 || df == 0) ? WHITE_ROOK : WHITE_BISHOP;
+                        all_match &= dut.noisy_lane.move_pseudo_legal(board, occupied, move) == expected;
+                    end
+                end
+            end
+        end
+        check(all_match, "direct sliders honor every intervening blocker pattern and destination capture");
+
+        // Both pawn colors require an empty intermediate and destination square.
+        all_match = 1'b1;
+        for (int color = 0; color < 2; color++) begin
+            for (int file = 0; file < 8; file++) begin
+                for (int pattern = 0; pattern < 4; pattern++) begin
+                    automatic int source = (color == 0 ? 8 : 48) + file;
+                    automatic int middle = (color == 0 ? 16 : 40) + file;
+                    automatic int destination = (color == 0 ? 24 : 32) + file;
+                    empty_board(board, color == 0 ? WHITE : BLACK);
+                    board.tiles[source] = color == 0 ? WHITE_PAWN : BLACK_PAWN;
+                    if ((pattern & 1) != 0) board.tiles[middle] = WHITE_KNIGHT;
+                    if ((pattern & 2) != 0) board.tiles[destination] = BLACK_ROOK;
+                    for (int square = 0; square < 64; square++)
+                        occupied[square] = board.tiles[square].piece_type != NULL_PIECE;
+                    move = Move'({Position'(source), Position'(destination), PROMO_QUEEN});
+                    all_match &= dut.noisy_lane.move_pseudo_legal(board, occupied, move) == (pattern == 0);
+                end
+            end
+        end
+        check(all_match, "both pawn double pushes require clear intermediate and destination squares");
+    endtask
+
     initial begin
         automatic FullBoard board;
         automatic MoveBucketTops tops;
@@ -622,6 +684,8 @@ module tb_move_generator;
         tick(2);
         rst_n = 1'b1;
         while (init_busy) tick();
+
+        check_direct_clearance();
 
         start_board(board);
         cmd_thread = ThreadID'(1);

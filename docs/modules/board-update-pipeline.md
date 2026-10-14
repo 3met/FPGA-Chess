@@ -58,6 +58,6 @@ Both material and piece-square parameter sets are maintained in `hardware/data/p
 
 ## Move History
 
-Push Move records the move effects and previous side data needed to reverse it. Push Null uses a reserved history encoding and records the same restorable side data. Reverse Move reads the prior ply record for the selected thread and restores either operation.
+Move history uses synchronous dual-port RAM; its read overlaps request capture, preserving the three-stage latency and one-request-per-cycle throughput. Push Move records the move effects and previous side data needed to reverse it. Push Null uses a reserved history encoding and records the same restorable side data. Reverse Move reads the prior ply record for the selected thread and restores either operation.
 
 Each thread may have one reversible move per ply. Search must reverse accepted pushed moves before reusing that ply record for a different line. A speculative push rejected for leaving the moving king in check is never accepted as thread state; its record may be overwritten by the next candidate at the same ply.

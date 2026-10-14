@@ -57,6 +57,7 @@ module nnue_evaluator #(
     logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_update_memory[STATE_COUNT];
     logic [ACCUMULATOR_WORD_BITS-1:0] eval_accumulators;
     NnueOutputBucket eval_output_bucket;
+    Color eval_turn_q;
     logic eval_busy;
     logic partial_pending;
     logic result_pending;
@@ -152,19 +153,25 @@ module nnue_evaluator #(
     assign eval_ready = !eval_busy || (eval_busy && partial_pending
         && partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1);
 
-    // An accepted evaluation primes row zero. Thereafter the ROM reads one row
+    // An accepted evaluation primes its first row. Thereafter the ROM reads one row
     // ahead so its synchronous output does not add a MAC cycle.
     always_comb begin
+        automatic int weight_cycle = int'(eval_cycle);
+        automatic NnueOutputBucket weight_bucket = eval_output_bucket;
+        automatic Color weight_turn = eval_turn_q;
+        if (eval_valid && eval_ready) begin
+            weight_cycle = 0;
+            weight_bucket = nnue_output_bucket(eval_piece_count);
+            weight_turn = eval_turn;
+        end else if (eval_busy && eval_cycle < NNUE_OUTPUT_MAC_CYCLES - 1)
+            weight_cycle = int'(eval_cycle) + 1;
+        else weight_cycle = 0;
+        // Reorder the weights instead of muxing the wide accumulator snapshot.
+        if (weight_turn == BLACK)
+            weight_cycle = (weight_cycle + NNUE_OUTPUT_MAC_CYCLES / 2)
+                % NNUE_OUTPUT_MAC_CYCLES;
         output_weight_row_address = OutputWeightRowAddress'(
-            int'(eval_output_bucket) * NNUE_OUTPUT_MAC_CYCLES);
-        if (eval_valid && eval_ready)
-            output_weight_row_address = OutputWeightRowAddress'(
-                int'(nnue_output_bucket(eval_piece_count))
-                    * NNUE_OUTPUT_MAC_CYCLES);
-        else if (eval_busy && eval_cycle < NNUE_OUTPUT_MAC_CYCLES - 1)
-            output_weight_row_address = OutputWeightRowAddress'(
-                int'(eval_output_bucket) * NNUE_OUTPUT_MAC_CYCLES
-                    + int'(eval_cycle) + 1);
+            int'(weight_bucket) * NNUE_OUTPUT_MAC_CYCLES + weight_cycle);
     end
 
     always_ff @(posedge clk)
@@ -285,6 +292,10 @@ module nnue_evaluator #(
                 result_pending <= 1'b0;
             end
 
+            // Idle snapshot contents are unused. Shift unconditionally so only
+            // accepting a new snapshot selects data on this wide register bank.
+            eval_accumulators <= eval_accumulators
+                >> (NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS);
             if (eval_busy) begin
                 automatic OutputProduct products[NNUE_OUTPUT_MAC_LANES];
                 automatic PairSum pair_sums_a[32], pair_sums_b[32];
@@ -322,10 +333,6 @@ module nnue_evaluator #(
                 partial_cycle <= eval_cycle;
                 partial_pending <= 1'b1;
                 eval_cycle <= eval_cycle + 1'b1;
-                // Advance the ordered snapshot so every MAC lane reads a fixed
-                // bit slice instead of a cycle-selected four-row mux.
-                eval_accumulators <= eval_accumulators
-                    >> (NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS);
 
                 if (partial_pending) begin
                     for (int lane = 0; lane < 16; lane++)
@@ -372,7 +379,7 @@ module nnue_evaluator #(
                 eval_busy <= 1'b1;
             end
 
-            // Snapshot and order both perspectives before shifting MAC rows.
+            // Snapshot fixed White/Black order; ROM row addressing orders the weights.
             if (eval_valid && eval_ready) begin
                 automatic logic [ACCUMULATOR_WORD_BITS-1:0] selected_state;
                 pst_first_q <= eval_pst.first;
@@ -381,14 +388,8 @@ module nnue_evaluator #(
 
                 selected_state = accumulator_update_memory[
                     state_address(eval_thread_id)];
-                if (eval_turn == WHITE)
-                    eval_accumulators <= selected_state;
-                else
-                    eval_accumulators <= {
-                        selected_state[0 +: ACCUMULATOR_WORD_BITS / 2],
-                        selected_state[ACCUMULATOR_WORD_BITS / 2
-                            +: ACCUMULATOR_WORD_BITS / 2]
-                    };
+                eval_accumulators <= selected_state;
+                eval_turn_q <= eval_turn;
                 eval_output_bucket <= nnue_output_bucket(eval_piece_count);
             end
         end

@@ -69,6 +69,7 @@ module board_update_pipeline #(
 
     BoardUpdatePipelineCtx ctx_pipe[2];
     BoardUpdatePipelineCtx next_ctx_pipe[2];
+    BoardUpdatePipelineCtx captured_ctx;
     FullBoard next_board_out;
     ZobristKey next_zobrist_key_out;
     PstEvalPair next_pst_eval_out;
@@ -78,7 +79,7 @@ module board_update_pipeline #(
     MoveRecordAddr move_record_rd_addr, move_record_wr_addr;
     logic move_record_rd_en, move_record_wr_en;
 
-    async_read_simple_dual_port_ram #(
+    sync_read_simple_dual_port_ram #(
         .NUM_WORDS(MOVE_RECORD_COUNT),
         .WORD_SIZE($bits(MoveRecord))
     ) move_hist_mem (
@@ -90,6 +91,13 @@ module board_update_pipeline #(
         .wren(move_record_wr_en),
         .q(move_record_out)
     );
+
+    // The request-capture edge also reads history RAM. Its synchronous result
+    // feeds the existing table-planning stage without adding a pipeline cycle.
+    always_comb begin
+        captured_ctx = ctx_pipe[0];
+        captured_ctx.move_record = move_record_out;
+    end
 
     PstReadPlan pst_read_plan;
     logic [PST_READ_PORTS-1:0] pst_read_enable_q;
@@ -439,7 +447,7 @@ module board_update_pipeline #(
     // Decode dynamic board reads and special-move geometry once for both
     // table planners, then register the same effects for board mutation.
     always_comb begin
-        automatic BoardUpdatePipelineCtx in = ctx_pipe[0];
+        automatic BoardUpdatePipelineCtx in = captured_ctx;
         automatic MoveEffects effects = MoveEffects'('x);
 
         effects.from_pos = in.move.from_pos;
@@ -536,7 +544,7 @@ module board_update_pipeline #(
         next_ctx_pipe[0].set_data    = set_data;
         next_ctx_pipe[0].thread_id   = thread_id;
         next_ctx_pipe[0].search_ply  = search_ply;
-        next_ctx_pipe[0].move_record = move_record_out;
+        next_ctx_pipe[0].move_record = '0;
         next_ctx_pipe[0].mover_king_square = '0;
         // Turn-changing move operations exclude the explicit set-turn operation.
         unique case (1'b1)
@@ -554,17 +562,17 @@ module board_update_pipeline #(
     end
 
     always_comb begin
-        next_ctx_pipe[1] = ctx_pipe[0];
+        next_ctx_pipe[1] = captured_ctx;
         // Decode the king destination after request capture so dispatch does
         // not feed a dynamic tile read before the first register boundary.
-        next_ctx_pipe[1].mover_king_square = pushed_king_square(ctx_pipe[0].board, ctx_pipe[0].move);
+        next_ctx_pipe[1].mover_king_square = pushed_king_square(captured_ctx.board, captured_ctx.move);
     end
 
     // Decode the captured request into registered overlay masks during the
     // existing table-alignment stage. The following attack scan therefore has
     // registered inputs without increasing end-to-end pipeline latency.
     always_comb begin
-        automatic BoardUpdatePipelineCtx in = ctx_pipe[0];
+        automatic BoardUpdatePipelineCtx in = captured_ctx;
         automatic MoveEffects check_effects = MoveEffects'('0);
 
         check_empty_mask_d = 64'd0;
@@ -593,7 +601,7 @@ module board_update_pipeline #(
     // Form the incremental hash delta one stage before board mutation. The
     // synchronous ROM outputs then align with the same request in ctx_pipe[1].
     always_comb begin
-        automatic BoardUpdatePipelineCtx in = ctx_pipe[0];
+        automatic BoardUpdatePipelineCtx in = captured_ctx;
         automatic ZobristReadPlan plan = ZobristReadPlan'(0);
 
         zobrist_turn_toggle = 1'b0;
@@ -744,7 +752,7 @@ module board_update_pipeline #(
     // true-dual-port ROMs supply the four values needed by castling without
     // changing the external pipeline latency.
     always_comb begin
-        automatic BoardUpdatePipelineCtx in = ctx_pipe[0];
+        automatic BoardUpdatePipelineCtx in = captured_ctx;
         automatic PstReadPlan plan = PstReadPlan'(0);
 
         // Board operation encodings are disjoint, including grouped move operations.

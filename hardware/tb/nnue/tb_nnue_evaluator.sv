@@ -229,6 +229,31 @@ module tb_nnue_evaluator;
         evaluate(EvalScore'(256), "side to move selects the first concatenated perspective");
         eval_turn = BLACK;
         evaluate(EvalScore'(-256), "opponent perspective moves to the second half");
+        // Consecutive snapshots must keep their own perspective ordering while
+        // the preceding evaluation drains its last partial sum.
+        begin
+            automatic int perspective_results = 0;
+            @(negedge clk);
+            eval_turn = WHITE;
+            eval_valid = 1;
+            @(negedge clk);
+            eval_valid = 0;
+            while (!eval_ready)
+                @(negedge clk);
+            eval_turn = BLACK;
+            eval_valid = 1;
+            @(negedge clk);
+            eval_valid = 0;
+            while (perspective_results != 2) begin
+                @(negedge clk);
+                if (result_valid) begin
+                    check(result == (perspective_results == 0
+                            ? EvalScore'(256) : EvalScore'(-256)),
+                        "overlapping evaluations preserve opposite perspective weights");
+                    perspective_results++;
+                end
+            end
+        end
         eval_turn = WHITE;
         dut.output_bias[0] = {NNUE_OUTPUT_BIAS_BITS{1'b1}};
         evaluate(EvalScore'(256 + ((1 << NNUE_OUTPUT_BIAS_BITS) - 1)),

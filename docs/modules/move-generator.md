@@ -26,6 +26,8 @@ Generation visits central destinations first. Noisy and quiet lanes produce cand
 
 Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 
+Direct-move path checks share a decoded square-occupancy map, avoiding full-tile board-read multiplexers for slider clearance and pawn double pushes within the existing validation cycle.
+
 Move memory scans buckets in descending priority. While generation can still add to the highest eligible bucket, an empty bucket makes the read wait for a move or generation completion before considering lower buckets. Writes continue without waiting for reads, including when the same bucket is being read. Each thread has independent storage and a pop channel, so threads can read concurrently and a wait affects only its thread. Flush and New Game cancel pending requests and responses.
 
 ## Ordering

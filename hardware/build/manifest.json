@@ -58,7 +58,7 @@
       "hardware/rtl/zobrist_defs.sv",
       "hardware/rtl/generated/zobrist_values_pkg.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
-      "hardware/rtl/memory/async_read_simple_dual_port_ram.sv",
+      "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/memory/sync_read_dual_port_rom.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline.sv"
     ],

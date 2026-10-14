@@ -912,6 +912,34 @@ module tb_board_update_pipeline;
         expect_equal(thread1_restored === start_board, "thread 1 reverse restores board");
         expect_equal(thread1_restored_zobrist === start_zobrist, "thread 1 reverse restores zobrist");
         expect_equal(thread1_restored_pst === start_pst, "thread 1 reverse restores pst");
+
+        // Consecutive reverse requests read different history records through
+        // the shared synchronous port without changing response spacing.
+        board_op = BOARD_REVERSE_MOVE_OP;
+        board_in = thread0_after;
+        zobrist_key_in = thread0_zobrist;
+        pst_eval_in = {thread0_pst, thread0_pst};
+        piece_count_in = ref_piece_count(thread0_after);
+        move_in = NULL_MOVE;
+        set_data = '0;
+        thread_id = ThreadID'(0);
+        search_ply = PlyIndex'(1);
+        do_clock(1);
+        board_in = thread1_after;
+        zobrist_key_in = thread1_zobrist;
+        pst_eval_in = {thread1_pst, thread1_pst};
+        piece_count_in = ref_piece_count(thread1_after);
+        thread_id = ThreadID'(1);
+        do_clock(1);
+        drive_idle();
+        do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 2);
+        expect_equal(board_out === start_board, "consecutive reverse thread 0 restores board");
+        expect_equal(zobrist_key_out === start_zobrist, "consecutive reverse thread 0 restores hash");
+        expect_equal(pst_eval_out.first === start_pst, "consecutive reverse thread 0 restores PST");
+        do_clock(1);
+        expect_equal(board_out === start_board, "consecutive reverse thread 1 restores board");
+        expect_equal(zobrist_key_out === start_zobrist, "consecutive reverse thread 1 restores hash");
+        expect_equal(pst_eval_out.first === start_pst, "consecutive reverse thread 1 restores PST");
     endtask
 
     task automatic test_back_to_back_independent_requests();
