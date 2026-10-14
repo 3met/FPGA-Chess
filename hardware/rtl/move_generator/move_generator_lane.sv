@@ -8,9 +8,9 @@ module move_generator_lane #(
     parameter int THREAD_COUNT = 1,
     parameter MoveGenCommand GENERATION_COMMAND = MOVE_GEN_GENERATE_NOISY,
     parameter int HISTORY_ENTRY_BITS = 8,
-    parameter int QUIET_THRESHOLD_1 = 32,
-    parameter int QUIET_THRESHOLD_2 = 64,
-    parameter int QUIET_THRESHOLD_3 = 128,
+    parameter int QUIET_THRESHOLD_1 = 0,
+    parameter int QUIET_THRESHOLD_2 = 16,
+    parameter int QUIET_THRESHOLD_3 = 64,
     parameter int CASTLING_HISTORY_BONUS = 8,
     parameter bit ENABLE_STATS = 1'b0
 ) (
@@ -49,7 +49,7 @@ module move_generator_lane #(
     output Color history_lookup_color,
     output Position history_lookup_from,
     output Position history_lookup_to,
-    input logic [HISTORY_ENTRY_BITS-1:0] history_lookup_value,
+    input logic signed [HISTORY_ENTRY_BITS-1:0] history_lookup_value,
 
     output logic [39:0] stat_noisy_count,
     output logic [39:0] stat_quiet_count,
@@ -557,7 +557,7 @@ module move_generator_lane #(
         return victim == ROOK || victim == QUEEN ? BAD_NOISY_HIGH_BUCKET : BAD_NOISY_LOW_BUCKET;
     endfunction
 
-    // Classify the combined score, reserving the final bucket for low-score quiets.
+    // Negative-history quiets follow unfavorable captures; other quiets use three priorities.
     function automatic MoveBucketIndex quiet_bucket(
         input int signed score
     );
@@ -788,7 +788,7 @@ module move_generator_lane #(
         end else begin
             // Sum ordering heuristics before classification; keep headroom beyond history RAM.
             automatic int signed score;
-            score = int'($unsigned(history_lookup_value));
+            score = int'($signed(history_lookup_value));
             if (candidate_is_castle) score += CASTLING_HISTORY_BONUS;
             bucket_wr_select = quiet_bucket(score);
         end
@@ -869,8 +869,10 @@ module move_generator_lane #(
                         // Preload it while idle so command validity controls
                         // only the state transition, not a 64-bit data mux.
                         destination_mask <= generation_destination_mask(cmd_board);
+                        // Idle tags are unused. Capture the arriving thread even
+                        // without valid, keeping scheduler decoding off its enable.
+                        job_thread <= cmd_thread;
                         if (cmd_valid && cmd_ready) begin
-                            job_thread <= cmd_thread;
                             job_ply <= cmd_ply;
                             job_board <= cmd_board;
                             job_suppress_valid <= cmd_suppress_valid;

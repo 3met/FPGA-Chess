@@ -1006,6 +1006,16 @@
                             search_thread_id <= search_tt_lookup_issue_thread;
                             search_null_candidate[search_tt_lookup_issue_thread]
                                 <= search_thread_null_candidate(search_tt_lookup_issue_thread);
+                            // Beta, entry window, depth, and check status are fixed for this node.
+                            // Register their policy comparisons before they enter shared dispatch.
+                            search_stack_top[search_tt_lookup_issue_thread].rfp_eligible
+                                <= rfp_node_eligible(
+                                    search_stack_top[search_tt_lookup_issue_thread].remaining_depth,
+                                    search_stack_top[search_tt_lookup_issue_thread].zero_window_node,
+                                    search_board_in_check[search_tt_lookup_issue_thread],
+                                    search_stack_top[search_tt_lookup_issue_thread].beta);
+                            search_stack_top[search_tt_lookup_issue_thread].null_beta_allowed
+                                <= search_stack_top[search_tt_lookup_issue_thread].beta > NULL_MIN_BETA;
                             // Board history and depth remain fixed while this
                             // probe and any retained-response validation run.
                             search_tt_history_required[search_tt_lookup_issue_thread]

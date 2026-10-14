@@ -110,6 +110,9 @@
         logic null_attempted;
         logic entered_by_null;
         logic rfp_checked;
+        // Cache fixed entry-time policy tests before shared pipeline arbitration.
+        logic rfp_eligible;
+        logic null_beta_allowed;
         // Reversible NNUE delta retained in the normal per-ply search stack;
         // this replaces a full accumulator copy at every search depth.
         Position nnue_from;
@@ -329,7 +332,6 @@
     logic move_pop_valid;
     logic move_pop_ready;
     ThreadID move_pop_thread;
-    PlyIndex move_pop_ply;
     logic move_pop_resp_valid;
     ThreadID move_pop_resp_thread;
     PlyIndex move_pop_resp_ply;

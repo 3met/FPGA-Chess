@@ -632,3 +632,22 @@
             end
         end
     end
+
+    // Cached entry-time policy tests remain valid through parent restoration.
+    always @(negedge clk) begin
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            if (rst_n && dut.state == CTRL_SEARCH_RUN) begin
+                // Cached policy bits must match the fixed node bounds after its TT probe.
+                if (dut.search_stack_top[tid].tt_checked) begin
+                    check(dut.search_stack_top[tid].rfp_eligible == dut.rfp_node_eligible(
+                            dut.search_stack_top[tid].remaining_depth,
+                            dut.search_stack_top[tid].zero_window_node,
+                            dut.search_board_in_check[tid], dut.search_stack_top[tid].beta),
+                        "cached RFP eligibility matches the node entry window");
+                    check(dut.search_stack_top[tid].null_beta_allowed
+                            == (dut.search_stack_top[tid].beta > dut.NULL_MIN_BETA),
+                        "cached null-move bound eligibility matches the node beta");
+                end
+            end
+        end
+    end

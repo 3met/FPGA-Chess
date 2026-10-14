@@ -4,7 +4,7 @@
 
 ## RTL Organization
 
-The top level coordinates noisy/direct and quiet generation lanes, move memory, and quiet history. Generation lanes produce ordered candidates while move memory owns per-thread storage, per-ply FIFO state, bucket sequencing, and destructive pops. Quiet-history updates run independently of generation.
+The top level coordinates noisy/direct and quiet generation lanes, move memory, and quiet history. Generation lanes produce ordered candidates while move memory owns per-thread storage, per-ply FIFO state, bucket sequencing, and destructive pops. While idle, each lane preloads its destination mask and thread tag independently of command validity; accepted commands retain the same launch cycle. Quiet-history updates run independently of generation.
 
 ## Commands
 
@@ -43,11 +43,12 @@ Candidates are divided into eight global-priority buckets:
 | 1 | Other unfavorable captures. |
 | 0 | Low-score quiet moves. |
 
-Capture classification uses a bounded static-exchange approximation. Quiet ordering sums unsigned history and the castling bonus in a wide signed score before classification. Three configured thresholds divide the quiet buckets; the lowest-score bucket follows both bad-noisy buckets. History entries saturate to their unsigned range and initialize to a configured default. Depth-scaled gravity updates reward quiet beta-cutoff moves and penalize up to three earlier quiets that failed to cut off. Storage is configured by the engine profile and update policy by the search profile.
+Capture classification uses a bounded static-exchange approximation. Quiet ordering adds signed history and the castling bonus in a wide signed score before classification. Three strictly increasing configured thresholds divide the quiet buckets; thresholds and reset priors may be negative. The low-score quiet bucket follows both unfavorable-capture groups. The history RAM stores signed entries initialized to its configured prior and saturates to its full signed range. The reset prior is independent of the bucket thresholds; an untouched move scores that prior plus any castling bonus. Depth-scaled gravity updates reward quiet beta-cutoff moves and penalize up to three earlier quiets that failed to cut off. Storage is configured by the engine profile and update policy by the search profile.
 
-Updates use `H′ = clamp(H + B − floor((H − default) × |B| / 2^entry_bits), 0, 2^entry_bits − 1)`, where the reward is bounded by remaining depth and the configured maximum, and a failed quiet receives the reward divided by the malus divisor with a negative sign. Gravity is centered on the default so both directions can use the unsigned storage range.
+All history updates use `h′ = clamp(h + B − trunc(h × |B| / D), −D, D − 1)`, where `D = 2^(entry_bits − 1)`. The reward is bounded by remaining depth and the configured maximum; a failed quiet receives that reward divided by the malus divisor with a negative sign. Signed division truncates toward zero. Defaults are initialization priors, while gravity is centered on zero; defaults and maximum rewards must fit each signed entry width.
 
-History lookups take priority over best-effort updates, so history maintenance does not stall generation.
+
+History lookups take priority over best-effort updates, so history maintenance does not stall generation. Gravity multiplication is registered with the captured RAM value, separating it from writeback saturation within the existing update latency. Write addresses are selected from the stable update context independently of lookup collision suppression; conflicts disable the write without gating its address or data.
 
 Move memory tracks each node's progress through good noisy, regular quiet, bad noisy, and low quiet buckets. Noisy generation enables buckets 7–6. After they are exhausted, search may stop or generate quiet moves in buckets 5–3 and 0; exhausting regular quiets enables bad noisy buckets 2–1, followed by low quiet bucket 0. Search issues `pop(thread, ply)` without supplying bucket state, and each pop consumes the returned move even if later legality checks reject it.
 
@@ -59,7 +60,7 @@ Each thread has separate move storage and a per-ply pointer stack. Engine profil
 
 Each pointer-stack entry records the FIFO bounds and bucket progress for one ply. A child begins at its parent's write tails, preventing it from reading or overwriting unsearched ancestor moves. Restoring a parent restores its unread moves, while later siblings may reuse descendant storage.
 
-FIFO heads and tails increment locally within each bucket, with bucket selection enabling the update after the increment. This preserves same-cycle write forwarding and pointer-stack updates. Registered generator ownership compares the candidate cache contexts before selecting the match bit, keeping FIFO service decisions off the ply-comparison path.
+FIFO heads and tails increment locally within each bucket, with bucket selection enabling the update after the increment. This preserves same-cycle write forwarding and pointer-stack updates. Forwarding compares each bucket’s cached head and tail before selecting its one-bit empty flag, avoiding a selected-pointer mux ahead of the comparison. Registered generator ownership compares the candidate cache contexts before selecting the match bit, keeping FIFO service decisions off the ply-comparison path.
 
 A write beyond its bucket partition sets a sticky overflow error bit but is not blocked or redirected. Contents for that thread are not guaranteed after overflow. Reset and New Game clear the bit; no overflow location or count is tracked.
 

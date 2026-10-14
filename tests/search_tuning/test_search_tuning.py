@@ -118,7 +118,7 @@ class SearchSpaceTests(unittest.TestCase):
         self.assertLess(null["shallow_reduction"], null["minimum_depth"])
         self.assertLess(null["deep_reduction"], null["deep_depth_threshold"])
         thresholds = candidate["history"]["quiet_bucket_thresholds"]
-        self.assertTrue(0 < thresholds[0] < thresholds[1] < thresholds[2])
+        self.assertTrue(thresholds[0] < thresholds[1] < thresholds[2])
 
     def test_all_configured_paths_exist(self):
         for parameter in self.parameters:

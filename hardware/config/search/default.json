@@ -43,11 +43,11 @@
     "single_legal_move_ms": 10
   },
   "history": {
-    "default_score": 32,
+    "default_score": 0,
     "reward_per_depth": 2,
     "maximum_reward": 31,
     "malus_divisor": 2,
-    "quiet_bucket_thresholds": [32, 64, 128],
+    "quiet_bucket_thresholds": [0, 16, 64],
     "castling_bonus": 8
   },
   "transposition_table": {

@@ -1,4 +1,4 @@
-// One logical quiet-history RAM shared by every thread and color.
+// One synchronous RAM for an quiet-history table.
 
 module move_generator_history_table #(
     parameter int HISTORY_ENTRY_COUNT = 8192,

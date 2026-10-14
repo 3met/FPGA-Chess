@@ -64,32 +64,28 @@
     always_comb begin
         move_cmd_valid = 1'b0;
         move_cmd = MOVE_GEN_GENERATE_NOISY;
-        move_cmd_thread = ThreadID'(0);
-        move_cmd_ply = PlyIndex'(0);
-        // The command is sampled only with move_cmd_valid. Default directly
-        // to the selected search board so readiness logic does not control a
-        // wide active-board/search-board data mux on the command path.
+        // Preselect the entire context before valid decoding so command readiness
+        // does not receive an extra valid-controlled thread, ply, or board mux.
+        move_cmd_thread = search_move_issue_thread;
+        move_cmd_ply = search_ply[search_move_issue_thread];
         move_cmd_board = search_board[search_move_issue_thread];
         move_cmd_suppress_valid = 1'b0;
         move_cmd_suppress_move = NULL_MOVE;
         move_quiet_cmd_valid = 1'b0;
-        move_quiet_cmd_thread = ThreadID'(0);
-        move_quiet_cmd_ply = PlyIndex'(0);
+        move_quiet_cmd_thread = search_quiet_issue_thread;
+        move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
         move_quiet_cmd_board = search_board[search_quiet_issue_thread];
         move_quiet_cmd_suppress_valid = 1'b0;
         move_quiet_cmd_suppress_move = NULL_MOVE;
         move_pop_valid = 1'b0;
-        // Preselect the complete pop address payload. It is ignored until
-        // valid, and keeping readiness out of it shortens every bucket-RAM
-        // read-address path.
+        // Shared pop continuations select only a thread; each reader uses its
+        // locally owned ply without a command-selection mux.
         move_pop_thread = search_move_issue_thread;
-        move_pop_ply = search_ply[search_move_issue_thread];
         if (state == CTRL_PERFT_GEN_ISSUE) begin
             move_cmd_thread = ThreadID'(0);
             move_cmd_ply = search_ply[0];
             move_cmd_board = search_board[0];
             move_pop_thread = ThreadID'(0);
-            move_pop_ply = search_ply[0];
             // Move-order states have distinct encodings.
             unique case (search_stack_top[0].move_order_state)
                 MOVE_ORDER_GENERATE_NOISY: begin
@@ -118,7 +114,6 @@
             move_cmd_ply = search_ply[move_followup_thread];
             move_cmd_board = search_board[move_followup_thread];
             move_pop_thread = move_followup_thread;
-            move_pop_ply = search_ply[move_followup_thread];
             // Follow-up action encodings are disjoint.
             unique case (move_followup_action)
                 MOVE_FOLLOWUP_NOISY_CMD: begin
@@ -252,10 +247,11 @@
             end
             move_pop_valid_vec[tid] = state == CTRL_SEARCH_RUN
                 && search_thread_move_ready(tid) && move_state_uses_pop(order_state);
+            // Every pop addresses its own thread's current ply, including shared
+            // follow-ups and perft; keep command selection out of this payload.
             move_pop_ply_vec[tid] = search_ply[tid];
             if (move_pop_valid && move_pop_thread == ThreadID'(tid)) begin
                 move_pop_valid_vec[tid] = 1'b1;
-                move_pop_ply_vec[tid] = move_pop_ply;
             end
             move_pop_resp_ready_vec[tid] = move_pop_resp_valid
                 && move_pop_response_thread == ThreadID'(tid);

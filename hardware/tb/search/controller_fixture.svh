@@ -159,6 +159,7 @@
         .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         // The focused variant puts ordinary quiets in the highest quiet bucket without
         // seeding internal RAM, so real search must exercise early quiet reads.
+        .HISTORY_DEFAULT_SCORE(16),
         .QUIET_THRESHOLD_1(EARLY_ONLY ? 1 : 32),
         .QUIET_THRESHOLD_2(EARLY_ONLY ? 2 : 64),
         .QUIET_THRESHOLD_3(EARLY_ONLY ? 3 : 128),

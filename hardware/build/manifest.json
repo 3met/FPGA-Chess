@@ -227,6 +227,11 @@
       "testbench": "hardware/tb/move_generator/tb_move_generator_read_pipeline.sv",
       "top": "tb_move_generator_read_pipeline"
     },
+    "quiet-history": {
+      "source_set": "move-generator",
+      "testbench": "hardware/tb/move_generator/tb_quiet_history.sv",
+      "top": "tb_quiet_history"
+    },
     "move-generator": {
       "source_set": "move-generator",
       "testbench": "hardware/tb/move_generator/tb_move_generator.sv",
@@ -404,7 +409,7 @@
         "reference_frequency_hz": 50000000,
         "reference_port": "CLOCK_50"
       },
-      "seed": 4,
+      "seed": 6,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",

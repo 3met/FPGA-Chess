@@ -6,7 +6,7 @@ module move_generator_read_pipeline #(
     parameter int THREAD_COUNT = 1,
     parameter int SEARCH_STACK_DEPTH = MAX_PLY_COUNT,
     parameter int MEMORY_ENTRIES = 2048,
-    parameter int BUCKET_RATIOS[MOVE_BUCKET_COUNT] = '{64,48,16,192,64,32,64,32}
+    parameter int BUCKET_RATIOS[MOVE_BUCKET_COUNT] = '{64,48,16,112,112,64,64,32}
 ) (
     input logic clk, rst_n, clear, flush,
     input logic pop_valid[THREAD_COUNT], output logic pop_ready[THREAD_COUNT],
@@ -193,6 +193,8 @@ module move_generator_read_pipeline #(
             automatic MoveBucketMask eligible;
             automatic MoveBucketMask generating;
             automatic MoveBucketMask incoming;
+            automatic MoveBucketMask bucket_empty;
+            automatic logic incoming_empty;
             automatic logic result_room;
             automatic logic generation_starting;
             next_state[tid] = cache_state[tid];
@@ -216,6 +218,9 @@ module move_generator_read_pipeline #(
             thread_write_top[tid] = MoveBucketTop'(0);
             generating = MoveBucketMask'(0);
             incoming = MoveBucketMask'(0);
+            for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++)
+                bucket_empty[bucket] = cache_state[tid].tops[bucket]
+                    == cache_state[tid].heads[bucket];
 
             for (int lane = 0; lane < 2; lane++) begin
                 if (generation_owns_cache_q[tid][lane]) begin
@@ -242,8 +247,7 @@ module move_generator_read_pipeline #(
                 if (!found[tid] && !blocked[tid] && eligible[bucket]) begin
                     automatic MoveBucketTop head = cache_state[tid].heads[bucket];
                     if (cache_state[tid].tops[bucket] > head
-                            || (cache_state[tid].tops[bucket] == head
-                                && incoming[bucket])) begin
+                            || (bucket_empty[bucket] && incoming[bucket])) begin
                         found[tid] = 1'b1;
                         selected[tid] = MoveBucketIndex'(bucket);
                         read_top[tid] = head;
@@ -256,9 +260,14 @@ module move_generator_read_pipeline #(
             result_room = !result_valid[tid] || pop_resp_ready[tid];
             service[tid] = stage_valid[tid] && cache_match[tid]
                 && !blocked[tid] && result_room && rst_n && !clear && !flush;
+            // Compare each FIFO before selecting its one-bit empty flag. The
+            // arriving bucket then avoids a wide pointer mux and comparison.
+            incoming_empty = 1'b0;
+            for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++)
+                incoming_empty |= bucket_empty[bucket]
+                    && thread_write_bucket[tid] == MoveBucketIndex'(bucket);
             bypass[tid] = service[tid] && found[tid] && thread_write_valid[tid]
-                && thread_write_bucket[tid] == selected[tid]
-                && cache_state[tid].tops[selected[tid]] == read_top[tid];
+                && thread_write_bucket[tid] == selected[tid] && incoming_empty;
 
             // A generation start changes ownership before its first write.
             if (node_init_valid[tid] && node_init_ready[tid]) begin

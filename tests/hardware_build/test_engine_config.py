@@ -73,6 +73,34 @@ class EngineConfigTests(unittest.TestCase):
         self.assertEqual(rtl_parameters["SINGLE_LEGAL_MOVE_MS"], timing["single_legal_move_ms"])
         self.assertEqual(len(config["digest"]), 64)
 
+    def test_signed_history_defaults_and_thresholds_reach_rtl(self):
+        """Negative priors and boundaries retain their signed values through configuration."""
+        policy = {"default_score": -21,
+                  "quiet_bucket_thresholds": [-40, -7, 23]}
+        config = self.load_temporary_config({"history": policy}, {
+            "history_heuristic": {"entry_bits": 8},
+        })
+        params = engine_rtl_parameter_values(config)
+        self.assertEqual(params["HISTORY_DEFAULT_SCORE"], policy["default_score"])
+        for index, threshold in enumerate(policy["quiet_bucket_thresholds"], 1):
+            self.assertEqual(params[f"QUIET_THRESHOLD_{index}"], threshold)
+
+    def test_signed_history_rejects_values_outside_entry_width(self):
+        """Both endpoints must fit the configured signed RAM width."""
+        config = self.load_temporary_config()
+        widths = {"default_score": config["history_entry_bits"]}
+        for field, bits in widths.items():
+            limit = 1 << (bits - 1)
+            for value in (-limit - 1, limit):
+                with self.subTest(field=field, value=value), self.assertRaises(BuildError):
+                    self.load_temporary_config({"history": {field: value}})
+        with self.assertRaises(BuildError):
+            limit = 1 << (min(widths.values()) - 1)
+            self.load_temporary_config({"history": {"maximum_reward": limit}})
+        for thresholds in ([-2147483649, -2, 0], [0, 1, 2147483648], [-8, -8, 2]):
+            with self.subTest(thresholds=thresholds), self.assertRaises(BuildError):
+                self.load_temporary_config({"history": {"quiet_bucket_thresholds": thresholds}})
+
     def test_tt_queue_depths_reach_rtl_parameters(self):
         """Check device overrides independently of the production queue sizes."""
         queues = {"store_fifo_depth": 17, "outstanding_depth": 16,
@@ -164,15 +192,15 @@ class EngineConfigTests(unittest.TestCase):
                     load_engine_config(str(engine_path))
 
     def test_history_reward_must_fit_configured_entry_width(self):
-        with self.assertRaisesRegex(BuildError, "fit the configured history entry width"):
+        with self.assertRaisesRegex(BuildError, "fit the configured .*entry width"):
             self.load_temporary_config({"history": {"maximum_reward": 256}})
 
-    def test_history_default_must_fit_unsigned_entry_width(self):
+    def test_history_default_must_fit_signed_entry_width(self):
         with self.assertRaisesRegex(BuildError, "default_score must fit"):
             self.load_temporary_config({"history": {"default_score": 256}})
-        with self.assertRaisesRegex(BuildError, "default_score must be an integer"):
-            self.load_temporary_config({"history": {"default_score": -1}})
-        self.load_temporary_config({"history": {"maximum_reward": 128}})
+        self.load_temporary_config({"history": {"default_score": -1}})
+        with self.assertRaises(BuildError):
+            self.load_temporary_config({"history": {"maximum_reward": 128}})
 
     def test_history_entry_count_must_be_a_power_of_two(self):
         with self.assertRaisesRegex(BuildError, "must be a power of two"):
@@ -183,19 +211,19 @@ class EngineConfigTests(unittest.TestCase):
     def test_history_policy_must_fit_entry_width(self):
         with self.assertRaisesRegex(BuildError, "castling_bonus must fit"):
             self.load_temporary_config(
-                {"history": {"default_score": 16, "maximum_reward": 15, "castling_bonus": 32}},
+                {"history": {"default_score": 8, "maximum_reward": 15, "castling_bonus": 32}},
                 {"history_heuristic": {"entry_bits": 5}},
             )
 
-    def test_quiet_thresholds_require_three_positive_ascending_boundaries(self):
-        for thresholds in ([0, 8, 16], [-8, 8, 16], [8, 8, 16], [16, 8, 32], [8], [8, 16]):
+    def test_quiet_thresholds_require_three_ascending_boundaries(self):
+        for thresholds in ([8, 8, 16], [16, 8, 32], [8], [8, 16], [8, 16, 24, 32], [True, 8, 16]):
             with self.subTest(thresholds=thresholds):
-                with self.assertRaisesRegex(BuildError, "three positive ascending integers"):
+                with self.assertRaisesRegex(BuildError, "three ascending integers"):
                     self.load_temporary_config({"history": {"quiet_bucket_thresholds": thresholds}})
 
     def test_quiet_thresholds_can_exceed_history_range_for_combined_scores(self):
         self.load_temporary_config(
-            {"history": {"default_score": 16, "maximum_reward": 15, "quiet_bucket_thresholds": [16, 32, 64]}},
+            {"history": {"default_score": 8, "maximum_reward": 15, "quiet_bucket_thresholds": [16, 32, 64]}},
             {"history_heuristic": {"entry_bits": 5}},
         )
         with self.assertRaisesRegex(BuildError, "must fit the signed ordering score"):

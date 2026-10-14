@@ -102,6 +102,8 @@
             automatic logic saved_unit_window = dut.search_stack_top[tid].unit_window;
             automatic logic saved_zero_window_node = dut.search_stack_top[tid].zero_window_node;
             automatic logic saved_rfp_checked = dut.search_stack_top[tid].rfp_checked;
+            automatic logic saved_rfp_eligible = dut.search_stack_top[tid].rfp_eligible;
+            automatic logic saved_null_beta_allowed = dut.search_stack_top[tid].null_beta_allowed;
             automatic logic saved_null_attempted = dut.search_stack_top[tid].null_attempted;
             automatic int saved_remaining_depth = int'(dut.search_stack_top[tid].remaining_depth);
 
@@ -114,6 +116,7 @@
             dut.search_stack_top[tid].tt_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
             dut.search_stack_top[tid].move_order_state = MOVE_ORDER_DIRECT;
             dut.search_stack_top[tid].beta = EvalScore'(100);
+            dut.search_stack_top[tid].null_beta_allowed = dut.search_stack_top[tid].beta > dut.NULL_MIN_BETA;
             dut.search_stack_top[tid].alpha = EvalScore'(99);
             dut.search_stack_top[tid].unit_window = 1'b1;
             dut.search_stack_top[tid].zero_window_node = 1'b1;
@@ -129,6 +132,10 @@
                 "pending TT validation selects the real move before a null probe");
 
             dut.search_stack_top[tid].remaining_depth = dut.RFP_MAXIMUM_DEPTH;
+            // A manually constructed probed node must include its cached entry policy.
+            dut.search_stack_top[tid].rfp_eligible = dut.rfp_node_eligible(
+                dut.search_stack_top[tid].remaining_depth, dut.search_stack_top[tid].zero_window_node,
+                dut.search_board_in_check[tid], dut.search_stack_top[tid].beta);
             dut.search_stack_top[tid].rfp_checked = 1'b0;
             dut.search_tt_validation_pending[tid] = 1'b0;
             check(dut.search_thread_rfp_ready(tid) && dut.search_thread_eval_ready(tid),
@@ -153,6 +160,8 @@
             dut.search_stack_top[tid].unit_window = saved_unit_window;
             dut.search_stack_top[tid].zero_window_node = saved_zero_window_node;
             dut.search_stack_top[tid].rfp_checked = saved_rfp_checked;
+            dut.search_stack_top[tid].rfp_eligible = saved_rfp_eligible;
+            dut.search_stack_top[tid].null_beta_allowed = saved_null_beta_allowed;
             dut.search_stack_top[tid].null_attempted = saved_null_attempted;
             dut.search_stack_top[tid].remaining_depth = saved_remaining_depth;
         end

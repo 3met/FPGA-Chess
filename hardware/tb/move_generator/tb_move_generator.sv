@@ -78,9 +78,10 @@ module tb_move_generator;
     move_generator #(
         .THREAD_COUNT(2),
         // The hand-calculated history checks use this explicit fixture policy.
-        .HISTORY_ENTRY_BITS(8), .HISTORY_DEFAULT_SCORE(48), .HISTORY_REWARD_PER_DEPTH(2),
+        .HISTORY_ENTRY_BITS(8), .HISTORY_DEFAULT_SCORE(48),
+        .HISTORY_REWARD_PER_DEPTH(2),
         .HISTORY_MAXIMUM_REWARD(31), .HISTORY_MALUS_DIVISOR(2),
-        .QUIET_THRESHOLD_1(32), .QUIET_THRESHOLD_2(64), .QUIET_THRESHOLD_3(128),
+        .QUIET_THRESHOLD_1(-12), .QUIET_THRESHOLD_2(64), .QUIET_THRESHOLD_3(112),
         .CASTLING_HISTORY_BONUS(8),
         .MOVE_MEMORY_ENTRIES(512),
         .ENABLE_STATS(1'b1)
@@ -819,28 +820,28 @@ module tb_move_generator;
         check(found && same_move(popped, target) && popped_bucket == QUIET_HIGH_BUCKET,
             "positive history update raises quiet move bucket");
         repeat (8) history_update(target, 6'd63);
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    target.from_pos, target.to_pos)]) == 8'd227,
+                    target.from_pos, target.to_pos)]) == 8'sd124,
             "history gravity reduces bonuses as history approaches its limit");
         failed0 = make_move(Position'(1), Position'(16));
         failed1 = make_move(Position'(1), Position'(11));
         failed2 = make_move(Position'(4), Position'(5));
         history_update_with_failures(target, failed0, failed1, failed2, 2'd3, 6'd4);
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    failed0.from_pos, failed0.to_pos)]) == dut.HISTORY_DEFAULT_SCORE - 4,
+                    failed0.from_pos, failed0.to_pos)]) == dut.HISTORY_DEFAULT_SCORE - 5,
             "failed quiet default history receives half-strength malus");
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    failed1.from_pos, failed1.to_pos)]) == dut.HISTORY_DEFAULT_SCORE - 4,
+                    failed1.from_pos, failed1.to_pos)]) == dut.HISTORY_DEFAULT_SCORE - 5,
             "second failed quiet receives a malus");
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    failed2.from_pos, failed2.to_pos)]) == dut.HISTORY_DEFAULT_SCORE - 4,
+                    failed2.from_pos, failed2.to_pos)]) == dut.HISTORY_DEFAULT_SCORE - 5,
             "third failed quiet receives a malus");
 
-        // Classify the combined score across every inclusive boundary, with signed headroom.
+        // Classify every inclusive boundary, including a negative fixture threshold.
         check(dut.quiet_lane.quiet_bucket(dut.QUIET_THRESHOLD_1 - 1) == QUIET_LOW_BUCKET
             && dut.quiet_lane.quiet_bucket(dut.QUIET_THRESHOLD_1) == QUIET_MEDIUM_BUCKET,
             "low and medium quiet boundary is inclusive");
@@ -852,7 +853,7 @@ module tb_move_generator;
             "high and highest quiet boundary is inclusive");
         check(dut.quiet_lane.quiet_bucket(dut.QUIET_THRESHOLD_1 - 4 + 8) == QUIET_MEDIUM_BUCKET,
             "additional ordering bonus offsets low history");
-        check(dut.quiet_lane.quiet_bucket(-1) == QUIET_LOW_BUCKET
+        check(dut.quiet_lane.quiet_bucket(-1) == QUIET_MEDIUM_BUCKET
             && dut.quiet_lane.quiet_bucket(256) == QUIET_HIGHEST_BUCKET,
             "combined heuristics retain signed headroom beyond stored history");
         tops = '0;
@@ -860,17 +861,17 @@ module tb_move_generator;
             tops, direct_valid, direct_move, tops);
         pop_one(ALL_BUCKET_MASK, tops, lower, found, popped, popped_bucket);
         check(found && same_move(popped, target) && popped_bucket == QUIET_HIGHEST_BUCKET,
-            "history above the signed range generates a highest-bucket quiet");
+            "strong signed history generates a highest-bucket quiet");
 
         history_update_thread = ThreadID'(1);
         history_update(target, 6'd1);
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(1), WHITE,
                     target.from_pos, target.to_pos)]) == dut.HISTORY_DEFAULT_SCORE + 2,
             "thread participates in the combined history hash");
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    target.from_pos, target.to_pos)]) == 8'd230,
+                    target.from_pos, target.to_pos)]) == 8'sd125,
             "thread-local update leaves the other hashed entry unchanged");
 
         // A second update presented while the private update pipeline is busy
@@ -878,19 +879,19 @@ module tb_move_generator;
         history_update_thread = ThreadID'(0);
         // Repeated rewards/maluses must saturate rather than wrap either endpoint.
         repeat (32) history_update(target, 6'd63);
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    target.from_pos, target.to_pos)]) == 8'hff,
-            "repeated rewards saturate at the unsigned maximum");
+                    target.from_pos, target.to_pos)]) == 8'sd127,
+            "repeated rewards saturate at the signed maximum");
         repeat (64) history_update_with_failures(failed1, target, NULL_MOVE, NULL_MOVE, 2'd1, 6'd63);
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    target.from_pos, target.to_pos)]) == 0,
-            "repeated maluses saturate at zero");
+                    target.from_pos, target.to_pos)]) == -128,
+            "repeated maluses saturate at the signed minimum");
         history_update(target, 6'd63);
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
-                    target.from_pos, target.to_pos)]) > 0,
+                    target.from_pos, target.to_pos)]) > -128,
             "a saturated low score recovers after a reward");
         launch_history_update_with_failures(
             make_move(Position'(2), Position'(10)),
@@ -902,7 +903,7 @@ module tb_move_generator;
         tick();
         history_update_valid = 1'b0;
         while (dut.quiet_history.state != HISTORY_UPDATE_IDLE) tick();
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
                     Position'(3), Position'(11))]) == dut.HISTORY_DEFAULT_SCORE,
             "busy history pipeline drops a new update without backpressure");
@@ -921,7 +922,7 @@ module tb_move_generator;
         clear = 1'b0;
         while (init_busy) tick();
         tick();
-        check($unsigned(dut.quiet_history.history_table.history_ram.mem[
+        check($signed(dut.quiet_history.history_table.history_ram.mem[
                 dut.quiet_history.history_hash(ThreadID'(0), WHITE,
                     Position'(2), Position'(10))]) == dut.HISTORY_DEFAULT_SCORE,
             "cleared history returns to its default after cancelling an update");
@@ -1106,10 +1107,12 @@ module tb_move_generator;
                 tops, direct_valid, direct_move, tops);
         end
         check(overflow_sticky, "overflow sets the sticky error bit");
+        // Check the actual fixture partition so bucket allocation can be tuned.
         check(dut.reader.cache_state[0].tops[QUIET_MEDIUM_BUCKET]
-                > MoveBucketTop'(192),
+                > MoveBucketTop'(dut.reader.CAPACITIES[QUIET_MEDIUM_BUCKET]),
             "overflow does not clamp the move-memory tail");
-        check(stat_bucket_high_water[QUIET_MEDIUM_BUCKET] > MoveBucketTop'(192),
+        check(stat_bucket_high_water[QUIET_MEDIUM_BUCKET]
+                > MoveBucketTop'(dut.reader.CAPACITIES[QUIET_MEDIUM_BUCKET]),
             "high-water telemetry includes overflowing writes");
         cmd_ply = PlyIndex'(0);
 

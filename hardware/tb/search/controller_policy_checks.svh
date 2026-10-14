@@ -17,13 +17,13 @@
         for (int bucket = 0; bucket < move_generator_defs::MOVE_BUCKET_COUNT; bucket++) begin
             automatic int expected = (bucket == move_generator_defs::QUIET_HIGHEST_BUCKET
                 || bucket == move_generator_defs::GOOD_NOISY_LOW_BUCKET || bucket == move_generator_defs::GOOD_NOISY_HIGH_BUCKET)
-                ? 1 : bucket == move_generator_defs::QUIET_LOW_BUCKET ? 3 : 2;
+                ? 1 : 2;
             check(dut.lmr_bucket_reduction(8'(2), 8'(6),
                     move_generator_defs::MoveBucketIndex'(bucket)) == 8'(expected),
                 $sformatf("LMR confidence adjustment for bucket %0d", bucket));
             check(dut.lmr_bucket_reduction(8'(0), 8'(6),
                     move_generator_defs::MoveBucketIndex'(bucket))
-                    == 8'(bucket == move_generator_defs::QUIET_LOW_BUCKET ? 1 : 0),
+                    == 8'(0),
                 $sformatf("LMR zero reduction cannot underflow for bucket %0d", bucket));
         end
         check(dut.lmr_bucket_reduction(8'(3), 8'(3),
@@ -31,7 +31,7 @@
             "LMR applies confidence before clamping to remaining depth");
         check(dut.lmr_bucket_reduction(8'((1 << dut.SEARCH_DEPTH_BITS) - 1), 8'(6),
                 move_generator_defs::QUIET_LOW_BUCKET) == 8'(5),
-            "LMR increment carries before depth clamp without wrapping");
+            "LMR maximum base reduction clamps without wrapping");
         dut.search_completed_depth = 5'd2;
         dut.previous_depth_best_move = make_move(Position'(8), Position'(16), PROMO_QUEEN);
         dut.previous_depth_score = EvalScore'(100);

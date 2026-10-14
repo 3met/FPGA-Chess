@@ -53,7 +53,7 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 
 ## State Ownership
 
-The active board is canonical controller state between commands. Board operations use [board_update_pipeline](board-update-pipeline.md) to update it and its incremental state. New Game restores the starting position and clears repetition history.
+The active board is canonical controller state between commands. Board operations use [board_update_pipeline](board-update-pipeline.md) to update it and its incremental state. New Game restores the starting position and clears repetition context.
 
 Each search thread owns its current position, search stack, alpha/beta window, iterative-deepening state, and node count. The stack retains the state needed to reverse a child and resume its parent.
 
@@ -80,11 +80,11 @@ Reset, New Game, Kill, and search restart prevent outstanding responses from cha
 
 ## Node Lifecycle
 
-The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent. Return-score and quiet-history decisions use each thread's local parent state; arbitration enables only the selected thread's update in the same cycle.
+The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent. Fixed RFP eligibility and the null-move beta-bound test are cached with the node at TT probe issue, keeping wide window comparisons out of shared dispatch while preserving them on parent restoration. Return-score and quiet-history decisions use each thread's local parent state; arbitration enables only the selected thread's update in the same cycle.
 
 Move generation produces pseudo-legal candidates. The controller applies each candidate speculatively and rejects it if the moving side remains in check. Accepted children update repetition and NNUE state; returning from a child restores the parent position and folds the child score into its result.
 
-Generation and move reads can overlap. Generation and direct-validation commands share lane arbitration; each thread accepts bucket pops through its own ready/valid channel independently of command selection. The controller initializes a node's move storage before descent and waits for parent generation to complete before a child can allocate move storage, descend, or reverse the parent. Cancellation covers both generation and reads. Bucket ordering and storage ownership are defined in [move-generator.md](move-generator.md).
+Generation and move reads can overlap. Generation and direct-validation commands share lane arbitration; each thread accepts bucket pops through its own ready/valid channel independently of command selection. The controller initializes a node's move storage before descent and waits for parent generation to complete before a child can allocate move storage, descend, or reverse the parent. Generation payloads are preselected independently of request-valid decoding, and each pop uses its thread’s locally owned ply, keeping shared command selection out of the reader address path. Cancellation covers both generation and reads. Bucket ordering and storage ownership are defined in [move-generator.md](move-generator.md).
 
 TT moves pass through the same legality checks as generated moves. Retained TT responses complete child validation before entry-time pruning or evaluation can run, preserving the probed node's board, depth, and history context until the response is resolved. The controller enforces the root and repetition-sensitive cutoff restrictions described in [transposition-table.md](transposition-table.md).
 

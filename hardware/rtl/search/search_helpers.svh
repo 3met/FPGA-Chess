@@ -116,8 +116,8 @@
     endfunction : null_child_depth
 
     // Cache the position/depth portion when launching the TT lookup. Alpha can
-    // change when the TT response is consumed, so the window tests remain live
-    // in the ready-action classifier.
+    // change when the TT response is consumed, so unit-window eligibility stays
+    // live while the fixed beta-bound test is cached with the node.
     function automatic logic search_thread_null_candidate(input int thread_index);
         automatic SearchDepth depth = search_stack_top[thread_index].remaining_depth;
         automatic SearchDepth reduction = depth < SearchDepth'(NULL_DEEP_DEPTH_THRESHOLD)
@@ -143,12 +143,7 @@
             && !search_thread_tt_lookup_ready(thread_index)
             && search_stack_top[thread_index].tt_checked
             && !search_stack_top[thread_index].rfp_checked
-            && rfp_node_eligible(
-                search_stack_top[thread_index].remaining_depth,
-                search_stack_top[thread_index].zero_window_node,
-                search_board_in_check[thread_index],
-                search_stack_top[thread_index].beta
-            );
+            && search_stack_top[thread_index].rfp_eligible;
     endfunction : search_thread_rfp_ready
 
     function automatic logic search_thread_null_ready(input int thread_index);
@@ -162,7 +157,7 @@
             && !search_stack_top[thread_index].null_attempted
             && search_null_candidate[thread_index]
             && search_stack_top[thread_index].unit_window
-            && search_stack_top[thread_index].beta > NULL_MIN_BETA;
+            && search_stack_top[thread_index].null_beta_allowed;
     endfunction : search_thread_null_ready
 
     function automatic logic search_thread_eval_ready(input int thread_index);

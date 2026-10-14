@@ -225,9 +225,9 @@ def _validate_search(search: dict, path: Path) -> dict:
         not isinstance(thresholds, list)
         or len(thresholds) != 3
         or any(isinstance(value, bool) or not isinstance(value, int) for value in thresholds)
-        or not 0 < thresholds[0] < thresholds[1] < thresholds[2]
+        or not thresholds[0] < thresholds[1] < thresholds[2]
     ):
-        raise BuildError(f"{context}.history.quiet_bucket_thresholds must be three positive ascending integers")
+        raise BuildError(f"{context}.history.quiet_bucket_thresholds must be three ascending integers")
 
     base = _positive_number(lmr, "base", f"{context}.lmr")
     divisor = _positive_number(lmr, "divisor", f"{context}.lmr")
@@ -310,7 +310,7 @@ def _validate_search(search: dict, path: Path) -> dict:
         ),
         "next_depth_fraction": _fraction(timing, "next_depth_fraction", f"{context}.time_management"),
         "single_legal_move_ms": _integer(timing, "single_legal_move_ms", f"{context}.time_management"),
-        "history_default_score": _integer(history, "default_score", f"{context}.history"),
+        "history_default_score": _integer(history, "default_score", f"{context}.history", -(1 << 31), (1 << 31) - 1),
         "history_reward_per_depth": _integer(history, "reward_per_depth", f"{context}.history", 1),
         "history_maximum_reward": _integer(history, "maximum_reward", f"{context}.history", 1),
         "history_malus_divisor": _integer(history, "malus_divisor", f"{context}.history", 1),
@@ -370,7 +370,7 @@ def load_engine_config(value: str) -> dict:
         "tt_response_fifo_depth": _integer(tt, "response_fifo_depth", f"{rel(engine_path)}.transposition_table", 2),
         "tt_writeback_fifo_depth": _integer(tt, "writeback_fifo_depth", f"{rel(engine_path)}.transposition_table", 2),
         "history_entry_count": _integer(history, "entry_count", f"{rel(engine_path)}.history_heuristic", 2),
-        "history_entry_bits": _integer(history, "entry_bits", f"{rel(engine_path)}.history_heuristic", 2),
+        "history_entry_bits": _integer(history, "entry_bits", f"{rel(engine_path)}.history_heuristic", 2, 29),
         "search_statistics": _boolean(instrumentation, "search_statistics", f"{rel(engine_path)}.instrumentation"),
         "search": search,
     }
@@ -389,20 +389,21 @@ def load_engine_config(value: str) -> dict:
         )
     if resolved["history_entry_count"] & (resolved["history_entry_count"] - 1):
         raise BuildError(f"{rel(engine_path)}.history_heuristic.entry_count must be a power of two")
-    history_maximum = (1 << resolved["history_entry_bits"]) - 1
-    if search["history_default_score"] > history_maximum:
+    history_limit = 1 << (resolved["history_entry_bits"] - 1)
+    history_maximum = history_limit - 1
+    if not -history_limit <= search["history_default_score"] <= history_maximum:
         raise BuildError(
-            f"{rel(search_path)}.history.default_score must fit the configured history entry width"
+            f"{rel(search_path)}.history.default_score must fit the configured signed history entry width"
         )
     if search["history_maximum_reward"] > history_maximum:
         raise BuildError(
-            f"{rel(search_path)}.history.maximum_reward must fit the configured history entry width"
+            f"{rel(search_path)}.history.maximum_reward must fit the configured signed history entry width"
         )
-    if search["castling_history_bonus"] > history_maximum:
+    if search["castling_history_bonus"] >= (1 << resolved["history_entry_bits"]):
         raise BuildError(
-            f"{rel(search_path)}.history.castling_bonus must fit the configured history entry width"
+            f"{rel(search_path)}.history.castling_bonus must fit the configured signed history entry width"
         )
-    if any(value > (1 << 31) - 1 for value in search["quiet_bucket_thresholds"]):
+    if any(not -(1 << 31) <= value < (1 << 31) for value in search["quiet_bucket_thresholds"]):
         raise BuildError(
             f"{rel(search_path)}.history.quiet_bucket_thresholds must fit the signed ordering score"
         )

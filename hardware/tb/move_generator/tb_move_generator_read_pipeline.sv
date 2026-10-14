@@ -195,7 +195,7 @@ module tb_move_generator_read_pipeline;
         request(0, 0);
         expect_response(0, 1, 501, 1, "bad noisy phase follows policy command");
 
-        // Low-score quiets must survive generation and wait until both bad-noisy buckets finish.
+        // Low-score quiets wait until both unfavorable-capture groups finish.
         reset_inputs();
         start_generation(0, 0, 0);
         push(0, int'(BAD_NOISY_HIGH_BUCKET), 701);
@@ -212,9 +212,9 @@ module tb_move_generator_read_pipeline;
         request(0, 0);
         expect_response(0, 0, 0, 0, "nonlow-score quiet phase exhausted");
         request(0, 0);
-        expect_response(0, 1, 701, int'(BAD_NOISY_HIGH_BUCKET), "bad high capture precedes low-score quiet");
+        expect_response(0, 1, 701, int'(BAD_NOISY_HIGH_BUCKET), "unfavorable rook or queen capture precedes low quiet");
         request(0, 0);
-        expect_response(0, 1, 702, int'(BAD_NOISY_LOW_BUCKET), "bad low capture precedes low-score quiet");
+        expect_response(0, 1, 702, int'(BAD_NOISY_LOW_BUCKET), "other unfavorable capture precedes low quiet");
         request(0, 0);
         expect_response(0, 0, 0, 0, "bad noisy phase exhausted");
         request(0, 0);

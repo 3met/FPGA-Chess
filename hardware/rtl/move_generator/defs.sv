@@ -43,6 +43,7 @@ package move_generator_defs;
         MOVE_MEMORY_INITIALIZED = 3'd5
     } MoveMemoryPhase;
 
+    // Four quiet groups share eight slots with four capture groups.
     localparam MoveBucketIndex BAD_NOISY_LOW_BUCKET = MoveBucketIndex'(1);
     localparam MoveBucketIndex BAD_NOISY_HIGH_BUCKET = MoveBucketIndex'(2);
     localparam MoveBucketIndex QUIET_LOW_BUCKET = MoveBucketIndex'(0);

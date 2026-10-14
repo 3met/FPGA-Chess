@@ -354,6 +354,8 @@
         entry.null_attempted = 1'b0;
         entry.entered_by_null = 1'b0;
         entry.rfp_checked = 1'b0;
+        entry.rfp_eligible = 1'b0;
+        entry.null_beta_allowed = 1'b0;
         entry.nnue_from = Position'(0);
         entry.nnue_to = Position'(0);
         entry.nnue_capture_pos = Position'(0);
@@ -489,7 +491,7 @@
         end
     endgenerate
 
-    // Apply bucket confidence before the depth clamp, with a carry bit for +1.
+    // Protect high-confidence moves without amplifying weak negative history.
     function automatic SearchDepth lmr_bucket_reduction(
         input SearchDepth base_reduction,
         input SearchDepth depth,
@@ -500,7 +502,6 @@
         unique case (bucket)
             GOOD_NOISY_HIGH_BUCKET, GOOD_NOISY_LOW_BUCKET, QUIET_HIGHEST_BUCKET:
                 if (adjusted != 0) adjusted = adjusted - 1'b1;
-            QUIET_LOW_BUCKET: adjusted = adjusted + 1'b1;
             default: begin end
         endcase
         if (depth == SearchDepth'(0)) return SearchDepth'(0);
