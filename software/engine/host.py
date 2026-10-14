@@ -919,6 +919,15 @@ class FPGAUCIHost:
         if elapsed_seconds is not None:
             elapsed = f" time {int(elapsed_seconds * 1000)}"
             nps = f" nps {int(response.nodes / max(elapsed_seconds, 1e-9))}"
+        # Preserve the invalid raw value for diagnosis instead of silently
+        # presenting the clamped mate distance as an ordinary engine result.
+        if abs(response.score) > MATE_SCORE:
+            self.emit(f"info string invalid FPGA mate score raw={response.score}; clamping mate distance")
+            self.logger.error(
+                "Invalid FPGA mate score raw=%d depth=%d nodes=%d move=%s fen=%s",
+                response.score, response.completed_depth, response.nodes, response.best_move,
+                board_snapshot.fen() if board_snapshot is not None else "unavailable",
+            )
         score_kind, score_value = self._eval_score_to_uci(response.score)
         self.emit(
             f"info depth {response.completed_depth} score {score_kind} {score_value}{elapsed} nodes {response.nodes}{nps}"
@@ -952,7 +961,9 @@ class FPGAUCIHost:
             # UCI mate values are whole moves, while the hardware stores the
             # distance from the root in plies. Both one and two plies mean mate
             # in one move from the root player's perspective.
-            moves = (MATE_SCORE - abs(score) + 1) // 2
+            # An out-of-range magnitude has no valid mate distance. Report the
+            # minimum nonzero distance without letting subtraction flip its sign.
+            moves = 1 if abs(score) > MATE_SCORE else (MATE_SCORE - abs(score) + 1) // 2
             return "mate", moves if score > 0 else -moves
         return "cp", FPGAUCIHost._eval_score_to_centipawns(score)
 

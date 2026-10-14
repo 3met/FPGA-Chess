@@ -13,6 +13,8 @@ from software.engine.protocol import (
     EndReason,
     EngineError,
     ErrorResponse,
+    MATE_SCORE,
+    MATE_THRESHOLD,
     Move,
     SearchResultResponse,
     StatusResponse,
@@ -132,6 +134,49 @@ class UCIHostSpecTests(unittest.TestCase):
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FE), ("mate", 1))
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FD), ("mate", 2))
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(-0x40FD), ("mate", -2))
+
+    def test_out_of_range_mate_scores_preserve_original_sign(self):
+        # Scores beyond the mate base must never reverse the reported winner,
+        # including negative values that previously converted to +M1.
+        for sign in (-1, 1):
+            for excess in (1, 2, 3):
+                with self.subTest(sign=sign, excess=excess):
+                    self.assertEqual(
+                        FPGAUCIHost._eval_score_to_uci(sign * (MATE_SCORE + excess)),
+                        ("mate", sign),
+                    )
+
+    def test_signed_wire_scores_never_reverse_uci_score_sign(self):
+        # Exhaust the signed score field; only zero and the exact mate base
+        # legitimately produce a zero-valued UCI score.
+        for score in range(-(1 << 15), 1 << 15):
+            kind, value = FPGAUCIHost._eval_score_to_uci(score)
+            self.assertEqual(kind, "mate" if abs(score) >= MATE_THRESHOLD else "cp")
+            if score == 0 or abs(score) == MATE_SCORE:
+                self.assertEqual(value, 0)
+            else:
+                self.assertGreater(value * score, 0, f"score {score} converted to {kind} {value}")
+            if abs(score) > MATE_SCORE:
+                self.assertEqual(abs(value), 1)
+
+    def test_out_of_range_mate_score_keeps_legal_bestmove(self):
+        host = self.make_host()
+        lines: list[str] = []
+        host.emit = lines.append
+        with self.assertLogs(host.logger, level="ERROR") as logs:
+            host._emit_search_result(
+                SearchResultResponse(
+                    Move(12, 28), -MATE_SCORE - 2, nodes=42, completed_depth=3,
+                    end_reason=EndReason.DEPTH_LIMIT,
+                ),
+                host.chess.Board(),
+            )
+        self.assertEqual(lines, [
+            f"info string invalid FPGA mate score raw={-MATE_SCORE - 2}; clamping mate distance",
+            "info depth 3 score mate -1 nodes 42", "bestmove e2e4",
+        ])
+        self.assertIn(f"raw={-MATE_SCORE - 2}", logs.output[0])
+        self.assertIn(host.chess.Board().fen(), logs.output[0])
 
     def test_search_result_emits_uci_mate_score(self):
         host = self.make_host()
