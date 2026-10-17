@@ -35,7 +35,7 @@ STALL_LABELS = {
     "cdc_done": "SDRAM completion backpressure (engine-clock samples)",
 }
 ALGORITHM_LABELS = {
-    "main_board_issues": "Main-search move pushes",
+    "main_board_issues": "Main-search board pushes (including nulls)",
     "qsearch_board_issues": "Quiescence-search move pushes",
     "pvs_scouts": "PVS scout searches",
     "pvs_researches": "PVS full-window re-searches",
@@ -73,4 +73,12 @@ TT_FIFOS = {
     "way_write": ("Way writeback CDC", "entries", "engine"),
     "probe_response": ("Probe response CDC", "words", "memory"),
     "store_response": ("Store response CDC", "words", "memory"),
+}
+
+# Checked parents take priority, making rejection causes a partition.
+ILLEGAL_MOVE_LABELS = {
+    "failed_evasion": "Failed to escape check (including king moves)",
+    "king_destination": "King moved into check (parent was not checked)",
+    "en_passant_exposure": "En passant exposed king (parent was not checked)",
+    "exposed_king": "Other move exposed king / moved pinned piece",
 }

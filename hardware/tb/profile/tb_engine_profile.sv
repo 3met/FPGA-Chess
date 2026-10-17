@@ -368,6 +368,10 @@ module tb_engine_profile #(
     longint unsigned direct_move_cutoffs;
     longint unsigned board_issues, board_reverses, board_completions;
     longint unsigned legal_candidates, illegal_candidates;
+    longint unsigned board_null_completions, board_reverse_completions;
+    // Mutually exclusive causes: existing check takes priority over move type.
+    longint unsigned illegal_failed_evasion, illegal_king_destination;
+    longint unsigned illegal_en_passant_exposure, illegal_exposed_king;
     longint unsigned board_stall_cycles, move_stall_cycles, tt_request_stall_cycles;
     longint unsigned move_commands, move_pops, move_pop_misses;
     longint unsigned early_noisy_reads = 0, early_quiet_reads = 0;
@@ -839,7 +843,12 @@ module tb_engine_profile #(
                 board_completions <= board_completions + 1;
                 // Reverse operations restore a parent board; they are pipeline
                 // work, not searched candidate moves.
-                if (!reverse_complete) begin
+                if (reverse_complete) begin
+                    board_reverse_completions <= board_reverse_completions + 1;
+                end else if (dut.controller.search_board_op_tag_pipe[
+                        SEARCH_BOARD_TAG_PIPE_LEN - 1] == BOARD_PUSH_NULL_OP) begin
+                    board_null_completions <= board_null_completions + 1;
+                end else begin
                     if (!dut.controller.board_update_mover_in_check) begin
                         legal_candidates <= legal_candidates + 1;
                         if (dut.controller.board_update_out.halfmove_clock >= 100)
@@ -847,7 +856,22 @@ module tb_engine_profile #(
                         legal_ordinal_histogram[legal_bucket] =
                             legal_ordinal_histogram[legal_bucket] + 1;
                     end else begin
+                        automatic FullBoard parent_board = dut.controller.search_board[tid];
+                        automatic Move candidate = dut.controller.search_pending_move[tid];
+                        automatic Tile mover = parent_board.tiles[candidate.from_pos];
                         illegal_candidates <= illegal_candidates + 1;
+                        // Read the unchanged parent at the same tagged completion
+                        // as search. Rejected pushes never become thread state.
+                        if (dut.controller.search_board_in_check[tid])
+                            illegal_failed_evasion <= illegal_failed_evasion + 1;
+                        else if (mover.piece_type == KING)
+                            illegal_king_destination <= illegal_king_destination + 1;
+                        else if (mover.piece_type == PAWN
+                                && candidate.from_pos[2:0] != candidate.to_pos[2:0]
+                                && parent_board.tiles[candidate.to_pos].piece_type == NULL_PIECE)
+                            illegal_en_passant_exposure <= illegal_en_passant_exposure + 1;
+                        else
+                            illegal_exposed_king <= illegal_exposed_king + 1;
                     end
                 end
             end
@@ -1390,6 +1414,12 @@ module tb_engine_profile #(
         emit("components.board.completions", board_completions);
         emit("components.board.legal_candidates", legal_candidates);
         emit("components.board.illegal_candidates", illegal_candidates);
+        emit("components.board.null_completions", board_null_completions);
+        emit("components.board.reverse_completions", board_reverse_completions);
+        emit("components.board.illegal.failed_evasion", illegal_failed_evasion);
+        emit("components.board.illegal.king_destination", illegal_king_destination);
+        emit("components.board.illegal.en_passant_exposure", illegal_en_passant_exposure);
+        emit("components.board.illegal.exposed_king", illegal_exposed_king);
         emit("components.move.commands", move_commands);
         emit("components.move.pops", move_pops);
         emit("components.move.pop_misses", move_pop_misses);

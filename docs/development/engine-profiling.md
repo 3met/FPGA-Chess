@@ -62,7 +62,7 @@ python -m tools.hardware_build profile-view --list-runs
 | `summary` | Search throughput, results, depths, faults, simulated search time, and total profiling wall time. |
 | `search` | Per-depth results and subsections for PVS, LMR, reverse and ordinary futility pruning, null moves, quiescence, TT cutoffs, terminal positions, and draws. |
 | `moves` | Move generation counts, latency, and efficiency; ordering bucket activity, occupancy, searched move ranks, and beta cutoffs. |
-| `pipeline` | Thread lifecycle, component activity, and stalls. |
+| `pipeline` | Thread lifecycle and separate board-update, move-generation, NNUE, repetition, and TT/memory pipeline sections. |
 | `tt` | Probes, cache behavior, request latency, FIFO occupancy, backpressure, and SDRAM traffic. |
 | `simulation` | Simulator speed and time spent on setup, search, response serialization, and drain. |
 
@@ -90,6 +90,12 @@ The simulated design includes the portable engine and production external-TT pat
 For comparisons, use the same positions and search limit and record any engine-profile overrides. Engine throughput measures simulated hardware performance; simulator speed measures how fast the host runs that simulation. Total profiling wall time includes configuration, simulator preparation, and all position simulations. Search timing runs from request acceptance to response presentation; setup, serialization, and TT-store drain are reported separately.
 
 ### Search and Pipeline
+
+The board-update section separates real candidate pushes, synthetic null pushes, and reversals. Legal and illegal counts classify completed real candidates before later pruning or TT validation decisions; they are not node counts. Unfinished candidates are reported separately. Counts measure attempts across threads and repeated searches, rather than distinct moves. Illegal candidates, synthetic nulls, and reversals do not count as search nodes.
+
+Illegal causes are exclusive: a checked parent is classified as failure to escape check, including rejected king moves; otherwise a rejected king move is a move into check, a rejected en passant capture exposes the king, and any other rejected move exposes the king by moving a pinned piece. Cause percentages use all illegal candidates; the overall rejection percentage uses completed real candidates. These counters are collected during simulation and require a new profile run to measure existing workloads.
+
+Each pipeline section groups its request activity, available completion measurements, and backpressure. Activity percentages use search cycles; memory backpressure includes post-search drain as labeled. Detailed move-generation work remains in `moves`, and cache, latency, queues, and SDRAM measurements remain in `tt`.
 
 PVS scout and re-search counters measure issued real main-search move pushes, excluding quiescence and null moves. They include speculative attempts that may later fail legality checks.
 

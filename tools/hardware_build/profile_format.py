@@ -5,6 +5,7 @@ import math
 from .profile_report import percent, rate
 from .profile_schema import (
     ALGORITHM_LABELS,
+    ILLEGAL_MOVE_LABELS,
     MOVE_BUCKETS,
     MOVE_GENERATOR_OPERATION_LABELS,
     MOVE_GENERATOR_OPERATIONS,
@@ -164,69 +165,87 @@ def _format_depths(report: dict) -> str:
     return "\n".join(lines).strip("\n") + "\n"
 
 
-def _format_components(report: dict) -> str:
-    """Format the components measurements."""
-    timing = report["timing"]
+def _format_stall_rows(report: dict, names: list[str]) -> list[str]:
+    """Label backpressure with its owner's measurement window; categories may overlap."""
     lines = []
-    lines += ["", "Component activity"]
-    for name, values in report["components"].items():
-        if name == "move_generator":
+    timing = report["timing"]
+    for name in names:
+        if name not in report["stalls"]:
             continue
-        count = values.get(
-            "issues",
-            values.get(
-                "evaluations",
-                values.get("commands", values.get("requests", 0)),
-            ),
-        )
-        if name == "board_update":
-            forward_count = count - values["reverses"]
-            lines.append(
-                f"  board update: {count:,} issues, "
-                f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles "
-                f"({forward_count:,} candidate pushes: "
-                f"{values['legal_candidates']:,} legal, "
-                f"{values['illegal_candidates']:,} illegal; "
-                f"{values['reverses']:,} reversals)"
-            )
-            continue
-        if name == "nnue_evaluator":
-            lines.append(
-                f"  NNUE evaluator: {count:,} evaluations, "
-                f"started in {_format_percent(values['issue_rate_percent'])} of search cycles"
-            )
-            lines.append(
-                f"    updates: {values['update_requests']:,} accepted "
-                f"({_format_percent(values['update_request_rate_percent'])} of search cycles); "
-                f"root initialization={values['root_initialization_cycles']:,} cycles; "
-                f"rows: {values['root_initialization_rows']:,} root, "
-                f"{values['delta_feature_requests']:,} delta rows, "
-                f"{values['child_rebuild_rows']:,} child-rebuild rows, "
-                f"{values['recovery_rebuild_rows']:,} recovery, "
-                f"{values['completion_markers']:,} completion markers"
-            )
-            lines.append(
-                f"    child completions={values['child_update_completions']:,}, "
-                f"rebuilds={values['child_rebuilds']:,}, "
-                f"accumulator wraps={values['accumulator_wrap_lanes']:,}, "
-                f"update busy={values['update_pipeline_busy_cycles']:,} cycles "
-                f"({_format_percent(percent(values['update_pipeline_busy_cycles'], timing['search_cycles']))})"
-            )
-            continue
-        if name == "repetition_checker":
-            lines.append(
-                f"  repetition checker: {count:,} issues, "
-                f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles; "
-                f"child requests in flight={values['inflight_child_thread_cycles']:,} "
-                "thread-cycles"
-            )
-            continue
+        value = report["stalls"][name]
+        drain = name.startswith("cdc_")
+        denominator = timing["search_cycles"] + (timing["post_search_drain_cycles"] if drain else 0)
+        window = "search + drain cycles" if drain else "search cycles"
         lines.append(
-            f"  {name.replace('_', ' ')}: {count:,} issues, "
-            f"accepted in {_format_percent(values['issue_rate_percent'])} of search cycles"
+            f"  {STALL_LABELS.get(name, name.replace('_', ' ').capitalize())}: "
+            f"{value:,} cycles ({_format_percent(percent(value, denominator))} of {window})"
         )
+    return lines
 
-    return "\n".join(lines).strip("\n") + "\n"
+
+def _format_pipelines(report: dict) -> str:
+    """Group requests, completions, rejection causes, and stalls by pipeline."""
+    timing = report["timing"]
+    components = report["components"]
+    board = components["board_update"]
+    completed = board["legal_candidates"] + board["illegal_candidates"]
+    lines = [
+        "Board update pipeline",
+        f"  Requests: {board['issues']:,} ({_format_percent(board['issue_rate_percent'])} of search cycles)",
+        f"    Real candidate pushes: {board['candidate_pushes']:,}",
+        f"    Synthetic null pushes: {board['null_pushes']:,}",
+        f"    Reversals: {board['reverses']:,}",
+        f"  Candidate completions: {completed:,}",
+        f"    Legal: {board['legal_candidates']:,}",
+        f"    Illegal: {board['illegal_candidates']:,} ({_format_percent(percent(board['illegal_candidates'], completed))} of completed candidates)",
+        "  Illegal causes (exclusive; checked parents take priority):",
+    ]
+    for name, label in ILLEGAL_MOVE_LABELS.items():
+        count = board["illegal_breakdown"][name]
+        lines.append(f"    {label}: {count:,} ({_format_percent(percent(count, board['illegal_candidates']))} of illegal)")
+    lines += [
+        f"  Search nodes entered: {report['result']['nodes']:,} (legal children accepted after pruning)",
+        f"  Unfinished candidate pushes at search end: {board['unfinished_candidates']:,}",
+        f"  Null completions: {board['null_completions']:,}; reverse completions: {board['reverse_completions']:,}",
+        "  Illegal candidates, synthetic nulls, and reversals contribute no search nodes.",
+    ]
+
+    moves = components["move_generator"]
+    lines += [
+        "", "Move generation pipelines",
+        f"  Generation/validation commands: {moves['commands']:,} ({_format_percent(moves['issue_rate_percent'])} of search cycles)",
+        f"  Bucket pops: {moves['pops']:,}; misses: {moves['pop_misses']:,}",
+    ]
+    for name in MOVE_GENERATOR_OPERATIONS:
+        operation = moves["operations"][name]
+        lines.append(f"  {MOVE_GENERATOR_OPERATION_LABELS[name]}: {operation['count']:,} requests; latency avg={_format_number(operation['average_cycles'])}, max={operation['maximum_cycles']:,} cycles; unfinished={operation['aborted_at_search_end']:,}")
+    lines.extend(_format_stall_rows(report, ["move_not_ready"]))
+
+    nnue = components["nnue_evaluator"]
+    lines += [
+        "", "NNUE evaluation pipeline",
+        f"  Evaluations: {nnue['evaluations']:,} ({_format_percent(nnue['issue_rate_percent'])} of search cycles); completions: {nnue['completions']:,}",
+        f"  Accumulator updates: {nnue['update_requests']:,} accepted ({_format_percent(nnue['update_request_rate_percent'])} of search cycles)",
+        f"  Root initialization: {nnue['root_initialization_cycles']:,} cycles; {nnue['root_initialization_rows']:,} rows",
+        f"  Update rows: {nnue['delta_feature_requests']:,} delta, {nnue['child_rebuild_rows']:,} child rebuild, {nnue['recovery_rebuild_rows']:,} recovery; completion markers: {nnue['completion_markers']:,}",
+        f"  Child update completions: {nnue['child_update_completions']:,}; rebuilds: {nnue['child_rebuilds']:,}; accumulator wraps: {nnue['accumulator_wrap_lanes']:,}",
+        f"  Update busy: {nnue['update_pipeline_busy_cycles']:,} cycles ({_format_percent(percent(nnue['update_pipeline_busy_cycles'], timing['search_cycles']))} of search cycles)",
+        f"  Update backpressure: {nnue['update_backpressure_cycles']:,} cycles",
+    ]
+    repetition = components["repetition_checker"]
+    lines += [
+        "", "Repetition checking pipeline",
+        f"  Requests: {repetition['requests']:,} ({_format_percent(repetition['issue_rate_percent'])} of search cycles); responses: {repetition['responses']:,}",
+        f"  Child requests in flight: {repetition['inflight_child_thread_cycles']:,} thread-cycles",
+    ]
+    tt = report["transposition_table"]
+    lines += [
+        "", "Transposition table / memory pipeline",
+        f"  Probes: {tt['lookups']:,}; stores: {tt['stores']:,} (search + drain)",
+        "  Backpressure categories may overlap. Detailed cache, latency, and SDRAM measurements: tt topic.",
+    ]
+    lines.extend(_format_stall_rows(report, [name for name in report["stalls"] if name != "move_not_ready"]))
+    return "\n".join(lines) + "\n"
 
 
 def _format_move_generation(report: dict) -> str:
@@ -288,27 +307,6 @@ def _format_move_generation(report: dict) -> str:
 
     return "\n".join(lines).strip("\n") + "\n"
 
-
-def _format_stalls(report: dict) -> str:
-    """Format the stalls measurements."""
-    timing = report["timing"]
-    lines = []
-    lines += ["", "Stalls", "  Percentages use search cycles; CDC uses search + drain cycles. Categories may overlap."]
-    stall_names = [name for name in STALL_LABELS if name in report["stalls"]]
-    stall_names += sorted(name for name in report["stalls"] if name not in STALL_LABELS)
-    for name in stall_names:
-        value = report["stalls"][name]
-        denominator = (
-            timing["search_cycles"] + timing["post_search_drain_cycles"]
-            if name.startswith("cdc_")
-            else timing["search_cycles"]
-        )
-        lines.append(
-            f"  {STALL_LABELS.get(name, name.replace('_', ' ').capitalize())}: {value:,} cycles "
-            f"({_format_percent(percent(value, denominator))})"
-        )
-
-    return "\n".join(lines).strip("\n") + "\n"
 
 
 def _format_move_ordering(report: dict) -> str:
@@ -535,7 +533,8 @@ def _format_tt(report: dict) -> str:
     ]
     memory_stalls = {name: value for name, value in report["stalls"].items() if name.startswith(("tt_", "cdc_"))}
     if memory_stalls:
-        lines += ["", _format_stalls({**report, "stalls": memory_stalls}).rstrip()]
+        lines += ["", "Memory backpressure (categories may overlap)"]
+        lines.extend(_format_stall_rows(report, list(memory_stalls)))
     return "\n".join(lines).strip("\n") + "\n"
 
 
@@ -543,7 +542,7 @@ PROFILE_TOPICS = {
     "summary": "Throughput, search results, completed depths, and faults",
     "search": "Depth breakdown and search heuristics",
     "moves": "Move generation, ordering buckets, searched move ranks, and beta cutoffs",
-    "pipeline": "Thread lifecycle, component activity, and stalls",
+    "pipeline": "Thread lifecycle and per-pipeline activity, legality, and stalls",
     "tt": "TT probes, cache, latency, queues, and SDRAM traffic",
     "simulation": "Simulator speed, wall time, setup, and drain overhead",
 }
@@ -622,7 +621,7 @@ def format_profile_topics(report: dict, topics: list[str] | None = None) -> str:
         "summary": lambda: _format_summary(report),
         "search": lambda: _format_search(aggregate),
         "moves": lambda: _format_move_generation(aggregate) + "\n" + _format_move_ordering(aggregate),
-        "pipeline": lambda: _format_lifecycle(aggregate) + "\n" + _format_components(aggregate) + "\n" + _format_stalls(aggregate),
+        "pipeline": lambda: _format_lifecycle(aggregate) + "\n" + _format_pipelines(aggregate),
         "tt": lambda: _format_tt(aggregate),
         "simulation": lambda: _format_simulation(report),
     }

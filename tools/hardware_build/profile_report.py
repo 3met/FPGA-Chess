@@ -4,6 +4,7 @@ from software.engine.protocol import Move, move_to_uci
 
 from .common import BuildError
 from .profile_schema import (
+    ILLEGAL_MOVE_LABELS,
     MOVE_BUCKETS,
     MOVE_GENERATOR_OPERATIONS,
     ORDINAL_BUCKETS,
@@ -348,12 +349,29 @@ def build_profile_report(
         metrics.get(f"move_order.legal_ordinal.{index}", 0)
         for index in range(len(ORDINAL_BUCKETS))
     )
+    # Causes partition completed real candidates; nulls and reversals are separate.
+    illegal_breakdown = {
+        name: metrics[f"components.board.illegal.{name}"] for name in ILLEGAL_MOVE_LABELS
+    }
+    if (any(value < 0 for value in illegal_breakdown.values())
+            or sum(illegal_breakdown.values()) != metrics["components.board.illegal_candidates"]):
+        raise BuildError("Illegal move causes do not match rejected candidates")
+    null_issues = metrics.get("algorithm.null_searches", 0)
+    null_completions = metrics["components.board.null_completions"]
+    reverse_completions = metrics["components.board.reverse_completions"]
+    if (not 0 <= null_completions <= null_issues
+            or not 0 <= reverse_completions <= board_reverses):
+        raise BuildError("Board null/reverse completions exceed issues")
+    if (metrics["components.board.legal_candidates"] + metrics["components.board.illegal_candidates"]
+            + null_completions + reverse_completions != metrics["components.board.completions"]
+            or metrics["components.board.completions"] > board_issues):
+        raise BuildError("Board completion classifications do not match total completions")
     if legal_ordinal_total != metrics["components.board.legal_candidates"]:
         raise BuildError("Legal move ordinal total does not match legal board candidates")
     if (
         metrics["components.board.legal_candidates"]
         + metrics["components.board.illegal_candidates"]
-        > forward_board_issues
+        > forward_board_issues - null_issues
     ):
         raise BuildError("Board candidate completions exceed forward board-update issues")
 
@@ -446,6 +464,14 @@ def build_profile_report(
             "completions": metrics["components.board.completions"],
             "legal_candidates": metrics["components.board.legal_candidates"],
             "illegal_candidates": metrics["components.board.illegal_candidates"],
+            "illegal_breakdown": illegal_breakdown,
+            "candidate_pushes": forward_board_issues - null_issues,
+            "null_pushes": null_issues,
+            "null_completions": null_completions,
+            "reverse_completions": reverse_completions,
+            "unfinished_candidates": forward_board_issues - null_issues
+                - metrics["components.board.legal_candidates"]
+                - metrics["components.board.illegal_candidates"],
         },
         "move_generator": {
             "commands": metrics["components.move.commands"],

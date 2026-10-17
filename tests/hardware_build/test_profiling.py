@@ -248,6 +248,12 @@ def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
         "components.board.completions": 2,
         "components.board.legal_candidates": 1,
         "components.board.illegal_candidates": 1,
+        "components.board.null_completions": 0,
+        "components.board.reverse_completions": 0,
+        "components.board.illegal.failed_evasion": 1,
+        "components.board.illegal.king_destination": 0,
+        "components.board.illegal.en_passant_exposure": 0,
+        "components.board.illegal.exposed_king": 0,
         "components.move.commands": 1,
         "components.move.pops": 1,
         "components.move.pop_misses": 0,
@@ -594,7 +600,7 @@ class ReportTests(unittest.TestCase):
         text = format_profile_topics(report, ["pipeline"])
         self.assertEqual(text.count("Search total"), 2)
         self.assertIn("T4", text)
-        self.assertNotIn("TT probe", text.split("Component activity")[0])
+        self.assertNotIn("TT probe", text.split("Board update pipeline")[0])
         rows = text.splitlines()
         parents = [row for row in rows if row.startswith("  Node control and dispatch")]
         children = [row for row in rows if row.startswith("    Pipeline request accepted")]
@@ -621,12 +627,25 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Legal candidates", text)
         self.assertIn("Cutoff share", text)
         self.assertIn("Move generator busy; a generation request was waiting", text)
-        self.assertIn("2 candidate pushes: 1 legal, 1 illegal; 0 reversals", text)
-        self.assertIn("NNUE evaluator: 1 evaluations", text)
+        self.assertIn("Real candidate pushes: 2", text)
+        self.assertIn("Illegal: 1 (50.0% of completed candidates)", text)
+        self.assertIn("Failed to escape check (including king moves): 1 (100.0% of illegal)", text)
+        self.assertNotIn("Component activity", text)
+        self.assertIn("Evaluations: 1", text)
         self.assertIn("Quiescence delta-pruned moves: 4", text)
-        self.assertIn("updates: 5 accepted", text)
-        self.assertIn("update busy=5 cycles", text)
+        self.assertIn("Accumulator updates: 5 accepted", text)
+        self.assertIn("Update busy: 5 cycles", text)
         self.assertEqual(report["components"]["nnue_evaluator"]["evaluations"], 1)
+
+    def test_memory_backpressure_formats_in_pipeline_and_tt_topics(self):
+        """Real simulations emit memory stalls even when the count is zero."""
+        report = self.build_sample_report()
+        report["stalls"].update({"tt_request_not_ready": 1, "cdc_command": 2})
+        for topic in ("pipeline", "tt"):
+            with self.subTest(topic=topic):
+                text = format_profile_topics(report, [topic])
+                self.assertIn("TT frontend busy; a probe request was waiting: 1 cycles (10.0% of search cycles)", text)
+                self.assertIn("2 cycles (15.4% of search + drain cycles)", text)
 
     def test_report_formats_move_generator_and_pruning_metrics(self):
         report = self.build_sample_report()
@@ -653,7 +672,7 @@ class ReportTests(unittest.TestCase):
                 "cycles_per_candidate"
             ]
         )
-        self.assertIn("Main-search move pushes", text)
+        self.assertIn("Main-search board pushes (including nulls)", text)
         self.assertIn("Reverse futility pruning cutoffs: 3", text)
         self.assertIn("Ordinary futility-pruned moves: 2", text)
         self.assertEqual(report["algorithm"]["rfp_cutoffs"], 3)
@@ -922,6 +941,51 @@ class ReportTests(unittest.TestCase):
                     with self.assertRaisesRegex(BuildError, "PVS scout and re-search"):
                         build_profile_report(*args)
 
+    def test_board_classifications_separate_nulls_reversals_and_unfinished_candidates(self):
+        """Only completed real moves enter legality counts and their denominator."""
+        base = self.build_sample_report()
+        metrics = sample_metrics()
+        metrics.update({
+            "components.board.issues": 6,
+            "components.board.reverses": 1,
+            "components.board.reverse_completions": 1,
+            "components.board.null_completions": 1,
+            "components.board.completions": 4,
+            "algorithm.null_searches": 2,
+            "algorithm.main_board_issues": 4,
+        })
+        result = {"best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
+                  "score": 0, "nodes": 1, "completed_depth": 1,
+                  "deepest_search_ply": 1, "end_reason": 0, "error": 0}
+        report = build_profile_report(base["configuration"], metrics, result, 0)
+        board = report["components"]["board_update"]
+        self.assertEqual(board["candidate_pushes"], 3)
+        self.assertEqual(board["unfinished_candidates"], 1)
+        text = format_profile_topics(report, ["pipeline"])
+        self.assertIn("Illegal: 1 (50.0% of completed candidates)", text)
+        self.assertIn("Synthetic null pushes: 2", text)
+        self.assertIn("Unfinished candidate pushes at search end: 1", text)
+        self.assertIn("Null completions: 1; reverse completions: 1", text)
+
+    def test_board_classification_invariants_reject_bad_totals(self):
+        """Reject overlapping causes and completions attributed to wrong operations."""
+        base = self.build_sample_report()
+        result = {"best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
+                  "score": 0, "nodes": 1, "completed_depth": 1,
+                  "deepest_search_ply": 1, "end_reason": 0, "error": 0}
+        for key, value, message in (
+            ("components.board.illegal.king_destination", 1, "Illegal move causes"),
+            ("components.board.illegal.failed_evasion", -1, "Illegal move causes"),
+            ("components.board.null_completions", 1, "null/reverse completions"),
+            ("components.board.reverse_completions", 1, "null/reverse completions"),
+            ("components.board.completions", 1, "completion classifications"),
+        ):
+            with self.subTest(key=key):
+                metrics = sample_metrics()
+                metrics[key] = value
+                with self.assertRaisesRegex(BuildError, message):
+                    build_profile_report(base["configuration"], metrics, result, 0)
+
     def test_incomplete_board_request_at_search_end_is_allowed(self):
         metrics = sample_metrics()
         metrics["components.board.issues"] = 3
@@ -936,6 +1000,7 @@ class ReportTests(unittest.TestCase):
             },
             1,
         )
+        self.assertEqual(report["components"]["board_update"]["unfinished_candidates"], 1)
         self.assertEqual(report["components"]["board_update"]["issues"], 3)
         self.assertEqual(report["components"]["board_update"]["legal_candidates"], 1)
         self.assertEqual(report["components"]["board_update"]["illegal_candidates"], 1)
@@ -1296,7 +1361,7 @@ class ProfileSuiteTests(unittest.TestCase):
         self.assertIn("Per-thread lifecycle", text)
         self.assertIn("Per-depth breakdown", text)
         self.assertIn("positions", text)
-        self.assertIn("Component activity", text)
+        self.assertIn("Board update pipeline", text)
         self.assertIn("Move generator operations", text)
         self.assertIn("Type       Destinations   With >=1 source", text)
         self.assertIn("Transposition table and SDRAM", text)
