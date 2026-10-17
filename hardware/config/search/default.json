@@ -16,8 +16,8 @@
     "deep_reduction": 3
   },
   "rfp": {
-    "base_margin": 64,
-    "margin_per_depth": 128,
+    "base_margin": 32,
+    "margin_per_depth": 96,
     "maximum_depth": 5
   },
   "futility": {
