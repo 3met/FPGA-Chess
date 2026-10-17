@@ -69,12 +69,14 @@
         move_cmd_thread = search_move_issue_thread;
         move_cmd_ply = search_ply[search_move_issue_thread];
         move_cmd_board = search_board[search_move_issue_thread];
+        move_cmd_in_check = search_board_in_check[search_move_issue_thread];
         move_cmd_suppress_valid = 1'b0;
         move_cmd_suppress_move = NULL_MOVE;
         move_quiet_cmd_valid = 1'b0;
         move_quiet_cmd_thread = search_quiet_issue_thread;
         move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
         move_quiet_cmd_board = search_board[search_quiet_issue_thread];
+        move_quiet_cmd_in_check = search_board_in_check[search_quiet_issue_thread];
         move_quiet_cmd_suppress_valid = 1'b0;
         move_quiet_cmd_suppress_move = NULL_MOVE;
         move_pop_valid = 1'b0;
@@ -85,6 +87,7 @@
             move_cmd_thread = ThreadID'(0);
             move_cmd_ply = search_ply[0];
             move_cmd_board = search_board[0];
+            move_cmd_in_check = search_board_in_check[0];
             move_pop_thread = ThreadID'(0);
             // Move-order states have distinct encodings.
             unique case (search_stack_top[0].move_order_state)
@@ -100,6 +103,7 @@
                     move_quiet_cmd_thread = ThreadID'(0);
                     move_quiet_cmd_ply = search_ply[0];
                     move_quiet_cmd_board = search_board[0];
+                    move_quiet_cmd_in_check = search_board_in_check[0];
                 end
                 MOVE_ORDER_QUIET: begin
                     move_pop_valid = 1'b1;
@@ -113,6 +117,7 @@
             move_cmd_thread = move_followup_thread;
             move_cmd_ply = search_ply[move_followup_thread];
             move_cmd_board = search_board[move_followup_thread];
+            move_cmd_in_check = search_board_in_check[move_followup_thread];
             move_pop_thread = move_followup_thread;
             // Follow-up action encodings are disjoint.
             unique case (move_followup_action)
@@ -130,6 +135,7 @@
             move_cmd_thread = search_move_issue_thread;
             move_cmd_ply = search_ply[search_move_issue_thread];
             move_cmd_board = search_board[search_move_issue_thread];
+            move_cmd_in_check = search_board_in_check[search_move_issue_thread];
             move_cmd_suppress_valid = search_stack_top[search_move_issue_thread].direct_attempted;
             move_cmd_suppress_move = search_stack_top[search_move_issue_thread].tt_move;
             move_cmd_valid = 1'b1;
@@ -147,6 +153,7 @@
             move_quiet_cmd_thread = move_followup_thread;
             move_quiet_cmd_ply = search_ply[move_followup_thread];
             move_quiet_cmd_board = search_board[move_followup_thread];
+            move_quiet_cmd_in_check = search_board_in_check[move_followup_thread];
             move_quiet_cmd_suppress_valid =
                 search_stack_top[move_followup_thread].direct_attempted;
             move_quiet_cmd_suppress_move =
@@ -156,6 +163,7 @@
             move_quiet_cmd_thread = search_quiet_issue_thread;
             move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
             move_quiet_cmd_board = search_board[search_quiet_issue_thread];
+            move_quiet_cmd_in_check = search_board_in_check[search_quiet_issue_thread];
             move_quiet_cmd_suppress_valid =
                 search_stack_top[search_quiet_issue_thread].direct_attempted;
             move_quiet_cmd_suppress_move =

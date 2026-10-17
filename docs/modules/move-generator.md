@@ -8,7 +8,7 @@ The top level coordinates noisy/direct and quiet generation lanes, move memory, 
 
 ## Commands
 
-The noisy/direct and quiet interfaces use independent ready/valid channels. Requests carry the board, thread and ply tags, and an optional move to suppress. Responses return routing tags and direct-validation results; FIFO state never crosses the module boundary.
+The noisy/direct and quiet interfaces use independent ready/valid channels. Requests carry the board, thread and ply tags, and an optional move to suppress. Generation requests also carry the cached check status of the side to move. Responses return routing tags and direct-validation results; FIFO state never crosses the module boundary.
 
 | Command | Behavior |
 | ------- | -------- |
@@ -24,7 +24,7 @@ An attempted direct move is suppressed from later generation only after successf
 
 Generation visits central destinations first. Noisy and quiet lanes produce candidates independently; promotions are generated in queen, knight, rook, bishop order.
 
-Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
+Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. When the side to move is checked, both lanes restrict their initial destination masks to the rank, file, and both diagonals through the cached king square. Noisy generation additionally preserves every capture of an enemy knight and every en passant target, so knight-check captures and en passant evasions remain available without identifying the checker. Blocking promotions lie on a king line and retain every promotion choice. This coarse filter preserves candidate order and adds no launch or generation stage. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 
 Direct-move path checks share a decoded square-occupancy map, avoiding full-tile board-read multiplexers for slider clearance and pawn double pushes within the existing validation cycle.
 

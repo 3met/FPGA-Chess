@@ -16,6 +16,51 @@
         set_castling_rights(CastlingRights'(4'b0000), "clear castling rights for kings only");
     endtask : setup_kings_only
 
+    // Legal checked root with both king escapes and quiet interpositions.
+    task automatic setup_quiet_evasion_perft_position();
+        clear_start_position("quiet evasion perft");
+        set_tile(WHITE_KING, Position'(4), "quiet evasion king e1");
+        set_tile(WHITE_ROOK, Position'(8), "quiet evasion rook a2");
+        set_tile(WHITE_BISHOP, Position'(2), "quiet evasion bishop c1");
+        set_tile(WHITE_KNIGHT, Position'(1), "quiet evasion knight b1");
+        set_tile(WHITE_PAWN, Position'(14), "quiet evasion pawn g2");
+        set_tile(BLACK_KING, Position'(57), "quiet evasion black king b8");
+        set_tile(BLACK_ROOK, Position'(60), "quiet evasion checker e8");
+        set_turn(WHITE, "quiet evasion white to move");
+    endtask : setup_quiet_evasion_perft_position
+
+    // Checked roots with off-line knight/EP captures and blocking promotions.
+    task automatic setup_noisy_evasion_perft_position(input int fixture);
+        clear_start_position("noisy evasion perft");
+        set_tile(WHITE_QUEEN, Position'(9), "noisy evasion queen b2");
+        case (fixture)
+            0: begin
+                set_tile(WHITE_KING, Position'(4), "knight evasion king e1");
+                set_tile(BLACK_KING, Position'(58), "knight evasion king c8");
+                set_tile(WHITE_BISHOP, Position'(14), "knight evasion bishop g2");
+                set_tile(BLACK_KNIGHT, Position'(21), "knight checker f3");
+                set_tile(BLACK_KNIGHT, Position'(45), "other knight f6");
+                set_tile(BLACK_PAWN, Position'(10), "unrelated capture c2");
+            end
+            1: begin
+                set_tile(WHITE_KING, Position'(28), "EP evasion king e4");
+                set_tile(BLACK_KING, Position'(56), "EP evasion king a8");
+                set_tile(WHITE_PAWN, Position'(36), "EP evasion pawn e5");
+                set_tile(BLACK_PAWN, Position'(35), "EP checker d5");
+                set_tile(BLACK_PAWN, Position'(8), "unrelated capture a2");
+                set_en_passant(1'b1, BoardFile'(3), "EP evasion d6");
+            end
+            2: begin
+                set_tile(WHITE_KING, Position'(56), "promotion evasion king a8");
+                set_tile(BLACK_KING, Position'(47), "promotion evasion king h6");
+                set_tile(BLACK_ROOK, Position'(63), "promotion checker h8");
+                set_tile(WHITE_PAWN, Position'(50), "blocking promotion pawn c7");
+                set_tile(BLACK_PAWN, Position'(10), "unrelated capture c2");
+            end
+        endcase
+        set_turn(WHITE, "noisy evasion white to move");
+    endtask : setup_noisy_evasion_perft_position
+
     task automatic setup_castling_perft_position();
         automatic CastlingRights castling_rights;
 

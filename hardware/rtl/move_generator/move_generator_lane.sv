@@ -26,6 +26,7 @@ module move_generator_lane #(
     input ThreadID cmd_thread,
     input PlyIndex cmd_ply,
     input FullBoard cmd_board,
+    input logic cmd_in_check,
     input logic cmd_suppress_valid,
     input Move cmd_suppress_move,
 
@@ -210,8 +211,18 @@ module move_generator_lane #(
         return 1'b0;
     endfunction
 
-    function automatic logic [63:0] generation_destination_mask(input FullBoard board);
+    // Evasions land on a king line except captures of checking knights and
+    // en passant. Preserve all knight captures and add EP after filtering;
+    // this needs no checker identification or additional generation stage.
+    function automatic logic [63:0] generation_destination_mask(
+        input FullBoard board, input logic in_check
+    );
         automatic logic [63:0] mask;
+        automatic Position king_square = board.king_positions[board.turn];
+        automatic BoardRank king_rank = get_rank(king_square);
+        automatic BoardFile king_file = get_file(king_square);
+        automatic logic [3:0] king_diagonal_sum = {1'b0, king_rank} + {1'b0, king_file};
+        automatic logic [3:0] king_diagonal_difference = {1'b0, king_rank} + {1'b0, ~king_file};
         mask = '0;
         for (int pos = 0; pos < 64; pos++) begin
             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY) begin
@@ -226,6 +237,14 @@ module move_generator_lane #(
                     && board.tiles[pos].piece_type == NULL_PIECE) begin
                 mask[pos] = 1'b1;
             end
+            if (in_check
+                    && get_rank(Position'(pos)) != king_rank
+                    && get_file(Position'(pos)) != king_file
+                    && 4'(pos / 8 + pos % 8) != king_diagonal_sum
+                    && 4'(pos / 8 + 7 - pos % 8) != king_diagonal_difference
+                    && !(GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
+                        && board.tiles[pos].piece_type == KNIGHT))
+                mask[pos] = 1'b0;
         end
         if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY && board.has_ep) begin
             automatic Position ep_destination = Position'({
@@ -874,7 +893,7 @@ module move_generator_lane #(
                         // Payload is irrelevant until a command is accepted.
                         // Preload it while idle so command validity controls
                         // only the state transition, not a 64-bit data mux.
-                        destination_mask <= generation_destination_mask(cmd_board);
+                        destination_mask <= generation_destination_mask(cmd_board, cmd_in_check);
                         // Idle tags are unused. Capture the arriving thread even
                         // without valid, keeping scheduler decoding off its enable.
                         job_thread <= cmd_thread;

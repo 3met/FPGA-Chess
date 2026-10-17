@@ -402,6 +402,7 @@
                                 end else begin
                                     // Perft borrows the idle first search context and leaves the game board intact.
                                     search_board[0] <= active_board;
+                                    search_board_in_check[0] <= active_board_in_check;
                                     search_zobrist_key[0] <= active_zobrist_key;
                                     search_pst_eval[0] <= active_pst_eval;
                                     search_piece_count[0] <= active_piece_count;
@@ -682,6 +683,7 @@
                             state <= CTRL_PERFT_GEN_ISSUE;
                         end else begin
                             search_board[0] <= board_update_out;
+                            search_board_in_check[0] <= board_update_side_in_check;
                             search_zobrist_key[0] <= board_update_zobrist_out;
                             search_pst_eval[0] <= board_update_pst_out;
                             search_piece_count[0] <= board_update_piece_count_out;
@@ -703,6 +705,7 @@
                 CTRL_PERFT_REVERSE_WAIT: begin
                     if (board_wait_count == BoardWaitCount'(0)) begin
                         search_board[0] <= board_update_out;
+                        search_board_in_check[0] <= board_update_side_in_check;
                         search_zobrist_key[0] <= board_update_zobrist_out;
                         search_pst_eval[0] <= board_update_pst_out;
                         search_piece_count[0] <= board_update_piece_count_out;

@@ -18,6 +18,7 @@ module tb_move_generator;
     ThreadID cmd_thread;
     PlyIndex cmd_ply;
     FullBoard cmd_board;
+    logic cmd_in_check;
     logic cmd_suppress_valid;
     Move cmd_suppress_move;
     logic cmd_resp_valid;
@@ -90,7 +91,7 @@ module tb_move_generator;
         .noisy_cmd_valid(cmd_valid && cmd != MOVE_GEN_GENERATE_QUIET),
         .noisy_cmd_ready, .noisy_cmd(cmd),
         .noisy_cmd_thread(cmd_thread), .noisy_cmd_ply(cmd_ply),
-        .noisy_cmd_board(cmd_board),
+        .noisy_cmd_board(cmd_board), .noisy_cmd_in_check(cmd_in_check),
         .noisy_cmd_suppress_valid(cmd_suppress_valid),
         .noisy_cmd_suppress_move(cmd_suppress_move),
         .noisy_resp_valid(cmd_resp_valid), .noisy_resp_thread(cmd_resp_thread),
@@ -100,7 +101,7 @@ module tb_move_generator;
         .quiet_cmd_valid(cmd_valid && cmd == MOVE_GEN_GENERATE_QUIET),
         .quiet_cmd_ready,
         .quiet_cmd_thread(cmd_thread), .quiet_cmd_ply(cmd_ply),
-        .quiet_cmd_board(cmd_board),
+        .quiet_cmd_board(cmd_board), .quiet_cmd_in_check(cmd_in_check),
         .quiet_cmd_suppress_valid(cmd_suppress_valid),
         .quiet_cmd_suppress_move(cmd_suppress_move),
         .quiet_resp_valid, .quiet_resp_thread, .quiet_resp_ply,
@@ -236,6 +237,7 @@ module tb_move_generator;
         cmd_thread = ThreadID'(0);
         cmd_ply = PlyIndex'(0);
         cmd_board = FullBoard'('0);
+        cmd_in_check = 1'b0;
         cmd_suppress_valid = 1'b0;
         cmd_suppress_move = NULL_MOVE;
         pop_valid = 1'b0;
@@ -292,7 +294,8 @@ module tb_move_generator;
         input MoveBucketTops tops_in,
         output logic direct_valid,
         output Move direct_move,
-        output MoveBucketTops tops_out
+        output MoveBucketTops tops_out,
+        input logic in_check = 1'b0
     );
         automatic FullBoard tracked_board = board;
         // Directed fixtures are assembled tile by tile; derive their cached
@@ -310,6 +313,7 @@ module tb_move_generator;
         cmd = operation;
         while (!cmd_ready) tick();
         cmd_board = tracked_board;
+        cmd_in_check = in_check;
         cmd_suppress_valid = suppress_valid;
         cmd_suppress_move = suppress_move;
         cmd_valid = 1'b1;
@@ -411,6 +415,7 @@ module tb_move_generator;
             prepare_quiet_phase();
         cmd = operation;
         cmd_board = board;
+        cmd_in_check = 1'b0;
         while (!cmd_ready) tick();
         cmd_valid = 1;
         tick();
@@ -530,6 +535,183 @@ module tb_move_generator;
             collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), count, seen);
             check(seen === expected, $sformatf("reference move set color=%0d phase=%0d", board.turn, phase));
         end
+    endtask
+
+    // Independent legality oracle for ordinary quiet moves: apply the move,
+    // then use source-centric movement to find attacks on the resulting king.
+    function automatic logic reference_quiet_legal(input FullBoard board, input int src, input int dst);
+        automatic FullBoard child = board;
+        automatic int king_square = -1;
+        if (!reference_move(board, src, dst) || board.tiles[dst].piece_type != NULL_PIECE)
+            return 1'b0;
+        child.tiles[dst] = child.tiles[src];
+        child.tiles[src] = EMPTY_TILE;
+        for (int pos = 0; pos < 64; pos++)
+            if (child.tiles[pos] == Tile'({board.turn, KING})) king_square = pos;
+        if (king_square < 0) return 1'b0;
+        // The movement oracle excludes king captures; a queen on the same
+        // square permits attack testing without changing occupancy or paths.
+        child.tiles[king_square] = Tile'({board.turn, QUEEN});
+        child.turn = Color'(~board.turn);
+        for (int attacker = 0; attacker < 64; attacker++)
+            if (reference_move(child, attacker, king_square)) return 1'b0;
+        return 1'b1;
+    endfunction
+
+    // Filter checked positions without losing legal blocks or king escapes.
+    // Mirror fixtures to exercise both colors and diagonal arithmetic at edges.
+    task automatic check_quiet_evasions();
+        automatic FullBoard board;
+        automatic FullBoard mirrored;
+        automatic MoveBucketTops tops;
+        automatic logic direct_valid;
+        automatic Move direct_move;
+        automatic logic [16383:0] unfiltered, filtered, legal_moves;
+        automatic int count, unfiltered_count;
+        automatic logic [39:0] before_cycles, unfiltered_cycles, filtered_cycles;
+        for (int fixture = 0; fixture < 5; fixture++) begin
+            empty_board(board);
+            board.tiles[4] = WHITE_KING;
+            board.tiles[57] = BLACK_KING;
+            board.tiles[8] = WHITE_ROOK;
+            board.tiles[2] = WHITE_BISHOP;
+            board.tiles[1] = WHITE_KNIGHT;
+            board.tiles[14] = WHITE_PAWN;
+            case (fixture)
+                0: board.tiles[60] = BLACK_ROOK;
+                1: board.tiles[31] = BLACK_BISHOP;
+                2: board.tiles[21] = BLACK_KNIGHT;
+                3: board.tiles[25] = BLACK_BISHOP;
+                4: board.tiles[7] = BLACK_ROOK;
+            endcase
+            for (int color = 0; color < 2; color++) begin
+                mirrored = board;
+                if (color != 0) begin
+                    mirrored.turn = BLACK;
+                    for (int pos = 0; pos < 64; pos++) begin
+                        mirrored.tiles[63-pos] = board.tiles[pos];
+                        if (board.tiles[pos].piece_type != NULL_PIECE)
+                            mirrored.tiles[63-pos].piece_color = Color'(~board.tiles[pos].piece_color);
+                    end
+                end
+                legal_moves = '0;
+                for (int src = 0; src < 64; src++)
+                    for (int dst = 0; dst < 64; dst++)
+                        if (reference_quiet_legal(mirrored, src, dst))
+                            legal_moves[14'(make_move(Position'(src), Position'(dst)))] = 1'b1;
+                check(legal_moves != '0, "checked fixture has legal quiet evasions");
+                tops = '0;
+                before_cycles = dut.quiet_stat_generation_cycles;
+                run_command(MOVE_GEN_GENERATE_QUIET, mirrored, 1'b0, NULL_MOVE,
+                    tops, direct_valid, direct_move, tops, 1'b0);
+                unfiltered_cycles = dut.quiet_stat_generation_cycles - before_cycles;
+                collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), unfiltered_count, unfiltered);
+                tops = '0;
+                before_cycles = dut.quiet_stat_generation_cycles;
+                run_command(MOVE_GEN_GENERATE_QUIET, mirrored, 1'b0, NULL_MOVE,
+                    tops, direct_valid, direct_move, tops, 1'b1);
+                filtered_cycles = dut.quiet_stat_generation_cycles - before_cycles;
+                collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), count, filtered);
+                check((filtered & legal_moves) == legal_moves,
+                    "quiet filter preserves every legal evasion");
+                check((filtered & ~unfiltered) == '0 && count < unfiltered_count,
+                    "quiet filter removes candidates without adding moves");
+                check(filtered_cycles < unfiltered_cycles,
+                    "quiet evasion mask reduces generation cycles");
+            end
+        end
+        cmd_in_check = 1'b0;
+    endtask
+
+    // Checked noisy generation must retain off-line knight captures, EP
+    // evasions, and every blocking promotion, while dropping unrelated captures.
+    task automatic check_noisy_evasions();
+        automatic FullBoard board, mirrored;
+        automatic MoveBucketTops tops;
+        automatic logic direct_valid;
+        automatic Move direct_move, evasion, unrelated, knight_capture;
+        automatic logic [16383:0] unfiltered, filtered;
+        automatic int count, unfiltered_count;
+        automatic logic [39:0] before_cycles, unfiltered_cycles, filtered_cycles;
+        for (int fixture = 0; fixture < 3; fixture++) begin
+            empty_board(board);
+            board.tiles[9] = WHITE_QUEEN;
+            if (fixture == 0) begin
+                board.tiles[4] = WHITE_KING;
+                board.tiles[58] = BLACK_KING;
+                board.tiles[14] = WHITE_BISHOP;
+                board.tiles[21] = BLACK_KNIGHT;
+                board.tiles[45] = BLACK_KNIGHT;
+                board.tiles[10] = BLACK_PAWN;
+                evasion = make_move(Position'(14), Position'(21));
+                knight_capture = make_move(Position'(9), Position'(45));
+                unrelated = make_move(Position'(9), Position'(10));
+            end else if (fixture == 1) begin
+                board.tiles[28] = WHITE_KING;
+                board.tiles[56] = BLACK_KING;
+                board.tiles[36] = WHITE_PAWN;
+                board.tiles[35] = BLACK_PAWN;
+                board.tiles[8] = BLACK_PAWN;
+                board.has_ep = 1'b1;
+                board.ep_file = BoardFile'(3);
+                evasion = make_move(Position'(36), Position'(43));
+                unrelated = make_move(Position'(9), Position'(8));
+            end else begin
+                board.tiles[56] = WHITE_KING;
+                board.tiles[47] = BLACK_KING;
+                board.tiles[63] = BLACK_ROOK;
+                board.tiles[50] = WHITE_PAWN;
+                board.tiles[10] = BLACK_PAWN;
+                evasion = make_move(Position'(50), Position'(58));
+                unrelated = make_move(Position'(9), Position'(10));
+            end
+            for (int color = 0; color < 2; color++) begin
+                mirrored = board;
+                if (color != 0) begin
+                    mirrored.turn = BLACK;
+                    mirrored.ep_file = BoardFile'(7 - board.ep_file);
+                    for (int pos = 0; pos < 64; pos++) begin
+                        mirrored.tiles[63-pos] = board.tiles[pos];
+                        if (board.tiles[pos].piece_type != NULL_PIECE)
+                            mirrored.tiles[63-pos].piece_color = Color'(~board.tiles[pos].piece_color);
+                    end
+                end
+                tops = '0;
+                before_cycles = dut.noisy_stat_generation_cycles;
+                run_command(MOVE_GEN_GENERATE_NOISY, mirrored, 1'b0, NULL_MOVE,
+                    tops, direct_valid, direct_move, tops, 1'b0);
+                unfiltered_cycles = dut.noisy_stat_generation_cycles - before_cycles;
+                collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), unfiltered_count, unfiltered);
+                tops = '0;
+                before_cycles = dut.noisy_stat_generation_cycles;
+                run_command(MOVE_GEN_GENERATE_NOISY, mirrored, 1'b0, NULL_MOVE,
+                    tops, direct_valid, direct_move, tops, 1'b1);
+                filtered_cycles = dut.noisy_stat_generation_cycles - before_cycles;
+                collect(ALL_BUCKET_MASK, tops, MoveBucketTops'(0), count, filtered);
+                begin
+                    automatic Move kept = color == 0 ? evasion
+                        : make_move(Position'(63-evasion.from_pos), Position'(63-evasion.to_pos));
+                    automatic Move dropped = color == 0 ? unrelated
+                        : make_move(Position'(63-unrelated.from_pos), Position'(63-unrelated.to_pos));
+                    check(unfiltered[14'(dropped)] && !filtered[14'(dropped)],
+                        "noisy check mask removes unrelated off-line captures");
+                    for (int promo = 0; promo < (fixture == 2 ? 4 : 1); promo++) begin
+                        kept.promo_piece = PromoType'(promo);
+                        check(filtered[14'(kept)], "noisy filter retains legal evasion and promotion choices");
+                    end
+                    if (fixture == 0) begin
+                        kept = color == 0 ? knight_capture
+                            : make_move(Position'(63-knight_capture.from_pos), Position'(63-knight_capture.to_pos));
+                        check(filtered[14'(kept)], "noisy filter conservatively retains nonchecking knight captures");
+                    end
+                end
+                check((filtered & ~unfiltered) == '0 && count < unfiltered_count,
+                    "noisy filter only removes candidates");
+                check(filtered_cycles < unfiltered_cycles,
+                    "noisy check mask reduces generation cycles");
+            end
+        end
+        cmd_in_check = 1'b0;
     endtask
 
     task automatic history_update(input Move move, input logic [5:0] depth);
@@ -686,6 +868,8 @@ module tb_move_generator;
         while (init_busy) tick();
 
         check_direct_clearance();
+        check_quiet_evasions();
+        check_noisy_evasions();
 
         start_board(board);
         cmd_thread = ThreadID'(1);

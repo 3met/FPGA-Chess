@@ -310,6 +310,7 @@
     ThreadID move_cmd_thread;
     PlyIndex move_cmd_ply;
     FullBoard move_cmd_board;
+    logic move_cmd_in_check;
     logic move_cmd_suppress_valid;
     Move move_cmd_suppress_move;
     logic move_cmd_resp_valid;
@@ -322,6 +323,7 @@
     ThreadID move_quiet_cmd_thread;
     PlyIndex move_quiet_cmd_ply;
     FullBoard move_quiet_cmd_board;
+    logic move_quiet_cmd_in_check;
     logic move_quiet_cmd_suppress_valid;
     Move move_quiet_cmd_suppress_move;
     logic move_quiet_resp_valid;

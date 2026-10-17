@@ -34,7 +34,7 @@ The controller schedules thread work across board update, move generation, NNUE 
 
 ## Move Generation and Legality
 
-The move generator produces ordered pseudo-legal candidates and rejects castling paths that are invalid before the final board can be examined. Ordinary legality is checked after speculative board update by testing whether the moving side left its king in check. An illegal candidate is discarded without changing the accepted thread state.
+The move generator produces ordered pseudo-legal candidates and rejects castling paths that are invalid before the final board can be examined. Search supplies its cached check status to both generation lanes, which skip destinations outside the king’s rank, file, and diagonals while checked; noisy generation also retains all captures of enemy knights and en passant targets. Ordinary legality is checked after speculative board update by testing whether the moving side left its king in check. An illegal candidate is discarded without changing the accepted thread state.
 
 Host-supplied positions and moves are assumed legal because the host validates UCI input before encoding FPGA commands. Search-generated moves always pass through hardware legality filtering.
 

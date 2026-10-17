@@ -71,6 +71,34 @@
         apply_game_move(make_move(Position'(40), Position'(32), PROMO_QUEEN), "perft regression a6a5");
         run_perft(8'd1, NodeCountType'(44), "queen sortie perft depth 1");
 
+        // Independent reference perft counts exercise cached check status at
+        // the root, on descent to an unchecked child, and after reversal.
+        new_game();
+        setup_quiet_evasion_perft_position();
+        run_perft(8'd1, NodeCountType'(6), "quiet evasion perft depth 1");
+        run_perft(8'd2, NodeCountType'(89), "quiet evasion perft depth 2");
+
+        // Independent reference counts preserve special noisy evasions and
+        // complete child move sets after leaving the checked root.
+        for (int fixture = 0; fixture < 3; fixture++) begin
+            new_game();
+            setup_noisy_evasion_perft_position(fixture);
+            case (fixture)
+                0: begin
+                    run_perft(8'd1, NodeCountType'(4), "knight capture evasion depth 1");
+                    run_perft(8'd2, NodeCountType'(84), "knight capture evasion depth 2");
+                end
+                1: begin
+                    run_perft(8'd1, NodeCountType'(8), "EP capture evasion depth 1");
+                    run_perft(8'd2, NodeCountType'(45), "EP capture evasion depth 2");
+                end
+                2: begin
+                    run_perft(8'd1, NodeCountType'(8), "blocking promotion evasion depth 1");
+                    run_perft(8'd2, NodeCountType'(106), "blocking promotion evasion depth 2");
+                end
+            endcase
+        end
+
         new_game();
         setup_kings_only();
         run_perft(8'd1, NodeCountType'(5), "kings-only perft depth 1");
