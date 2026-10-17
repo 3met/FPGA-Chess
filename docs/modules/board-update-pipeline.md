@@ -48,7 +48,11 @@ The engine sets up a board through Set Tile, Set Castling Rights, Set Turn, Set 
 
 ## Hashing
 
-Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king safety is checked through the normal move path. Deterministic generated data supplies the piece-square, en passant, turn, and castling keys.
+Tile, turn, castling, and en passant components of the 64-bit Zobrist key are updated incrementally for every board operation. An en passant file is retained and hashed only when the side to move has an adjacent pawn that can make the pseudo-legal capture; final king safety is checked through the normal move path.
+
+Piece-square keys are computed by a combinational Boolean hash: invertible address diffusion followed by two layers of small nonlinear logic functions. Concatenating the packed tile and square forms the input without arithmetic. The circuit is specified in `hardware/data/zobrist/hash_network.json`; `hardware/scripts/generate_zobrist.py` emits the portable `zobrist_hash_pkg` RTL and independent simulation references under `hardware/tb/board_update_pipeline/data/`. EP files use otherwise unused empty-tile encodings and compile to combinational constants, as do the turn and castling-right keys. Hashing uses no block memory.
+
+Three general feature lanes handle the moving piece, placed piece, and capture. Castling uses the moving/placed-piece lanes and a constant rook XOR delta selected by color and side; the capture lane remains disabled. The same four rook deltas undo castling. Registered results retain the existing pipeline latency and throughput; PST and move-history storage remain separate.
 
 The pipeline maintains cached king squares, the Zobrist key, both material/PST sums, and piece count for setup, moves, and reversal.
 

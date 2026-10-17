@@ -4,9 +4,17 @@ import chess_defs::*;
 import chess_helpers::*;
 import board_update_pipeline_defs::*;
 import zobrist_defs::*;
-import zobrist_values_pkg::*;
+import zobrist_hash_pkg::*;
 
 module tb_board_update_pipeline;
+
+    // Golden tables are simulation data, independent of the generated RTL.
+    localparam int ZOBRIST_TILE_REFERENCE_COUNT = 1 << $bits(ZobristFeature);
+    localparam int ZOBRIST_EP_REFERENCE_COUNT = 1 << $bits(BoardFile);
+    localparam ZOBRIST_TILE_REFERENCE_FILE =
+        "hardware/tb/board_update_pipeline/data/zobrist_tile_reference.hex";
+    localparam ZOBRIST_EP_REFERENCE_FILE =
+        "hardware/tb/board_update_pipeline/data/zobrist_ep_reference.hex";
 
     logic clk;
     BoardOp board_op;
@@ -28,8 +36,8 @@ module tb_board_update_pipeline;
 
     PstScore pst_values[0:(6 * 64)-1];
     PstScore pst_values_endgame[0:(6 * 64)-1];
-    ZobristKey zobrist_tile_values[0:ZOBRIST_TILE_ENTRY_CNT-1];
-    ZobristKey zobrist_ep_values[0:ZOBRIST_EP_ENTRY_CNT-1];
+    ZobristKey zobrist_tile_reference[0:ZOBRIST_TILE_REFERENCE_COUNT-1];
+    ZobristKey zobrist_ep_reference[0:ZOBRIST_EP_REFERENCE_COUNT-1];
 
     FullBoard ref_board;
     MoveRecord ref_history[0:MAX_PLY_COUNT-1];
@@ -174,7 +182,7 @@ module tb_board_update_pipeline;
     endfunction
 
     function automatic ZobristKey ref_zobrist_tile(
-        input Tile tile, input Position pos, const ref ZobristKey tile_values[ZOBRIST_TILE_ENTRY_CNT]
+        input Tile tile, input Position pos, const ref ZobristKey tile_values[ZOBRIST_TILE_REFERENCE_COUNT]
     );
         automatic Tile normalized = norm_tile(tile);
 
@@ -182,7 +190,7 @@ module tb_board_update_pipeline;
             return ZobristKey'(0);
         end
 
-        return tile_values[zobrist_tile_addr(normalized, pos)];
+        return tile_values[zobrist_tile_feature(normalized, pos)];
     endfunction
 
     function automatic logic ref_ep_has_capturer(
@@ -201,8 +209,8 @@ module tb_board_update_pipeline;
 
     // Share the full-key calculation instead of expanding its tile loop at each operation.
     function automatic ZobristKey calc_ref_zobrist_full(
-        input FullBoard board, const ref ZobristKey tile_values[ZOBRIST_TILE_ENTRY_CNT],
-        const ref ZobristKey ep_values[ZOBRIST_EP_ENTRY_CNT]
+        input FullBoard board, const ref ZobristKey tile_values[ZOBRIST_TILE_REFERENCE_COUNT],
+        const ref ZobristKey ep_values[ZOBRIST_EP_REFERENCE_COUNT]
     );
         /* verilator no_inline_task */
         automatic ZobristKey key = ZobristKey'(0);
@@ -230,7 +238,7 @@ module tb_board_update_pipeline;
 
     // Bind the loaded hashing tables at the call site.
     function automatic ZobristKey ref_zobrist_full(input FullBoard board);
-        return calc_ref_zobrist_full(board, zobrist_tile_values, zobrist_ep_values);
+        return calc_ref_zobrist_full(board, zobrist_tile_reference, zobrist_ep_reference);
     endfunction
 
     task automatic init_empty_board(output FullBoard board);
@@ -1073,11 +1081,39 @@ module tb_board_update_pipeline;
         dut.gen_pst_rom[0].pst_endgame_rom.mem[address] = original_value;
     endtask
 
+    // Exhaustively compare the synthesized function's feature domain with the
+    // independently evaluated Python reference data used for full-board hashes.
+    task automatic test_feature_hash();
+        for (int address = 0; address < ZOBRIST_TILE_REFERENCE_COUNT; address++) begin
+            // Empty/spare encodings and back-rank pawns are disabled entries.
+            if (zobrist_tile_reference[address] != 0)
+                expect_equal(zobrist_feature_key(ZobristFeature'(address)) === zobrist_tile_reference[address],
+                    $sformatf("piece-square hash address %0d", address));
+        end
+        for (int file_index = 0; file_index < ZOBRIST_EP_REFERENCE_COUNT; file_index++) begin
+            expect_equal(zobrist_ep_key(BoardFile'(file_index)) === zobrist_ep_reference[file_index],
+                $sformatf("en-passant hash file %0d", file_index));
+            expect_equal(zobrist_feature_key(10'(file_index)) === zobrist_ep_reference[file_index],
+                $sformatf("en-passant feature domain %0d", file_index));
+        end
+        for (int color = 0; color < 2; color++) begin
+            for (int kingside = 0; kingside < 2; kingside++) begin
+                automatic int base_address = ((color << 3) | int'(ROOK)) * 64 + color * 56;
+                automatic int source_file = kingside ? 7 : 0;
+                automatic int destination_file = kingside ? 5 : 3;
+                expect_equal(zobrist_castle_rook_delta(2'((color << 1) | kingside))
+                        === (zobrist_tile_reference[base_address + source_file]
+                            ^ zobrist_tile_reference[base_address + destination_file]),
+                    $sformatf("castling rook delta color %0d kingside %0d", color, kingside));
+            end
+        end
+    endtask
+
     initial begin
         $readmemh("hardware/data/pst_values/pst_values.hex", pst_values);
         $readmemh("hardware/data/pst_values/pst_values_endgame.hex", pst_values_endgame);
-        $readmemh(ZOBRIST_TILE_MEM_INIT_FILE, zobrist_tile_values);
-        $readmemh(ZOBRIST_EP_MEM_INIT_FILE, zobrist_ep_values);
+        $readmemh(ZOBRIST_TILE_REFERENCE_FILE, zobrist_tile_reference);
+        $readmemh(ZOBRIST_EP_REFERENCE_FILE, zobrist_ep_reference);
 
         clk = 1'b0;
         reset_ref_model();
@@ -1085,6 +1121,7 @@ module tb_board_update_pipeline;
         do_clock(2);
 
         $display("=== Board update pipeline testbench ===");
+        test_feature_hash();
         test_back_to_back_independent_requests();
         test_back_to_back_king_safety();
         test_main_move_sequence();

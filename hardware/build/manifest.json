@@ -56,7 +56,7 @@
     "board-update-pipeline": [
       "@common",
       "hardware/rtl/zobrist_defs.sv",
-      "hardware/rtl/generated/zobrist_values_pkg.sv",
+      "hardware/rtl/generated/zobrist_hash_pkg.sv",
       "hardware/rtl/board_update_pipeline/board_update_pipeline_defs.sv",
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/memory/sync_read_dual_port_rom.sv",
@@ -81,7 +81,6 @@
     ],
     "repetition-checker": [
       "@common",
-      "hardware/rtl/zobrist_defs.sv",
       "hardware/rtl/memory/sync_read_simple_dual_port_ram.sv",
       "hardware/rtl/repetition_defs.sv",
       "hardware/rtl/repetition_checker.sv"
@@ -386,12 +385,12 @@
         "hardware/data/nnue/accumulator_bias.hex"
       ]
     },
-    "zobrist-values": {
-      "script": "hardware/scripts/generate_zobrist_values.py",
+    "zobrist": {
+      "script": "hardware/scripts/generate_zobrist.py",
       "outputs": [
-        "hardware/data/zobrist/zobrist_tile_values.hex",
-        "hardware/data/zobrist/zobrist_ep_values.hex",
-        "hardware/rtl/generated/zobrist_values_pkg.sv"
+        "hardware/tb/board_update_pipeline/data/zobrist_tile_reference.hex",
+        "hardware/tb/board_update_pipeline/data/zobrist_ep_reference.hex",
+        "hardware/rtl/generated/zobrist_hash_pkg.sv"
       ]
     }
   },

@@ -4,7 +4,7 @@ import chess_defs::*;
 import chess_helpers::*;
 import board_update_pipeline_defs::*;
 import zobrist_defs::*;
-import zobrist_values_pkg::*;
+import zobrist_hash_pkg::*;
 
 module board_update_pipeline #(
     parameter int MOVE_RECORD_THREAD_COUNT = THREAD_COUNT,
@@ -35,7 +35,7 @@ module board_update_pipeline #(
     localparam PST_MEM_INIT_FILE = "hardware/data/pst_values/pst_values.hex";
     localparam PST_ENDGAME_MEM_INIT_FILE = "hardware/data/pst_values/pst_values_endgame.hex";
     localparam int PST_READ_PORTS = 4;
-    localparam int ZOBRIST_TILE_READ_PORTS = 4;
+    localparam int ZOBRIST_DELTA_LANES = 4;
 
     typedef struct packed {
         logic [PST_READ_PORTS-1:0] enable;
@@ -43,9 +43,9 @@ module board_update_pipeline #(
     } PstReadPlan;
 
     typedef struct packed {
-        logic [ZOBRIST_TILE_READ_PORTS-1:0] enable;
-        ZobristTileAddr [ZOBRIST_TILE_READ_PORTS-1:0] address;
-    } ZobristReadPlan;
+        logic [ZOBRIST_DELTA_LANES-1:0] enable;
+        ZobristFeature [ZOBRIST_DELTA_LANES-1:0] feature;
+    } ZobristHashPlan;
 
     typedef struct packed {
         Position from_pos;
@@ -104,9 +104,9 @@ module board_update_pipeline #(
     PstScore pst_read_data[PST_READ_PORTS];
     PstScore pst_endgame_read_data[PST_READ_PORTS];
     PstEvalPair pst_source_out, pst_destination_out, pst_captured_out, pst_castle_out;
-    ZobristReadPlan zobrist_read_plan;
-    logic [ZOBRIST_TILE_READ_PORTS-1:0] zobrist_read_enable_q;
-    ZobristKey zobrist_read_data[ZOBRIST_TILE_READ_PORTS];
+    ZobristHashPlan zobrist_hash_plan;
+    logic [ZOBRIST_DELTA_LANES-1:0] zobrist_hash_enable_q;
+    ZobristKey zobrist_lane_keys[ZOBRIST_DELTA_LANES];
     logic zobrist_turn_toggle, zobrist_turn_toggle_q;
     CastlingRights zobrist_castle_toggle, zobrist_castle_toggle_q;
     logic zobrist_old_ep_valid, zobrist_new_ep_valid;
@@ -121,43 +121,25 @@ module board_update_pipeline #(
     Color check_mover_color_d, check_mover_color_q;
     FullBoard check_board;
 
-    genvar port_pair;
-    generate
-        for (port_pair = 0; port_pair < ZOBRIST_TILE_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_zobrist_rom
-            sync_read_dual_port_rom #(
-                .NUM_WORDS(ZOBRIST_TILE_ENTRY_CNT),
-                .WORD_SIZE($bits(ZobristKey)),
-                .MEM_INIT_FILE(ZOBRIST_TILE_MEM_INIT_FILE)
-            ) zobrist_rom (
-                .clock(clk),
-                .address_a(zobrist_read_plan.address[port_pair * 2]),
-                .address_b(zobrist_read_plan.address[port_pair * 2 + 1]),
-                .rden_a(zobrist_read_plan.enable[port_pair * 2]),
-                .rden_b(zobrist_read_plan.enable[port_pair * 2 + 1]),
-                .q_a(zobrist_read_data[port_pair * 2]),
-                .q_b(zobrist_read_data[port_pair * 2 + 1])
-            );
+    // Compute feature keys in logic and register each enabled result. The
+    // fourth delta lane selects a constant rook delta for castling.
+    always_ff @(posedge clk) begin
+        for (int port_index = 0; port_index < ZOBRIST_DELTA_LANES - 1; port_index++) begin
+            if (zobrist_hash_plan.enable[port_index])
+                zobrist_lane_keys[port_index] <= zobrist_feature_key(zobrist_hash_plan.feature[port_index]);
         end
-    endgenerate
+        // Castling's rook XOR delta is one of four constants, and is the same
+        // for push and reversal. The capture lane stays idle during castling.
+        if (zobrist_hash_plan.enable[3])
+            zobrist_lane_keys[3] <= zobrist_castle_rook_delta({
+                zobrist_hash_plan.feature[3][9], zobrist_hash_plan.feature[3][2]});
+        if (zobrist_old_ep_valid)
+            zobrist_old_ep_data <= zobrist_ep_key(zobrist_old_ep_address);
+        if (zobrist_new_ep_valid)
+            zobrist_new_ep_data <= zobrist_ep_key(zobrist_new_ep_address);
+    end
 
-    // Side-state hashing needs only the old and new en-passant file values.
-    // Turn and castling keys are fixed constants, so keeping them out of the
-    // replicated piece ROMs limits the tile table to the four move ports. The
-    // separate eight-entry EP ROM supplies both side-state reads directly.
-    sync_read_dual_port_rom #(
-        .NUM_WORDS(ZOBRIST_EP_ENTRY_CNT),
-        .WORD_SIZE($bits(ZobristKey)),
-        .MEM_INIT_FILE(ZOBRIST_EP_MEM_INIT_FILE)
-    ) zobrist_ep_rom (
-        .clock(clk),
-        .address_a(zobrist_old_ep_address),
-        .address_b(zobrist_new_ep_address),
-        .rden_a(zobrist_old_ep_valid),
-        .rden_b(zobrist_new_ep_valid),
-        .q_a(zobrist_old_ep_data),
-        .q_b(zobrist_new_ep_data)
-    );
-
+    genvar port_pair;
     generate
         for (port_pair = 0; port_pair < PST_READ_PORTS / 2; port_pair = port_pair + 1) begin : gen_pst_rom
             sync_read_dual_port_rom #(
@@ -520,7 +502,7 @@ module board_update_pipeline #(
             ctx_pipe[1].side_king_square,
             Color'(~result_turn(ctx_pipe[1]))
         );
-        zobrist_read_enable_q <= zobrist_read_plan.enable;
+        zobrist_hash_enable_q <= zobrist_hash_plan.enable;
         zobrist_turn_toggle_q <= zobrist_turn_toggle;
         zobrist_castle_toggle_q <= zobrist_castle_toggle;
         zobrist_old_ep_valid_q <= zobrist_old_ep_valid;
@@ -599,10 +581,10 @@ module board_update_pipeline #(
     end
 
     // Form the incremental hash delta one stage before board mutation. The
-    // synchronous ROM outputs then align with the same request in ctx_pipe[1].
+    // registered hash outputs then align with the same request in ctx_pipe[1].
     always_comb begin
         automatic BoardUpdatePipelineCtx in = captured_ctx;
-        automatic ZobristReadPlan plan = ZobristReadPlan'(0);
+        automatic ZobristHashPlan plan = ZobristHashPlan'(0);
 
         zobrist_turn_toggle = 1'b0;
         zobrist_castle_toggle = CastlingRights'(0);
@@ -625,25 +607,22 @@ module board_update_pipeline #(
                 automatic logic is_ep = effects.is_ep;
                 automatic Tile placed_tile = effects.placed_tile;
                 automatic Position ep_capture_pos = effects.ep_capture_pos;
-                automatic Position rook_from = effects.rook_from;
                 automatic Position rook_to = effects.rook_to;
                 automatic Tile captured_tile = is_ep ? Tile'({captured_color, PAWN}) : destination_tile;
                 automatic CastlingRights next_castle = in.board.castling_rights;
                 automatic logic next_has_ep;
                 automatic BoardFile next_ep_file = get_file(to_pos);
 
-                plan.address[0] = zobrist_tile_addr(moving_tile, from_pos);
+                plan.feature[0] = zobrist_tile_feature(moving_tile, from_pos);
                 plan.enable[0] = valid_piece_type(moving_tile.piece_type) ? 1'b1 : 1'bx;
-                plan.address[1] = zobrist_tile_addr(placed_tile, to_pos);
+                plan.feature[1] = zobrist_tile_feature(placed_tile, to_pos);
                 plan.enable[1] = valid_piece_type(placed_tile.piece_type) ? 1'b1 : 1'bx;
                 if (is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                    plan.address[2] = zobrist_tile_addr(rook_tile, rook_from);
-                    plan.address[3] = zobrist_tile_addr(rook_tile, rook_to);
-                    plan.enable[2] = 1'b1;
+                    plan.feature[3] = zobrist_tile_feature(rook_tile, rook_to);
                     plan.enable[3] = 1'b1;
                 end else begin
-                    plan.address[2] = zobrist_tile_addr(captured_tile, is_ep ? ep_capture_pos : to_pos);
+                    plan.feature[2] = zobrist_tile_feature(captured_tile, is_ep ? ep_capture_pos : to_pos);
                     plan.enable[2] = (captured_tile.piece_type != NULL_PIECE);
                 end
 
@@ -676,25 +655,22 @@ module board_update_pipeline #(
                 automatic Tile restored_mover = effects.restored_mover;
                 automatic Tile restored_capture = effects.restored_capture;
                 automatic Position ep_capture_pos = effects.ep_capture_pos;
-                automatic Position rook_from = effects.rook_from;
                 automatic Position rook_to = effects.rook_to;
 
-                plan.address[0] = zobrist_tile_addr(destination_tile, to_pos);
+                plan.feature[0] = zobrist_tile_feature(destination_tile, to_pos);
                 plan.enable[0] = !is_null_record(rec) && (destination_tile.piece_type != NULL_PIECE);
-                plan.address[1] = zobrist_tile_addr(restored_mover, from_pos);
+                plan.feature[1] = zobrist_tile_feature(restored_mover, from_pos);
                 plan.enable[1] = !is_null_record(rec) && (restored_mover.piece_type != NULL_PIECE);
                 if (!is_null_record(rec) && is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                    plan.address[2] = zobrist_tile_addr(rook_tile, rook_to);
-                    plan.address[3] = zobrist_tile_addr(rook_tile, rook_from);
-                    plan.enable[2] = 1'b1;
+                    plan.feature[3] = zobrist_tile_feature(rook_tile, rook_to);
                     plan.enable[3] = 1'b1;
                 end else if (!is_null_record(rec) && is_ep) begin
                     automatic Tile ep_tile = Tile'({captured_color, PAWN});
-                    plan.address[2] = zobrist_tile_addr(ep_tile, ep_capture_pos);
+                    plan.feature[2] = zobrist_tile_feature(ep_tile, ep_capture_pos);
                     plan.enable[2] = 1'b1;
                 end else if (!is_null_record(rec)) begin
-                    plan.address[2] = zobrist_tile_addr(restored_capture, to_pos);
+                    plan.feature[2] = zobrist_tile_feature(restored_capture, to_pos);
                     plan.enable[2] = (restored_capture.piece_type != NULL_PIECE);
                 end
                 plan_side_delta(in.board, moved_color, rec.castling_rights, rec.has_ep, rec.ep_file);
@@ -720,8 +696,8 @@ module board_update_pipeline #(
                 new_has_ep = in.board.has_ep
                     && has_ep_capturer(
                         new_board, in.board.turn, in.board.ep_file);
-                plan.address[0] = zobrist_tile_addr(old_tile, to_pos);
-                plan.address[1] = zobrist_tile_addr(new_tile, to_pos);
+                plan.feature[0] = zobrist_tile_feature(old_tile, to_pos);
+                plan.feature[1] = zobrist_tile_feature(new_tile, to_pos);
                 plan.enable[0] = (old_tile.piece_type != NULL_PIECE);
                 plan.enable[1] = (new_tile.piece_type != NULL_PIECE);
                 plan_side_delta(in.board, in.board.turn, in.board.castling_rights,
@@ -745,7 +721,7 @@ module board_update_pipeline #(
             end
             default: begin end
         endcase
-        zobrist_read_plan = plan;
+        zobrist_hash_plan = plan;
     end
 
     // Form all PST reads one stage before board mutation. Two replicated
@@ -843,14 +819,14 @@ module board_update_pipeline #(
     always_comb begin
         automatic BoardUpdatePipelineCtx in = ctx_pipe[1];
         automatic BoardUpdatePipelineCtx out = in;
-        ZobristKey tile_delta[ZOBRIST_TILE_READ_PORTS];
+        ZobristKey tile_delta[ZOBRIST_DELTA_LANES];
         ZobristKey side_delta;
         ZobristKey old_ep_delta, new_ep_delta;
 
-        for (int port_idx = 0; port_idx < ZOBRIST_TILE_READ_PORTS; port_idx++) begin
+        for (int port_idx = 0; port_idx < ZOBRIST_DELTA_LANES; port_idx++) begin
             tile_delta[port_idx] = '0;
-            if (zobrist_read_enable_q[port_idx])
-                tile_delta[port_idx] = zobrist_read_data[port_idx];
+            if (zobrist_hash_enable_q[port_idx])
+                tile_delta[port_idx] = zobrist_lane_keys[port_idx];
         end
         side_delta = '0;
         if (zobrist_turn_toggle_q)
