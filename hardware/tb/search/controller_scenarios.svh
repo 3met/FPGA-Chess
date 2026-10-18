@@ -746,6 +746,9 @@
         check(!resp.error, {label, " no error"});
         check(resp.completed_depth == 8'd0, {label, " no completed depth"});
         check(resp.end_reason == ENGINE_END_TIME_LIMIT, {label, " end reason"});
+        check(!is_null_move(resp.best_move), {label, " hardware retains a legal fallback"});
+        check(is_null_move(resp.ponder_move), {label, " no unsearched ponder reply"});
+        check(resp.score == EvalScore'(0), {label, " no unsearched evaluation"});
     endtask : run_fixed_time_search
 
     task automatic run_clock_budget_search(input string label);
@@ -759,4 +762,102 @@
         check(!resp.error, {label, " no error"});
         check(resp.completed_depth == 8'd0, {label, " no completed depth"});
         check(resp.end_reason == ENGINE_END_TIME_LIMIT, {label, " end reason"});
+        check(!is_null_move(resp.best_move), {label, " hardware retains a legal fallback"});
+        check(is_null_move(resp.ponder_move), {label, " no unsearched ponder reply"});
+        check(resp.score == EvalScore'(0), {label, " no unsearched evaluation"});
     endtask : run_clock_budget_search
+
+    // An exhausted budget must still distinguish terminal roots from a move fallback.
+    task automatic run_expired_terminal_search(input string label, input EvalScore expected_score);
+        automatic EngineControllerRequest request = zero_request();
+        request.operation = ENGINE_CTRL_SEARCH_ON_CLOCK;
+        pulse_request(request, label);
+        wait_response(label);
+        check(!resp.error, {label, " no error"});
+        check(is_null_move(resp.best_move), {label, " terminal root has no move"});
+        check(resp.score == expected_score, {label, " terminal score"});
+        check(resp.end_reason == ENGINE_END_TIME_LIMIT, {label, " end reason"});
+    endtask : run_expired_terminal_search
+
+    // Reproduce the game failure using a legitimate positive upper bound that
+    // cannot cut off; its legality proof must not consume the only evasion.
+    task automatic run_tt_validation_fallback_test(input logic quiet_evasion);
+        automatic EngineControllerRequest request = zero_request();
+        automatic logic injected = 1'b0;
+        automatic logic proved = 1'b0;
+        automatic logic searched_evasion = 1'b0;
+        automatic int cycles = 0;
+        automatic Move checking_move = quiet_evasion
+            ? make_move(Position'(46), Position'(60), PROMO_QUEEN)
+            : make_move(Position'(59), Position'(45), PROMO_QUEEN);
+        automatic Move evasion = quiet_evasion
+            ? make_move(Position'(62), Position'(55), PROMO_QUEEN)
+            : make_move(Position'(5), Position'(45), PROMO_QUEEN);
+        new_game();
+        clear_start_position("TT validation fallback");
+        if (quiet_evasion) begin
+            set_tile(BLACK_KING, Position'(62), "TacDQf4W g8");
+            set_tile(BLACK_PAWN, Position'(54), "TacDQf4W g7");
+            set_tile(BLACK_PAWN, Position'(50), "TacDQf4W c7");
+            set_tile(BLACK_PAWN, Position'(48), "TacDQf4W a7");
+            set_tile(BLACK_PAWN, Position'(47), "TacDQf4W h6");
+            set_tile(WHITE_QUEEN, Position'(46), "TacDQf4W g6");
+            set_tile(BLACK_PAWN, Position'(44), "TacDQf4W e6");
+            set_tile(WHITE_KING, Position'(31), "TacDQf4W h4");
+            set_tile(WHITE_PAWN, Position'(22), "TacDQf4W g3");
+            set_tile(BLACK_BISHOP, Position'(21), "TacDQf4W f3");
+            set_tile(BLACK_QUEEN, Position'(12), "TacDQf4W e2");
+            set_halfmove_clock(HalfmoveClock'(6), "TacDQf4W reversible history");
+        end else begin
+            set_tile(BLACK_KING, Position'(63), "ALKkDXfU h8");
+            set_tile(BLACK_KNIGHT, Position'(61), "ALKkDXfU f8");
+            set_tile(WHITE_QUEEN, Position'(59), "ALKkDXfU d8");
+            set_tile(BLACK_BISHOP, Position'(58), "ALKkDXfU c8");
+            set_tile(BLACK_ROOK, Position'(56), "ALKkDXfU a8");
+            set_tile(BLACK_PAWN, Position'(55), "ALKkDXfU h7");
+            set_tile(BLACK_PAWN, Position'(44), "ALKkDXfU e6");
+            set_tile(WHITE_ROOK, Position'(38), "ALKkDXfU g5");
+            set_tile(WHITE_KNIGHT, Position'(36), "ALKkDXfU e5");
+            set_tile(BLACK_PAWN, Position'(35), "ALKkDXfU d5");
+            set_tile(WHITE_PAWN, Position'(30), "ALKkDXfU g4");
+            set_tile(BLACK_QUEEN, Position'(27), "ALKkDXfU d4");
+            set_tile(WHITE_ROOK, Position'(17), "ALKkDXfU b3");
+            set_tile(BLACK_PAWN, Position'(16), "ALKkDXfU a3");
+            set_tile(WHITE_PAWN, Position'(10), "ALKkDXfU c2");
+            set_tile(WHITE_KING, Position'(8), "ALKkDXfU a2");
+            set_tile(BLACK_ROOK, Position'(5), "ALKkDXfU f1");
+
+            set_halfmove_clock(HalfmoveClock'(15), "ALKkDXfU reversible history");
+        end
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd2;
+        pulse_request(request, "TT validation fallback search");
+        while (!resp_valid && cycles < 200000) begin
+            if (!injected && dut.search_tt_consume_valid
+                    && dut.search_ply[0] == PlyIndex'(1)
+                    && dut.search_stack_top[0].move == checking_move) begin
+                // Force history validation at shallow depth to keep this
+                // integration test small; all proof and search pipelines run.
+                dut.search_tt_validation_forced[0] = 1'b1;
+                dut.search_tt_history_required[0] = 1'b1;
+                dut.search_tt_response[0].hit = 1'b1;
+                dut.search_tt_response[0].depth = TTDepth'(SEARCH_STACK_DEPTH - 1);
+                dut.search_tt_response[0].bound_type = TT_BOUND_UPPER;
+                dut.search_tt_response[0].score = MATE_THRESHOLD - EvalScore'(1);
+                dut.search_tt_response[0].best_move = evasion;
+                injected = 1'b1;
+                #1;
+            end
+            if (dut.search_tt_validation_passed[0]) proved = 1'b1;
+            if (proved && dut.search_ply[0] == PlyIndex'(2)
+                    && dut.search_stack_top[0].move == evasion)
+                searched_evasion = 1'b1;
+            do_clock(1);
+            cycles++;
+        end
+        check(resp_valid, "non-cutting validated TT search completes");
+        check(injected && proved, "non-cutting TT move passed actual legality and repetition proof");
+        check(searched_evasion, "validated sole evasion is subsequently searched");
+        check(resp.score < MATE_THRESHOLD, "non-mating checking move does not claim mate in one");
+        do_clock(2);
+    endtask : run_tt_validation_fallback_test

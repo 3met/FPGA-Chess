@@ -8,7 +8,7 @@ Time values are milliseconds using `TimeType`. Allocation policy is selected by 
 
 Clock allocation reserves move overhead and derives a base budget from usable time, increment, and moves to go. A zero `movestogo` selects sudden-death allocation. The hard budget is capped by usable time and shared by all search threads.
 
-A hard timeout interrupts active search and returns the primary thread's last completed iteration. Fixed `movetime` bypasses adaptive allocation and uses the requested duration minus overhead, clamped at zero.
+A hard timeout interrupts active search and returns the primary thread's last completed iteration. If no iteration has finished, hardware first proves a legal root move or establishes a terminal root, then returns without waiting for child evaluation. Fixed `movetime` bypasses adaptive allocation and uses the requested duration minus overhead, clamped at zero.
 
 ## Adaptive Stopping
 

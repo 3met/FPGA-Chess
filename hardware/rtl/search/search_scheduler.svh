@@ -12,7 +12,11 @@
                 && search_nodes >= active_req.node_limit;
             search_time_stop_q <= (active_req.operation == ENGINE_CTRL_SEARCH_FIXED_TIME
                     || active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)
-                && elapsed_ms >= search_hard_ms;
+                && elapsed_ms >= search_hard_ms
+                // Before the first result, prove a legal move or a terminal root.
+                && (search_completed_depth != SearchDepth'(0)
+                    || !is_null_move(search_root_fallback_move)
+                    || search_thread_phase[0] == SEARCH_PHASE_DONE);
         end
     end
 

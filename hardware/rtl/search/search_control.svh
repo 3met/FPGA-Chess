@@ -34,6 +34,7 @@
             search_max_depth <= SearchDepth'(0);
             search_completed_depth <= SearchDepth'(0);
             search_completed_best_move <= NULL_MOVE;
+            search_root_fallback_move <= NULL_MOVE;
             search_completed_ponder_move <= NULL_MOVE;
             search_completed_score <= EvalScore'(0);
             search_thread_id <= ThreadID'(0);
@@ -437,6 +438,7 @@
                                     search_max_depth <= SearchDepth'(requested_search_depth(req));
                                     search_completed_depth <= SearchDepth'(0);
                                     search_completed_best_move <= NULL_MOVE;
+                                    search_root_fallback_move <= NULL_MOVE;
                                     search_completed_ponder_move <= NULL_MOVE;
                                     search_completed_score <= EvalScore'(0);
                                     search_thread_id <= ThreadID'(0);

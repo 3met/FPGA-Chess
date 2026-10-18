@@ -129,6 +129,13 @@
                             search_board_result_valid <= 1'b1;
 `endif
                             search_board_inflight[board_thread_id] <= 1'b0;
+                            // Retain the first king-safe root move independently
+                            // of child evaluation for an exhausted initial budget.
+                            if (board_thread_id == ThreadID'(0) && board_ply == PlyIndex'(0)
+                                    && !reverse_complete && !null_push_complete
+                                    && !board_update_mover_in_check
+                                    && is_null_move(search_root_fallback_move))
+                                search_root_fallback_move <= search_pending_move[board_thread_id];
                             if (reverse_complete) begin
                                 search_board[board_thread_id] <= board_update_out;
                                 search_board_in_check[board_thread_id]
@@ -484,7 +491,11 @@
                             search_stack_top[move_thread_id].move_order_state
                                 <= MOVE_ORDER_GENERATE_NOISY;
                             if (move_cmd_resp_direct_valid) begin
-                                search_stack_top[move_thread_id].direct_attempted <= 1'b1;
+                                // A TT history proof does not search the child. If its
+                                // bound cannot cut off, normal generation must retain
+                                // this move, which may be the only legal check evasion.
+                                search_stack_top[move_thread_id].direct_attempted
+                                    <= !search_tt_validation_pending[move_thread_id];
                                 search_stack_top[move_thread_id].tt_move <= move_cmd_resp_direct_move;
                                 search_pending_move[move_thread_id] <= move_cmd_resp_direct_move;
                                 search_pending_move_bucket[move_thread_id] <= QUIET_MEDIUM_BUCKET;

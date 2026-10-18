@@ -100,7 +100,7 @@ Perft uses the same generation, legality, and reversal paths but counts fixed-de
 
 ## Stops and Results
 
-Depth, node, and time limits are checked at safe search boundaries. Hard time limits return the last completed primary iteration. Node limits and explicit kills may use a fully resolved root candidate from the interrupted iteration when it satisfies the result-selection rules in [search-design.md](../architecture/search-design.md); otherwise they return the completed result. A partial result does not advance the reported completed depth.
+Depth, node, and time limits are checked at safe search boundaries. Hard time limits return the last completed primary iteration, or a hardware-validated legal root move if no iteration finished. An exhausted initial budget waits only for root legality or a terminal result, without requiring child evaluation. Node limits and explicit kills may use a fully resolved root candidate from the interrupted iteration when it satisfies the result-selection rules in [search-design.md](../architecture/search-design.md); otherwise they return the completed result. A partial result does not advance the reported completed depth.
 
 Completed primary iterations retain the best root move and its searched child reply as a two-move principal-variation prefix for UCI pondering.
 

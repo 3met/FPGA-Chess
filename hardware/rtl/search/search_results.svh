@@ -34,7 +34,7 @@
     endfunction : is_search_operation
 
     // Prefer a completed pass, then an eligible resolved partial root candidate.
-    // Time stops disallow partial candidates; kills permit them even for timed searches.
+    // Time stops use a legal fallback if no pass finished; kills may use partial scores.
     function automatic EngineControllerResponse stopped_search_response(
         input logic search_active,
         input logic allow_partial,
@@ -71,6 +71,11 @@
                 result.ponder_move = search_ponder_move[0];
                 result.score = search_root_best_score[0];
             end
+            // A legality-only fallback has no searched score or ponder reply.
+            if (end_reason == ENGINE_END_TIME_LIMIT
+                    && completed_depth == SearchDepth'(0)
+                    && is_null_move(result.best_move))
+                result.best_move = search_root_fallback_move;
             result.nodes_count = search_nodes;
             result.completed_depth = 8'(completed_depth);
         end

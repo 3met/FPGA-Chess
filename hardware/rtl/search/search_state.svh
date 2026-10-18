@@ -209,6 +209,7 @@
     SearchDepth search_max_depth;
     SearchDepth search_completed_depth;
     Move search_completed_best_move;
+    Move search_root_fallback_move;
     Move search_completed_ponder_move;
     EvalScore search_completed_score;
     EvalScore search_thread_root_alpha[0:SEARCH_THREAD_COUNT-1];

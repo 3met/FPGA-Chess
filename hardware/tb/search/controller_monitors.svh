@@ -198,8 +198,8 @@
     end
 
     initial begin
-        // Full mating regressions have a separate budget from shallow checks.
-        #(MATE_ONLY ? 80_000_000 : 5_000_000);
+        // Allow the full suite, including both TT validation fallback searches.
+        #(MATE_ONLY ? 80_000_000 : 10_000_000);
         fail_count += 1;
         $error("[FAIL] tb_search_controller timeout");
         $display("Pass Count: %0d", pass_count);

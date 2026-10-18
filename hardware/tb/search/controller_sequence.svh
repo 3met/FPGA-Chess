@@ -230,6 +230,8 @@
 
         run_root_tt_score_policy_test("root TT score policy");
         run_tt_validation_priority_test();
+        run_tt_validation_fallback_test(1'b0);
+        run_tt_validation_fallback_test(1'b1);
         run_direct_reject_followup_test("direct rejection generation tracking");
         check_underpromotion_publication();
 
@@ -244,6 +246,25 @@
         run_node_limit_search("node-limited search");
         run_fixed_time_search("zero fixed-time search");
         run_clock_budget_search("zero clock-budget search");
+
+        // Expiry must reject pseudo-legal king moves that remain on the rook's file.
+        new_game();
+        setup_qsearch_quiet_evasion_position();
+        run_fixed_time_search("expired checked root");
+        check(resp.best_move.from_pos == Position'(63)
+                && (resp.best_move.to_pos == Position'(54) || resp.best_move.to_pos == Position'(62)),
+            "expired checked root returns a king-safe evasion");
+        run_clock_budget_search("expired checked root on clock");
+        check(resp.best_move.from_pos == Position'(63)
+                && (resp.best_move.to_pos == Position'(54) || resp.best_move.to_pos == Position'(62)),
+            "expired clock root returns a king-safe evasion");
+
+        new_game();
+        setup_checkmate_position();
+        run_expired_terminal_search("expired checkmate", -MATE_SCORE);
+        new_game();
+        setup_stalemate_position();
+        run_expired_terminal_search("expired stalemate", DRAW_EVAL_SCORE);
 
         // A synthetic nonzero model proves the search score consumes the NNUE
         // result rather than merely exercising the update/output handshake.
