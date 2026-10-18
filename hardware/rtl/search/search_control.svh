@@ -802,7 +802,6 @@
                         search_tt_validation_forced[tid] <= 1'b0;
                         search_stack_top[tid].remaining_depth <= search_thread_target_depth[tid];
                         search_stack_top[tid].alpha <= search_thread_root_alpha[tid];
-                        search_stack_top[tid].orig_alpha <= search_thread_root_alpha[tid];
                         search_stack_top[tid].beta <= search_thread_root_beta[tid];
                         search_stack_top[tid].stand_pat_done <= active_board_in_check;
                         search_stack_top[tid].node_in_check <= active_board_in_check;

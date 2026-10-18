@@ -29,8 +29,14 @@ module tb_search_nnue_update_encoder;
 
     // Compare physical requests against the feature difference between two boards.
     // This checks chess semantics without depending on the encoder's request order.
-    task automatic check_move(input Color color, input int scenario);
+    task automatic check_move(
+        input Color color, input int scenario,
+        input PromoType promotion, input PieceType promoted_piece
+    );
         FullBoard before_board, after_board;
+        SearchNnueUndo undo_record;
+        Move entering_move;
+        PlyIndex parent_ply;
         int expected[NNUE_SIDE_COUNT][NNUE_FEATURE_COUNT];
         int observed[NNUE_SIDE_COUNT][NNUE_FEATURE_COUNT];
         int request_count;
@@ -39,7 +45,7 @@ module tb_search_nnue_update_encoder;
         Position rook_from, rook_to;
         string label;
 
-        label = $sformatf("color=%0d scenario=%0d", color, scenario);
+        label = $sformatf("color=%0d scenario=%0d promotion=%0d", color, scenario, promotion);
         rank_flip = color == WHITE ? Position'(0) : Position'(56);
         before_board = FullBoard'('0);
         before_board.tiles[4] = WHITE_KING;
@@ -75,7 +81,7 @@ module tb_search_nnue_update_encoder;
                 plan.from_pos = Position'(48) ^ rank_flip;
                 plan.to_pos = Position'(scenario == 3 ? 56 : 57) ^ rank_flip;
                 plan.mover = Tile'({color, PAWN});
-                plan.placed = Tile'({color, QUEEN});
+                plan.placed = Tile'({color, promoted_piece});
                 plan.capture = Tile'({Color'(!color), ROOK});
                 plan.capture_valid = scenario == 4;
                 request_count = scenario == 4 ? 3 : 2;
@@ -93,6 +99,11 @@ module tb_search_nnue_update_encoder;
             default: begin end
         endcase
         if (scenario != 2) plan.capture_pos = plan.to_pos;
+        entering_move = Move'({plan.from_pos, plan.to_pos, promotion});
+        parent_ply = plan.child_ply;
+        undo_record.mover = plan.mover.piece_type;
+        undo_record.capture_kind = scenario == 2 ? NNUE_CAPTURE_EP
+            : plan.capture_valid ? plan.capture.piece_type : NULL_PIECE;
         before_board.tiles[plan.from_pos] = plan.mover;
         if (plan.capture_valid) before_board.tiles[plan.capture_pos] = plan.capture;
         after_board = before_board;
@@ -119,7 +130,10 @@ module tb_search_nnue_update_encoder;
         end
         protocol_ok = 1'b1;
         for (int undo = 0; undo < 2; undo++) begin
-            plan.reverse = 1'(undo);
+            // Undo uses only the compact record; expected features still come
+            // from independently constructed before/after boards above.
+            if (undo)
+                plan = nnue_undo_plan(entering_move, undo_record, color, parent_ply);
             for (int index = 0; index < request_count; index++) begin
                 step = 3'(index);
                 #1;
@@ -163,6 +177,7 @@ module tb_search_nnue_update_encoder;
     endtask
 
     initial begin
+        PieceType promotion_pieces[4] = '{QUEEN, KNIGHT, ROOK, BISHOP};
         thread_id = ThreadID'(THREAD_COUNT - 1);
         step = '0;
         draining = 1'b0;
@@ -171,7 +186,10 @@ module tb_search_nnue_update_encoder;
         replay_tile = EMPTY_TILE;
         for (int color = 0; color < NNUE_SIDE_COUNT; color++)
             for (int scenario = 0; scenario < 7; scenario++)
-                check_move(Color'(color), scenario);
+                for (int promotion = 0; promotion < 4; promotion++)
+                    if (promotion == 0 || scenario == 3 || scenario == 4)
+                        check_move(Color'(color), scenario,
+                            PromoType'(promotion), promotion_pieces[promotion]);
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
         $finish;

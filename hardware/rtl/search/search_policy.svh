@@ -338,7 +338,6 @@
         entry.best_score = -SEARCH_INF;
         entry.static_eval = EvalScore'(0);
         entry.alpha = -SEARCH_INF;
-        entry.orig_alpha = -SEARCH_INF;
         entry.beta = SEARCH_INF;
         entry.tt_move = NULL_MOVE;
         entry.repetition_start = PlyIndex'(0);
@@ -361,14 +360,7 @@
         entry.rfp_checked = 1'b0;
         entry.rfp_eligible = 1'b0;
         entry.null_beta_allowed = 1'b0;
-        entry.nnue_from = Position'(0);
-        entry.nnue_to = Position'(0);
-        entry.nnue_capture_pos = Position'(0);
-        entry.nnue_mover = EMPTY_TILE;
-        entry.nnue_placed = EMPTY_TILE;
-        entry.nnue_capture = EMPTY_TILE;
-        entry.nnue_capture_valid = 1'b0;
-        entry.nnue_delta_valid = 1'b0;
+        entry.nnue_undo = '0;
         entry.failed_quiet0 = 12'd0;
         entry.failed_quiet1 = 12'd0;
         entry.failed_quiet2 = 12'd0;

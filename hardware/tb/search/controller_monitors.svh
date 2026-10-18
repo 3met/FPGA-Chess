@@ -1,6 +1,58 @@
 // Handshake, state-ownership, NNUE reference, and bounded-completion monitors.
 // Included in tb_search_controller scope.
 
+    // Record completion cycles and complete responses for baseline comparisons.
+    integer monitor_cycle_count = 0;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            monitor_cycle_count <= 0;
+        end else begin
+            monitor_cycle_count <= monitor_cycle_count + 1;
+            if (resp_valid)
+                $display("SEARCH_RESPONSE cycle=%0d resp=%h", monitor_cycle_count, resp);
+        end
+    end
+
+    // Save each node's actual entry alpha independently of the reconstruction.
+    // Compare only after the existing synchronous parent read has caught up,
+    // and also at TT publication where the bound classification consumes it.
+    EvalScore reference_entry_alpha[THREAD_COUNT][SEARCH_STACK_DEPTH];
+    PlyIndex reference_previous_ply[THREAD_COUNT];
+    bit reference_line_active[THREAD_COUNT];
+    always @(negedge clk) begin
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            if (!rst_n || dut.state != CTRL_SEARCH_RUN) begin
+                reference_line_active[tid] = 1'b0;
+            end else begin
+                if (dut.search_ply[tid] == PlyIndex'(0)) begin
+                    reference_entry_alpha[tid][0] = dut.search_thread_root_alpha[tid];
+                end else if (reference_line_active[tid]
+                        && dut.search_ply[tid] > reference_previous_ply[tid]) begin
+                    reference_entry_alpha[tid][dut.search_ply[tid]]
+                        = dut.search_stack_top[tid].alpha;
+                end
+                if (reference_line_active[tid]
+                        && dut.search_ply[tid] == reference_previous_ply[tid]) begin
+                    assert (dut.search_original_alpha(ThreadID'(tid))
+                            == reference_entry_alpha[tid][dut.search_ply[tid]])
+                        else $fatal(1, "Entry alpha changed: thread %0d ply %0d", tid, dut.search_ply[tid]);
+                end
+                reference_previous_ply[tid] = dut.search_ply[tid];
+                reference_line_active[tid] = 1'b1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (rst_n && dut.search_tt_store_issue_valid) begin
+            assert (dut.tt_store_req.bound_type == dut.tt_bound_for_score(
+                    dut.search_return_score[dut.search_tt_store_issue_thread],
+                    reference_entry_alpha[dut.search_tt_store_issue_thread][dut.search_ply[dut.search_tt_store_issue_thread]],
+                    dut.search_stack_top[dut.search_tt_store_issue_thread].beta))
+                else $fatal(1, "Reconstructed entry alpha changed a TT bound");
+        end
+    end
+
 
     // Rebuild the two-perspective accumulator directly from a board so special
     // move deltas can be checked against their complete positional state.

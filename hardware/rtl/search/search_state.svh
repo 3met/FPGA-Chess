@@ -85,7 +85,6 @@
         // always uses the node's static evaluation.
         EvalScore static_eval;
         EvalScore alpha;
-        EvalScore orig_alpha;
         EvalScore beta;
         Move tt_move;
         PlyIndex repetition_start;
@@ -111,16 +110,9 @@
         // Cache fixed entry-time policy tests before shared pipeline arbitration.
         logic rfp_eligible;
         logic null_beta_allowed;
-        // Reversible NNUE delta retained in the normal per-ply search stack;
-        // this replaces a full accumulator copy at every search depth.
-        Position nnue_from;
-        Position nnue_to;
-        Position nnue_capture_pos;
-        Tile nnue_mover;
-        Tile nnue_placed;
-        Tile nnue_capture;
-        logic nnue_capture_valid;
-        logic nnue_delta_valid;
+        // The entering move supplies squares and promotion choice; turn and
+        // null-move state reconstruct the rest of the reversible NNUE delta.
+        SearchNnueUndo nnue_undo;
         logic [11:0] failed_quiet0;
         logic [11:0] failed_quiet1;
         logic [11:0] failed_quiet2;

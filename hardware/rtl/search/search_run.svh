@@ -163,28 +163,14 @@
                                         <= search_stack_parent_q[board_thread_id].legal_move_count + 8'd1;
                                 end
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
-                                if (search_stack_top[board_thread_id].nnue_delta_valid) begin
+                                if (!search_stack_top[board_thread_id].entered_by_null) begin
                                     nnue_plan_pending[board_thread_id] <= 1'b1;
                                     nnue_plan_inflight[board_thread_id] <= 1'b0;
-                                    nnue_plan[board_thread_id].kind <= NNUE_PLAN_DELTA;
-                                    nnue_plan[board_thread_id].child_ply
-                                        <= board_ply - PlyIndex'(1);
-                                    nnue_plan[board_thread_id].from_pos
-                                        <= search_stack_top[board_thread_id].nnue_from;
-                                    nnue_plan[board_thread_id].to_pos
-                                        <= search_stack_top[board_thread_id].nnue_to;
-                                    nnue_plan[board_thread_id].capture_pos
-                                        <= search_stack_top[board_thread_id].nnue_capture_pos;
-                                    nnue_plan[board_thread_id].mover
-                                        <= search_stack_top[board_thread_id].nnue_mover;
-                                    nnue_plan[board_thread_id].placed
-                                        <= search_stack_top[board_thread_id].nnue_placed;
-                                    nnue_plan[board_thread_id].capture
-                                        <= search_stack_top[board_thread_id].nnue_capture;
-                                    nnue_plan[board_thread_id].capture_valid
-                                        <= search_stack_top[board_thread_id].nnue_capture_valid;
-                                    nnue_plan[board_thread_id].real_move <= 1'b0;
-                                    nnue_plan[board_thread_id].reverse <= 1'b1;
+                                    nnue_plan[board_thread_id] <= nnue_undo_plan(
+                                        search_stack_top[board_thread_id].move,
+                                        search_stack_top[board_thread_id].nnue_undo,
+                                        board_update_out.turn,
+                                        board_ply - PlyIndex'(1));
                                     nnue_state_valid[board_thread_id] <= 1'b0;
                                     // Start a newly created plan immediately when
                                     // arbitration has no older work, saving one
@@ -212,8 +198,6 @@
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
                                 search_stack_top[board_thread_id].alpha
-                                    <= -search_stack_top[board_thread_id].beta;
-                                search_stack_top[board_thread_id].orig_alpha
                                     <= -search_stack_top[board_thread_id].beta;
                                 search_stack_top[board_thread_id].beta
                                     <= -search_stack_top[board_thread_id].beta + EvalScore'(1);
@@ -245,7 +229,6 @@
                                 search_stack_top[board_thread_id].null_attempted <= 1'b0;
                                 search_stack_top[board_thread_id].entered_by_null <= 1'b1;
                                 search_stack_top[board_thread_id].rfp_checked <= 1'b0;
-                                search_stack_top[board_thread_id].nnue_delta_valid <= 1'b0;
                                 search_stack_top[board_thread_id].failed_quiet_count <= 2'd0;
                                 search_eval_is_stand_pat[board_thread_id] <= 1'b0;
                                 search_eval_is_rfp[board_thread_id] <= 1'b0;
@@ -424,19 +407,11 @@
                                         && !nnue_plan_select_valid) begin
                                     start_nnue_plan(board_thread_id, parent_state_invalid);
                                 end
-                                search_stack_top[board_thread_id].nnue_from
-                                    <= search_pending_move[board_thread_id].from_pos;
-                                search_stack_top[board_thread_id].nnue_to
-                                    <= search_pending_move[board_thread_id].to_pos;
-                                search_stack_top[board_thread_id].nnue_capture_pos
-                                    <= delta_capture_pos;
-                                search_stack_top[board_thread_id].nnue_mover <= delta_mover;
-                                search_stack_top[board_thread_id].nnue_placed
-                                    <= board_update_out.tiles[search_pending_move[board_thread_id].to_pos];
-                                search_stack_top[board_thread_id].nnue_capture <= delta_capture;
-                                search_stack_top[board_thread_id].nnue_capture_valid
-                                    <= delta_capture_valid;
-                                search_stack_top[board_thread_id].nnue_delta_valid <= 1'b1;
+                                search_stack_top[board_thread_id].nnue_undo.mover
+                                    <= delta_mover.piece_type;
+                                search_stack_top[board_thread_id].nnue_undo.capture_kind
+                                    <= delta_is_ep ? NNUE_CAPTURE_EP
+                                        : delta_capture.piece_type;
                                 search_stack_top[board_thread_id].move <= search_pending_move[board_thread_id];
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
@@ -446,14 +421,12 @@
                                         && search_stack_top[board_thread_id].has_legal
                                         && !search_in_qsearch(board_thread_id)) begin
                                     search_stack_top[board_thread_id].alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
-                                    search_stack_top[board_thread_id].orig_alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b1;
                                     search_stack_top[board_thread_id].zero_window_node <= 1'b1;
                                     search_stack_top[board_thread_id].unit_window <= 1'b1;
                                 end else begin
                                     search_stack_top[board_thread_id].alpha <= -search_stack_top[board_thread_id].beta;
-                                    search_stack_top[board_thread_id].orig_alpha <= -search_stack_top[board_thread_id].beta;
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b0;
                                     search_stack_top[board_thread_id].zero_window_node
@@ -833,7 +806,7 @@
                                             search_root_best_exact[return_thread_id]
                                                 <= tt_bound_for_score(
                                                     parent_score,
-                                                    search_stack_top[return_thread_id].orig_alpha,
+                                                    search_thread_root_alpha[return_thread_id],
                                                     search_stack_top[return_thread_id].beta
                                                 ) == TT_BOUND_EXACT;
                                             if (return_thread_id == ThreadID'(0)) begin

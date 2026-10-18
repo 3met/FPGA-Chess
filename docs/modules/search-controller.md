@@ -4,7 +4,7 @@ The search controller owns the active position, search threads and stacks, repet
 
 ## RTL Organization
 
-The implementation lives in `hardware/rtl/search/`. `search_controller.sv` defines the module parameters and ports; `defs.sv` owns the search FSM enums and packed NNUE plan and routing metadata. Public operation requests and responses remain in `engine_defs.sv`.
+The implementation lives in `hardware/rtl/search/`. `search_controller.sv` defines the module parameters and ports; `defs.sv` owns the search FSM enums and packed NNUE plan, undo, and routing metadata. Public operation requests and responses remain in `engine_defs.sv`.
 
 | File | Responsibility |
 | ---- | -------------- |
@@ -56,6 +56,8 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 The active board is canonical controller state between commands. Board operations use [board_update_pipeline](board-update-pipeline.md) to update it and its incremental state. New Game restores the starting position and clears repetition context.
 
 Each search thread owns its current position, search stack, alpha/beta window, iterative-deepening state, and node count. The stack retains the state needed to reverse a child and resume its parent.
+
+The packed stack uses one synchronous simple dual-port RAM per thread, with the current node held in registers. Each cycle outside reset writes the current ply and reads the parent ply. Original alpha is reconstructed from the stored root window, the fixed beta of a scout or null child, or the saved parent's beta for a full-window child; it requires no additional RAM access or search cycle.
 
 The primary thread owns the published result and last completed iteration. Helper threads cooperate through the TT and never delay or overwrite the primary result. Threads advance through iterative deepening independently.
 

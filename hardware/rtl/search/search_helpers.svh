@@ -275,8 +275,6 @@
                 : search_thread_target_depth[thread_index] + SearchDepth'(1);
         search_stack_top[thread_index].alpha
             <= aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta);
-        search_stack_top[thread_index].orig_alpha
-            <= aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta);
         search_stack_top[thread_index].beta
             <= aspiration_upper_bound(search_thread_iteration_score[thread_index], next_delta);
         search_stack_top[thread_index].stand_pat_done <= active_board_in_check;
@@ -343,6 +341,17 @@
             && (search_tt_validation_forced[thread]
                 || search_remaining_depth(thread) >= TTDepth'(TT_VALIDATE_MINIMUM_DEPTH));
     endfunction : tt_history_validation_required
+
+    // Recover the entry bound without per-ply storage or another RAM read.
+    // Scout and null windows have fixed beta == entry alpha + 1; full-window
+    // children retain their entry alpha in the frozen parent's beta.
+    function automatic EvalScore search_original_alpha(input ThreadID thread);
+        if (search_ply[thread] == PlyIndex'(0))
+            return search_thread_root_alpha[thread];
+        if (search_stack_top[thread].scout_search)
+            return search_stack_top[thread].beta - EvalScore'(1);
+        return -search_stack_parent_q[thread].beta;
+    endfunction : search_original_alpha
 
     function automatic TTBoundType tt_bound_for_score(
         input EvalScore score,

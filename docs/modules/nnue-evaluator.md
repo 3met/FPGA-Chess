@@ -14,6 +14,8 @@ Each thread owns White and Black accumulator vectors. A clear starts a perspecti
 
 Before search, the controller builds the root accumulator for every thread. An ordinary move applies compact feature deltas to the live child state, stores the reversible delta with the ply record, and applies its inverse after board reversal. Castling updates the king and rook features; a null child keeps the parent accumulator unchanged.
 
+The per-ply undo record stores only the original moving piece type and capture kind. Capture kind includes no capture and en passant. The entering move supplies source, destination, and promotion choice; the restored parent's turn supplies colors, and en passant's capture square follows from the move squares. Existing null-child state suppresses accumulator updates. Undo expands into the existing plan register without additional memory reads or search cycles.
+
 The final request in an update plan marks completion and returns the tagged thread and ply. Requests from different threads share the update path, while evaluation has an independent accumulator read path. Both paths read the same live-state storage; evaluation captures a snapshot before processing its output rows, so another thread can update concurrently without a duplicate accumulator memory.
 
 Search constructs these requests with `hardware/rtl/search/search_nnue_update_encoder.sv`, a combinational encoder for forward and inverse move deltas, rebuild rows, and ordered completion markers. The search controller retains sequencing and plan ownership, including immediate handoff between pending threads.

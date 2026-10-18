@@ -224,7 +224,7 @@
         tt_store_req.score = search_return_score[search_tt_store_issue_thread];
         tt_store_req.bound_type = tt_bound_for_score(
             search_return_score[search_tt_store_issue_thread],
-            search_stack_top[search_tt_store_issue_thread].orig_alpha,
+            search_original_alpha(search_tt_store_issue_thread),
             search_stack_top[search_tt_store_issue_thread].beta
         );
         tt_store_req.best_move = search_stack_top[search_tt_store_issue_thread].best_move;
