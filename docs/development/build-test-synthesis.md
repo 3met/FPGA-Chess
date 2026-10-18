@@ -76,6 +76,8 @@ Quartus reuses valid build results. Use `--clean` to delete the target build dir
 
 `synth-report` shows utilization and timing from an existing result; omit `--target` to select the most recently modified result. Add `--verbose` for the complete component hierarchy. `timing-paths` reads an existing Quartus fit and reports failing setup paths, or the tightest passing paths when timing is met; `--limit <count>` controls the number shown.
 
+The DE1-SoC constraints reserve additional setup headroom on internal engine-clock paths while retaining the configured PLL frequency. Timing must pass with this guard included. Reported engine Fmax includes the guard; the nominal-clock setup margin is the guard plus the reported setup slack. See [engine timing validation](engine-timing.md) for the verified seeds and latency tradeoffs.
+
 Generic Xilinx targets require a device part:
 
 ```text

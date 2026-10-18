@@ -43,7 +43,9 @@
     bit store_wait_dispatch_seen;
     bit store_wait_issue_seen;
     bit return_pending_dispatch_seen;
-    bit move_followup_seen;
+    bit move_continuation_seen;
+    bit direct_reject_waiting[THREAD_COUNT];
+    PlyIndex direct_reject_waiting_ply[THREAD_COUNT];
     bit direct_reject_followup_seen = 1'b0;
     bit direct_reject_followup_check_pending = 1'b0;
     ThreadID direct_reject_followup_thread;

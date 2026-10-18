@@ -280,13 +280,9 @@
         search_stack_top[thread_index].stand_pat_done <= active_board_in_check;
         search_stack_top[thread_index].node_in_check <= active_board_in_check;
         search_stack_top[thread_index].unit_window
-            <= aspiration_upper_bound(search_thread_iteration_score[thread_index], next_delta)
-                == aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta)
-                    + EvalScore'(1);
+            <= aspiration_unit_window(search_thread_iteration_score[thread_index], next_delta);
         search_stack_top[thread_index].zero_window_node
-            <= aspiration_upper_bound(search_thread_iteration_score[thread_index], next_delta)
-                == aspiration_lower_bound(search_thread_iteration_score[thread_index], next_delta)
-                    + EvalScore'(1);
+            <= aspiration_unit_window(search_thread_iteration_score[thread_index], next_delta);
         search_return_move[thread_index] <= NULL_MOVE;
     endtask : restart_search_thread
 

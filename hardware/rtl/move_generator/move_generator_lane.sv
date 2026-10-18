@@ -82,10 +82,12 @@ module move_generator_lane #(
     ThreadID job_thread;
     PlyIndex job_ply;
     FullBoard job_board;
+    logic job_in_check;
     logic [63:0] job_occupied;
     logic job_suppress_valid;
     Move job_suppress_move;
     logic [63:0] destination_mask;
+    logic [1:0] castle_legal_q;
     Position scan_destination;
     logic next_destination_valid;
     Position context_destination;
@@ -734,7 +736,7 @@ module move_generator_lane #(
             : (castle_index ? Position'(58) : Position'(62));
         castle_candidate_move.promo_piece = PROMO_QUEEN;
         castle_candidate_pseudo_legal = state == GEN_CASTLE && candidate_slot_ready
-            && castle_pseudo_legal(job_board, castle_candidate_move);
+            && castle_legal_q[castle_index];
         castle_candidate_suppressed = job_suppress_valid
             && same_move(castle_candidate_move, job_suppress_move);
     end
@@ -801,9 +803,9 @@ module move_generator_lane #(
             && generator_history_read;
         history_lookup_thread = job_thread;
         history_lookup_color = job_board.turn;
-        history_lookup_from = generator_history_read_castle
+        history_lookup_from = state == GEN_CASTLE
             ? castle_candidate_move.from_pos : source_move.from_pos;
-        history_lookup_to = generator_history_read_castle
+        history_lookup_to = state == GEN_CASTLE
             ? castle_candidate_move.to_pos : source_move.to_pos;
 
         // Each class lane has a fixed bucket family; do not route history RAM
@@ -890,24 +892,23 @@ module move_generator_lane #(
                 // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
                 unique case (state)
                     GEN_IDLE: begin
-                        // Payload is irrelevant until a command is accepted.
-                        // Preload it while idle so command validity controls
-                        // only the state transition, not a 64-bit data mux.
-                        destination_mask <= generation_destination_mask(cmd_board, cmd_in_check);
                         // Idle tags are unused. Capture the arriving thread even
                         // without valid, keeping scheduler decoding off its enable.
                         job_thread <= cmd_thread;
+                        // Idle payload is unused; preload the whole command so
+                        // admission and arbitration only enable the small FSM.
+                        job_ply <= cmd_ply;
+                        job_board <= cmd_board;
+                        job_in_check <= cmd_in_check;
+                        job_suppress_valid <= cmd_suppress_valid;
+                        job_suppress_move <= cmd_suppress_move;
                         if (cmd_valid && cmd_ready) begin
-                            job_ply <= cmd_ply;
-                            job_board <= cmd_board;
-                            job_suppress_valid <= cmd_suppress_valid;
-                            job_suppress_move <= cmd_suppress_move;
                             candidate_valid <= 1'b0;
                             if (GENERATION_COMMAND == MOVE_GEN_GENERATE_NOISY
                                     && cmd == MOVE_GEN_VALIDATE_DIRECT) begin
                                 state <= GEN_DIRECT;
                             end else begin
-                                state <= GEN_SELECT_DEST;
+                                state <= GEN_PREPARE_DEST;
                             end
                         end
                     end
@@ -919,6 +920,26 @@ module move_generator_lane #(
                         cmd_resp_direct_valid <= move_pseudo_legal(job_board, job_occupied, job_suppress_move);
                         cmd_resp_direct_move <= job_suppress_move;
                         state <= GEN_IDLE;
+                    end
+
+                    // Decode destinations from the captured board so scheduler
+                    // selection and king-line filtering occupy separate cycles.
+                    GEN_PREPARE_DEST: begin
+                        destination_mask <= generation_destination_mask(job_board, job_in_check);
+                        // Castling legality is constant throughout this job.
+                        // Cache both sides before history lookups need it.
+                        if (GENERATION_COMMAND == MOVE_GEN_GENERATE_QUIET) begin
+                            for (int side = 0; side < 2; side++) begin
+                                automatic Move castle_plan = NULL_MOVE;
+                                castle_plan.from_pos = job_board.turn == WHITE ? Position'(4) : Position'(60);
+                                castle_plan.to_pos = job_board.turn == WHITE
+                                    ? (side == 0 ? Position'(6) : Position'(2))
+                                    : (side == 0 ? Position'(62) : Position'(58));
+                                castle_plan.promo_piece = PROMO_QUEEN;
+                                castle_legal_q[side] <= castle_pseudo_legal(job_board, castle_plan);
+                            end
+                        end
+                        state <= GEN_SELECT_DEST;
                     end
 
                     GEN_SELECT_DEST: begin

@@ -408,7 +408,7 @@
         "reference_frequency_hz": 50000000,
         "reference_port": "CLOCK_50"
       },
-      "seed": 6,
+      "seed": 1,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",

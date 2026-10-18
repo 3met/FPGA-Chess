@@ -168,7 +168,7 @@
     endtask : run_tt_validation_priority_test
 
     // Reject an impossible TT move through the real direct-validation lane and
-    // require its same-cycle noisy follow-up to retain generation ownership.
+    // require its normally dispatched noisy continuation to retain generation ownership.
     task automatic run_direct_reject_followup_test(input string label);
         automatic Move best_move;
         automatic EvalScore score;
@@ -216,7 +216,7 @@
         store_wait_dispatch_seen = 1'b0;
         store_wait_issue_seen = 1'b0;
         return_pending_dispatch_seen = 1'b0;
-        move_followup_seen = 1'b0;
+        move_continuation_seen = 1'b0;
         tt_response_consume_seen = 1'b0;
         tt_response_buffered_consume_seen = 1'b0;
         multi_move_inflight_seen = 1'b0;
@@ -280,8 +280,8 @@
         check(store_wait_dispatch_seen, {label, " held pending TT store in run scheduler"});
         check(store_wait_issue_seen, {label, " issued pending TT store from store-wait phase"});
         check(return_pending_dispatch_seen, {label, " held pending child return in run scheduler"});
-        check(move_followup_seen,
-            {label, " chained a move-order operation on its response cycle"});
+        check(move_continuation_seen,
+            {label, " dispatched a move-order continuation"});
         if (THREAD_COUNT > 1) begin
             check(multi_move_inflight_seen, {label, " overlapped multiple move-generator requests"});
             check(pipeline_overlap_seen, {label, " overlapped different tagged pipelines"});

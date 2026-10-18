@@ -25,6 +25,7 @@ module move_generator #(
     parameter int QUIET_THRESHOLD_2 = 16,
     parameter int QUIET_THRESHOLD_3 = 64,
     parameter int CASTLING_HISTORY_BONUS = 8,
+    parameter bit EXCLUSIVE_THREAD_ISSUE = 1'b0,
     parameter bit ENABLE_STATS = 1'b0
 ) (
     input logic clk,
@@ -151,7 +152,10 @@ module move_generator #(
                 && noisy_cmd_thread == ThreadID'(tid) && noisy_cmd_ply == pop_ply[tid])
             || (quiet_cmd_valid && quiet_cmd_ready && quiet_cmd_thread == ThreadID'(tid)
                 && quiet_cmd_ply == pop_ply[tid]);
-        pop_ready[tid] = reader_ready[tid] && !init_busy && !starting_pop_node[tid];
+        // A scheduler that issues only one operation per thread needs no
+        // same-cycle generation/pop arbitration on the reader-ready path.
+        pop_ready[tid] = reader_ready[tid] && !init_busy
+            && (EXCLUSIVE_THREAD_ISSUE || !starting_pop_node[tid]);
         reader_valid[tid] = pop_valid[tid] && pop_ready[tid];
     end
     assign generation_start_accept[0] = noisy_cmd_valid && noisy_cmd_ready
@@ -318,5 +322,19 @@ module move_generator #(
         .stat_bucket_count(quiet_stat_bucket_count),
         .stat_bucket_high_water(quiet_stat_bucket_high_water)
     );
+
+`ifndef SYNTHESIS
+    generate
+    if (EXCLUSIVE_THREAD_ISSUE) begin : check_exclusive_thread_issue
+        always @(posedge clk) begin
+            if (rst_n && !clear && !flush) begin
+                for (int tid = 0; tid < THREAD_COUNT; tid++)
+                    assert (!(pop_valid[tid] && starting_pop_node[tid]))
+                        else $fatal(1, "exclusive thread issued generation and pop together");
+            end
+        end
+    end
+    endgenerate
+`endif
 
 endmodule : move_generator

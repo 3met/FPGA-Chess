@@ -281,51 +281,43 @@ module board_update_pipeline #(
         end
     end
 
+    // Test independent attackers in parallel; each ray uses a prefix occupancy
+    // reduction so no priority chain spans the directions or piece classes.
     function automatic logic board_square_attacked(
         input FullBoard board,
         input Position square,
         input Color attacker_color
     );
-        automatic Position test_pos;
-        automatic Tile test_tile;
-
-        if (attacker_color == WHITE) begin
-            if (is_shift_on_board(square, SOUTH_WEST, 3'd1)
-                    && board.tiles[shift_position(square, SOUTH_WEST, 3'd1)] == WHITE_PAWN) return 1'b1;
-            if (is_shift_on_board(square, SOUTH_EAST, 3'd1)
-                    && board.tiles[shift_position(square, SOUTH_EAST, 3'd1)] == WHITE_PAWN) return 1'b1;
-        end else begin
-            if (is_shift_on_board(square, NORTH_WEST, 3'd1)
-                    && board.tiles[shift_position(square, NORTH_WEST, 3'd1)] == BLACK_PAWN) return 1'b1;
-            if (is_shift_on_board(square, NORTH_EAST, 3'd1)
-                    && board.tiles[shift_position(square, NORTH_EAST, 3'd1)] == BLACK_PAWN) return 1'b1;
-        end
-
+        automatic logic [65:0] attacks = '0;
+        automatic Direction pawn_left = attacker_color == WHITE ? SOUTH_WEST : NORTH_WEST;
+        automatic Direction pawn_right = attacker_color == WHITE ? SOUTH_EAST : NORTH_EAST;
+        attacks[0] = is_shift_on_board(square, pawn_left, 3'd1)
+            && board.tiles[shift_position(square, pawn_left, 3'd1)] == Tile'({attacker_color, PAWN});
+        attacks[1] = is_shift_on_board(square, pawn_right, 3'd1)
+            && board.tiles[shift_position(square, pawn_right, 3'd1)] == Tile'({attacker_color, PAWN});
         for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
-            if (is_knight_shift_on_board(square, KnightDirection'(knight_dir))) begin
-                test_pos = shift_knight_position(square, KnightDirection'(knight_dir));
-                if (board.tiles[test_pos] == Tile'({attacker_color, KNIGHT})) return 1'b1;
-            end
+            attacks[2 + knight_dir] = is_knight_shift_on_board(square, KnightDirection'(knight_dir))
+                && board.tiles[shift_knight_position(square, KnightDirection'(knight_dir))]
+                    == Tile'({attacker_color, KNIGHT});
         end
-
         for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
             automatic Direction dir = Direction'(dir_idx);
+            automatic logic [6:0] occupied;
+            automatic logic [6:0] attackers;
             for (int distance = 1; distance < 8; distance++) begin
-                if (is_shift_on_board(square, dir, distance[2:0])) begin
-                    test_pos = shift_position(square, dir, distance[2:0]);
-                    test_tile = board.tiles[test_pos];
-                    if (test_tile.piece_type != NULL_PIECE) begin
-                        if (test_tile.piece_color == attacker_color) begin
-                            if (distance == 1 && test_tile.piece_type == KING) return 1'b1;
-                            if (is_line_attacker(test_tile.piece_type, dir)) return 1'b1;
-                        end
-                        break;
-                    end
-                end
+                automatic Tile tile = board.tiles[shift_position(square, dir, distance[2:0])];
+                automatic logic on_board = is_shift_on_board(square, dir, distance[2:0]);
+                occupied[distance - 1] = on_board && tile.piece_type != NULL_PIECE;
+                attackers[distance - 1] = on_board && tile.piece_color == attacker_color
+                    && ((distance == 1 && tile.piece_type == KING)
+                        || is_line_attacker(tile.piece_type, dir));
+            end
+            for (int distance = 1; distance < 8; distance++) begin
+                attacks[10 + dir_idx * 7 + distance - 1] = attackers[distance - 1]
+                    && !(|(occupied & ((7'b1 << (distance - 1)) - 7'b1)));
             end
         end
-
-        return 1'b0;
+        return |attacks;
     endfunction : board_square_attacked
 
     function automatic Position pushed_king_square(input FullBoard board, input Move move);
@@ -528,16 +520,7 @@ module board_update_pipeline #(
         next_ctx_pipe[0].search_ply  = search_ply;
         next_ctx_pipe[0].move_record = '0;
         next_ctx_pipe[0].mover_king_square = '0;
-        // Turn-changing move operations exclude the explicit set-turn operation.
-        unique case (1'b1)
-            (board_op == BOARD_PUSH_MOVE_OP || board_op == BOARD_COMMIT_MOVE_OP
-                    || board_op == BOARD_PUSH_NULL_OP || board_op == BOARD_REVERSE_MOVE_OP):
-                next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(~board_in.turn)];
-            (board_op == BOARD_SET_TURN_OP):
-                next_ctx_pipe[0].side_king_square = board_in.king_positions[Color'(set_data[0])];
-            default:
-                next_ctx_pipe[0].side_king_square = board_in.king_positions[board_in.turn];
-        endcase
+        next_ctx_pipe[0].side_king_square = '0;
         move_record_rd_addr = move_hist_addr(thread_id, search_ply - PlyIndex'('d1));
         move_record_rd_en = (board_op == BOARD_REVERSE_MOVE_OP);
 
@@ -545,6 +528,17 @@ module board_update_pipeline #(
 
     always_comb begin
         next_ctx_pipe[1] = captured_ctx;
+        // Select the checked king after capture, alongside mover-king decoding.
+        // Turn-changing move operations exclude the explicit set-turn operation.
+        unique case (1'b1)
+            (captured_ctx.board_op == BOARD_PUSH_MOVE_OP || captured_ctx.board_op == BOARD_COMMIT_MOVE_OP
+                    || captured_ctx.board_op == BOARD_PUSH_NULL_OP || captured_ctx.board_op == BOARD_REVERSE_MOVE_OP):
+                next_ctx_pipe[1].side_king_square = captured_ctx.board.king_positions[Color'(~captured_ctx.board.turn)];
+            (captured_ctx.board_op == BOARD_SET_TURN_OP):
+                next_ctx_pipe[1].side_king_square = captured_ctx.board.king_positions[Color'(captured_ctx.set_data[0])];
+            default:
+                next_ctx_pipe[1].side_king_square = captured_ctx.board.king_positions[captured_ctx.board.turn];
+        endcase
         // Decode the king destination after request capture so dispatch does
         // not feed a dynamic tile read before the first register boundary.
         next_ctx_pipe[1].mover_king_square = pushed_king_square(captured_ctx.board, captured_ctx.move);

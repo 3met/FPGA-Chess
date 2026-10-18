@@ -34,7 +34,7 @@
   },
   "clocks": {
     "engine": {
-      "frequency_hz": 80000000,
+      "frequency_hz": 85000000,
       "phase_ps": 0,
       "duty_percent": 50
     },

@@ -201,23 +201,27 @@ module move_generator_read_pipeline #(
         endcase
     endfunction
 
-    // The first generator initializes a node from its parent's final tails;
-    // quiet generation reuses the current node and advances its bucket phase.
+    // Compare against each thread's local cache before selecting readiness.
+    // In particular, increment the cached ply before command-thread selection
+    // so scheduler arbitration cannot feed an adder and a context comparison.
     always_comb begin
         for (int lane = 0; lane < 2; lane++) begin
-            automatic int tid = int'(generation_request_thread[lane]);
-            if (lane == 0)
-                generation_start_ready[lane] = generation_request_ply[lane] == PlyIndex'(0)
-                    || (cache_valid[tid]
-                        && (cache_ply[tid] + PlyIndex'(1) == generation_request_ply[lane]
-                            || (cache_ply[tid] == generation_request_ply[lane]
-                                && cache_state[tid].phase == MOVE_MEMORY_INITIALIZED)));
-            else
-                generation_start_ready[lane] = cache_valid[tid]
-                    && cache_ply[tid] == generation_request_ply[lane]
-                    && cache_state[tid].phase == MOVE_MEMORY_WAIT_QUIET;
-            generation_start_ready[lane] = generation_start_ready[lane]
-                && !pointer_load_pending[tid] && !stage_valid[tid];
+            generation_start_ready[lane] = 1'b0;
+            for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                automatic logic context_ready;
+                if (lane == 0)
+                    context_ready = generation_request_ply[lane] == PlyIndex'(0)
+                        || (cache_valid[tid]
+                            && (cache_ply[tid] + PlyIndex'(1) == generation_request_ply[lane]
+                                || (cache_ply[tid] == generation_request_ply[lane]
+                                    && cache_state[tid].phase == MOVE_MEMORY_INITIALIZED)));
+                else
+                    context_ready = cache_valid[tid]
+                        && cache_ply[tid] == generation_request_ply[lane]
+                        && cache_state[tid].phase == MOVE_MEMORY_WAIT_QUIET;
+                generation_start_ready[lane] |= generation_request_thread[lane] == ThreadID'(tid)
+                    && context_ready && !pointer_load_pending[tid] && !stage_valid[tid];
+            end
         end
     end
 

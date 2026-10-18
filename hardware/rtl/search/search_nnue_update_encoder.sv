@@ -132,7 +132,9 @@ module search_nnue_update_encoder (
                 end
             endcase
         end
-        if (!draining && req_valid) begin
+        // Invalid requests are ignored; keep the empty-tile validity decode
+        // off the feature-address data path into the transformer ROM.
+        if (!draining) begin
             req.white_feature = nnue_feature_index(
                 feature_pos, feature_tile, WHITE);
             req.black_feature = nnue_feature_index(

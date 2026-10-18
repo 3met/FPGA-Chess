@@ -4,8 +4,9 @@
                     if (nnue_build_busy && !nnue_build_draining) begin
                         automatic Tile build_tile =
                             search_board[nnue_build_thread].tiles[nnue_build_pos];
-                        if (build_tile.piece_type == NULL_PIECE
-                                || (nnue_update_valid && nnue_update_ready)) begin
+                        // This producer owns the port; empty squares advance
+                        // without consulting another producer's valid decode.
+                        if (build_tile.piece_type == NULL_PIECE || nnue_update_ready) begin
                             if (build_tile.piece_type != NULL_PIECE)
                                 nnue_build_first <= 1'b0;
                             if (nnue_build_pos == Position'(63)) begin
@@ -40,8 +41,13 @@
                     end
 
                     if (nnue_delta_busy) begin
+                        // Match the update-port arbiter locally, keeping root
+                        // feature decoding out of incremental replay feedback.
+                        automatic logic delta_update_accepted =
+                            (!nnue_build_busy || nnue_build_draining)
+                            && nnue_delta_update_valid && nnue_update_ready;
                         if (nnue_delta_draining) begin
-                            if (nnue_update_valid && nnue_update_ready) begin
+                            if (delta_update_accepted) begin
                                 // The ordered marker now owns completion; hand
                                 // directly to another pending child if possible.
                                 nnue_plan_inflight[nnue_delta_thread] <= 1'b1;
@@ -58,7 +64,8 @@
                             automatic Tile rebuild_tile =
                                 search_board[nnue_delta_thread].tiles[nnue_delta_pos];
                             if (rebuild_tile.piece_type == NULL_PIECE
-                                    || (nnue_update_valid && nnue_update_ready)) begin
+                                    || ((!nnue_build_busy || nnue_build_draining)
+                                        && nnue_update_ready)) begin
                                 if (rebuild_tile.piece_type != NULL_PIECE)
                                     nnue_delta_first <= 1'b0;
                                 if (nnue_delta_pos == Position'(63)) begin
@@ -68,7 +75,7 @@
                                     nnue_delta_pos <= nnue_delta_pos + Position'(1);
                                 end
                             end
-                        end else if (nnue_update_valid && nnue_update_ready) begin
+                        end else if (delta_update_accepted) begin
                             // The encoder marks exactly the last physical delta request.
                             if (nnue_delta_update_req.complete) begin
                                 // A tagged writeback completes this plan;

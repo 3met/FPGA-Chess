@@ -21,8 +21,9 @@ module tt_replacement #(
         logic [TAG_BITS-1:0] tag;
         TTBoundType bound_type;
     } Way;
-    Way incoming, candidates[TT_WAYS], victim, updated;
+    Way incoming, candidates[TT_WAYS], updated;
     TTAge relative_age[TT_WAYS];
+    logic [TT_WAYS-1:0] way_matches, first_way_match;
     // Signed depth-minus-eight-times-age follows Stockfish's general policy.
     localparam int VALUE_BITS = (($bits(TTDepth) > TT_AGE_BITS+3) ? $bits(TTDepth) : TT_AGE_BITS+3) + 2;
     logic signed [VALUE_BITS-1:0] value[TT_WAYS];
@@ -38,25 +39,35 @@ module tt_replacement #(
             if (candidates[way].bound_type == TT_BOUND_INVALID)
                 value[way] = {1'b1, {(VALUE_BITS-1){1'b0}}};
         end
-        for (int way = 1; way < TT_WAYS; way++)
-            if (value[way] < value[selected_way]) selected_way = $clog2(TT_WAYS)'(way);
-        // Prefer the first matching way and never touch either other way.
+        // Compare victims in parallel, retaining the lowest index on ties.
         for (int way = 0; way < TT_WAYS; way++) begin
-            if (!position_matches && candidates[way].bound_type != TT_BOUND_INVALID
-                    && candidates[way].tag == incoming.tag) begin
+            automatic logic lowest = 1'b1;
+            for (int other = 0; other < TT_WAYS; other++) begin
+                if (other < way) lowest &= value[way] < value[other];
+                else lowest &= value[way] <= value[other];
+            end
+            selected_way |= {$clog2(TT_WAYS){lowest}} & $clog2(TT_WAYS)'(way);
+            way_matches[way] = candidates[way].bound_type != TT_BOUND_INVALID
+                && candidates[way].tag == incoming.tag;
+        end
+        position_matches = |way_matches;
+        // Replacement permission and retained hints need only the first match;
+        // victim quality must not feed the publication-valid decision.
+        replace = !position_matches;
+        updated = incoming;
+        for (int way = 0; way < TT_WAYS; way++) begin
+            first_way_match[way] = way_matches[way]
+                && !(|(way_matches & ((TT_WAYS'(1) << way) - TT_WAYS'(1))));
+            if (first_way_match[way]) begin
                 selected_way = $clog2(TT_WAYS)'(way);
-                position_matches = 1'b1;
+                if (incoming.best_move_bits[$bits(Position) +: $bits(Position)]
+                        == incoming.best_move_bits[0 +: $bits(Position)])
+                    updated.best_move_bits = candidates[way].best_move_bits;
+                replace |= tt_should_replace(1'b1, 1'b1,
+                    candidates[way].age, candidates[way].depth, candidates[way].bound_type,
+                    incoming.age, incoming.depth, incoming.bound_type, STALE_DEPTH_TOLERANCE);
             end
         end
-        victim = candidates[selected_way];
-        // Equal squares encode no move; retain the hint only for the same position.
-        updated = incoming;
-        if (position_matches && incoming.best_move_bits[$bits(Position) +: $bits(Position)]
-                == incoming.best_move_bits[0 +: $bits(Position)])
-            updated.best_move_bits = victim.best_move_bits;
         updated_way = WAY_BITS'(updated);
-        replace = tt_should_replace(victim.bound_type != TT_BOUND_INVALID,
-            position_matches, victim.age, victim.depth, victim.bound_type,
-            incoming.age, incoming.depth, incoming.bound_type, STALE_DEPTH_TOLERANCE);
     end
 endmodule

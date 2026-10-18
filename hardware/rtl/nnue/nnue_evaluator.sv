@@ -60,10 +60,13 @@ module nnue_evaluator #(
     Color eval_turn_q;
     logic eval_busy;
     logic partial_pending;
+    logic reduction_pending;
     logic result_pending;
     logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] eval_cycle;
     logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] partial_cycle;
+    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] reduction_cycle;
     QuadSum partial_q[32];
+    SixteenSum reduction_q[8];
     OutputSum eval_sum;
     OutputSum result_sum;
     EvalScore pst_blend_active, pst_blend_pending;
@@ -150,8 +153,8 @@ module nnue_evaluator #(
     assign update_ready = 1'b1;
     assign update_idle = !update_busy;
     // Accept a new snapshot while the preceding registered partial sums drain.
-    assign eval_ready = !eval_busy || (eval_busy && partial_pending
-        && partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1);
+    assign eval_ready = !eval_busy || (eval_busy && reduction_pending
+        && reduction_cycle == NNUE_OUTPUT_MAC_CYCLES - 1);
 
     // An accepted evaluation primes its first row. Thereafter the ROM reads one row
     // ahead so its synchronous output does not add a MAC cycle.
@@ -177,6 +180,13 @@ module nnue_evaluator #(
     always_ff @(posedge clk)
         output_weight_row_q <= output_weight_rows[output_weight_row_address];
 
+    // Unused rows need no hold behavior. Reading every cycle keeps request
+    // validity off the many transformer ROM address-register enables.
+    always_ff @(posedge clk) begin
+        feature_row_white <= feature_rom[update_req.white_feature];
+        feature_row_black <= feature_rom[update_req.black_feature];
+    end
+
     always_ff @(posedge clk) begin
         if (!rst_n || clear) begin
             update_busy <= 1'b0;
@@ -185,6 +195,7 @@ module nnue_evaluator #(
             update_done_ply <= '0;
             eval_busy <= 1'b0;
             partial_pending <= 1'b0;
+            reduction_pending <= 1'b0;
             result_pending <= 1'b0;
             result_valid <= 1'b0;
             result <= '0;
@@ -207,8 +218,6 @@ module nnue_evaluator #(
 
             if (update_valid) begin
                 active_update <= update_req;
-                feature_row_white <= feature_rom[update_req.white_feature];
-                feature_row_black <= feature_rom[update_req.black_feature];
             end
             update_busy <= update_valid;
 
@@ -300,7 +309,6 @@ module nnue_evaluator #(
                 automatic OutputProduct products[NNUE_OUTPUT_MAC_LANES];
                 automatic PairSum pair_sums_a[32], pair_sums_b[32];
                 automatic OctetSum octet_sums[16];
-                automatic SixteenSum sixteen_sums[8];
                 automatic ThirtyTwoSum thirty_two_sums[4];
                 automatic SixtyFourSum sixty_four_sums[2];
                 automatic MacGroupSum lane_sum;
@@ -338,19 +346,25 @@ module nnue_evaluator #(
                     for (int lane = 0; lane < 16; lane++)
                         octet_sums[lane] = OctetSum'(partial_q[2 * lane])
                             + OctetSum'(partial_q[2 * lane + 1]);
+                    // Split the remaining tree before its running-sum feedback.
+                    // Only eight narrow sums cross this extra pipeline stage.
                     for (int lane = 0; lane < 8; lane++)
-                        sixteen_sums[lane] = SixteenSum'(octet_sums[2 * lane])
+                        reduction_q[lane] <= SixteenSum'(octet_sums[2 * lane])
                             + SixteenSum'(octet_sums[2 * lane + 1]);
+                end
+                reduction_pending <= partial_pending;
+                reduction_cycle <= partial_cycle;
+                if (reduction_pending) begin
                     for (int lane = 0; lane < 4; lane++)
-                        thirty_two_sums[lane] = ThirtyTwoSum'(sixteen_sums[2 * lane])
-                            + ThirtyTwoSum'(sixteen_sums[2 * lane + 1]);
+                        thirty_two_sums[lane] = ThirtyTwoSum'(reduction_q[2 * lane])
+                            + ThirtyTwoSum'(reduction_q[2 * lane + 1]);
                     for (int lane = 0; lane < 2; lane++)
                         sixty_four_sums[lane] = SixtyFourSum'(thirty_two_sums[2 * lane])
                             + SixtyFourSum'(thirty_two_sums[2 * lane + 1]);
                     lane_sum = MacGroupSum'(sixty_four_sums[0])
                         + MacGroupSum'(sixty_four_sums[1]);
                     cycle_sum = eval_sum + OutputSum'(lane_sum);
-                    if (partial_cycle == NNUE_OUTPUT_MAC_CYCLES - 1) begin
+                    if (reduction_cycle == NNUE_OUTPUT_MAC_CYCLES - 1) begin
                         result_sum <= cycle_sum;
                         pst_blend_pending <= pst_blend_active;
                         result_pending <= 1'b1;
@@ -361,9 +375,11 @@ module nnue_evaluator #(
                                 output_bias[nnue_output_bucket(eval_piece_count)][
                                     NNUE_OUTPUT_BIAS_BITS-1:0]});
                             partial_pending <= 1'b0;
+                            reduction_pending <= 1'b0;
                         end else begin
                             eval_busy <= 1'b0;
                             partial_pending <= 1'b0;
+                            reduction_pending <= 1'b0;
                         end
                     end else begin
                         eval_sum <= cycle_sum;
@@ -376,6 +392,7 @@ module nnue_evaluator #(
                     output_bias[nnue_output_bucket(eval_piece_count)][
                         NNUE_OUTPUT_BIAS_BITS-1:0]});
                 partial_pending <= 1'b0;
+                reduction_pending <= 1'b0;
                 eval_busy <= 1'b1;
             end
 

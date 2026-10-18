@@ -527,8 +527,8 @@ module tb_nnue_evaluator;
             @(negedge clk);
             eval_valid = 0;
             check(second_issue - first_issue
-                    == (NNUE_OUTPUT_MAC_CYCLES + 1) * 10ns,
-                "evaluation initiation interval includes the partial-sum register");
+                    == (NNUE_OUTPUT_MAC_CYCLES + 2) * 10ns,
+                "evaluation initiation interval includes both partial-sum stages");
             while (stream_results != 2) begin
                 @(negedge clk);
                 if (result_valid) begin

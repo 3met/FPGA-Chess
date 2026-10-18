@@ -46,12 +46,6 @@
         end
     end
 
-    // Readiness acknowledges the selected follow-up but never selects its payload.
-    assign move_followup_accepted =
-            (move_followup_action == MOVE_FOLLOWUP_NOISY_CMD && move_cmd_ready)
-            || (move_followup_action == MOVE_FOLLOWUP_POP_BAD && move_pop_ready)
-            || (move_followup_uses_quiet && move_quiet_cmd_ready);
-
     assign setup_req_comb = new_game_setup_request(new_setup_index);
 
     // Classify ready work and choose a context for each shared pipeline.
@@ -119,35 +113,8 @@
         move_board_bypass_move = move_pop_resp_valid && move_pop_resp_found
             ? move_pop_resp_move : move_cmd_resp_direct_move;
 
-        // A response is visible after its lane has returned idle. Prefer one
-        // same-thread continuation over a newly selected request so move
-        // ordering does not spend a READY scheduler cycle between operations.
-        move_followup_action = MOVE_FOLLOWUP_NONE;
-        move_followup_thread = ThreadID'(0);
-        if (state == CTRL_SEARCH_RUN && move_cmd_resp_valid
-                && !search_generation_inflight[move_cmd_resp_thread]
-                && !move_cmd_resp_direct_valid) begin
-            move_followup_thread = move_cmd_resp_thread;
-            move_followup_action = MOVE_FOLLOWUP_NOISY_CMD;
-        end else if (state == CTRL_SEARCH_RUN && move_pop_resp_valid
-                && !move_pop_resp_found
-                && !search_generation_inflight[move_pop_resp_thread]) begin
-            move_followup_thread = move_pop_resp_thread;
-            // Move-order states have distinct encodings.
-            unique case (search_stack_top[move_pop_resp_thread].move_order_state)
-                MOVE_ORDER_GOOD_NOISY:
-                    if (!(search_in_qsearch(move_pop_resp_thread)
-                            && !search_board_in_check[move_pop_resp_thread]))
-                        move_followup_action = MOVE_FOLLOWUP_QUIET_CMD;
-                MOVE_ORDER_QUIET, MOVE_ORDER_BAD_NOISY:
-                    move_followup_action = MOVE_FOLLOWUP_POP_BAD;
-                default: begin end
-            endcase
-        end
-        move_followup_uses_move = move_followup_action == MOVE_FOLLOWUP_NOISY_CMD
-            || move_followup_action == MOVE_FOLLOWUP_POP_BAD;
-        move_followup_uses_quiet =
-            move_followup_action == MOVE_FOLLOWUP_QUIET_CMD;
+        // Response continuations become ordinary ready work on the next cycle;
+        // downstream admission never feeds the current response's state write.
         search_null_issue_valid = (state == CTRL_SEARCH_RUN)
             && !move_board_bypass_valid
             && !(|search_board_mask)
@@ -157,10 +124,8 @@
                 || |search_board_mask
                 || search_null_issue_valid);
         search_move_issue_valid = (state == CTRL_SEARCH_RUN)
-            && !move_followup_uses_move
             && |search_move_mask;
         search_quiet_issue_valid = (state == CTRL_SEARCH_RUN)
-            && !move_followup_uses_quiet
             && |search_quiet_mask;
         search_eval_issue_valid = (state == CTRL_SEARCH_RUN)
             && !nnue_build_busy

@@ -42,6 +42,8 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 The pipeline returns the transformed board, incremental side data, and aligned check flags after three pipeline stages.
 
+King-safety scans test pawn, knight, and ray attacks in parallel. Each ray masks attackers behind any nearer occupied square, then a reduction combines the independent hits without a priority chain across directions.
+
 ## Board Setup
 
 The engine sets up a board through Set Tile, Set Castling Rights, Set Turn, Set En Passant, and Set Halfmove Clock operations in that order. Applying the turn before en passant lets the pipeline canonicalize the target for the correct side to move. The external Set Board command is decomposed into those operations by the engine layer. Reset is not used to create a position.
@@ -55,6 +57,8 @@ Piece-square keys are computed by a combinational Boolean hash: invertible addre
 Three general feature lanes handle the moving piece, placed piece, and capture. Castling uses the moving/placed-piece lanes and a constant rook XOR delta selected by color and side; the capture lane remains disabled. The same four rook deltas undo castling. Registered results retain the existing pipeline latency and throughput; PST and move-history storage remain separate.
 
 The pipeline maintains cached king squares, the Zobrist key, both material/PST sums, and piece count for setup, moves, and reversal.
+
+The checked king and mover king are selected from the captured request during table alignment, keeping dispatch selection out of the first king-square register path.
 
 ## PST Tables
 

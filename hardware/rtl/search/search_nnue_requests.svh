@@ -59,34 +59,32 @@
         nnue_eval_valid = nnue_build_busy && nnue_build_draining
             && nnue_eval_tag_count != 2
             && (!nnue_build_wait_updates || nnue_update_idle);
+        // Payload is unused when invalid; only source ownership selects it.
+        // Empty-square detection controls valid without gating ROM addresses.
         if (state == CTRL_SEARCH_ROOT_INIT && !nnue_root_init_draining) begin
-            if (root_feature_tile.piece_type != NULL_PIECE) begin
-                nnue_update_valid = 1'b1;
-                nnue_update_req.thread_id = nnue_root_init_thread;
-                nnue_update_req.ply = PlyIndex'(0);
-                nnue_update_req.white_feature = nnue_feature_index(
-                    nnue_root_init_pos, root_feature_tile, WHITE);
-                nnue_update_req.black_feature = nnue_feature_index(
-                    nnue_root_init_pos, root_feature_tile, BLACK);
-                nnue_update_req.apply = 1'b1;
-                nnue_update_req.add = 1'b1;
-                nnue_update_req.clear = nnue_root_init_first;
-            end
+            nnue_update_valid = root_feature_tile.piece_type != NULL_PIECE;
+            nnue_update_req.thread_id = nnue_root_init_thread;
+            nnue_update_req.ply = PlyIndex'(0);
+            nnue_update_req.white_feature = nnue_feature_index(
+                nnue_root_init_pos, root_feature_tile, WHITE);
+            nnue_update_req.black_feature = nnue_feature_index(
+                nnue_root_init_pos, root_feature_tile, BLACK);
+            nnue_update_req.apply = 1'b1;
+            nnue_update_req.add = 1'b1;
+            nnue_update_req.clear = nnue_root_init_first;
         end
         if (nnue_build_busy) begin
             if (!nnue_build_draining) begin
-                if (build_feature_tile.piece_type != NULL_PIECE) begin
-                    nnue_update_valid = 1'b1;
-                    nnue_update_req.thread_id = nnue_build_thread;
-                    nnue_update_req.ply = search_ply[nnue_build_thread];
-                    nnue_update_req.white_feature = nnue_feature_index(
-                        nnue_build_pos, build_feature_tile, WHITE);
-                    nnue_update_req.black_feature = nnue_feature_index(
-                        nnue_build_pos, build_feature_tile, BLACK);
-                    nnue_update_req.apply = 1'b1;
-                    nnue_update_req.add = 1'b1;
-                    nnue_update_req.clear = nnue_build_first;
-                end
+                nnue_update_valid = build_feature_tile.piece_type != NULL_PIECE;
+                nnue_update_req.thread_id = nnue_build_thread;
+                nnue_update_req.ply = search_ply[nnue_build_thread];
+                nnue_update_req.white_feature = nnue_feature_index(
+                    nnue_build_pos, build_feature_tile, WHITE);
+                nnue_update_req.black_feature = nnue_feature_index(
+                    nnue_build_pos, build_feature_tile, BLACK);
+                nnue_update_req.apply = 1'b1;
+                nnue_update_req.add = 1'b1;
+                nnue_update_req.clear = nnue_build_first;
             end
         end
         if ((!nnue_build_busy || nnue_build_draining) && nnue_delta_busy) begin

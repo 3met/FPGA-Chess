@@ -20,13 +20,17 @@ The final request in an update plan marks completion and returns the tagged thre
 
 Search constructs these requests with `hardware/rtl/search/search_nnue_update_encoder.sv`, a combinational encoder for forward and inverse move deltas, rebuild rows, and ordered completion markers. The search controller retains sequencing and plan ownership, including immediate handoff between pending threads.
 
+Feature addresses are independent of request validity, and transformer ROMs read every cycle. Registered validity gates accumulator writes and completion, so unused rows require no address or data hold behavior and update latency is unchanged.
+
 Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumulator RAM contents need not be erased because the controller tracks which per-thread state is valid.
 
 ## Output Layer
 
-Evaluation maps each signed five-bit accumulator to the three-bit SCReLU code `min(7, floor(max(0, accumulator)² / 8))`, places the side-to-move perspective before the opposing perspective, and applies the three-bit signed output weights and six-bit unsigned output bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The hardware snapshots perspectives in fixed White/Black order and permutes output-weight row addresses for the side to move, avoiding a wide snapshot mux while preserving the same dot product and evaluation cadence. The result is clipped to the finite search-score range. In parallel, the evaluator blends the two incoming material/PST sums linearly from the two-king position through the full 32-piece position, using signed truncation. The blended result is aligned with the NNUE output.
+Evaluation maps each signed five-bit accumulator to the three-bit SCReLU code `min(7, floor(max(0, accumulator)² / 8))`, places the side-to-move perspective before the opposing perspective, and applies the three-bit signed output weights and six-bit unsigned output bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The hardware snapshots perspectives in fixed White/Black order and permutes output-weight row addresses for the side to move, avoiding a wide snapshot mux while preserving the same dot product. The result is clipped to the finite search-score range. In parallel, the evaluator blends the two incoming material/PST sums linearly from the two-king position through the full 32-piece position, using signed truncation. The blended result is aligned with the NNUE output.
 
 Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
+
+The output reduction registers four-product sums and then sixteen-product sums before accumulating each MAC group. The second reduction stage adds one cycle to evaluation latency and the minimum initiation interval, keeping the final adder tree out of a long feedback path. A new snapshot can still be accepted while the preceding result drains into clipping.
 
 ## Model Data
 

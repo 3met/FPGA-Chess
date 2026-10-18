@@ -119,14 +119,6 @@
         logic [1:0] failed_quiet_count;
     } SearchStackEntry;
 
-    // Chain the next move-order operation directly from a response when the
-    // target generator lane is already ready on that response cycle.
-    typedef enum logic [1:0] {
-        MOVE_FOLLOWUP_NONE,
-        MOVE_FOLLOWUP_NOISY_CMD,
-        MOVE_FOLLOWUP_QUIET_CMD,
-        MOVE_FOLLOWUP_POP_BAD
-    } MoveFollowupAction;
 
     // Controller-level request, response, and active-position state.
     SearchControllerState state;
@@ -486,11 +478,6 @@
     ThreadID move_board_bypass_thread;
     Move move_board_bypass_move;
     MoveBucketIndex search_board_issue_bucket;
-    MoveFollowupAction move_followup_action;
-    ThreadID move_followup_thread;
-    logic move_followup_uses_move;
-    logic move_followup_uses_quiet;
-    logic move_followup_accepted;
 
     // Repetition checker request, response, and epoch state.
     localparam int REPETITION_EPOCH_BITS = 4;

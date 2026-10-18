@@ -482,8 +482,7 @@
                             search_move_result_valid <= 1'b1;
                             search_move_inflight[move_thread_id] <= 1'b0;
                             search_stack_top[move_thread_id].move_order_state
-                                <= move_followup_accepted && move_followup_thread == move_thread_id
-                                    ? MOVE_ORDER_GOOD_NOISY : MOVE_ORDER_GENERATE_NOISY;
+                                <= MOVE_ORDER_GENERATE_NOISY;
                             if (move_cmd_resp_direct_valid) begin
                                 search_stack_top[move_thread_id].direct_attempted <= 1'b1;
                                 search_stack_top[move_thread_id].tt_move <= move_cmd_resp_direct_move;
@@ -501,8 +500,7 @@
                             search_move_result_thread_id <= move_thread_id;
                             search_move_result_valid <= 1'b1;
                             search_move_inflight[move_thread_id]
-                                <= move_followup_accepted && !move_followup_uses_quiet
-                                    && move_followup_thread == move_thread_id;
+                                <= 1'b0;
                             if (move_pop_resp_found) begin
                                 search_pending_move[move_thread_id] <= move_pop_resp_move;
                                 search_pending_move_bucket[move_thread_id] <= move_pop_resp_bucket;
@@ -515,9 +513,7 @@
                                             <= search_in_qsearch(move_thread_id)
                                                     && !search_board_in_check[move_thread_id]
                                                 ? MOVE_ORDER_DONE
-                                                : move_followup_accepted && move_followup_uses_quiet
-                                                    && move_followup_thread == move_thread_id
-                                                    ? MOVE_ORDER_QUIET : MOVE_ORDER_GENERATE_QUIET;
+                                                : MOVE_ORDER_GENERATE_QUIET;
                                     MOVE_ORDER_QUIET:
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_BAD_NOISY;
                                     MOVE_ORDER_BAD_NOISY:
@@ -526,9 +522,7 @@
                                         search_stack_top[move_thread_id].move_order_state <= MOVE_ORDER_DONE;
                                 endcase
                                 search_thread_phase[move_thread_id]
-                                    <= move_followup_accepted && !move_followup_uses_quiet
-                                            && move_followup_thread == move_thread_id
-                                        ? SEARCH_PHASE_MOVE_WAIT : SEARCH_PHASE_READY;
+                                    <= SEARCH_PHASE_READY;
                             end
                         end
 
@@ -1020,15 +1014,6 @@
                                 <= !nnue_state_valid[search_eval_issue_thread];
                             nnue_build_pos <= Position'(0);
                             nnue_build_thread <= search_eval_issue_thread;
-                        end
-
-                        if (move_followup_accepted) begin
-                            if (move_followup_uses_quiet)
-                                search_dispatch.quiet
-                                    <= search_thread_after(move_followup_thread);
-                            else
-                                search_dispatch.move
-                                    <= search_thread_after(move_followup_thread);
                         end
 
                         if (search_move_issue_valid && move_cmd_valid && move_cmd_ready) begin

@@ -76,7 +76,13 @@ The controller schedules work across:
 
 A thread has at most one in-flight request in each subsystem, with generation and move reads tracked independently. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
+TT store bounds and promotion filtering are decoded independently for each thread before arbitration selects the request payload.
+
+Move-command and bucket-pop responses update their thread before a continuation becomes eligible for normal dispatch on the next cycle. This keeps downstream admission out of response-state feedback; independent work from other threads can still issue during response handling.
+
 Before search, NNUE builds a root accumulator for every thread. Legal child preparation completes NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator.
+
+NNUE build and incremental replay advance from their local update-port ownership and readiness, keeping other producers' feature decoding out of replay-position feedback.
 
 Reset, New Game, Kill, and search restart prevent outstanding responses from changing a later operation. Each thread retains TT transport ownership until its accepted probe returns, even after search cancellation. A new probe for that thread waits for the old response to drain; canceled responses are discarded.
 

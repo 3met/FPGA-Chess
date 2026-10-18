@@ -4,7 +4,7 @@
 
 ## RTL Organization
 
-The top level coordinates noisy/direct and quiet generation lanes, move memory, and quiet history. Generation lanes produce ordered candidates while move memory owns per-thread storage, per-ply FIFO state, bucket sequencing, and destructive pops. While idle, each lane preloads its destination mask and thread tag independently of command validity; accepted commands retain the same launch cycle. Quiet-history updates run independently of generation.
+The top level coordinates noisy/direct and quiet generation lanes, move memory, and quiet history. Generation lanes produce ordered candidates while move memory owns per-thread storage, per-ply FIFO state, bucket sequencing, and destructive pops. While idle, each lane preloads its complete command payload independently of command validity, keeping admission logic off the wide board-register enables. Generation prepares the destination mask from the captured board in one cycle before scanning; direct validation retains its existing latency. Quiet-history updates run independently of generation.
 
 ## Commands
 
@@ -24,9 +24,11 @@ An attempted direct move is suppressed from later generation only after successf
 
 Generation visits central destinations first. Noisy and quiet lanes produce candidates independently; promotions are generated in queen, knight, rook, bishop order.
 
-Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. When the side to move is checked, both lanes restrict their initial destination masks to the rank, file, and both diagonals through the cached king square. Noisy generation additionally preserves every capture of an enemy knight and every en passant target, so knight-check captures and en passant evasions remain available without identifying the checker. Blocking promotions lie on a king line and retain every promotion choice. This coarse filter preserves candidate order and adds no launch or generation stage. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
+Noisy destinations include occupied enemy squares, valid en passant targets, and promotion destinations. Quiet destinations include ordinary empty squares and castling destinations. When the side to move is checked, both lanes restrict their initial destination masks to the rank, file, and both diagonals through the cached king square. Noisy generation additionally preserves every capture of an enemy knight and every en passant target, so knight-check captures and en passant evasions remain available without identifying the checker. Blocking promotions lie on a king line and retain every promotion choice. This coarse filter preserves candidate order and runs in the destination-preparation cycle. Castling additionally checks permissions, king and rook placement, empty paths, and attacks on the king's origin, transit, and destination squares.
 
 Direct-move path checks share a decoded square-occupancy map, avoiding full-tile board-read multiplexers for slider clearance and pawn double pushes within the existing validation cycle.
+
+Quiet generation caches both castling-legality results during destination preparation because its board remains fixed for the job. History lookup addresses select ordinary or castling payloads from the lane state independently of legality, keeping attack scans out of history-RAM enables and addresses.
 
 Move memory scans buckets in descending priority. While generation can still add to the highest eligible bucket, an empty bucket makes the read wait for a move or generation completion before considering lower buckets. Writes continue without waiting for reads, including when the same bucket is being read. Each thread has independent storage and a pop channel, so threads can read concurrently and a wait affects only its thread. Flush and New Game cancel pending requests and responses.
 
@@ -65,6 +67,10 @@ Each pointer-stack entry records the FIFO bounds and bucket progress for one ply
 The active pointer cache and stack RAM pack each bucket's head and tail into the minimum width that includes its capacity as the one-past-end boundary. Combinational packing and zero extension preserve bucket selection, physical layout, forwarding, and read latency.
 
 FIFO heads and tails increment locally within each bucket, with bucket selection enabling the update after the increment. This preserves same-cycle write forwarding and pointer-stack updates. Valid heads never pass their tails or wrap, so bucket availability and forwarding share each bucket's head/tail equality comparison. Forwarding selects this one-bit empty flag, avoiding a selected-pointer mux ahead of the comparison. Registered generator ownership compares the candidate cache contexts before selecting the match bit, keeping FIFO service decisions off the ply-comparison path.
+
+Generation admission also compares each thread's cache context before selecting its readiness bit, keeping command-thread selection out of cached-ply incrementing and pointer-state selection.
+
+Search enables `EXCLUSIVE_THREAD_ISSUE` because its state machine selects generation or a bucket pop for each thread. This removes same-cycle generation admission from reader readiness; a simulation assertion checks the ownership contract. General frontend use retains generation/pop arbitration.
 
 A write beyond its bucket partition sets a sticky overflow error bit but is not blocked or redirected. Contents for that thread are not guaranteed after overflow. Reset and New Game clear the bit; no overflow location or count is tracked.
 

@@ -119,6 +119,11 @@
                 "direct rejection follow-up matches the actual noisy generator");
             direct_reject_followup_check_pending = 1'b0;
         end
+        // Retain the rejected direct command's tags until normal noisy dispatch.
+        if (!rst_n || dut.state != CTRL_SEARCH_RUN) begin
+            for (int tid = 0; tid < THREAD_COUNT; tid++)
+                direct_reject_waiting[tid] = 1'b0;
+        end
         if (rst_n && dut.state == CTRL_SEARCH_RUN) begin
             for (int lane = 0; lane < 2; lane++) begin
                 if (dut.move_generator.live_active[lane]) begin
@@ -132,13 +137,20 @@
                 end
             end
             if (dut.move_cmd_resp_valid && !dut.move_cmd_resp_direct_valid
-                    && dut.move_cmd_valid && dut.move_cmd_ready
+                    && !dut.search_generation_inflight[dut.move_cmd_resp_thread]) begin
+                direct_reject_waiting[dut.move_cmd_resp_thread] = 1'b1;
+                direct_reject_waiting_ply[dut.move_cmd_resp_thread] = dut.move_cmd_resp_ply;
+            end
+            if (dut.move_cmd_valid && dut.move_cmd_ready
                     && dut.move_cmd == move_generator_defs::MOVE_GEN_GENERATE_NOISY
-                    && dut.move_cmd_thread == dut.move_cmd_resp_thread) begin
+                    && direct_reject_waiting[dut.move_cmd_thread]) begin
+                check(dut.move_cmd_ply == direct_reject_waiting_ply[dut.move_cmd_thread],
+                    "direct rejection continuation preserves command ply");
                 direct_reject_followup_seen = 1'b1;
                 direct_reject_followup_check_pending = 1'b1;
                 direct_reject_followup_thread = dut.move_cmd_thread;
                 direct_reject_followup_ply = dut.move_cmd_ply;
+                direct_reject_waiting[dut.move_cmd_thread] = 1'b0;
             end
             if (dut.move_cmd_valid && dut.move_cmd_ready
                     && dut.move_cmd == move_generator_defs::MOVE_GEN_GENERATE_NOISY)
@@ -461,8 +473,13 @@
                     tt_response_buffered_consume_seen = 1'b1;
                 thread_tt_response_cursor_seen[int'(dut.search_tt_consume_thread)] = 1'b1;
             end
-            if (dut.state == CTRL_SEARCH_RUN && dut.move_followup_accepted)
-                move_followup_seen = 1'b1;
+            if (dut.state == CTRL_SEARCH_RUN
+                    && ((dut.search_move_issue_valid && dut.move_cmd_valid
+                            && dut.move_cmd_ready
+                            && dut.move_cmd == move_generator_defs::MOVE_GEN_GENERATE_NOISY)
+                        || (dut.search_quiet_issue_valid && dut.move_quiet_cmd_valid
+                            && dut.move_quiet_cmd_ready)))
+                move_continuation_seen = 1'b1;
             if (dut.state == CTRL_SEARCH_RUN) begin
                 for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                     if (dut.search_return_valid[idx]

@@ -22,6 +22,8 @@ When a valid way matches the incoming position tag, only that way can change. An
 
 When no way matches, an empty way is preferred. Otherwise the victim minimizes signed `depth - 8 * relative_age`, following [Stockfish's depth-minus-age policy](https://github.com/official-stockfish/Stockfish/blob/master/src/tt.cpp). Ties choose the first way. The other two ways are preserved. An accepted replacement publishes only the selected updated way to the cache and external memory.
 
+Victim quality is compared in parallel with stable lowest-way tie breaking. Replacement permission and retained move hints use the first matching way directly, so victim-quality selection does not feed store publication validity.
+
 ## Reset and New Game
 
 Reset serially invalidates both slots in every cache set and initializes LRU state. The external controller invalidates each way before releasing readiness. New Game stops new requests, drains outstanding metadata and memory traffic, clears one validity-containing memory word per way through a CDC toggle handshake, and sweeps cached ways. These serial operations minimize area.

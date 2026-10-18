@@ -60,7 +60,7 @@
 
     end
 
-    // Move-generation commands and immediate bucket-pop continuations.
+    // Move-generation commands and perft bucket pops.
     always_comb begin
         move_cmd_valid = 1'b0;
         move_cmd = MOVE_GEN_GENERATE_NOISY;
@@ -113,23 +113,6 @@
                 end
                 default: begin end
             endcase
-        end else if (move_followup_uses_move) begin
-            move_cmd_thread = move_followup_thread;
-            move_cmd_ply = search_ply[move_followup_thread];
-            move_cmd_board = search_board[move_followup_thread];
-            move_cmd_in_check = search_board_in_check[move_followup_thread];
-            move_pop_thread = move_followup_thread;
-            // Follow-up action encodings are disjoint.
-            unique case (move_followup_action)
-                MOVE_FOLLOWUP_NOISY_CMD: begin
-                    move_cmd = MOVE_GEN_GENERATE_NOISY;
-                    move_cmd_valid = 1'b1;
-                end
-                MOVE_FOLLOWUP_POP_BAD: begin
-                    move_pop_valid = 1'b1;
-                end
-                default: begin end
-            endcase
         end else if (search_move_issue_valid) begin
             automatic Move order_move = ordering_move_for_thread(search_move_issue_thread);
             move_cmd_thread = search_move_issue_thread;
@@ -148,17 +131,7 @@
             end
         end
 
-        if (state == CTRL_SEARCH_RUN && move_followup_uses_quiet) begin
-            move_quiet_cmd_valid = 1'b1;
-            move_quiet_cmd_thread = move_followup_thread;
-            move_quiet_cmd_ply = search_ply[move_followup_thread];
-            move_quiet_cmd_board = search_board[move_followup_thread];
-            move_quiet_cmd_in_check = search_board_in_check[move_followup_thread];
-            move_quiet_cmd_suppress_valid =
-                search_stack_top[move_followup_thread].direct_attempted;
-            move_quiet_cmd_suppress_move =
-                search_stack_top[move_followup_thread].tt_move;
-        end else if (state == CTRL_SEARCH_RUN && search_quiet_issue_valid) begin
+        if (state == CTRL_SEARCH_RUN && search_quiet_issue_valid) begin
             move_quiet_cmd_valid = 1'b1;
             move_quiet_cmd_thread = search_quiet_issue_thread;
             move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
@@ -215,26 +188,28 @@
 
     end
 
-    // TT publication derives its payload only from the selected store context.
+    // Decode each local store before arbitration selects its payload, keeping
+    // scheduler selection out of bound comparison and promotion-tile lookup.
     always_comb begin
+        TTStoreRequest local_stores[THREAD_COUNT];
+        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            local_stores[tid] = TTStoreRequest'('0);
+            local_stores[tid].zobrist_key = search_zobrist_key[tid];
+            local_stores[tid].depth = search_remaining_depth(tid);
+            local_stores[tid].score = search_return_score[tid];
+            local_stores[tid].bound_type = tt_bound_for_score(
+                search_return_score[tid], search_original_alpha(tid),
+                search_stack_top[tid].beta);
+            local_stores[tid].best_move = search_stack_top[tid].best_move;
+            // Underpromotions cannot be represented by the external TT entry.
+            if (is_promotion_move(search_board[tid], local_stores[tid].best_move)
+                    && local_stores[tid].best_move.promo_piece != PROMO_QUEEN)
+                local_stores[tid].best_move = NULL_MOVE;
+            local_stores[tid].age = tt_age;
+            local_stores[tid].ply = search_ply[tid];
+        end
         tt_store_req_valid = search_tt_store_issue_valid;
-        tt_store_req = TTStoreRequest'('0);
-        tt_store_req.zobrist_key = search_zobrist_key[search_tt_store_issue_thread];
-        tt_store_req.depth = search_remaining_depth(search_tt_store_issue_thread);
-        tt_store_req.score = search_return_score[search_tt_store_issue_thread];
-        tt_store_req.bound_type = tt_bound_for_score(
-            search_return_score[search_tt_store_issue_thread],
-            search_original_alpha(search_tt_store_issue_thread),
-            search_stack_top[search_tt_store_issue_thread].beta
-        );
-        tt_store_req.best_move = search_stack_top[search_tt_store_issue_thread].best_move;
-        // Promotion type is meaningful only when the source is a promoting pawn.
-        if (is_promotion_move(search_board[search_tt_store_issue_thread], tt_store_req.best_move)
-                && tt_store_req.best_move.promo_piece != PROMO_QUEEN)
-            tt_store_req.best_move = NULL_MOVE;
-        tt_store_req.age = tt_age;
-        tt_store_req.ply = search_ply[search_tt_store_issue_thread];
-
+        tt_store_req = local_stores[search_tt_store_issue_thread];
     end
 
     assign move_pop_ready = move_pop_ready_vec[move_pop_thread];
@@ -256,7 +231,7 @@
             move_pop_valid_vec[tid] = state == CTRL_SEARCH_RUN
                 && search_thread_move_ready(tid) && move_state_uses_pop(order_state);
             // Every pop addresses its own thread's current ply, including shared
-            // follow-ups and perft; keep command selection out of this payload.
+            // perft; keep command selection out of this payload.
             move_pop_ply_vec[tid] = search_ply[tid];
             if (move_pop_valid && move_pop_thread == ThreadID'(tid)) begin
                 move_pop_valid_vec[tid] = 1'b1;

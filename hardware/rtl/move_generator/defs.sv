@@ -19,6 +19,7 @@ package move_generator_defs;
     typedef enum logic [3:0] {
         GEN_IDLE,
         GEN_DIRECT,
+        GEN_PREPARE_DEST,
         GEN_SELECT_DEST,
         GEN_EXPAND_SOURCE,
         GEN_BUILD_CONTEXT,

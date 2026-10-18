@@ -330,6 +330,18 @@
         return (bound >= 17'sd32767) ? SEARCH_INF : EvalScore'(bound);
     endfunction : aspiration_upper_bound
 
+    // Clamping leaves a one-point interval only at the score endpoints;
+    // recognize it without adding and comparing both aspiration bounds.
+    function automatic logic aspiration_unit_window(
+        input EvalScore score,
+        input AspirationDelta delta
+    );
+        return (delta == AspirationDelta'(1)
+                && (score == SEARCH_INF || score == -SEARCH_INF))
+            || (delta == AspirationDelta'(2)
+                && score == -SEARCH_INF - EvalScore'(1));
+    endfunction : aspiration_unit_window
+
     // Every newly entered node starts from the same empty search record.
     function automatic SearchStackEntry empty_search_stack_entry();
         automatic SearchStackEntry entry;

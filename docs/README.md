@@ -23,6 +23,7 @@ These docs describe the FPGA chess engine architecture, module contracts, protoc
 | Host protocol | [protocols/host-fpga-protocol.md](protocols/host-fpga-protocol.md) and [protocols/binary-encoding.md](protocols/binary-encoding.md) |
 | Build and verification | [development/build-test-synthesis.md](development/build-test-synthesis.md) |
 | Stockfish benchmark | [development/stockfish-benchmark.md](development/stockfish-benchmark.md) |
+| Engine timing and latency | [development/engine-timing.md](development/engine-timing.md) |
 | Runtime profiling | [development/engine-profiling.md](development/engine-profiling.md) |
 | Evaluation tuning | [development/evaluation-tuning.md](development/evaluation-tuning.md) |
 | Search-parameter tuning | [development/search-parameter-tuning.md](development/search-parameter-tuning.md) |
