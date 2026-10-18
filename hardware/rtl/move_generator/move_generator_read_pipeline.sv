@@ -43,6 +43,41 @@ module move_generator_read_pipeline #(
         MoveMemoryPhase phase;
     } MovePointerState;
 
+    // Each stored boundary includes the one-past-end value for its own bucket.
+    localparam int PACKED_BUCKET_TOP_BITS = $clog2(CAPACITIES[0]+1)+$clog2(CAPACITIES[1]+1)
+        +$clog2(CAPACITIES[2]+1)+$clog2(CAPACITIES[3]+1)+$clog2(CAPACITIES[4]+1)
+        +$clog2(CAPACITIES[5]+1)+$clog2(CAPACITIES[6]+1)+$clog2(CAPACITIES[7]+1);
+    typedef logic [PACKED_BUCKET_TOP_BITS-1:0] PackedBucketTops;
+    typedef struct packed {
+        PackedBucketTops tops;
+        PackedBucketTops heads;
+        MoveMemoryPhase phase;
+    } PackedMovePointerState;
+
+    // Constant offsets and masks pack bucket-local widths without extra cycles.
+    function automatic PackedBucketTops pack_bucket_tops(input MoveBucketTops tops);
+        automatic PackedBucketTops result = '0;
+        automatic int offset = 0;
+        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+            result |= (PackedBucketTops'(tops[bucket])
+                & PackedBucketTops'((1 << $clog2(CAPACITIES[bucket] + 1)) - 1)) << offset;
+            offset += $clog2(CAPACITIES[bucket] + 1);
+        end
+        return result;
+    endfunction
+
+    // Zero extension keeps dynamic bucket selection on the existing interfaces.
+    function automatic MoveBucketTops unpack_bucket_tops(input PackedBucketTops tops);
+        automatic MoveBucketTops result = '0;
+        automatic int offset = 0;
+        for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+            result[bucket] = MoveBucketTop'(tops >> offset)
+                & MoveBucketTop'((1 << $clog2(CAPACITIES[bucket] + 1)) - 1);
+            offset += $clog2(CAPACITIES[bucket] + 1);
+        end
+        return result;
+    endfunction
+
     genvar bucket_index;
     generate
         if (TOTAL_RATIO <= 0 || MEMORY_ENTRIES < 2
@@ -66,6 +101,7 @@ module move_generator_read_pipeline #(
     Move result_forward[THREAD_COUNT], ram_move[THREAD_COUNT];
 
     MovePointerState cache_state[THREAD_COUNT], next_state[THREAD_COUNT];
+    PackedMovePointerState cache_state_bits[THREAD_COUNT], next_state_bits[THREAD_COUNT];
     PlyIndex cache_ply[THREAD_COUNT];
     logic cache_valid[THREAD_COUNT], state_update[THREAD_COUNT];
     PlyIndex state_update_ply[THREAD_COUNT];
@@ -74,7 +110,7 @@ module move_generator_read_pipeline #(
     PlyIndex pointer_load_tag[THREAD_COUNT], pointer_read_ply[THREAD_COUNT];
     PointerAddress pointer_read_address[THREAD_COUNT], pointer_write_address[THREAD_COUNT];
     logic pointer_write_enable[THREAD_COUNT];
-    logic [$bits(MovePointerState)-1:0] pointer_read_bits[THREAD_COUNT];
+    logic [$bits(PackedMovePointerState)-1:0] pointer_read_bits[THREAD_COUNT];
 
     logic service[THREAD_COUNT], found[THREAD_COUNT], blocked[THREAD_COUNT];
     logic bypass[THREAD_COUNT], cache_match[THREAD_COUNT];
@@ -245,12 +281,12 @@ module move_generator_read_pipeline #(
             eligible = phase_mask(cache_state[tid].phase);
             for (int bucket = MOVE_BUCKET_COUNT-1; bucket >= 0; bucket--) begin
                 if (!found[tid] && !blocked[tid] && eligible[bucket]) begin
-                    automatic MoveBucketTop head = cache_state[tid].heads[bucket];
-                    if (cache_state[tid].tops[bucket] > head
-                            || (bucket_empty[bucket] && incoming[bucket])) begin
+                    // Valid FIFO pointers never wrap and head cannot pass tail,
+                    // so the existing empty flag also determines availability.
+                    if (!bucket_empty[bucket] || incoming[bucket]) begin
                         found[tid] = 1'b1;
                         selected[tid] = MoveBucketIndex'(bucket);
-                        read_top[tid] = head;
+                        read_top[tid] = cache_state[tid].heads[bucket];
                     end else if (generating[bucket]) begin
                         blocked[tid] = 1'b1;
                     end
@@ -376,6 +412,17 @@ module move_generator_read_pipeline #(
     genvar thread_index;
     generate
         for (thread_index = 0; thread_index < THREAD_COUNT; thread_index++) begin : gen_thread
+            // Only the narrow representation occupies cache registers and stack RAM.
+            assign cache_state[thread_index] = {
+                unpack_bucket_tops(cache_state_bits[thread_index].tops),
+                unpack_bucket_tops(cache_state_bits[thread_index].heads),
+                cache_state_bits[thread_index].phase
+            };
+            assign next_state_bits[thread_index] = {
+                pack_bucket_tops(next_state[thread_index].tops),
+                pack_bucket_tops(next_state[thread_index].heads),
+                next_state[thread_index].phase
+            };
             move_generator_bucket_store #(
                 .MEMORY_ENTRIES(MEMORY_ENTRIES), .CAPACITIES(CAPACITIES)
             ) store (
@@ -392,9 +439,9 @@ module move_generator_read_pipeline #(
             );
 
             sync_read_simple_dual_port_ram #(
-                .NUM_WORDS(SEARCH_STACK_DEPTH), .WORD_SIZE($bits(MovePointerState))
+                .NUM_WORDS(SEARCH_STACK_DEPTH), .WORD_SIZE($bits(PackedMovePointerState))
             ) pointer_stack (
-                .clock(clk), .data(next_state[thread_index]),
+                .clock(clk), .data(next_state_bits[thread_index]),
                 .rdaddress(pointer_read_address[thread_index]),
                 .rden(pointer_load_issue[thread_index]),
                 .wraddress(pointer_write_address[thread_index]),
@@ -409,9 +456,9 @@ module move_generator_read_pipeline #(
                     pointer_load_pending[thread_index] <= 1'b0;
                     cache_valid[thread_index] <= 1'b1;
                     cache_ply[thread_index] <= PlyIndex'(0);
-                    cache_state[thread_index].tops <= MoveBucketTops'(0);
-                    cache_state[thread_index].heads <= MoveBucketTops'(0);
-                    cache_state[thread_index].phase <= MOVE_MEMORY_DONE;
+                    cache_state_bits[thread_index].tops <= PackedBucketTops'(0);
+                    cache_state_bits[thread_index].heads <= PackedBucketTops'(0);
+                    cache_state_bits[thread_index].phase <= MOVE_MEMORY_DONE;
                 end else if (flush) begin
                     stage_valid[thread_index] <= 1'b0;
                     result_valid[thread_index] <= 1'b0;
@@ -439,12 +486,12 @@ module move_generator_read_pipeline #(
                         pointer_load_pending[thread_index] <= 1'b0;
                         cache_valid[thread_index] <= 1'b1;
                         cache_ply[thread_index] <= pointer_load_tag[thread_index];
-                        cache_state[thread_index] <= MovePointerState'(pointer_read_bits[thread_index]);
+                        cache_state_bits[thread_index] <= PackedMovePointerState'(pointer_read_bits[thread_index]);
                     end
                     if (state_update[thread_index]) begin
                         cache_valid[thread_index] <= 1'b1;
                         cache_ply[thread_index] <= state_update_ply[thread_index];
-                        cache_state[thread_index] <= next_state[thread_index];
+                        cache_state_bits[thread_index] <= next_state_bits[thread_index];
                     end
                 end
             end
@@ -457,6 +504,16 @@ module move_generator_read_pipeline #(
                 && live_thread[0] == live_thread[1]))
             else $error("two generators wrote one thread");
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+            // Availability relies on ordered pointers until overflow invalidates
+            // the move store contents.
+            if (cache_valid[tid] && !overflow_sticky) begin
+                for (int bucket = 0; bucket < MOVE_BUCKET_COUNT; bucket++) begin
+                    assert (cache_state[tid].heads[bucket] <= cache_state[tid].tops[bucket])
+                        else $error("move FIFO head passed tail: thread=%0d bucket=%0d head=%0d tail=%0d",
+                            tid, bucket, cache_state[tid].heads[bucket],
+                            cache_state[tid].tops[bucket]);
+                end
+            end
             if (node_init_valid[tid] && node_init_ready[tid]) begin
                 assert (node_init_ply[tid] == PlyIndex'(0)
                         || (cache_valid[tid]

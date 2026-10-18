@@ -3,6 +3,10 @@ import move_generator_defs::*;
 
 module tb_move_generator_read_pipeline;
     localparam int THREADS = 2;
+    localparam int MEMORY_ENTRIES = 512;
+    localparam int BUCKET_RATIOS[MOVE_BUCKET_COUNT] = '{64,48,16,112,112,64,64,32};
+    localparam int TOTAL_RATIO = BUCKET_RATIOS[0]+BUCKET_RATIOS[1]+BUCKET_RATIOS[2]+BUCKET_RATIOS[3]
+        +BUCKET_RATIOS[4]+BUCKET_RATIOS[5]+BUCKET_RATIOS[6]+BUCKET_RATIOS[7];
     logic clk = 0, rst_n = 0, clear = 0, flush = 0, overflow_sticky;
     logic pop_valid[THREADS], pop_ready[THREADS], pop_resp_valid[THREADS];
     logic pop_resp_ready[THREADS], pop_resp_found[THREADS];
@@ -22,7 +26,8 @@ module tb_move_generator_read_pipeline;
     int pass_count = 0, fail_count = 0;
 
     move_generator_read_pipeline #(
-        .THREAD_COUNT(THREADS), .SEARCH_STACK_DEPTH(8), .MEMORY_ENTRIES(512)
+        .THREAD_COUNT(THREADS), .SEARCH_STACK_DEPTH(8), .MEMORY_ENTRIES(MEMORY_ENTRIES),
+        .BUCKET_RATIOS(BUCKET_RATIOS)
     ) dut (.*);
 
     task automatic tick(input int count = 1);
@@ -116,6 +121,28 @@ module tb_move_generator_read_pipeline;
         pop_resp_ready[tid] = 1;
         tick();
         pop_resp_ready[tid] = 0;
+    endtask
+
+    // Derive boundaries from the test fixture rather than production defaults.
+    function automatic int bucket_capacity(input int bucket);
+        return MEMORY_ENTRIES * BUCKET_RATIOS[bucket] / TOTAL_RATIO;
+    endfunction
+
+    // Exercise every configured boundary, including power-of-two capacities.
+    task automatic fill_bucket(input int lane, input int bucket);
+        for (int index = 0; index < bucket_capacity(bucket); index++)
+            push(lane, bucket, (bucket + 1) * 256 + index);
+    endtask
+
+    // Cache hits and restored parents must keep their existing response timing.
+    task automatic drain_bucket(input int bucket, input logic restored_parent = 0);
+        for (int index = 0; index < bucket_capacity(bucket); index++) begin
+            request(0, 0);
+            tick(restored_parent && index == 0 ? 2 : 1);
+            check(pop_resp_valid[0], "bucket boundary pop adds no read cycles");
+            expect_response(0, 1, (bucket + 1) * 256 + index, bucket,
+                "full bucket preserves FIFO contents");
+        end
     endtask
 
     initial begin
@@ -350,9 +377,9 @@ module tb_move_generator_read_pipeline;
         // no RAM address and leaves both pointers at the boundary.
         reset_inputs();
         start_generation(0, 0, 0);
-        for (int move_index = 0; move_index < 32; move_index++)
+        for (int move_index = 0; move_index < bucket_capacity(7); move_index++)
             push(0, 7, 800 + move_index);
-        for (int move_index = 0; move_index < 32; move_index++) begin
+        for (int move_index = 0; move_index < bucket_capacity(7); move_index++) begin
             request(0, 0);
             expect_response(0, 1, 800 + move_index, 7,
                 "full bucket drains in FIFO order");
@@ -363,11 +390,46 @@ module tb_move_generator_read_pipeline;
         push(0, 7, 900);
         expect_response(0, 1, 900, 7,
             "empty FIFO forwards a same-cycle incoming move");
-        check(dut.cache_state[0].heads[7] == MoveBucketTop'(32)
-                && dut.cache_state[0].tops[7] == MoveBucketTop'(32),
+        check(dut.cache_state[0].heads[7] == MoveBucketTop'(bucket_capacity(7))
+                && dut.cache_state[0].tops[7] == MoveBucketTop'(bucket_capacity(7)),
             "empty-FIFO bypass leaves both pointers unchanged");
         check(!overflow_sticky,
             "empty-FIFO bypass at capacity does not report overflow");
+
+        // Save and restore all full tails together so narrowing cannot truncate
+        // an end boundary or leak high bits into an adjacent packed bucket.
+        reset_inputs();
+        start_generation(0, 0, 0);
+        fill_bucket(0, 7);
+        fill_bucket(0, 6);
+        fill_bucket(0, 2);
+        fill_bucket(0, 1);
+        finish_generation(0);
+        drain_bucket(7);
+        drain_bucket(6);
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "full noisy buckets reach quiet generation");
+        start_generation(1, 0, 0);
+        fill_bucket(1, 5);
+        fill_bucket(1, 4);
+        fill_bucket(1, 3);
+        fill_bucket(1, 0);
+        finish_generation(1);
+        start_generation(0, 0, 1);
+        finish_generation(0);
+        drain_bucket(5, 1);
+        drain_bucket(4);
+        drain_bucket(3);
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "full quiet buckets reach bad noisy phase");
+        drain_bucket(2);
+        drain_bucket(1);
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "full bad noisy buckets reach low quiet phase");
+        drain_bucket(0);
+        request(0, 0);
+        expect_response(0, 0, 0, 0, "all restored full buckets drain completely");
+        check(!overflow_sticky, "all bucket end boundaries fit without overflow");
 
         // Logical reset makes stale move RAM contents unreachable.
         clear = 1;
@@ -382,10 +444,10 @@ module tb_move_generator_read_pipeline;
         // Overflow is detected while the tail continues advancing.
         reset_inputs();
         start_generation(0, 0, 0);
-        for (int move_index = 0; move_index < 34; move_index++)
+        for (int move_index = 0; move_index < bucket_capacity(7) + 2; move_index++)
             push(0, 7, 700 + move_index);
         check(overflow_sticky, "overflow sets sticky error");
-        check(dut.cache_state[0].tops[7] > MoveBucketTop'(32),
+        check(dut.cache_state[0].tops[7] > MoveBucketTop'(bucket_capacity(7)),
             "overflow does not clamp the tail");
 
         $display("Pass Count: %0d", pass_count);
