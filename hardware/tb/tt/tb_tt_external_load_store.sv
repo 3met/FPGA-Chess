@@ -61,7 +61,7 @@ module tb_tt_external_load_store;
         for (int id = 1; id <= 24; id++) begin
             key = (ZobristKey'(32'(id)*32'h9e37_79b9) << TAG_BITS) | ZobristKey'(id);
             key[63] = id[0];
-            store(key, 0, id*256, 0, TT_BOUND_EXACT,
+            store(key, 0, id*64, 0, TT_BOUND_EXACT,
                 Move'({Position'(id), Position'(0), PROMO_QUEEN}));
         end
         for (int cycle = 0; cycle < 20000 || pending[0] || pending[1]; cycle++) begin
@@ -75,7 +75,7 @@ module tb_tt_external_load_store;
                 key = (ZobristKey'(32'(identity)*32'h9e37_79b9) << TAG_BITS) | ZobristKey'(identity);
                 key[63] = identity[0];
                 store_req = '0; store_req.zobrist_key = key;
-                store_req.score = EvalScore'(identity*256 + nonce);
+                store_req.score = EvalScore'(identity*64 + nonce);
                 store_req.depth = TTDepth'(nonce);
                 store_req.bound_type = TTBoundType'(1 + nonce % 3);
                 store_req.age = TTAge'(cycle / 97);
@@ -102,8 +102,8 @@ module tb_tt_external_load_store;
                 tid = int'(lookup_resp.thread_id);
                 if (!pending[tid]) $fatal(1, "stress returned an unowned response to thread %0d", tid);
                 if (lookup_resp.hit) begin
-                    nonce = int'(lookup_resp.score) % 256;
-                    if (int'(lookup_resp.score)/256 != target[tid] || nonce >= 64
+                    nonce = int'(lookup_resp.score) % 64;
+                    if (int'(lookup_resp.score)/64 != target[tid] || nonce >= 64
                             || lookup_resp.depth != TTDepth'(nonce)
                             || lookup_resp.bound_type != TTBoundType'(1 + nonce % 3)
                             || lookup_resp.best_move.from_pos != Position'(target[tid])

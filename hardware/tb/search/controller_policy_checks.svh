@@ -1,6 +1,19 @@
 // Existing untimed search-policy checks under the controller fixture policy.
 // Included inside the main integration sequence.
 
+        // Wide operands must cancel before clipping into the finite score band.
+        for (int base_index = 0; base_index < 5; base_index++) begin
+            automatic int base = (base_index-2) * (PST_EVAL_BOUND / 2);
+            for (int correction_index = 0; correction_index < 5; correction_index++) begin
+                automatic int correction = (correction_index-2) * (NNUE_CORRECTION_BOUND / 2);
+                automatic int expected = base + correction;
+                if (expected > int'(MAX_NON_MATE_EVAL_SCORE)) expected = int'(MAX_NON_MATE_EVAL_SCORE);
+                if (expected < -int'(MAX_NON_MATE_EVAL_SCORE)) expected = -int'(MAX_NON_MATE_EVAL_SCORE);
+                check(int'(dut.add_nnue_correction(PstEvalScore'(base), NnueCorrection'(correction))) == expected,
+                    "combined static evaluation clips after wide cancellation");
+            end
+        end
+
         // Probe both mate-range boundaries and the adjacent finite scores.
         check(dut.null_beta_eligible(MATE_THRESHOLD - EvalScore'(1))
                 && dut.null_beta_eligible(-MATE_THRESHOLD + EvalScore'(1))
@@ -10,8 +23,8 @@
                 && !dut.null_beta_eligible(-MATE_THRESHOLD)
                 && !dut.null_beta_eligible(MATE_SCORE)
                 && !dut.null_beta_eligible(-MATE_SCORE)
-                && !dut.null_beta_eligible(dut.SEARCH_INF)
-                && !dut.null_beta_eligible(-dut.SEARCH_INF),
+                && !dut.null_beta_eligible(MAX_EVAL_SCORE)
+                && !dut.null_beta_eligible(-MAX_EVAL_SCORE),
             "null pruning excludes winning and losing mate bounds and infinity");
 
         check(dut.lmr_table_value_for_params(128, 256, 1, 1) == 8'd1,

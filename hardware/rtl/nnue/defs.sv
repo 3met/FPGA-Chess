@@ -15,6 +15,16 @@ package nnue_defs;
         NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT;
     localparam int NNUE_OUTPUT_WEIGHT_BITS = 3;
     localparam int NNUE_OUTPUT_BIAS_BITS = 6;
+    // SCReLU is 0..7; retain every dot-product result before combining with PST.
+    localparam int NNUE_CORRECTION_NEGATIVE_BOUND =
+        NNUE_OUTPUT_INPUT_COUNT * 7 * (1 << (NNUE_OUTPUT_WEIGHT_BITS - 1));
+    localparam int NNUE_CORRECTION_POSITIVE_BOUND =
+        NNUE_OUTPUT_INPUT_COUNT * 7 * ((1 << (NNUE_OUTPUT_WEIGHT_BITS - 1)) - 1)
+        + (1 << NNUE_OUTPUT_BIAS_BITS) - 1;
+    localparam int NNUE_CORRECTION_BOUND =
+        NNUE_CORRECTION_NEGATIVE_BOUND > NNUE_CORRECTION_POSITIVE_BOUND
+        ? NNUE_CORRECTION_NEGATIVE_BOUND : NNUE_CORRECTION_POSITIVE_BOUND;
+    typedef logic signed [$clog2(NNUE_CORRECTION_BOUND + 1):0] NnueCorrection;
     localparam int NNUE_OUTPUT_MAC_LANES = 128;
     localparam int NNUE_OUTPUT_MAC_CYCLES =
         (NNUE_OUTPUT_INPUT_COUNT + NNUE_OUTPUT_MAC_LANES - 1) / NNUE_OUTPUT_MAC_LANES;

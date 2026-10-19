@@ -15,8 +15,8 @@ from typing import Callable
 # Keep the assertions here so changes which exceed their wire representation fail loudly.
 BAUD_RATE = 2_000_000  # hardware/rtl/de1_soc.sv BAUD_RATE
 MAX_SEARCH_DEPTH = 31  # 5-bit search depth used by hardware/rtl/search/search_controller.sv
-MATE_THRESHOLD = 0x4000  # hardware/rtl/tt/tt_defs.sv MATE_THRESHOLD
-MATE_SCORE = 0x4100  # hardware/rtl/tt/tt_defs.sv MATE_SCORE
+MATE_THRESHOLD = 3840  # hardware/rtl/tt/tt_defs.sv MATE_THRESHOLD
+MATE_SCORE = 4094  # hardware/rtl/tt/tt_defs.sv MATE_SCORE
 FULL_BOARD_BYTES = 36  # hardware/rtl/engine_command_layer.sv Set Board payload
 TIME_MAX_MS = (1 << 24) - 1  # chess_defs::TimeType
 NODE_COUNT_MAX = (1 << 40) - 1  # chess_defs::NodeCountType

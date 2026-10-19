@@ -10,10 +10,9 @@ package tt_defs;
     localparam int TT_DEPTH_BITS = $bits(PlyIndex);
     localparam int TT_AGE_BITS = 5;
 
-    // Bit 14 separates finite evaluations from mates. The 0x100 score gap
-    // represents distances through 256 plies (mate in at least 128 moves).
-    localparam EvalScore MATE_THRESHOLD = EvalScore'(16'h4000);
-    localparam EvalScore MATE_SCORE = EvalScore'(16'h4100);
+    // Mate in one is immediately below infinity; the band ends at 255 plies.
+    localparam EvalScore MATE_THRESHOLD = MAX_NON_MATE_EVAL_SCORE + EvalScore'(1);
+    localparam EvalScore MATE_SCORE = MAX_EVAL_SCORE - EvalScore'(1);
 
     // Shared FSM type keeps profiler decoding tied to the implementation.
     typedef enum logic [1:0] { TT_FRONTEND_IDLE, TT_FRONTEND_DRAIN, TT_FRONTEND_CLEAR_WAIT, TT_FRONTEND_CACHE_CLEAR } TTFrontendState;
@@ -108,21 +107,35 @@ package tt_defs;
         return Move'({move_bits, PROMO_QUEEN});
     endfunction : tt_decode_move
 
+    // Mate-distance conversion saturates within the mate band, retaining its class.
+    function automatic EvalScore clamp_mate_score(input logic signed [16:0] score, input logic winning);
+        if (winning) begin
+            if (score > 17'(MATE_SCORE)) return MATE_SCORE;
+            if (score < 17'(MATE_THRESHOLD)) return MATE_THRESHOLD;
+        end else begin
+            if (score < 17'(-MATE_SCORE)) return -MATE_SCORE;
+            if (score > 17'(-MATE_THRESHOLD)) return -MATE_THRESHOLD;
+        end
+        return EvalScore'(score);
+    endfunction
+
     // Store mate scores relative to the node so entries remain valid when the
     // same position is reached at a different root-relative ply.
     function automatic EvalScore tt_normalize_mate_score(input EvalScore score, input PlyIndex ply);
-        automatic logic signed [16:0] score_wide = $signed({score[15], score});
+        automatic logic signed [16:0] score_wide = $signed({score[$bits(EvalScore)-1], score});
         automatic logic signed [16:0] ply_wide = $signed({1'b0, ply});
-        if (score >= MATE_THRESHOLD) return EvalScore'(score_wide + ply_wide);
-        if (score <= -MATE_THRESHOLD) return EvalScore'(score_wide - ply_wide);
+        if (score == MAX_EVAL_SCORE || score == MIN_EVAL_SCORE) return score;
+        if (score >= MATE_THRESHOLD) return clamp_mate_score(score_wide + ply_wide, 1'b1);
+        if (score <= -MATE_THRESHOLD) return clamp_mate_score(score_wide - ply_wide, 1'b0);
         return score;
     endfunction : tt_normalize_mate_score
 
     function automatic EvalScore tt_restore_mate_score(input EvalScore score, input PlyIndex ply);
-        automatic logic signed [16:0] score_wide = $signed({score[15], score});
+        automatic logic signed [16:0] score_wide = $signed({score[$bits(EvalScore)-1], score});
         automatic logic signed [16:0] ply_wide = $signed({1'b0, ply});
-        if (score >= MATE_THRESHOLD) return EvalScore'(score_wide - ply_wide);
-        if (score <= -MATE_THRESHOLD) return EvalScore'(score_wide + ply_wide);
+        if (score == MAX_EVAL_SCORE || score == MIN_EVAL_SCORE) return score;
+        if (score >= MATE_THRESHOLD) return clamp_mate_score(score_wide - ply_wide, 1'b1);
+        if (score <= -MATE_THRESHOLD) return clamp_mate_score(score_wide + ply_wide, 1'b0);
         return score;
     endfunction : tt_restore_mate_score
 

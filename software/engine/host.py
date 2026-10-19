@@ -929,6 +929,8 @@ class FPGAUCIHost:
                 board_snapshot.fen() if board_snapshot is not None else "unavailable",
             )
         score_kind, score_value = self._eval_score_to_uci(response.score)
+        if board_snapshot is not None and board_snapshot.is_checkmate():
+            score_kind, score_value = "mate", 0
         self.emit(
             f"info depth {response.completed_depth} score {score_kind} {score_value}{elapsed} nodes {response.nodes}{nps}"
         )
@@ -963,7 +965,7 @@ class FPGAUCIHost:
             # in one move from the root player's perspective.
             # An out-of-range magnitude has no valid mate distance. Report the
             # minimum nonzero distance without letting subtraction flip its sign.
-            moves = 1 if abs(score) > MATE_SCORE else (MATE_SCORE - abs(score) + 1) // 2
+            moves = 1 if abs(score) > MATE_SCORE else (MATE_SCORE - abs(score) + 2) // 2
             return "mate", moves if score > 0 else -moves
         return "cp", FPGAUCIHost._eval_score_to_centipawns(score)
 

@@ -35,7 +35,9 @@
 
     function automatic EvalScore terminal_no_move_score(input logic in_check, input PlyIndex ply);
         if (in_check) begin
-            return EvalScore'($signed({1'b0, ply}) - MATE_SCORE);
+            // Root checkmate has no played ply; report the closest losing mate.
+            return ply == PlyIndex'(0) ? -MATE_SCORE
+                : EvalScore'($signed({1'b0, ply}) - 1 - MATE_SCORE);
         end
         return DRAW_EVAL_SCORE;
     endfunction : terminal_no_move_score
@@ -136,8 +138,8 @@
             factor = factor + 1;
         else if (stable_depths >= STABLE_DEPTH_THRESHOLD)
             factor = factor - 1;
-        score_wide = {score[15], score};
-        previous_wide = {previous_depth_score[15], previous_depth_score};
+        score_wide = score;
+        previous_wide = previous_depth_score;
         if (search_completed_depth != SearchDepth'(0)
                 && score_wide < previous_wide - SCORE_DROP_THRESHOLD)
             factor = factor + 2;
@@ -148,20 +150,22 @@
         return 4'(factor);
     endfunction : adaptive_soft_factor
 
-    function automatic EvalScore pov_eval(input FullBoard board, input EvalScore white_relative_eval);
+    function automatic PstEvalScore pov_eval(input FullBoard board, input PstEvalScore white_relative_eval);
         return (board.turn == WHITE) ? white_relative_eval : -white_relative_eval;
     endfunction : pov_eval
 
     function automatic EvalScore add_nnue_correction(
-        input EvalScore material_pst,
-        input EvalScore correction
+        input PstEvalScore material_pst,
+        input NnueCorrection correction
     );
-        automatic logic signed [16:0] total =
-            $signed({material_pst[15], material_pst})
-            + $signed({correction[15], correction});
-        if (total > 17'sd16383)
+        // One carry bit preserves cancellation before finite-score saturation.
+        localparam int SUM_BITS = 1 + (($bits(PstEvalScore) > $bits(NnueCorrection))
+            ? $bits(PstEvalScore) : $bits(NnueCorrection));
+        automatic logic signed [SUM_BITS-1:0] total =
+            SUM_BITS'(material_pst) + SUM_BITS'(correction);
+        if (total > SUM_BITS'(MAX_NON_MATE_EVAL_SCORE))
             return MAX_NON_MATE_EVAL_SCORE;
-        if (total < -17'sd16383)
+        if (total < SUM_BITS'(-MAX_NON_MATE_EVAL_SCORE))
             return -MAX_NON_MATE_EVAL_SCORE;
         return EvalScore'(total);
     endfunction : add_nnue_correction
@@ -174,9 +178,9 @@
         input SearchDepth depth
     );
         automatic logic signed [31:0] static_eval_wide =
-            $signed({{16{static_eval[15]}}, static_eval});
+            $signed({{(32-$bits(EvalScore)){static_eval[$bits(EvalScore)-1]}}, static_eval});
         automatic logic signed [31:0] beta_wide =
-            $signed({{16{beta[15]}}, beta});
+            $signed({{(32-$bits(EvalScore)){beta[$bits(EvalScore)-1]}}, beta});
         automatic logic signed [31:0] margin =
             RFP_BASE_MARGIN + RFP_MARGIN_PER_DEPTH * int'(depth);
         return static_eval_wide - margin >= beta_wide;
@@ -228,9 +232,9 @@
         input SearchDepth predicted_depth
     );
         automatic logic signed [31:0] static_eval_wide =
-            $signed({{16{static_eval[15]}}, static_eval});
+            $signed({{(32-$bits(EvalScore)){static_eval[$bits(EvalScore)-1]}}, static_eval});
         automatic logic signed [31:0] alpha_wide =
-            $signed({{16{alpha[15]}}, alpha});
+            $signed({{(32-$bits(EvalScore)){alpha[$bits(EvalScore)-1]}}, alpha});
         automatic logic signed [31:0] margin = FUTILITY_BASE_MARGIN
             + FUTILITY_MARGIN_PER_DEPTH * int'(predicted_depth);
         return static_eval_wide + margin <= alpha_wide;
@@ -249,9 +253,9 @@
         input logic immediate_recapture
     );
         automatic logic signed [31:0] static_eval_wide =
-            $signed({{16{static_eval[15]}}, static_eval});
+            $signed({{(32-$bits(EvalScore)){static_eval[$bits(EvalScore)-1]}}, static_eval});
         automatic logic signed [31:0] alpha_wide =
-            $signed({{16{alpha[15]}}, alpha});
+            $signed({{(32-$bits(EvalScore)){alpha[$bits(EvalScore)-1]}}, alpha});
         automatic logic signed [31:0] victim_value = PIECE_VALS_128[victim];
         return !in_check
             && !gives_check
@@ -303,8 +307,8 @@
     function automatic AspirationDelta aspiration_next_delta(input AspirationDelta delta);
         automatic logic [31:0] scaled = delta * ASPIRATION_DELTA_MULTIPLIER_Q3;
         automatic logic [31:0] rounded = (scaled + 32'd4) >> 3;
-        if (rounded >= 32'd32767)
-            return AspirationDelta'(32767);
+        if (rounded >= 32'(MAX_EVAL_SCORE))
+            return AspirationDelta'(MAX_EVAL_SCORE);
         // Ensure that quantization cannot leave a narrow window stuck at one size.
         if (rounded <= delta)
             return delta + AspirationDelta'(1);
@@ -316,18 +320,18 @@
         input EvalScore score,
         input AspirationDelta delta
     );
-        automatic logic signed [16:0] bound =
-            $signed({score[15], score}) - $signed({2'b00, delta});
-        return (bound <= -17'sd32767) ? -SEARCH_INF : EvalScore'(bound);
+        automatic logic signed [$bits(EvalScore):0] bound =
+            $signed({score[$bits(EvalScore)-1], score}) - $signed({2'b00, delta});
+        return (bound <= ($bits(EvalScore)+1)'(-MAX_EVAL_SCORE)) ? -MAX_EVAL_SCORE : EvalScore'(bound);
     endfunction : aspiration_lower_bound
 
     function automatic EvalScore aspiration_upper_bound(
         input EvalScore score,
         input AspirationDelta delta
     );
-        automatic logic signed [16:0] bound =
-            $signed({score[15], score}) + $signed({2'b00, delta});
-        return (bound >= 17'sd32767) ? SEARCH_INF : EvalScore'(bound);
+        automatic logic signed [$bits(EvalScore):0] bound =
+            $signed({score[$bits(EvalScore)-1], score}) + $signed({2'b00, delta});
+        return (bound >= ($bits(EvalScore)+1)'(MAX_EVAL_SCORE)) ? MAX_EVAL_SCORE : EvalScore'(bound);
     endfunction : aspiration_upper_bound
 
     // Clamping leaves a one-point interval only at the score endpoints;
@@ -336,10 +340,8 @@
         input EvalScore score,
         input AspirationDelta delta
     );
-        return (delta == AspirationDelta'(1)
-                && (score == SEARCH_INF || score == -SEARCH_INF))
-            || (delta == AspirationDelta'(2)
-                && score == -SEARCH_INF - EvalScore'(1));
+        return delta == AspirationDelta'(1)
+                && (score == MAX_EVAL_SCORE || score == -MAX_EVAL_SCORE);
     endfunction : aspiration_unit_window
 
     // Every newly entered node starts from the same empty search record.
@@ -347,10 +349,10 @@
         automatic SearchStackEntry entry;
         entry.move = NULL_MOVE;
         entry.best_move = NULL_MOVE;
-        entry.best_score = -SEARCH_INF;
+        entry.best_score = -MAX_EVAL_SCORE;
         entry.static_eval = EvalScore'(0);
-        entry.alpha = -SEARCH_INF;
-        entry.beta = SEARCH_INF;
+        entry.alpha = -MAX_EVAL_SCORE;
+        entry.beta = MAX_EVAL_SCORE;
         entry.tt_move = NULL_MOVE;
         entry.repetition_start = PlyIndex'(0);
         entry.remaining_depth = SearchDepth'(0);

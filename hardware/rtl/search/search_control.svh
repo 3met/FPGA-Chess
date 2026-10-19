@@ -104,14 +104,14 @@
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 search_best_move[tid] <= NULL_MOVE;
                 search_ponder_move[tid] <= NULL_MOVE;
-                search_root_best_score[tid] <= -SEARCH_INF;
+                search_root_best_score[tid] <= -MAX_EVAL_SCORE;
                 search_root_has_completed_move[tid] <= 1'b0;
                 search_root_best_exact[tid] <= 1'b0;
                 search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                 search_thread_nodes[tid] <= NodeCountType'(0);
                 search_thread_target_depth[tid] <= SearchDepth'(0);
-                search_thread_root_alpha[tid] <= -SEARCH_INF;
-                search_thread_root_beta[tid] <= SEARCH_INF;
+                search_thread_root_alpha[tid] <= -MAX_EVAL_SCORE;
+                search_thread_root_beta[tid] <= MAX_EVAL_SCORE;
                 search_thread_aspiration_delta[tid] <= aspiration_initial_delta(tid);
                 search_thread_aspiration_active[tid] <= 1'b0;
                 search_thread_iteration_best_move[tid] <= NULL_MOVE;
@@ -469,7 +469,7 @@
                                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                                         search_best_move[tid] <= NULL_MOVE;
                                         search_ponder_move[tid] <= NULL_MOVE;
-                                        search_root_best_score[tid] <= -SEARCH_INF;
+                                        search_root_best_score[tid] <= -MAX_EVAL_SCORE;
                                         search_root_has_completed_move[tid] <= 1'b0;
                                         search_root_best_exact[tid] <= 1'b0;
                                         search_thread_nodes[tid] <= NodeCountType'(0);
@@ -477,8 +477,8 @@
                                         search_thread_target_depth[tid]
                                             <= (requested_search_depth(req) == SearchDepth'(0))
                                                 ? SearchDepth'(0) : SearchDepth'(1);
-                                        search_thread_root_alpha[tid] <= -SEARCH_INF;
-                                        search_thread_root_beta[tid] <= SEARCH_INF;
+                                        search_thread_root_alpha[tid] <= -MAX_EVAL_SCORE;
+                                        search_thread_root_beta[tid] <= MAX_EVAL_SCORE;
                                         search_thread_aspiration_delta[tid] <= aspiration_initial_delta(tid);
                                         search_thread_aspiration_active[tid] <= 1'b0;
                                         search_thread_iteration_best_move[tid] <= NULL_MOVE;
@@ -780,7 +780,7 @@
                         search_repetition_seen_before[tid] <= 1'b0;
                         search_best_move[tid] <= NULL_MOVE;
                         search_ponder_move[tid] <= NULL_MOVE;
-                        search_root_best_score[tid] <= -SEARCH_INF;
+                        search_root_best_score[tid] <= -MAX_EVAL_SCORE;
                         search_root_has_completed_move[tid] <= 1'b0;
                         search_root_best_exact[tid] <= 1'b0;
                         search_pending_move[tid] <= NULL_MOVE;
@@ -809,10 +809,10 @@
                         search_stack_top[tid].node_in_check <= active_board_in_check;
                         search_stack_top[tid].unit_window
                             <= search_thread_root_beta[tid]
-                                == search_thread_root_alpha[tid] + EvalScore'(1);
+                                == score_successor(search_thread_root_alpha[tid]);
                         search_stack_top[tid].zero_window_node
                             <= search_thread_root_beta[tid]
-                                == search_thread_root_alpha[tid] + EvalScore'(1);
+                                == score_successor(search_thread_root_alpha[tid]);
                         search_return_move[tid] <= NULL_MOVE;
                     end
                     total_root_nodes <= NodeCountType'(0);

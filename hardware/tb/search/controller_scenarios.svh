@@ -548,7 +548,7 @@
                 $sformatf("%s thread %0d best move cleared", label, tid));
             check(is_null_move(dut.search_ponder_move[tid]),
                 $sformatf("%s thread %0d ponder move cleared", label, tid));
-            check(dut.search_root_best_score[tid] == -dut.SEARCH_INF,
+            check(dut.search_root_best_score[tid] == -MAX_EVAL_SCORE,
                 $sformatf("%s thread %0d root score cleared", label, tid));
         end
 
@@ -595,7 +595,7 @@
             label, resp.score, resp.completed_depth, resp.best_move.from_pos,
             resp.best_move.to_pos, resp.nodes_count);
         check(!resp.error, {label, " no error"});
-        check(resp.score == -MATE_SCORE + EvalScore'(6), {label, " mate in three for Black"});
+        check(resp.score == -MATE_SCORE + EvalScore'(5), {label, " mate in three for Black"});
         check(resp.best_move.from_pos == Position'(51)
                 && (resp.best_move.to_pos == Position'(61)
                     || resp.best_move.to_pos == Position'(45)),

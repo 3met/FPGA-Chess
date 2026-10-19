@@ -173,14 +173,14 @@ module board_update_pipeline #(
 
     // Widen each ROM phase separately. Opening updates below also consume the
     // raw ROM outputs because Quartus prunes that half of packed score helpers.
-    assign pst_source_out.first = pst_read_enable_q[0] ? EvalScore'(pst_read_data[0]) : '0;
-    assign pst_source_out.endgame = pst_read_enable_q[0] ? EvalScore'(pst_endgame_read_data[0]) : '0;
-    assign pst_destination_out.first = pst_read_enable_q[1] ? EvalScore'(pst_read_data[1]) : '0;
-    assign pst_destination_out.endgame = pst_read_enable_q[1] ? EvalScore'(pst_endgame_read_data[1]) : '0;
-    assign pst_captured_out.first = pst_read_enable_q[2] ? EvalScore'(pst_read_data[2]) : '0;
-    assign pst_captured_out.endgame = pst_read_enable_q[2] ? EvalScore'(pst_endgame_read_data[2]) : '0;
-    assign pst_castle_out.first = pst_read_enable_q[3] ? EvalScore'(pst_read_data[3]) : '0;
-    assign pst_castle_out.endgame = pst_read_enable_q[3] ? EvalScore'(pst_endgame_read_data[3]) : '0;
+    assign pst_source_out.first = pst_read_enable_q[0] ? PstEvalScore'(pst_read_data[0]) : '0;
+    assign pst_source_out.endgame = pst_read_enable_q[0] ? PstEvalScore'(pst_endgame_read_data[0]) : '0;
+    assign pst_destination_out.first = pst_read_enable_q[1] ? PstEvalScore'(pst_read_data[1]) : '0;
+    assign pst_destination_out.endgame = pst_read_enable_q[1] ? PstEvalScore'(pst_endgame_read_data[1]) : '0;
+    assign pst_captured_out.first = pst_read_enable_q[2] ? PstEvalScore'(pst_read_data[2]) : '0;
+    assign pst_captured_out.endgame = pst_read_enable_q[2] ? PstEvalScore'(pst_endgame_read_data[2]) : '0;
+    assign pst_castle_out.first = pst_read_enable_q[3] ? PstEvalScore'(pst_read_data[3]) : '0;
+    assign pst_castle_out.endgame = pst_read_enable_q[3] ? PstEvalScore'(pst_endgame_read_data[3]) : '0;
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
         return MoveRecordAddr'(MoveRecordAddr'(tid) * MoveRecordAddr'(MOVE_RECORD_PLY_COUNT)
@@ -241,11 +241,11 @@ module board_update_pipeline #(
     // Concatenate separately sized sums so each phase remains independent.
     // Older Quartus versions can miscompile named struct assignment patterns.
     function automatic PstEvalPair pair_add(input PstEvalPair a, input PstEvalPair b);
-        return {EvalScore'(a.first + b.first), EvalScore'(a.endgame + b.endgame)};
+        return {PstEvalScore'(a.first + b.first), PstEvalScore'(a.endgame + b.endgame)};
     endfunction
 
     function automatic PstEvalPair pair_neg(input PstEvalPair value);
-        return {EvalScore'(-value.first), EvalScore'(-value.endgame)};
+        return {PstEvalScore'(-value.first), PstEvalScore'(-value.endgame)};
     endfunction
 
     function automatic PstEvalPair pair_sub(input PstEvalPair a, input PstEvalPair b);
@@ -258,8 +258,8 @@ module board_update_pipeline #(
         if (tile.piece_type == NULL_PIECE) return '0;
         first_score = PIECE_VALS_128[tile.piece_type] + pst_value.first;
         endgame_score = PIECE_VALS_ENDGAME_128[tile.piece_type] + pst_value.endgame;
-        if (tile.piece_color == WHITE) return {first_score, endgame_score};
-        return {EvalScore'(-first_score), EvalScore'(-endgame_score)};
+        if (tile.piece_color == WHITE) return {PstEvalScore'(first_score), PstEvalScore'(endgame_score)};
+        return {PstEvalScore'(-first_score), PstEvalScore'(-endgame_score)};
     endfunction : signed_piece_score
 
     // Keep opening-phase ROM data on an explicit scalar path for Quartus.
@@ -890,14 +890,14 @@ module board_update_pipeline #(
                 out.pst_eval.first = in.pst_eval.first
                     + (signed_first_score(placed_tile, pst_read_data[1])
                         - signed_first_score(moving_tile, pst_read_data[0]))
-                    + ((is_ep || is_castle) ? EvalScore'(0)
+                    + ((is_ep || is_castle) ? PstEvalScore'(0)
                         : -signed_first_score(destination_tile, pst_read_data[2]))
                     + ((is_ep || is_castle)
                         ? -signed_first_score(auxiliary_tile, pst_read_data[2])
-                        : EvalScore'(0))
+                        : PstEvalScore'(0))
                     + (is_castle
                         ? signed_first_score(Tile'({moved_color, ROOK}), pst_read_data[3])
-                        : EvalScore'(0));
+                        : PstEvalScore'(0));
 
                 replace_tile(out.board, out.piece_count,
                     from_pos, moving_tile, EMPTY_TILE);
@@ -979,11 +979,11 @@ module board_update_pipeline #(
                         - signed_first_score(effects.destination_tile, pst_read_data[1])
                         + (is_ep
                             ? signed_first_score(Tile'({captured_color, PAWN}), pst_read_data[2])
-                            : EvalScore'(0))
+                            : PstEvalScore'(0))
                         + (is_castle
                             ? signed_first_score(Tile'({moved_color, ROOK}), pst_read_data[2])
                                 - signed_first_score(Tile'({moved_color, ROOK}), pst_read_data[3])
-                            : EvalScore'(0));
+                            : PstEvalScore'(0));
                     replace_tile(out.board, out.piece_count,
                         from_pos, EMPTY_TILE, restored_mover);
                     replace_tile(out.board, out.piece_count,

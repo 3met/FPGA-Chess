@@ -42,8 +42,8 @@ module tb_board_update_pipeline;
     FullBoard ref_board;
     MoveRecord ref_history[0:MAX_PLY_COUNT-1];
     PlyIndex ref_ply;
-    EvalScore ref_pst;
-    EvalScore ref_pst_endgame;
+    PstEvalScore ref_pst;
+    PstEvalScore ref_pst_endgame;
     ZobristKey ref_zobrist;
 
     int pass_count = 0;
@@ -121,33 +121,33 @@ module tb_board_update_pipeline;
     endfunction
 
     // Use the selected material and PST table for one signed piece score.
-    function automatic EvalScore ref_tile_score(
+    function automatic PstEvalScore ref_tile_score(
         input Tile tile, input Position pos, input bit endgame,
         const ref PstScore first_table[6 * 64], const ref PstScore endgame_table[6 * 64],
         input EvalScore first_material[8], input EvalScore endgame_material[8]
     );
         automatic Position pst_pos;
         automatic int pst_idx;
-        automatic EvalScore score;
+        automatic PstEvalScore score;
         automatic Tile normalized = norm_tile(tile);
 
         if (normalized.piece_type == NULL_PIECE) begin
-            return EvalScore'(0);
+            return PstEvalScore'(0);
         end
 
         pst_pos = (normalized.piece_color == BLACK) ? mirror_position(pos) : pos;
         pst_idx = (int'(normalized.piece_type) - 1) * 64 + int'(pst_pos);
         if (endgame)
             score = endgame_material[normalized.piece_type]
-                + EvalScore'(endgame_table[pst_idx]);
+                + PstEvalScore'(endgame_table[pst_idx]);
         else
             score = first_material[normalized.piece_type]
-                + EvalScore'(first_table[pst_idx]);
+                + PstEvalScore'(first_table[pst_idx]);
         return (normalized.piece_color == WHITE) ? score : -score;
     endfunction
 
     // Pass reference tables explicitly so the full-board loop can remain shared.
-    function automatic EvalScore calc_ref_eval(
+    function automatic PstEvalScore calc_ref_eval(
         input FullBoard board, input bit endgame,
         const ref PstScore first_table[6 * 64], const ref PstScore endgame_table[6 * 64],
         input EvalScore first_material[8], input EvalScore endgame_material[8]
@@ -161,11 +161,11 @@ module tb_board_update_pipeline;
                 first_table, endgame_table, first_material, endgame_material);
         end
 
-        return EvalScore'(total);
+        return PstEvalScore'(total);
     endfunction
 
     // Bind the loaded reference tables at the call site.
-    function automatic EvalScore ref_eval(input FullBoard board, input bit endgame = 1'b0);
+    function automatic PstEvalScore ref_eval(input FullBoard board, input bit endgame = 1'b0);
         return calc_ref_eval(board, endgame, pst_values, pst_values_endgame,
             PIECE_VALS_128, PIECE_VALS_ENDGAME_128);
     endfunction
@@ -301,8 +301,8 @@ module tb_board_update_pipeline;
     endtask
 
     task automatic expect_state(input FullBoard expected_board, input string test_name);
-        automatic EvalScore expected_pst = ref_eval(expected_board);
-        automatic EvalScore expected_pst_endgame = ref_eval(expected_board, 1'b1);
+        automatic PstEvalScore expected_pst = ref_eval(expected_board);
+        automatic PstEvalScore expected_pst_endgame = ref_eval(expected_board, 1'b1);
         automatic ZobristKey expected_zobrist = ref_zobrist_full(expected_board);
 
         expect_equal(board_out === expected_board,
@@ -510,8 +510,8 @@ module tb_board_update_pipeline;
     );
         automatic FullBoard old_board = ref_board;
         automatic ZobristKey old_zobrist = ref_zobrist;
-        automatic EvalScore old_pst = ref_pst;
-        automatic EvalScore old_pst_endgame = ref_pst_endgame;
+        automatic PstEvalScore old_pst = ref_pst;
+        automatic PstEvalScore old_pst_endgame = ref_pst_endgame;
         automatic PlyIndex old_ply = ref_ply;
 
         apply_ref_op(op, move, data);
@@ -536,14 +536,14 @@ module tb_board_update_pipeline;
         input BoardOp op,
         input FullBoard in_board,
         input ZobristKey in_zobrist,
-        input EvalScore in_pst,
+        input PstEvalScore in_pst,
         input Move move,
         input logic [6:0] data,
         input ThreadID request_thread_id,
         input PlyIndex request_ply,
         output FullBoard out_board,
         output ZobristKey out_zobrist,
-        output EvalScore out_pst
+        output PstEvalScore out_pst
     );
         board_in = in_board;
         zobrist_key_in = in_zobrist;
@@ -850,11 +850,11 @@ module tb_board_update_pipeline;
         automatic ZobristKey thread1_zobrist;
         automatic ZobristKey thread0_restored_zobrist;
         automatic ZobristKey thread1_restored_zobrist;
-        automatic EvalScore start_pst;
-        automatic EvalScore thread0_pst;
-        automatic EvalScore thread1_pst;
-        automatic EvalScore thread0_restored_pst;
-        automatic EvalScore thread1_restored_pst;
+        automatic PstEvalScore start_pst;
+        automatic PstEvalScore thread0_pst;
+        automatic PstEvalScore thread1_pst;
+        automatic PstEvalScore thread0_restored_pst;
+        automatic PstEvalScore thread1_restored_pst;
 
         setup_start_position();
         start_board = ref_board;
@@ -955,7 +955,7 @@ module tb_board_update_pipeline;
         automatic FullBoard expected_a;
         automatic FullBoard expected_b;
         automatic ZobristKey base_zobrist;
-        automatic EvalScore base_pst;
+        automatic PstEvalScore base_pst;
         automatic Move move_a = NULL_MOVE;
         automatic Move move_b = NULL_MOVE;
 
@@ -1073,10 +1073,10 @@ module tb_board_update_pipeline;
         do_clock(1);
         drive_idle();
         do_clock(BOARD_UPDATE_PIPELINE_STAGE_CNT - 1);
-        expect_equal(pst_eval_out.first == PIECE_VALS_128[KNIGHT] + EvalScore'(pst_values[address]),
+        expect_equal(pst_eval_out.first == PIECE_VALS_128[KNIGHT] + PstEvalScore'(pst_values[address]),
             "first PST sum uses the first table");
         expect_equal(pst_eval_out.endgame == PIECE_VALS_ENDGAME_128[KNIGHT]
-                + EvalScore'(original_value) + EvalScore'(7),
+                + PstEvalScore'(original_value) + PstEvalScore'(7),
             "endgame PST sum uses its independent table");
         dut.gen_pst_rom[0].pst_endgame_rom.mem[address] = original_value;
     endtask

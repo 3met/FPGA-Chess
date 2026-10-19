@@ -10,10 +10,8 @@
     localparam int THREAD_COUNT_BITS = (SEARCH_THREAD_COUNT <= 1) ? 1 : $clog2(SEARCH_THREAD_COUNT + 1);
     localparam int SEARCH_STACK_ADDR_BITS = (SEARCH_STACK_DEPTH <= 1) ? 1 : $clog2(SEARCH_STACK_DEPTH);
     localparam int SEARCH_DEPTH_BITS = (SEARCH_STACK_DEPTH <= 2) ? 1 : $clog2(SEARCH_STACK_DEPTH);
-    localparam int SEARCH_INF_VALUE = 32767;
     localparam int MAX_ASPIRATION_THREAD_OFFSET = (SEARCH_THREAD_COUNT < 8)
         ? SEARCH_THREAD_COUNT - 1 : 7;
-    localparam EvalScore SEARCH_INF = EvalScore'(SEARCH_INF_VALUE);
     localparam int LMR_LN2_Q8 = 177;
     localparam int LMR_MAX_REMAINING_DEPTH = SEARCH_STACK_DEPTH - 1;
     // Only floor-log2 buckets reachable by a legal configured search depth exist.
@@ -29,7 +27,7 @@
         if (SEARCH_STACK_DEPTH < 1 || SEARCH_STACK_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "SEARCH_STACK_DEPTH must fit the global PlyIndex width");
         if (ASPIRATION_STARTING_DELTA < 1
-                || ASPIRATION_STARTING_DELTA > SEARCH_INF_VALUE - MAX_ASPIRATION_THREAD_OFFSET)
+                || ASPIRATION_STARTING_DELTA > int'(MAX_EVAL_SCORE) - MAX_ASPIRATION_THREAD_OFFSET)
             $fatal(1, "ASPIRATION_STARTING_DELTA plus the thread offset must fit the positive score range");
         if (ASPIRATION_DELTA_MULTIPLIER_Q3 <= 8 || ASPIRATION_DELTA_MULTIPLIER_Q3 > 64)
             $fatal(1, "ASPIRATION_DELTA_MULTIPLIER_Q3 must represent a value in (1, 8]");
@@ -40,17 +38,17 @@
         if (NULL_SHALLOW_REDUCTION >= NULL_MINIMUM_DEPTH
                 || NULL_DEEP_REDUCTION >= NULL_DEEP_DEPTH_THRESHOLD)
             $fatal(1, "null-move reductions must leave a nonnegative child depth");
-        if (RFP_BASE_MARGIN < 0 || RFP_BASE_MARGIN > SEARCH_INF_VALUE
-                || RFP_MARGIN_PER_DEPTH < 0 || RFP_MARGIN_PER_DEPTH > SEARCH_INF_VALUE
+        if (RFP_BASE_MARGIN < 0 || RFP_BASE_MARGIN > int'(MAX_EVAL_SCORE)
+                || RFP_MARGIN_PER_DEPTH < 0 || RFP_MARGIN_PER_DEPTH > int'(MAX_EVAL_SCORE)
                 || RFP_MAXIMUM_DEPTH < 1 || RFP_MAXIMUM_DEPTH > MAX_PLY_COUNT)
             $fatal(1, "RFP parameters must fit the score range at a positive supported depth");
-        if (FUTILITY_BASE_MARGIN < 0 || FUTILITY_BASE_MARGIN > SEARCH_INF_VALUE
+        if (FUTILITY_BASE_MARGIN < 0 || FUTILITY_BASE_MARGIN > int'(MAX_EVAL_SCORE)
                 || FUTILITY_MARGIN_PER_DEPTH < 0
-                || FUTILITY_MARGIN_PER_DEPTH > SEARCH_INF_VALUE
+                || FUTILITY_MARGIN_PER_DEPTH > int'(MAX_EVAL_SCORE)
                 || FUTILITY_MAXIMUM_DEPTH < 1
                 || FUTILITY_MAXIMUM_DEPTH >= SEARCH_STACK_DEPTH)
             $fatal(1, "futility parameters must fit the score range and supported child depth");
-        if (QDELTA_MARGIN < 0 || QDELTA_MARGIN > SEARCH_INF_VALUE)
+        if (QDELTA_MARGIN < 0 || QDELTA_MARGIN > int'(MAX_EVAL_SCORE))
             $fatal(1, "QDELTA_MARGIN must fit the positive score range");
     end
 `endif
@@ -61,7 +59,7 @@
     typedef logic [SEARCH_STACK_ADDR_BITS-1:0] SearchStackRamAddr;
     typedef logic [SEARCH_DEPTH_BITS-1:0] SearchDepth;
     typedef logic [TIME_BITS+1:0] SearchTimeBase;
-    typedef logic [14:0] AspirationDelta;
+    typedef logic [$bits(EvalScore)-2:0] AspirationDelta;
     typedef logic [SEARCH_THREAD_COUNT-1:0] SearchThreadMask;
     typedef struct packed {
         ThreadID main;
@@ -389,8 +387,8 @@
     ThreadID nnue_update_done_thread;
     PlyIndex nnue_update_done_ply;
     logic nnue_eval_valid, nnue_eval_ready, nnue_result_valid;
-    EvalScore nnue_result;
-    EvalScore nnue_result_pst;
+    NnueCorrection nnue_result;
+    PstEvalScore nnue_result_pst;
     SearchPipelineTag nnue_eval_tag[2];
     logic nnue_eval_tag_read_ptr, nnue_eval_tag_write_ptr;
     logic [1:0] nnue_eval_tag_count;

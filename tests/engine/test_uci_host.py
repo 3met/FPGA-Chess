@@ -127,13 +127,14 @@ class UCIHostSpecTests(unittest.TestCase):
 
     def test_eval_score_uci_representation(self):
         self.assertEqual(FPGAUCIHost._eval_score_to_uci(128), ("cp", 100))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x3FFF), ("cp", 12_799))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x4000), ("mate", 128))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x4100 - 100), ("mate", 50))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FF), ("mate", 1))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FE), ("mate", 1))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(0x40FD), ("mate", 2))
-        self.assertEqual(FPGAUCIHost._eval_score_to_uci(-0x40FD), ("mate", -2))
+        finite = MATE_THRESHOLD - 1
+        self.assertEqual(FPGAUCIHost._eval_score_to_uci(finite),
+                         ("cp", FPGAUCIHost._eval_score_to_centipawns(finite)))
+        for distance in (1, 2, 3, 100, MATE_SCORE - MATE_THRESHOLD + 1):
+            for sign in (-1, 1):
+                score = sign * (MATE_SCORE - distance + 1)
+                self.assertEqual(FPGAUCIHost._eval_score_to_uci(score),
+                                 ("mate", sign * ((distance + 1) // 2)))
 
     def test_out_of_range_mate_scores_preserve_original_sign(self):
         # Scores beyond the mate base must never reverse the reported winner,
@@ -147,12 +148,12 @@ class UCIHostSpecTests(unittest.TestCase):
                     )
 
     def test_signed_wire_scores_never_reverse_uci_score_sign(self):
-        # Exhaust the signed score field; only zero and the exact mate base
-        # legitimately produce a zero-valued UCI score.
+        # Exhaust the signed score field; only a zero finite score produces zero
+        # without the separate already-checkmated board context.
         for score in range(-(1 << 15), 1 << 15):
             kind, value = FPGAUCIHost._eval_score_to_uci(score)
             self.assertEqual(kind, "mate" if abs(score) >= MATE_THRESHOLD else "cp")
-            if score == 0 or abs(score) == MATE_SCORE:
+            if score == 0:
                 self.assertEqual(value, 0)
             else:
                 self.assertGreater(value * score, 0, f"score {score} converted to {kind} {value}")
@@ -185,12 +186,27 @@ class UCIHostSpecTests(unittest.TestCase):
 
         host._emit_search_result(
             SearchResultResponse(
-                Move(0, 0), 0x40FF, nodes=42, completed_depth=3, end_reason=EndReason.DEPTH_LIMIT
+                Move(0, 0), MATE_SCORE, nodes=42, completed_depth=3, end_reason=EndReason.DEPTH_LIMIT
             ),
             board_snapshot=None,
         )
 
         self.assertEqual(lines, ["info depth 3 score mate 1 nodes 42", "bestmove 0000"])
+
+    def test_already_checkmated_root_reports_zero_without_an_infinity_score(self):
+        host = self.make_host()
+        lines = []
+        host.emit = lines.append
+        board = host.chess.Board()
+        for move in ("f2f3", "e7e5", "g2g4", "d8h4"):
+            board.push_uci(move)
+        self.assertTrue(board.is_checkmate())
+        host._emit_search_result(
+            SearchResultResponse(Move(0, 0), -MATE_SCORE, nodes=0,
+                                 completed_depth=0, end_reason=EndReason.DEPTH_LIMIT),
+            board,
+        )
+        self.assertEqual(lines, ["info depth 0 score mate 0 nodes 0", "bestmove 0000"])
 
     def test_search_result_emits_legal_ponder_move(self):
         host = self.make_host()

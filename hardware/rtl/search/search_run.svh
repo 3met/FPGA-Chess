@@ -28,7 +28,7 @@
                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                         assert (search_stack_top[tid].unit_window
                                 == (search_stack_top[tid].beta
-                                    == search_stack_top[tid].alpha + EvalScore'(1)))
+                                    == score_successor(search_stack_top[tid].alpha)))
                             else $fatal(1, "cached unit-window state disagrees for thread %0d", tid);
                         if (search_thread_ready(tid) && search_in_qsearch(ThreadID'(tid))
                                 && search_board_in_check[tid]) begin
@@ -203,11 +203,11 @@
                                 search_piece_count[board_thread_id] <= board_update_piece_count_out;
                                 search_stack_top[board_thread_id].move <= NULL_MOVE;
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
-                                search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
+                                search_stack_top[board_thread_id].best_score <= -MAX_EVAL_SCORE;
                                 search_stack_top[board_thread_id].alpha
                                     <= -search_stack_top[board_thread_id].beta;
                                 search_stack_top[board_thread_id].beta
-                                    <= -search_stack_top[board_thread_id].beta + EvalScore'(1);
+                                    <= score_successor(-search_stack_top[board_thread_id].beta);
                                 search_stack_top[board_thread_id].remaining_depth
                                     <= search_pending_child_depth[board_thread_id];
                                 // The child inherits arena tails but begins at
@@ -421,13 +421,13 @@
                                         : delta_capture.piece_type;
                                 search_stack_top[board_thread_id].move <= search_pending_move[board_thread_id];
                                 search_stack_top[board_thread_id].best_move <= NULL_MOVE;
-                                search_stack_top[board_thread_id].best_score <= -SEARCH_INF;
+                                search_stack_top[board_thread_id].best_score <= -MAX_EVAL_SCORE;
                                 // Search the first child (and any required re-search) with the full
                                 // window. Later main-search children use a one-point PVS scout window.
                                 if (!search_pvs_research[board_thread_id]
                                         && search_stack_top[board_thread_id].has_legal
                                         && !search_in_qsearch(board_thread_id)) begin
-                                    search_stack_top[board_thread_id].alpha <= -(search_stack_top[board_thread_id].alpha + EvalScore'(1));
+                                    search_stack_top[board_thread_id].alpha <= -(score_successor(search_stack_top[board_thread_id].alpha));
                                     search_stack_top[board_thread_id].beta <= -search_stack_top[board_thread_id].alpha;
                                     search_stack_top[board_thread_id].scout_search <= 1'b1;
                                     search_stack_top[board_thread_id].zero_window_node <= 1'b1;
@@ -568,7 +568,7 @@
                                     search_stack_top[eval_thread_id].alpha <= eval_score;
                                     search_stack_top[eval_thread_id].unit_window
                                         <= search_stack_top[eval_thread_id].beta
-                                            == eval_score + EvalScore'(1);
+                                            == score_successor(eval_score);
                                 end
                                 if (eval_score >= search_stack_top[eval_thread_id].beta) begin
                                     search_return_score[eval_thread_id] <= eval_score;
@@ -688,7 +688,7 @@
                                         search_stack_top[lookup_thread_id].alpha <= lookup_resp.score;
                                         search_stack_top[lookup_thread_id].unit_window
                                             <= search_stack_top[lookup_thread_id].beta
-                                                == lookup_resp.score + EvalScore'(1);
+                                                == score_successor(lookup_resp.score);
                                     end
                                     // max(alpha, score) >= beta, expressed as
                                     // parallel comparisons instead of a mux
@@ -826,7 +826,7 @@
                                         search_stack_top[return_thread_id].alpha <= parent_score;
                                         search_stack_top[return_thread_id].unit_window
                                             <= search_stack_top[return_thread_id].beta
-                                                == parent_score + EvalScore'(1);
+                                                == score_successor(parent_score);
                                     end
                                     search_return_valid[return_thread_id] <= 1'b0;
                                     search_return_was_scout[return_thread_id] <= 1'b0;

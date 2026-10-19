@@ -154,20 +154,20 @@ The canonical internal representation is two fields:
 
 ### Evaluation Scores
 
-`EvalScore` is a signed 16-bit value. `PstEvalPair` carries two White-relative incremental PST/material sums: positive scores are good for White and negative scores are good for Black. The NNUE pipeline blends them by piece count, then search converts the result to side-to-move point of view before adding the side-to-move-relative NNUE correction.
+`EvalScore` is a signed 13-bit search value in units of 1/128 pawn. `PstEvalScore` holds reversible material/PST totals; its width is generated from both phase tables, allowing all original pieces and eight promotions per side. `NnueCorrection` is independently sized from the activation, output-weight, bias, and input-count bounds. Both currently require 15 bits; individual material and material/PST piece values use `EvalScore`. `PstEvalPair` carries two White-relative intermediate sums, which the evaluator blends before side-to-move conversion and NNUE addition. Final evaluation saturates only after those wide components are combined.
 
-`PstScore` is the signed 10-bit ROM-entry type used by the generated piece-square tables. Board update maintains the incremental sums as `EvalScore` values.
+`PstScore` is the signed 10-bit ROM-entry type used by the generated piece-square tables.
 
-| Name | Value | Description |
-| ---- | ----- | ----------- |
-| `MAX_EVAL_SCORE` | `32767` | Positive search infinity and maximum representable non-sentinel score. |
-| `MIN_EVAL_SCORE` | `-32767` | Negative search infinity. |
-| `DRAW_EVAL_SCORE` | `0` | Drawn/equal evaluation. |
-| `UNKNOWN_EVAL_SCORE` | `x` | Unknown evaluation. |
+| Value | Meaning |
+| --- | --- |
+| `-4096` | Unused: cannot be negated. |
+| `-4095`, `4095` | Negative and positive search infinity. |
+| Magnitude `3840` through `4094` | Mate distances 255 through one ply. |
+| `-3839` through `3839` | Finite evaluation, saturated at ±29.9921875 pawns. |
 
-`PieceCount` is a six-bit side-state value covering 0 through the standard-chess maximum of 32. Board update maintains it incrementally and the NNUE output layer uses it for phase-head selection.
+`MAX_EVAL_SCORE` and `MIN_EVAL_SCORE` are the negatable infinity endpoints. `MAX_NON_MATE_EVAL_SCORE` is the finite ceiling, `DRAW_EVAL_SCORE` is zero, and `UNKNOWN_EVAL_SCORE` is an unknown simulation value. `MATE_SCORE` denotes mate in one; a mate at positive distance `d` has magnitude `MATE_SCORE - d + 1`. There are no holes between the bands. Score increments/decrements and aspiration windows saturate at infinity; TT conversions saturate within the mate band.
 
-`MAX_NON_MATE_EVAL_SCORE` is `0x3fff`. Values whose absolute magnitude is at least `0x4000` are reserved for mate-distance scores; `MAX_EVAL_SCORE` remains `0x7fff` for search infinity.
+`PieceCount` is a six-bit side-state value covering zero through the standard-chess maximum of 32. Board update maintains it incrementally and the NNUE output layer uses it for phase-head selection.
 
 Material values are available in two forms:
 

@@ -124,12 +124,8 @@ package chess_defs;
 
 
 	// -- Evaluation Related Definitions --
-	typedef logic signed [15:0] EvalScore;
-	// Both phase tables are accumulated before the piece-count blend.
-	typedef struct packed {
-		EvalScore first;
-		EvalScore endgame;
-	} PstEvalPair;
+	// Search values include finite evaluations, mate distances, and infinity.
+	typedef logic signed [12:0] EvalScore;
 	// PST ROM entries are individually small; expand them before accumulating.
 	typedef logic signed [9:0] PstScore;
 	// Standard chess starts with 32 pieces; six bits include the full endpoint.
@@ -138,13 +134,28 @@ package chess_defs;
 
 	localparam EvalScore MAX_EVAL_SCORE = EvalScore'(2 ** ($bits(EvalScore)-1) - 1);
 	localparam EvalScore MIN_EVAL_SCORE = -MAX_EVAL_SCORE;
-	// Finite scores occupy the signed 14-bit interval below the mate flag bit.
-	localparam EvalScore MAX_NON_MATE_EVAL_SCORE = EvalScore'(16'h3fff);
+	// Infinity is followed by exactly 255 mate distances, then finite scores.
+	localparam int MAX_MATE_DISTANCE = 255;
+	localparam EvalScore MAX_NON_MATE_EVAL_SCORE = MAX_EVAL_SCORE - EvalScore'(MAX_MATE_DISTANCE + 1);
 	localparam EvalScore DRAW_EVAL_SCORE = EvalScore'(0);
 	localparam EvalScore UNKNOWN_EVAL_SCORE = EvalScore'('dx);
 
+	// Window arithmetic saturates at infinity rather than emitting the unused minimum code.
+	function automatic EvalScore score_successor(input EvalScore score);
+		return score >= MAX_EVAL_SCORE ? MAX_EVAL_SCORE : score + EvalScore'(1);
+	endfunction
+	function automatic EvalScore score_predecessor(input EvalScore score);
+		return score <= MIN_EVAL_SCORE ? MIN_EVAL_SCORE : score - EvalScore'(1);
+	endfunction
+
 	// Generated from the canonical material/PST parameter JSON.
 	`include "hardware/rtl/generated/evaluation_parameters.svh"
+	// Legal promotions bound incremental totals; never saturate reversible sums.
+	typedef logic signed [PST_EVAL_BITS-1:0] PstEvalScore;
+	typedef struct packed {
+		PstEvalScore first;
+		PstEvalScore endgame;
+	} PstEvalPair;
 
 
 	// -- Metric Tracking Definitions --

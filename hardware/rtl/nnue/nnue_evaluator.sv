@@ -21,8 +21,8 @@ module nnue_evaluator #(
     input PieceCount eval_piece_count,
     input PstEvalPair eval_pst,
     output logic result_valid,
-    output EvalScore result,
-    output EvalScore result_pst
+    output NnueCorrection result,
+    output PstEvalScore result_pst
 );
 
     // Each thread owns one live accumulator. Search stores compact move deltas
@@ -45,7 +45,7 @@ module nnue_evaluator #(
     typedef logic signed [10:0] ThirtyTwoSum;
     typedef logic signed [11:0] SixtyFourSum;
     typedef logic signed [12:0] MacGroupSum;
-    typedef logic signed [14:0] OutputSum;
+    typedef NnueCorrection OutputSum;
 
     NnueUpdateRequest active_update;
     logic update_busy;
@@ -69,19 +69,26 @@ module nnue_evaluator #(
     SixteenSum reduction_q[8];
     OutputSum eval_sum;
     OutputSum result_sum;
-    EvalScore pst_blend_active, pst_blend_pending;
+    PstEvalScore pst_blend_active, pst_blend_pending;
     logic [5:0] pst_first_weight;
-    EvalScore pst_first_q, pst_endgame_q;
+    PstEvalScore pst_first_q, pst_endgame_q;
     logic [5:0] pst_weight_q;
-    logic signed [20:0] pst_numerator_q;
-    logic [19:0] pst_magnitude;
-    logic [40:0] pst_reciprocal_product_q;
+    // Weights sum to 30. Nine guard bits make reciprocal division exact over
+    // the entire input type, including truncation of negative fractions.
+    localparam int PST_NUMERATOR_BITS = $bits(PstEvalScore) + 5;
+    localparam int PST_RECIPROCAL_SHIFT = $bits(PstEvalScore) + 9;
+    localparam int PST_RECIPROCAL_BITS = PST_RECIPROCAL_SHIFT - 4;
+    localparam logic [PST_RECIPROCAL_BITS-1:0] PST_RECIPROCAL =
+        PST_RECIPROCAL_BITS'(((64'd1 << PST_RECIPROCAL_SHIFT) + 29) / 30);
+    logic signed [PST_NUMERATOR_BITS-1:0] pst_numerator_q;
+    logic [PST_NUMERATOR_BITS-2:0] pst_magnitude;
+    logic [PST_NUMERATOR_BITS+PST_RECIPROCAL_BITS-2:0] pst_reciprocal_product_q;
     logic pst_negative_q;
-    EvalScore pst_quotient;
+    PstEvalScore pst_quotient;
 
     // The legal endpoints are two kings and the 32-piece initial position.
     // Compute the phase outside a function so Quartus preserves the PST data
-    // path. The reciprocal is exact for the signed-16-bit score range.
+    // path. The reciprocal is exact for the generated score width.
     always_comb begin
         // Low and high piece-count clamps cannot both apply.
         unique case (1'b1)
@@ -90,9 +97,9 @@ module nnue_evaluator #(
             default: pst_first_weight = 6'(eval_piece_count - PieceCount'(2));
         endcase
     end
-    assign pst_magnitude = pst_numerator_q[20]
-        ? 20'(-pst_numerator_q) : 20'(pst_numerator_q);
-    assign pst_quotient = $signed(pst_reciprocal_product_q[40:25]);
+    assign pst_magnitude = pst_numerator_q[PST_NUMERATOR_BITS-1]
+        ? (PST_NUMERATOR_BITS-1)'(-pst_numerator_q) : (PST_NUMERATOR_BITS-1)'(pst_numerator_q);
+    assign pst_quotient = PstEvalScore'(pst_reciprocal_product_q >> PST_RECIPROCAL_SHIFT);
 
     (* ram_style = "block" *)
     logic [NNUE_ROW_BYTES * 8-1:0] feature_rom[NNUE_FEATURE_COUNT];
@@ -208,12 +215,12 @@ module nnue_evaluator #(
             update_done_valid <= 1'b0;
 
             // Divide the phase-weighted PST sum over existing MAC cycles.
-            // For magnitude <= 30*32768, ceil(2^25/30) gives exact truncation.
-            pst_numerator_q <= 21'(
+            // The reciprocal guard bits preserve exact division by 30 at every phase.
+            pst_numerator_q <= PST_NUMERATOR_BITS'(
                 int'(pst_first_q) * int'(pst_weight_q)
                 + int'(pst_endgame_q) * (30 - int'(pst_weight_q)));
-            pst_reciprocal_product_q <= pst_magnitude * 21'd1118482;
-            pst_negative_q <= pst_numerator_q[20];
+            pst_reciprocal_product_q <= pst_magnitude * PST_RECIPROCAL;
+            pst_negative_q <= pst_numerator_q[PST_NUMERATOR_BITS-1];
             pst_blend_active <= pst_negative_q ? -pst_quotient : pst_quotient;
 
             if (update_valid) begin
@@ -287,15 +294,10 @@ module nnue_evaluator #(
                 end
             end
 
-            // Clip from a dedicated result register so output timing is
+            // Publish from a dedicated result register so output timing is
             // independent of the fourth MAC tree.
             if (result_pending) begin
-                // Positive and negative score saturation ranges cannot overlap.
-                unique case (1'b1)
-                    (result_sum > 24'sd16383): result <= MAX_NON_MATE_EVAL_SCORE;
-                    (result_sum < -24'sd16383): result <= -MAX_NON_MATE_EVAL_SCORE;
-                    default: result <= EvalScore'(result_sum);
-                endcase
+                result <= result_sum;
                 result_valid <= 1'b1;
                 result_pst <= pst_blend_pending;
                 result_pending <= 1'b0;

@@ -48,7 +48,7 @@ Repetition history is not part of the Zobrist key, so a stored score may be unsa
 
 Finite evaluations are clamped below the mate-score range. Mate scores encode distance in plies, and search infinity lies outside that range. Constants are defined in `hardware/rtl/chess_defs.sv`.
 
-A winning mate at root-relative ply `ply` is encoded as `MATE_SCORE - ply`; a losing mate is `-MATE_SCORE + ply`. TT stores normalize mate scores relative to the stored node and restore them relative to the current root.
+For positive root-relative ply `ply`, winning mate is `MATE_SCORE - ply + 1` and losing mate is `-MATE_SCORE + ply - 1`. TT stores normalize mate scores relative to the stored node and restore them relative to the current root, saturating distance at the mate-band endpoints. A node already in checkmate has zero remaining plies, so its score is not cached in the TT. An already-checkmated root uses the closest losing-mate code; the host recognizes that terminal board and reports UCI `mate 0`.
 
 Draw scores are zero. The controller detects checkmate, stalemate, the 50-move rule, and threefold repetition. It does not detect insufficient material, avoiding a separate full-board material scan. The halfmove clock is part of `FullBoard`; repetition uses a separate history of full 64-bit Zobrist keys.
 

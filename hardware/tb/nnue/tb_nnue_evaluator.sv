@@ -20,12 +20,12 @@ module tb_nnue_evaluator;
     Color eval_turn;
     PieceCount eval_piece_count;
     PstEvalPair eval_pst;
-    EvalScore result;
-    EvalScore result_pst;
+    NnueCorrection result;
+    PstEvalScore result_pst;
     logic single_update_valid, single_update_ready, single_update_idle;
     NnueUpdateRequest single_update_req;
     logic single_eval_valid, single_eval_ready, single_result_valid;
-    EvalScore single_result;
+    NnueCorrection single_result;
     int pass_count = 0;
     int fail_count = 0;
 
@@ -70,7 +70,7 @@ module tb_nnue_evaluator;
         update_valid = 0;
     endtask
 
-    task automatic evaluate(input EvalScore expected, input string label);
+    task automatic evaluate(input NnueCorrection expected, input string label);
         @(negedge clk);
         eval_valid = 1;
         @(negedge clk);
@@ -95,7 +95,7 @@ module tb_nnue_evaluator;
         @(negedge clk);
         single_eval_valid = 1'b0;
         wait (single_result_valid);
-        check(single_result == EvalScore'(256),
+        check(single_result == NnueCorrection'(256),
             "single-thread evaluation reuses the update-state mirror");
     endtask
 
@@ -138,7 +138,7 @@ module tb_nnue_evaluator;
         eval_thread_id = 0;
         eval_turn = WHITE;
         eval_piece_count = PieceCount'(2);
-        eval_pst = '{first: EvalScore'(300), endgame: EvalScore'(-300)};
+        eval_pst = '{first: PstEvalScore'(300), endgame: PstEvalScore'(-300)};
         single_update_valid = 0;
         single_update_req = '0;
         single_eval_valid = 0;
@@ -202,33 +202,47 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = LAST_THREAD;
-        evaluate(EvalScore'(256), "state memory supports the highest configured thread ID");
-        check(result_pst == EvalScore'(-300), "two-piece position uses endgame PST");
+        evaluate(NnueCorrection'(256), "state memory supports the highest configured thread ID");
+        check(result_pst == PstEvalScore'(-300), "two-piece position uses endgame PST");
         eval_piece_count = PieceCount'(17);
-        evaluate(EvalScore'(256), "midpoint PST blend runs alongside NNUE");
-        check(result_pst == EvalScore'(0), "seventeen pieces blend both PST sets equally");
+        evaluate(NnueCorrection'(256), "midpoint PST blend runs alongside NNUE");
+        check(result_pst == PstEvalScore'(0), "seventeen pieces blend both PST sets equally");
         eval_piece_count = PieceCount'(32);
-        evaluate(EvalScore'(256), "full-board PST blend runs alongside NNUE");
-        check(result_pst == EvalScore'(300), "full board uses first PST set");
+        evaluate(NnueCorrection'(256), "full-board PST blend runs alongside NNUE");
+        check(result_pst == PstEvalScore'(300), "full board uses first PST set");
         // Preserve signed truncation and the full input range through the
         // pipelined reciprocal used by synthesized hardware.
-        eval_pst = '{first: EvalScore'(0), endgame: EvalScore'(-1)};
+        eval_pst = '{first: PstEvalScore'(0), endgame: PstEvalScore'(-1)};
         eval_piece_count = PieceCount'(3);
-        evaluate(EvalScore'(256), "negative fractional PST blend keeps NNUE result");
-        check(result_pst == EvalScore'(0), "negative fractional PST blend truncates toward zero");
-        eval_pst = '{first: EvalScore'(-32768), endgame: EvalScore'(-32768)};
+        evaluate(NnueCorrection'(256), "negative fractional PST blend keeps NNUE result");
+        check(result_pst == PstEvalScore'(0), "negative fractional PST blend truncates toward zero");
+        eval_pst = '{first: PstEvalScore'(-(1 << ($bits(PstEvalScore)-1))), endgame: PstEvalScore'(-(1 << ($bits(PstEvalScore)-1)))};
         eval_piece_count = PieceCount'(2);
-        evaluate(EvalScore'(256), "minimum PST blend keeps NNUE result");
-        check(result_pst == EvalScore'(-32768), "minimum PST blend retains signed range");
-        eval_pst = '{first: EvalScore'(300), endgame: EvalScore'(-300)};
+        evaluate(NnueCorrection'(256), "minimum PST blend keeps NNUE result");
+        check(result_pst == PstEvalScore'(-(1 << ($bits(PstEvalScore)-1))), "minimum PST blend retains signed range");
+        // Exercise every phase at opposite signed endpoints through the real pipeline.
+        for (int polarity = 0; polarity < 2; polarity++) begin
+            eval_pst.first = PstEvalScore'(-(1 << ($bits(PstEvalScore)-1)));
+            eval_pst.endgame = PstEvalScore'((1 << ($bits(PstEvalScore)-1))-1);
+            if (polarity != 0)
+                eval_pst = {eval_pst.endgame, eval_pst.first};
+            for (int weight = 0; weight <= 30; weight++) begin
+                automatic int expected = (int'(eval_pst.first) * weight
+                    + int'(eval_pst.endgame) * (30-weight)) / 30;
+                eval_piece_count = PieceCount'(weight+2);
+                evaluate(NnueCorrection'(256), "extreme phase blend preserves NNUE result");
+                check(int'(result_pst) == expected, "extreme phase blend truncates exactly");
+            end
+        end
+        eval_pst = '{first: PstEvalScore'(300), endgame: PstEvalScore'(-300)};
         eval_piece_count = PieceCount'(2);
         dut.output_weight_rows[0] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
         dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
         dut.output_weight_rows[2] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
         dut.output_weight_rows[3] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
-        evaluate(EvalScore'(256), "side to move selects the first concatenated perspective");
+        evaluate(NnueCorrection'(256), "side to move selects the first concatenated perspective");
         eval_turn = BLACK;
-        evaluate(EvalScore'(-256), "opponent perspective moves to the second half");
+        evaluate(NnueCorrection'(-256), "opponent perspective moves to the second half");
         // Consecutive snapshots must keep their own perspective ordering while
         // the preceding evaluation drains its last partial sum.
         begin
@@ -248,7 +262,7 @@ module tb_nnue_evaluator;
                 @(negedge clk);
                 if (result_valid) begin
                     check(result == (perspective_results == 0
-                            ? EvalScore'(256) : EvalScore'(-256)),
+                            ? PstEvalScore'(256) : PstEvalScore'(-256)),
                         "overlapping evaluations preserve opposite perspective weights");
                     perspective_results++;
                 end
@@ -256,17 +270,17 @@ module tb_nnue_evaluator;
         end
         eval_turn = WHITE;
         dut.output_bias[0] = {NNUE_OUTPUT_BIAS_BITS{1'b1}};
-        evaluate(EvalScore'(256 + ((1 << NNUE_OUTPUT_BIAS_BITS) - 1)),
+        evaluate(NnueCorrection'(256 + ((1 << NNUE_OUTPUT_BIAS_BITS) - 1)),
             "unsigned output bias is added once");
         dut.output_bias[0] = 8'(1 << (NNUE_OUTPUT_BIAS_BITS - 1));
-        evaluate(EvalScore'(256 + (1 << (NNUE_OUTPUT_BIAS_BITS - 1))),
+        evaluate(NnueCorrection'(256 + (1 << (NNUE_OUTPUT_BIAS_BITS - 1))),
             "highest output-bias bit reaches the result");
         dut.output_bias[0] = 0;
         for (int row = NNUE_OUTPUT_MAC_CYCLES;
                 row < 2 * NNUE_OUTPUT_MAC_CYCLES; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h2}};
         eval_piece_count = PieceCount'(6);
-        evaluate(EvalScore'(512), "piece count selects an independent output bucket");
+        evaluate(NnueCorrection'(512), "piece count selects an independent output bucket");
         eval_piece_count = PieceCount'(2);
         for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
             dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
@@ -308,7 +322,7 @@ module tb_nnue_evaluator;
         update_req.clear = 1;
         enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(256), "perspective activations feed the output layer");
+        evaluate(NnueCorrection'(256), "perspective activations feed the output layer");
         check(eval_ready, "evaluator becomes ready after its MAC and clipping cycles");
 
         update_req = '0;
@@ -319,7 +333,7 @@ module tb_nnue_evaluator;
         update_req.add = 0;
         enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(0), "a feature delta forwards updated state");
+        evaluate(NnueCorrection'(0), "a feature delta forwards updated state");
 
         // A normal child updates its thread's live state without a copy request.
         update_req = '0;
@@ -341,7 +355,7 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = ThreadID'(1);
-        evaluate(EvalScore'(0),
+        evaluate(NnueCorrection'(0),
             "first delta reads the live parent without a standalone copy request");
 
         // The shared state store must support an evaluation read while a
@@ -366,11 +380,11 @@ module tb_nnue_evaluator;
         @(negedge clk);
         eval_valid = 0;
         wait (result_valid);
-        check(result == EvalScore'(256),
+        check(result == NnueCorrection'(256),
             "evaluation overlaps another thread's accumulator commit");
         wait (update_idle);
         eval_thread_id = ThreadID'(4);
-        evaluate(EvalScore'(512),
+        evaluate(NnueCorrection'(512),
             "overlapped update is visible in its destination thread");
 
         // Consecutive requests for one thread must observe each preceding
@@ -395,7 +409,7 @@ module tb_nnue_evaluator;
         wait (update_done_valid);
         wait (update_idle);
         eval_thread_id = ThreadID'(2);
-        evaluate(EvalScore'(768),
+        evaluate(NnueCorrection'(768),
             "full-width update pipeline commits back-to-back same-thread rows");
 
         // The maximum unsigned bias must survive the clear without sign extension.
@@ -414,7 +428,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'((1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1),
             "unsigned accumulator bias is zero-extended on clear");
-        evaluate(EvalScore'(NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT * 7),
+        evaluate(NnueCorrection'(NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT * 7),
             "unsigned bias activates both perspectives");
         dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
         enqueue(update_req);
@@ -422,7 +436,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(-(1 << (NNUE_ACCUMULATOR_BITS - 1))),
             "maximum bias plus a feature wraps the signed accumulator");
-        evaluate(EvalScore'(NNUE_ACCUMULATOR_COUNT * 7),
+        evaluate(NnueCorrection'(NNUE_ACCUMULATOR_COUNT * 7),
             "wrapped perspective contributes zero after SCReLU");
 
         for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
@@ -442,7 +456,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(15),
             "five-bit accumulators retain the trained positive range");
-        evaluate(EvalScore'(2048), "concatenated perspective activations reach the output");
+        evaluate(NnueCorrection'(2048), "concatenated perspective activations reach the output");
         update_req.add = 0;
         repeat (12)
             enqueue(update_req);
@@ -450,7 +464,7 @@ module tb_nnue_evaluator;
         check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
                 == NnueAccumulator'(3),
             "modular inverse deltas exactly restore the accumulator bias");
-        evaluate(EvalScore'(512), "both biased perspectives remain in the concatenated output");
+        evaluate(NnueCorrection'(512), "both biased perspectives remain in the concatenated output");
 
         // Flush an accepted evaluation and queued update together, then prove
         // that no result or update survives and a fresh rebuild still works.
@@ -486,7 +500,7 @@ module tb_nnue_evaluator;
         enqueue(update_req);
         wait (update_idle);
         eval_thread_id = LAST_THREAD;
-        evaluate(EvalScore'(256), "evaluation restarts correctly after clear");
+        evaluate(NnueCorrection'(256), "evaluation restarts correctly after clear");
 
         // Exercise the signed activation product extrema; an unsigned
         // multiply produces a non-clipped value with this model.
@@ -504,9 +518,9 @@ module tb_nnue_evaluator;
         repeat (11)
             enqueue(update_req);
         wait (update_idle);
-        evaluate(EvalScore'(-14336), "signed activation products retain their full width");
+        evaluate(NnueCorrection'(-14336), "signed activation products retain their full width");
         dut.output_bias[0] = 8'h10;
-        evaluate(EvalScore'(-14320), "negative MAC sum and unsigned bias retain their full width");
+        evaluate(NnueCorrection'(-14320), "negative MAC sum and unsigned bias retain their full width");
         dut.output_bias[0] = 0;
 
         begin
@@ -514,7 +528,7 @@ module tb_nnue_evaluator;
             automatic int stream_results = 0;
 
             @(negedge clk);
-            eval_pst = '{first: EvalScore'(0), endgame: EvalScore'(137)};
+            eval_pst = '{first: PstEvalScore'(0), endgame: PstEvalScore'(137)};
             first_issue = $time;
             eval_valid = 1;
             @(negedge clk);
@@ -522,7 +536,7 @@ module tb_nnue_evaluator;
             while (!eval_ready)
                 @(negedge clk);
             second_issue = $time;
-            eval_pst = '{first: EvalScore'(0), endgame: EvalScore'(-83)};
+            eval_pst = '{first: PstEvalScore'(0), endgame: PstEvalScore'(-83)};
             eval_valid = 1;
             @(negedge clk);
             eval_valid = 0;
@@ -532,10 +546,10 @@ module tb_nnue_evaluator;
             while (stream_results != 2) begin
                 @(negedge clk);
                 if (result_valid) begin
-                    check(result == EvalScore'(-14336),
+                    check(result == NnueCorrection'(-14336),
                         "pipelined evaluation preserves result ordering");
                     check(result_pst == (stream_results == 0
-                            ? EvalScore'(137) : EvalScore'(-83)),
+                            ? PstEvalScore'(137) : PstEvalScore'(-83)),
                         "pipelined PST blend preserves result ordering");
                     stream_results++;
                 end

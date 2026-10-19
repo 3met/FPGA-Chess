@@ -205,7 +205,8 @@
     endfunction : search_thread_quiet_ready
 
     function automatic logic should_store_search_tt(input ThreadID thread, input PlyIndex ply);
-        return !search_in_qsearch(thread);
+        return !search_in_qsearch(thread)
+            && !(search_board_in_check[thread] && !search_stack_top[thread].has_legal);
     endfunction : should_store_search_tt
 
     function automatic Move root_hint_for_thread(input ThreadID thread);
@@ -244,7 +245,7 @@
         search_repetition_seen_before[thread_index] <= 1'b0;
         search_best_move[thread_index] <= NULL_MOVE;
         search_ponder_move[thread_index] <= NULL_MOVE;
-        search_root_best_score[thread_index] <= -SEARCH_INF;
+        search_root_best_score[thread_index] <= -MAX_EVAL_SCORE;
         search_root_has_completed_move[thread_index] <= 1'b0;
         search_root_best_exact[thread_index] <= 1'b0;
         search_pending_move[thread_index] <= NULL_MOVE;
@@ -345,7 +346,7 @@
         if (search_ply[thread] == PlyIndex'(0))
             return search_thread_root_alpha[thread];
         if (search_stack_top[thread].scout_search)
-            return search_stack_top[thread].beta - EvalScore'(1);
+            return score_predecessor(search_stack_top[thread].beta);
         return -search_stack_parent_q[thread].beta;
     endfunction : search_original_alpha
 

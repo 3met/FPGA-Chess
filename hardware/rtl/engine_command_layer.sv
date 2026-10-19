@@ -295,7 +295,7 @@ module engine_command_layer #(
                         };
                         5'd2:  data_out = {2'b00, last_move.from_pos};
                         5'd3:  data_out = last_score[7:0];
-                        5'd4:  data_out = last_score[15:8];
+                        5'd4:  data_out = 8'($signed(last_score) >>> 8);
                         5'd5:  data_out = last_node_count[7:0];
                         5'd6:  data_out = last_node_count[15:8];
                         5'd7:  data_out = last_node_count[23:16];
