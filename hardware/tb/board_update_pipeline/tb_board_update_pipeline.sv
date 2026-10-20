@@ -998,6 +998,56 @@ module tb_board_update_pipeline;
         expect_state(expected_b, "back-to-back request B");
     endtask
 
+    // Compare every relative probe against the independent directional scanner,
+    // then exercise mixed-color blockers with reproducible board arrangements.
+    task automatic test_attack_scan_rotation();
+        automatic FullBoard probe_board;
+        automatic logic [31:0] random_state = 32'h4b19a7c3;
+        automatic logic expected_attack;
+        automatic logic actual_attack;
+
+        for (int piece = int'(PAWN); piece <= int'(KING); piece++) begin
+            for (int color = 0; color < 2; color++) begin
+                for (int source = 0; source < 64; source++) begin
+                    init_empty_board(probe_board);
+                    probe_board.tiles[source] = Tile'({Color'(color), PieceType'(piece)});
+                    for (int target = 0; target < 64; target++) begin
+                        for (int attacker = 0; attacker < 2; attacker++) begin
+                            expected_attack = square_attacked(probe_board, Position'(target), Color'(attacker));
+                            actual_attack = dut.board_square_attacked(probe_board, Position'(target), Color'(attacker));
+                            expect_equal(actual_attack === expected_attack,
+                                $sformatf("attack rotation piece %0d color %0d source %0d target %0d attacker %0d",
+                                    piece, color, source, target, attacker));
+                        end
+                    end
+                end
+            end
+        end
+
+        // Arbitrary tiles deliberately include partial setup boards and both
+        // occupied and empty ray prefixes; only the attack function is tested.
+        for (int sample = 0; sample < 128; sample++) begin
+            init_empty_board(probe_board);
+            for (int pos = 0; pos < 64; pos++) begin
+                random_state ^= random_state << 13;
+                random_state ^= random_state >> 17;
+                random_state ^= random_state << 5;
+                if (random_state[3:0] < (sample % 16))
+                    probe_board.tiles[pos] = Tile'({
+                        Color'(random_state[4]), PieceType'(1 + ((random_state >> 5) % 6))});
+            end
+            for (int target = 0; target < 64; target++) begin
+                for (int attacker = 0; attacker < 2; attacker++) begin
+                    expected_attack = square_attacked(probe_board, Position'(target), Color'(attacker));
+                    actual_attack = dut.board_square_attacked(probe_board, Position'(target), Color'(attacker));
+                    expect_equal(actual_attack === expected_attack,
+                        $sformatf("blocked attack rotation sample %0d target %0d attacker %0d",
+                            sample, target, attacker));
+                end
+            end
+        end
+    endtask
+
     // Consecutive pushes must use each request's own post-move overlay when
     // checking whether the mover exposed its king.
     task automatic test_back_to_back_king_safety();
@@ -1049,6 +1099,114 @@ module tb_board_update_pipeline;
         expect_equal(mover_in_check_out, "back-to-back request A exposes its king");
         do_clock(1);
         expect_equal(!mover_in_check_out, "back-to-back request B keeps its king safe");
+    endtask
+
+    // Fill the pipeline with different move effects, then undo every history
+    // entry at the same throughput. Every response must retain its own side data.
+    task automatic test_sustained_special_moves();
+        localparam int REQUEST_COUNT = 12;
+        automatic FullBoard before_boards[REQUEST_COUNT];
+        automatic FullBoard after_boards[REQUEST_COUNT];
+        automatic Move moves[REQUEST_COUNT];
+        automatic Color color;
+        automatic Position king_from;
+        automatic Position rook_from;
+        automatic Position king_to;
+        automatic int response;
+
+        for (int request = 0; request < REQUEST_COUNT; request++) begin
+            init_empty_board(ref_board);
+            ref_board.tiles[Position'(4)] = WHITE_KING;
+            ref_board.tiles[Position'(60)] = BLACK_KING;
+            ref_board.king_positions[WHITE] = Position'(4);
+            ref_board.king_positions[BLACK] = Position'(60);
+            ref_board.halfmove_clock = HalfmoveClock'(request);
+            ref_ply = PlyIndex'(request);
+            moves[request] = NULL_MOVE;
+            if (request < 4) begin
+                color = request < 2 ? WHITE : BLACK;
+                king_from = color == WHITE ? Position'(4) : Position'(60);
+                rook_from = Position'((color == WHITE ? 0 : 56) + (request % 2 ? 7 : 0));
+                king_to = Position'((color == WHITE ? 0 : 56) + (request % 2 ? 6 : 2));
+                ref_board.turn = color;
+                ref_board.tiles[rook_from] = Tile'({color, ROOK});
+                ref_board.castling_rights = CastlingRights'(4'b1000 >> (request ^ 1));
+                moves[request].from_pos = king_from;
+                moves[request].to_pos = king_to;
+            end else if (request < 8) begin
+                color = request % 2 ? BLACK : WHITE;
+                ref_board.turn = color;
+                // Place the defending king off the promotion rank and diagonals.
+                if (color == WHITE) begin
+                    ref_board.tiles[Position'(60)] = EMPTY_TILE;
+                    ref_board.tiles[Position'(47)] = BLACK_KING;
+                    ref_board.king_positions[BLACK] = Position'(47);
+                end else begin
+                    ref_board.tiles[Position'(4)] = EMPTY_TILE;
+                    ref_board.tiles[Position'(23)] = WHITE_KING;
+                    ref_board.king_positions[WHITE] = Position'(23);
+                end
+                moves[request].from_pos = color == WHITE ? Position'(48) : Position'(8);
+                moves[request].to_pos = color == WHITE ? Position'(56) : Position'(0);
+                moves[request].promo_piece = PromoType'(request - 4);
+                ref_board.tiles[moves[request].from_pos] = Tile'({color, PAWN});
+                // Alternate noncapturing and capturing promotions.
+                if (request % 2) begin
+                    moves[request].to_pos = Position'(1);
+                    ref_board.tiles[Position'(1)] = WHITE_ROOK;
+                end
+            end else if (request < 10) begin
+                color = request == 8 ? WHITE : BLACK;
+                ref_board.turn = color;
+                ref_board.has_ep = 1'b1;
+                ref_board.ep_file = BoardFile'(4);
+                moves[request].from_pos = color == WHITE ? Position'(35) : Position'(27);
+                moves[request].to_pos = color == WHITE ? Position'(44) : Position'(20);
+                ref_board.tiles[moves[request].from_pos] = Tile'({color, PAWN});
+                ref_board.tiles[color == WHITE ? Position'(36) : Position'(28)] = Tile'({Color'(~color), PAWN});
+            end else if (request == 10) begin
+                ref_board.tiles[Position'(0)] = WHITE_ROOK;
+                moves[request].from_pos = Position'(0);
+                moves[request].to_pos = Position'(56);
+            end else begin
+                ref_board.tiles[Position'(0)] = WHITE_ROOK;
+                ref_board.tiles[Position'(48)] = BLACK_KNIGHT;
+                moves[request].from_pos = Position'(0);
+                moves[request].to_pos = Position'(48);
+            end
+            before_boards[request] = ref_board;
+            ref_apply_move(moves[request], 1'b1);
+            after_boards[request] = ref_board;
+        end
+
+        for (int reverse_pass = 0; reverse_pass < 2; reverse_pass++) begin
+            for (int cycle = 0; cycle < REQUEST_COUNT + BOARD_UPDATE_PIPELINE_STAGE_CNT - 1; cycle++) begin
+                if (cycle < REQUEST_COUNT) begin
+                    board_op = reverse_pass ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
+                    board_in = reverse_pass ? after_boards[cycle] : before_boards[cycle];
+                    zobrist_key_in = ref_zobrist_full(board_in);
+                    pst_eval_in = '{first: ref_eval(board_in), endgame: ref_eval(board_in, 1'b1)};
+                    piece_count_in = ref_piece_count(board_in);
+                    move_in = moves[cycle];
+                    set_data = '0;
+                    thread_id = ThreadID'(0);
+                    search_ply = PlyIndex'(cycle + reverse_pass);
+                end else begin
+                    drive_idle();
+                end
+                do_clock(1);
+                response = cycle - BOARD_UPDATE_PIPELINE_STAGE_CNT + 1;
+                if (response >= 0) begin
+                    expect_state(reverse_pass ? before_boards[response] : after_boards[response],
+                        $sformatf("sustained %s request %0d", reverse_pass ? "reverse" : "push", response));
+                    expect_equal(side_in_check_out == (!reverse_pass && response == 10),
+                        $sformatf("sustained request %0d side check flag is aligned", response));
+                    if (!reverse_pass)
+                        expect_equal(!mover_in_check_out,
+                            $sformatf("sustained request %0d mover king remains safe", response));
+                end
+            end
+        end
     endtask
 
     // A distinct endgame ROM entry must change only the endgame accumulator.
@@ -1123,6 +1281,7 @@ module tb_board_update_pipeline;
         $display("=== Board update pipeline testbench ===");
         test_feature_hash();
         test_back_to_back_independent_requests();
+        test_attack_scan_rotation();
         test_back_to_back_king_safety();
         test_main_move_sequence();
         test_null_move();
@@ -1131,6 +1290,7 @@ module tb_board_update_pipeline;
         test_set_tile_overwrite();
         test_commit_history_not_written();
         test_thread_history_isolation();
+        test_sustained_special_moves();
         test_distinct_phase_table();
 
         $display("Testbench run complete.");

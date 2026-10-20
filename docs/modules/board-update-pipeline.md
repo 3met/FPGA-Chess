@@ -42,7 +42,9 @@ The board update pipeline is a pipelined board-state transformer. It accepts a c
 
 The pipeline returns the transformed board, incremental side data, and aligned check flags after three pipeline stages.
 
-King-safety scans test pawn, knight, and ray attacks in parallel. Each ray masks attackers behind any nearer occupied square, then a reduction combines the independent hits without a priority chain across directions.
+King-safety scans rotate the packed tiles relative to each checked king once, sharing that rotation across constant-offset pawn, knight, and ray probes. Board-edge guards exclude wrapped probes. Each ray masks attackers behind any nearer occupied square, then a reduction combines the independent hits without a priority chain across directions.
+
+Push, reverse, and tile setup share four square-write lanes and one board mutation network. Castling uses all four lanes; en passant uses three. Piece count changes only for captures on move operations, while setup compares the old and new square occupancy. These shared datapaths retain three-stage latency and one-request-per-cycle throughput.
 
 ## Board Setup
 
@@ -62,7 +64,7 @@ The checked king and mover king are selected from the captured request during ta
 
 ## PST Tables
 
-Both material and piece-square parameter sets are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces a ROM and material definitions for each set. Both ROMs receive the same square addresses, and their entries are sign-extended to separate `EvalScore` sums.
+Both material and piece-square parameter sets are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces a ROM and material definitions for each set. Both ROMs receive the same square addresses. Four shared contribution lanes select the piece and addition/removal sign for push, reverse, or setup, then balanced sums update each phase. Disabled ROM lanes contribute zero, including null moves and side-only operations. Both phases use explicit scalar arithmetic paths through their accumulators.
 
 ## Move History
 

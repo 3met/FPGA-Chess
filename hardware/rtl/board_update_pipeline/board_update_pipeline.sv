@@ -103,7 +103,10 @@ module board_update_pipeline #(
     logic [PST_READ_PORTS-1:0] pst_read_enable_q;
     PstScore pst_read_data[PST_READ_PORTS];
     PstScore pst_endgame_read_data[PST_READ_PORTS];
-    PstEvalPair pst_source_out, pst_destination_out, pst_captured_out, pst_castle_out;
+    Tile pst_lane_tile[PST_READ_PORTS];
+    logic [PST_READ_PORTS-1:0] pst_lane_remove;
+    PstEvalScore pst_first_delta[PST_READ_PORTS];
+    PstEvalScore pst_endgame_delta[PST_READ_PORTS];
     ZobristHashPlan zobrist_hash_plan;
     logic [ZOBRIST_DELTA_LANES-1:0] zobrist_hash_enable_q;
     ZobristKey zobrist_lane_keys[ZOBRIST_DELTA_LANES];
@@ -120,6 +123,12 @@ module board_update_pipeline #(
     Tile check_mover_tile_d, check_mover_tile_q;
     Color check_mover_color_d, check_mover_color_q;
     FullBoard check_board;
+
+    // All operations share four square-write lanes: mover, destination, and
+    // the two auxiliary squares needed by castling (one for en passant).
+    logic [3:0] tile_write_enable;
+    Position [3:0] tile_write_position;
+    Tile [3:0] tile_write_data;
 
     // Compute feature keys in logic and register each enabled result. The
     // fourth delta lane selects a constant rook delta for castling.
@@ -170,17 +179,6 @@ module board_update_pipeline #(
             );
         end
     endgenerate
-
-    // Widen each ROM phase separately. Opening updates below also consume the
-    // raw ROM outputs because Quartus prunes that half of packed score helpers.
-    assign pst_source_out.first = pst_read_enable_q[0] ? PstEvalScore'(pst_read_data[0]) : '0;
-    assign pst_source_out.endgame = pst_read_enable_q[0] ? PstEvalScore'(pst_endgame_read_data[0]) : '0;
-    assign pst_destination_out.first = pst_read_enable_q[1] ? PstEvalScore'(pst_read_data[1]) : '0;
-    assign pst_destination_out.endgame = pst_read_enable_q[1] ? PstEvalScore'(pst_endgame_read_data[1]) : '0;
-    assign pst_captured_out.first = pst_read_enable_q[2] ? PstEvalScore'(pst_read_data[2]) : '0;
-    assign pst_captured_out.endgame = pst_read_enable_q[2] ? PstEvalScore'(pst_endgame_read_data[2]) : '0;
-    assign pst_castle_out.first = pst_read_enable_q[3] ? PstEvalScore'(pst_read_data[3]) : '0;
-    assign pst_castle_out.endgame = pst_read_enable_q[3] ? PstEvalScore'(pst_endgame_read_data[3]) : '0;
 
     function automatic MoveRecordAddr move_hist_addr(input ThreadID tid, input PlyIndex ply);
         return MoveRecordAddr'(MoveRecordAddr'(tid) * MoveRecordAddr'(MOVE_RECORD_PLY_COUNT)
@@ -238,37 +236,67 @@ module board_update_pipeline #(
         endcase
     endfunction : castle_rook_to
 
-    // Concatenate separately sized sums so each phase remains independent.
-    // Older Quartus versions can miscompile named struct assignment patterns.
-    function automatic PstEvalPair pair_add(input PstEvalPair a, input PstEvalPair b);
-        return {PstEvalScore'(a.first + b.first), PstEvalScore'(a.endgame + b.endgame)};
-    endfunction
-
-    function automatic PstEvalPair pair_neg(input PstEvalPair value);
-        return {PstEvalScore'(-value.first), PstEvalScore'(-value.endgame)};
-    endfunction
-
-    function automatic PstEvalPair pair_sub(input PstEvalPair a, input PstEvalPair b);
-        return pair_add(a, pair_neg(b));
-    endfunction
-
-    // Calculate the two material/PST phases as independent scalar paths.
-    function automatic PstEvalPair signed_piece_score(input Tile tile, input PstEvalPair pst_value);
-        EvalScore first_score, endgame_score;
+    // Fold removal into color before negation, sharing one signed score path
+    // per ROM lane for push, reverse, and setup operations.
+    function automatic PstEvalScore pst_lane_score(
+        input Tile tile,
+        input logic remove_piece,
+        input EvalScore material,
+        input PstScore pst_value
+    );
+        PstEvalScore score;
         if (tile.piece_type == NULL_PIECE) return '0;
-        first_score = PIECE_VALS_128[tile.piece_type] + pst_value.first;
-        endgame_score = PIECE_VALS_ENDGAME_128[tile.piece_type] + pst_value.endgame;
-        if (tile.piece_color == WHITE) return {PstEvalScore'(first_score), PstEvalScore'(endgame_score)};
-        return {PstEvalScore'(-first_score), PstEvalScore'(-endgame_score)};
-    endfunction : signed_piece_score
-
-    // Keep opening-phase ROM data on an explicit scalar path for Quartus.
-    function automatic EvalScore signed_first_score(input Tile tile, input PstScore pst_value);
-        EvalScore score;
-        if (tile.piece_type == NULL_PIECE) return '0;
-        score = PIECE_VALS_128[tile.piece_type] + EvalScore'(pst_value);
-        return tile.piece_color == WHITE ? score : -score;
+        score = PstEvalScore'(material) + PstEvalScore'(pst_value);
+        return (tile.piece_color == BLACK) ^ remove_piece ? -score : score;
     endfunction
+
+    // Each lane describes one added or removed piece. Castling and en passant
+    // share the capture lane because those move effects are mutually exclusive.
+    always_comb begin
+        for (int lane = 0; lane < PST_READ_PORTS; lane++)
+            pst_lane_tile[lane] = EMPTY_TILE;
+        pst_lane_remove = '0;
+        case (ctx_pipe[1].board_op)
+            BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
+                pst_lane_tile[0] = move_effects_q.moving_tile;
+                pst_lane_tile[1] = move_effects_q.placed_tile;
+                pst_lane_tile[2] = move_effects_q.is_castle
+                    ? Tile'({move_effects_q.moving_tile.piece_color, ROOK})
+                    : move_effects_q.is_ep
+                        ? Tile'({Color'(~move_effects_q.moving_tile.piece_color), PAWN})
+                        : move_effects_q.destination_tile;
+                pst_lane_tile[3] = Tile'({move_effects_q.moving_tile.piece_color, ROOK});
+                pst_lane_remove = 4'b0101;
+            end
+            BOARD_REVERSE_MOVE_OP: begin
+                pst_lane_tile[0] = move_effects_q.restored_mover;
+                pst_lane_tile[1] = move_effects_q.destination_tile;
+                pst_lane_tile[2] = move_effects_q.is_castle
+                    ? Tile'({Color'(~ctx_pipe[1].board.turn), ROOK})
+                    : move_effects_q.is_ep
+                        ? Tile'({ctx_pipe[1].board.turn, PAWN})
+                        : move_effects_q.restored_capture;
+                pst_lane_tile[3] = Tile'({Color'(~ctx_pipe[1].board.turn), ROOK});
+                pst_lane_remove = 4'b1010;
+            end
+            BOARD_SET_TILE_OP: begin
+                pst_lane_tile[1] = Tile'(ctx_pipe[1].set_data[3:0]);
+                pst_lane_tile[2] = ctx_pipe[1].board.tiles[ctx_pipe[1].move.to_pos];
+                pst_lane_remove = 4'b0100;
+            end
+            default: begin end
+        endcase
+        // Keep both phases scalar through the ROM-to-accumulator datapath;
+        // Quartus can prune the first member of packed score-return helpers.
+        for (int lane = 0; lane < PST_READ_PORTS; lane++) begin
+            pst_first_delta[lane] = pst_read_enable_q[lane]
+                ? pst_lane_score(pst_lane_tile[lane], pst_lane_remove[lane],
+                    PIECE_VALS_128[pst_lane_tile[lane].piece_type], pst_read_data[lane]) : '0;
+            pst_endgame_delta[lane] = pst_read_enable_q[lane]
+                ? pst_lane_score(pst_lane_tile[lane], pst_lane_remove[lane],
+                    PIECE_VALS_ENDGAME_128[pst_lane_tile[lane].piece_type], pst_endgame_read_data[lane]) : '0;
+        end
+    end
 
     // Apply registered move overlays once before both king-safety scans.
     always_comb begin
@@ -289,15 +317,24 @@ module board_update_pipeline #(
         input Color attacker_color
     );
         automatic logic [65:0] attacks = '0;
+        automatic Tile [63:0] relative_tiles = board.tiles;
         automatic Direction pawn_left = attacker_color == WHITE ? SOUTH_WEST : NORTH_WEST;
         automatic Direction pawn_right = attacker_color == WHITE ? SOUTH_EAST : NORTH_EAST;
+        // Share one cyclic board rotation across every attack probe. Relative
+        // offsets are constant for knights and rays, avoiding an independent
+        // full-board tile multiplexer at each distance in each direction.
+        for (int bit_index = 0; bit_index < $bits(Position); bit_index++) begin
+            if (square[bit_index])
+                relative_tiles = (relative_tiles >> ($bits(Tile) << bit_index))
+                    | (relative_tiles << ($bits(board.tiles) - ($bits(Tile) << bit_index)));
+        end
         attacks[0] = is_shift_on_board(square, pawn_left, 3'd1)
-            && board.tiles[shift_position(square, pawn_left, 3'd1)] == Tile'({attacker_color, PAWN});
+            && relative_tiles[shift_position(Position'('0), pawn_left, 3'd1)] == Tile'({attacker_color, PAWN});
         attacks[1] = is_shift_on_board(square, pawn_right, 3'd1)
-            && board.tiles[shift_position(square, pawn_right, 3'd1)] == Tile'({attacker_color, PAWN});
+            && relative_tiles[shift_position(Position'('0), pawn_right, 3'd1)] == Tile'({attacker_color, PAWN});
         for (int knight_dir = 0; knight_dir < 8; knight_dir++) begin
             attacks[2 + knight_dir] = is_knight_shift_on_board(square, KnightDirection'(knight_dir))
-                && board.tiles[shift_knight_position(square, KnightDirection'(knight_dir))]
+                && relative_tiles[shift_knight_position(Position'('0), KnightDirection'(knight_dir))]
                     == Tile'({attacker_color, KNIGHT});
         end
         for (int dir_idx = 0; dir_idx < 8; dir_idx++) begin
@@ -305,7 +342,7 @@ module board_update_pipeline #(
             automatic logic [6:0] occupied;
             automatic logic [6:0] attackers;
             for (int distance = 1; distance < 8; distance++) begin
-                automatic Tile tile = board.tiles[shift_position(square, dir, distance[2:0])];
+                automatic Tile tile = relative_tiles[shift_position(Position'('0), dir, distance[2:0])];
                 automatic logic on_board = is_shift_on_board(square, dir, distance[2:0]);
                 occupied[distance - 1] = on_board && tile.piece_type != NULL_PIECE;
                 attackers[distance - 1] = on_board && tile.piece_color == attacker_color
@@ -383,25 +420,16 @@ module board_update_pipeline #(
         zobrist_new_ep_address = new_ep_file;
     endtask : plan_side_delta
 
-    task automatic replace_tile(
-        inout FullBoard board,
-        inout PieceCount piece_count,
+    // Select a write lane; the common per-square mux applies the plan below.
+    task automatic plan_tile_write(
+        input int lane,
         input Position pos,
-        input Tile old_tile,
-        input Tile new_tile
+        input Tile tile
     );
-        automatic Tile placed_tile = new_tile;
-
-        if (old_tile.piece_type == NULL_PIECE && placed_tile.piece_type != NULL_PIECE)
-            piece_count += PieceCount'(1);
-        else if (old_tile.piece_type != NULL_PIECE && placed_tile.piece_type == NULL_PIECE)
-            piece_count -= PieceCount'(1);
-        board.tiles[pos] = placed_tile;
-        // Legal positions contain one king per color, so placing a king also
-        // establishes that color's canonical cached square.
-        if (placed_tile.piece_type == KING)
-            board.king_positions[placed_tile.piece_color] = pos;
-    endtask : replace_tile
+        tile_write_enable[lane] = 1'b1;
+        tile_write_position[lane] = pos;
+        tile_write_data[lane] = tile;
+    endtask : plan_tile_write
 
     task automatic replace_side_data(
         inout FullBoard board,
@@ -847,6 +875,19 @@ module board_update_pipeline #(
                 ^ (tile_delta[2] ^ tile_delta[3]))
             ^ (old_ep_delta ^ new_ep_delta);
 
+        tile_write_enable = '0;
+        tile_write_position = '0;
+        tile_write_data = '0;
+
+        // Sum all four selected contributions with a balanced tree. Disabled
+        // reads contribute zero, preserving side-only operations and null moves.
+        out.pst_eval.first = in.pst_eval.first
+            + ((pst_first_delta[0] + pst_first_delta[1])
+                + (pst_first_delta[2] + pst_first_delta[3]));
+        out.pst_eval.endgame = in.pst_eval.endgame
+            + ((pst_endgame_delta[0] + pst_endgame_delta[1])
+                + (pst_endgame_delta[2] + pst_endgame_delta[3]));
+
         // Preserve pass-through for unspecified operations; unique without default would make them don't-cares.
         case (in.board_op)
             BOARD_PUSH_MOVE_OP, BOARD_COMMIT_MOVE_OP: begin
@@ -867,54 +908,17 @@ module board_update_pipeline #(
                 automatic logic next_has_ep;
                 automatic BoardFile next_ep_file = get_file(to_pos);
                 automatic HalfmoveClock next_halfmove;
-                automatic PstEvalPair mover_delta = pair_sub(
-                    signed_piece_score(placed_tile, pst_destination_out),
-                    signed_piece_score(moving_tile, pst_source_out));
-                automatic PstEvalPair capture_delta = (is_ep || is_castle)
-                    ? PstEvalPair'('0) : pair_neg(signed_piece_score(destination_tile, pst_captured_out));
-                automatic Tile auxiliary_tile = is_ep
-                    ? Tile'({Color'(~moved_color), PAWN})
-                    : Tile'({moved_color, ROOK});
-                automatic PstEvalPair auxiliary_remove_delta = (is_ep || is_castle)
-                    ? pair_neg(signed_piece_score(auxiliary_tile, pst_captured_out))
-                    : PstEvalPair'('0);
-                automatic PstEvalPair rook_place_delta = is_castle
-                    ? signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out)
-                    : PstEvalPair'('0);
-
-                // Balance the independent tile-score deltas so a synchronous
-                // PST ROM output crosses two adders rather than a serial task chain.
-                out.pst_eval = pair_add(in.pst_eval,
-                    pair_add(pair_add(mover_delta, capture_delta),
-                             pair_add(auxiliary_remove_delta, rook_place_delta)));
-                out.pst_eval.first = in.pst_eval.first
-                    + (signed_first_score(placed_tile, pst_read_data[1])
-                        - signed_first_score(moving_tile, pst_read_data[0]))
-                    + ((is_ep || is_castle) ? PstEvalScore'(0)
-                        : -signed_first_score(destination_tile, pst_read_data[2]))
-                    + ((is_ep || is_castle)
-                        ? -signed_first_score(auxiliary_tile, pst_read_data[2])
-                        : PstEvalScore'(0))
-                    + (is_castle
-                        ? signed_first_score(Tile'({moved_color, ROOK}), pst_read_data[3])
-                        : PstEvalScore'(0));
-
-                replace_tile(out.board, out.piece_count,
-                    from_pos, moving_tile, EMPTY_TILE);
-                replace_tile(out.board, out.piece_count,
-                    to_pos, destination_tile, placed_tile);
+                plan_tile_write(0, from_pos, EMPTY_TILE);
+                plan_tile_write(1, to_pos, placed_tile);
 
                 if (is_ep) begin
-                    replace_tile(out.board, out.piece_count,
-                        ep_capture_pos, Tile'({Color'(~moved_color), PAWN}), EMPTY_TILE);
+                    plan_tile_write(2, ep_capture_pos, EMPTY_TILE);
                 end
 
                 if (is_castle) begin
                     automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                    replace_tile(out.board, out.piece_count,
-                        rook_from, rook_tile, EMPTY_TILE);
-                    replace_tile(out.board, out.piece_count,
-                        rook_to, EMPTY_TILE, rook_tile);
+                    plan_tile_write(2, rook_from, EMPTY_TILE);
+                    plan_tile_write(3, rook_to, rook_tile);
                 end
                 // A legal move changes occupancy only when it captures;
                 // castling moves its rook and promotion replaces its pawn.
@@ -954,53 +958,19 @@ module board_update_pipeline #(
                 automatic Position ep_capture_pos = effects.ep_capture_pos;
                 automatic Position rook_from = effects.rook_from;
                 automatic Position rook_to = effects.rook_to;
-                automatic PstEvalPair mover_delta =
-                    signed_piece_score(restored_mover, pst_source_out);
-                automatic PstEvalPair capture_delta = pair_sub(
-                    signed_piece_score(restored_capture,
-                        is_ep ? PstEvalPair'('0) : pst_captured_out),
-                    signed_piece_score(effects.destination_tile, pst_destination_out));
-                automatic PstEvalPair ep_restore_delta = is_ep
-                    ? signed_piece_score(Tile'({captured_color, PAWN}), pst_captured_out)
-                    : PstEvalPair'('0);
-                automatic PstEvalPair castle_rook_delta = is_castle
-                    ? pair_sub(signed_piece_score(Tile'({moved_color, ROOK}), pst_captured_out),
-                        signed_piece_score(Tile'({moved_color, ROOK}), pst_castle_out))
-                    : PstEvalPair'('0);
-
                 if (!is_null_record(rec)) begin
-                    out.pst_eval = pair_add(in.pst_eval,
-                        pair_add(pair_add(mover_delta, capture_delta),
-                                 pair_add(ep_restore_delta, castle_rook_delta)));
-                    out.pst_eval.first = in.pst_eval.first
-                        + signed_first_score(restored_mover, pst_read_data[0])
-                        + signed_first_score(restored_capture,
-                            is_ep ? PstScore'(0) : pst_read_data[2])
-                        - signed_first_score(effects.destination_tile, pst_read_data[1])
-                        + (is_ep
-                            ? signed_first_score(Tile'({captured_color, PAWN}), pst_read_data[2])
-                            : PstEvalScore'(0))
-                        + (is_castle
-                            ? signed_first_score(Tile'({moved_color, ROOK}), pst_read_data[2])
-                                - signed_first_score(Tile'({moved_color, ROOK}), pst_read_data[3])
-                            : PstEvalScore'(0));
-                    replace_tile(out.board, out.piece_count,
-                        from_pos, EMPTY_TILE, restored_mover);
-                    replace_tile(out.board, out.piece_count,
-                        to_pos, effects.destination_tile, restored_capture);
+                    plan_tile_write(0, from_pos, restored_mover);
+                    plan_tile_write(1, to_pos, restored_capture);
 
                     if (is_ep) begin
                         automatic Tile ep_tile = Tile'({captured_color, PAWN});
-                        replace_tile(out.board, out.piece_count,
-                            ep_capture_pos, EMPTY_TILE, ep_tile);
+                        plan_tile_write(2, ep_capture_pos, ep_tile);
                     end
 
                     if (is_castle) begin
                         automatic Tile rook_tile = Tile'({moved_color, ROOK});
-                        replace_tile(out.board, out.piece_count,
-                            rook_to, rook_tile, EMPTY_TILE);
-                        replace_tile(out.board, out.piece_count,
-                            rook_from, EMPTY_TILE, rook_tile);
+                        plan_tile_write(2, rook_to, EMPTY_TILE);
+                        plan_tile_write(3, rook_from, rook_tile);
                     end
                     // Reverse restores at most the one captured piece.
                     out.piece_count = in.piece_count + PieceCount'(
@@ -1034,14 +1004,10 @@ module board_update_pipeline #(
                 automatic Position to_pos = in.move.to_pos;
                 automatic Tile new_tile = Tile'(in.set_data[3:0]);
 
-                out.pst_eval = pair_add(in.pst_eval,
-                    pair_sub(signed_piece_score(new_tile, pst_destination_out),
-                             signed_piece_score(in.board.tiles[to_pos], pst_captured_out)));
-                out.pst_eval.first = in.pst_eval.first
-                    + signed_first_score(new_tile, pst_read_data[1])
-                    - signed_first_score(in.board.tiles[to_pos], pst_read_data[2]);
-                replace_tile(out.board, out.piece_count,
-                    to_pos, in.board.tiles[to_pos], new_tile);
+                plan_tile_write(1, to_pos, new_tile);
+                out.piece_count = in.piece_count
+                    + PieceCount'(new_tile.piece_type != NULL_PIECE)
+                    - PieceCount'(in.board.tiles[to_pos].piece_type != NULL_PIECE);
                 out.board.has_ep = zobrist_new_ep_valid_q;
             end
 
@@ -1070,6 +1036,21 @@ module board_update_pipeline #(
                 out.board_op = in.board_op;
             end
         endcase
+
+        // Decode each lane once per square, sharing the board mutation muxes
+        // between push, reversal, and setup. Later lanes retain write priority.
+        for (int pos = 0; pos < 64; pos++) begin
+            for (int lane = 0; lane < 4; lane++) begin
+                if (tile_write_enable[lane] && tile_write_position[lane] == Position'(pos))
+                    out.board.tiles[pos] = tile_write_data[lane];
+            end
+        end
+        // A king placement establishes the cached square; removing a king
+        // during setup leaves its cache intact until the replacement arrives.
+        for (int lane = 0; lane < 4; lane++) begin
+            if (tile_write_enable[lane] && tile_write_data[lane].piece_type == KING)
+                out.board.king_positions[tile_write_data[lane].piece_color] = tile_write_position[lane];
+        end
 
         move_record_in = out.move_record;
         move_record_wr_en = out.board_op == BOARD_PUSH_MOVE_OP
