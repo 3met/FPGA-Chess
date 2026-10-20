@@ -24,69 +24,47 @@ module engine_command_layer #(
     input logic search_req_ready,
     output EngineControllerRequest search_req,
     input logic search_resp_valid,
+    output logic search_resp_ready,
     input EngineControllerResponse search_resp,
     output logic [7:0] debug_stat_address,
     input logic [39:0] debug_stat_value
 );
 
-    localparam int SET_BOARD_PAYLOAD_BYTES = 36;
+    localparam logic [5:0] RESULT_BASE = 6'd48;
     localparam logic [31:0] BUILD_CLOCK_FREQ = CLOCK_FREQ;
     localparam logic [7:0] BUILD_THREAD_COUNT = 8'(SEARCH_THREAD_COUNT);
     localparam logic [7:0] BUILD_SEARCH_STACK_DEPTH = 8'(SEARCH_STACK_DEPTH);
 
     typedef enum logic [2:0] {
-        RESP_NONE,
-        RESP_STATUS,
-        RESP_ACK,
-        RESP_SEARCH,
-        RESP_PERFT,
-        RESP_DEBUG,
-        RESP_ERROR,
-        RESP_BUILD_INFO
+        RESP_NONE, RESP_STATUS, RESP_ACK, RESP_SEARCH, RESP_PERFT,
+        RESP_DEBUG, RESP_ERROR, RESP_BUILD_INFO
     } ResponseKind;
 
     EngineState state;
-    ResponseKind response_kind;
+    ResponseKind response_kind, request_response_kind;
     logic [3:0] response_index;
     logic [3:0] response_status;
-    logic [2:0] response_error;
-    logic [7:0] response_active_op;
-    logic [2:0] error_code;
-
-    logic [7:0] curr_opcode;
+    logic [2:0] response_error, error_code;
+    logic [7:0] response_active_op, active_operation, curr_opcode;
     logic [5:0] payload_count;
-    logic payload_error;
-    logic [7:0] payload [0:SET_BOARD_PAYLOAD_BYTES-1];
-
+    logic payload_error, search_active, result_valid, result_error;
     logic [6:0] board_update_index;
-    EngineControllerRequest request_reg;
-    ResponseKind request_response_kind;
-    logic request_waits_for_result;
-    logic request_clears_error;
-    logic board_update_request_inflight;
-    logic search_active;
-    logic [7:0] active_operation;
-
-    Move last_move;
-    Move last_ponder_move;
-    EvalScore last_score;
-    NodeCountType last_node_count;
-    logic [7:0] last_completed_depth;
-    logic [2:0] last_end_reason;
     logic [7:0] debug_stat_address_reg;
+    // All scalar commands share the largest wire payload, rather than a full request register.
+    logic [87:0] operands;
+
+    // A single synchronous byte port serves command staging and the persistent result cache.
+    // Memory contents are never reset; control state guards unwritten command/result bytes.
+    logic [7:0] scratch [0:63];
+    logic [5:0] ram_address;
+    logic ram_read, ram_write;
+    logic [7:0] ram_data, ram_q;
+    always_ff @(posedge clk) begin
+        if (ram_write) scratch[ram_address] <= ram_data;
+        if (ram_read) ram_q <= scratch[ram_address];
+    end
 
     assign debug_stat_address = debug_stat_address_reg;
-
-    // The protocol reserves the upper status bits as zero, so store only its live bits.
-    function automatic logic [3:0] status_byte(
-        input logic ready_bit,
-        input logic search_bit,
-        input logic output_pending_bit,
-        input logic error_bit
-    );
-        return {error_bit, output_pending_bit, search_bit, ready_bit};
-    endfunction : status_byte
-
     function automatic logic command_known(input logic [7:0] opcode);
         // Command opcodes are distinct; default retains handling of other bytes.
         unique case (opcode)
@@ -181,517 +159,352 @@ module engine_command_layer #(
         endcase
     endfunction : payload_byte_invalid
 
-    function automatic TimeType decode_time(input int start_idx);
-        return TimeType'({payload[start_idx + 2], payload[start_idx + 1], payload[start_idx]});
-    endfunction : decode_time
-
-    function automatic NodeCountType decode_node_count();
-        return NodeCountType'({payload[4], payload[3], payload[2], payload[1], payload[0]});
-    endfunction : decode_node_count
-
-    function automatic Move decode_move();
-        automatic Move move;
-
-        move.from_pos = payload[1][5:0];
-        move.to_pos = payload[0][7:2];
-        move.promo_piece = PromoType'(payload[0][1:0]);
-        return move;
-    endfunction : decode_move
-
-    function automatic EngineControllerRequest zero_request();
-        automatic EngineControllerRequest req;
-
-        req = EngineControllerRequest'('0);
-        req.operation = ENGINE_CTRL_IDLE;
-        req.board_op = BOARD_IDLE_OP;
-        return req;
-    endfunction : zero_request
-
-    function automatic EngineControllerRequest set_board_request(input logic [6:0] idx);
-        automatic EngineControllerRequest req;
-        automatic logic [7:0] tile_byte;
-
-        req = zero_request();
-        req.operation = ENGINE_CTRL_BOARD_UPDATE;
-        req.move = Move'('0);
-
-        // Tile indices and the three explicit metadata indices are disjoint.
-        unique case (1'b1)
-            (idx < 7'd64): begin
-                tile_byte = payload[idx[6:1]];
-                req.board_op = BOARD_SET_TILE_OP;
-                req.move.to_pos = Position'(idx[5:0]);
-                req.board_wr_data = idx[0] ? {3'b000, tile_byte[7:4]} : {3'b000, tile_byte[3:0]};
-            end
-            (idx == 7'd64): begin
-                req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
-                req.board_wr_data = {3'b000, payload[32][3:0]};
-            end
-            (idx == 7'd65): begin
-                req.board_op = BOARD_SET_TURN_OP;
-                req.board_wr_data = {6'b000000, payload[34][0]};
-            end
-            (idx == 7'd66): begin
-                req.board_op = BOARD_SET_EN_PASSANT_OP;
-                req.board_wr_data = {3'b000, payload[33][3:0]};
-            end
-            default: begin
-                req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
-                req.board_wr_data = payload[35][6:0];
-            end
+    // Encode directly from the controller's held completion; no duplicate result register bank.
+    function automatic logic [7:0] result_byte(input logic [3:0] index);
+        unique case (index)
+            4'd1: return {search_resp.best_move.to_pos,
+                (search_resp.best_move.from_pos == Position'(0) && search_resp.best_move.to_pos == Position'(0))
+                    ? 2'b00 : search_resp.best_move.promo_piece};
+            4'd2: return {2'b00, search_resp.best_move.from_pos};
+            4'd3: return search_resp.score[7:0];
+            4'd4: return 8'($signed(search_resp.score) >>> 8);
+            4'd5: return search_resp.nodes_count[7:0];
+            4'd6: return search_resp.nodes_count[15:8];
+            4'd7: return search_resp.nodes_count[23:16];
+            4'd8: return search_resp.nodes_count[31:24];
+            4'd9: return search_resp.nodes_count[39:32];
+            4'd10: return search_resp.completed_depth;
+            4'd11: return {5'b0, search_resp.end_reason[2:0]};
+            4'd12: return {search_resp.ponder_move.to_pos,
+                (search_resp.ponder_move.from_pos == Position'(0) && search_resp.ponder_move.to_pos == Position'(0))
+                    ? 2'b00 : search_resp.ponder_move.promo_piece};
+            4'd13: return {2'b00, search_resp.ponder_move.from_pos};
+            default: return '0;
         endcase
+    endfunction : result_byte
 
-        return req;
-    endfunction : set_board_request
-
+    // The FSM makes RAM users mutually exclusive, including cached-result output reads.
     always_comb begin
-        search_req_valid = (state == CMD_BOARD_UPDATE && !board_update_request_inflight) || (state == CMD_ISSUE_REQUEST) || (state == CMD_ISSUE_KILL);
-        // The request payload is irrelevant until valid; avoid preserving an idle mux value.
-        search_req = 'x;
-        if (state == CMD_BOARD_UPDATE && !board_update_request_inflight) begin
-            search_req = set_board_request(board_update_index);
-        end else if (state == CMD_ISSUE_REQUEST || state == CMD_ISSUE_KILL) begin
-            search_req = request_reg;
-        end
+        ram_address = payload_count;
+        ram_read = 1'b0;
+        ram_write = 1'b0;
+        ram_data = data_in;
+        unique case (state)
+            CMD_RECEIVE_PAYLOAD: ram_write = data_in_valid;
+            CMD_LOAD_READ: ram_read = 1'b1;
+            CMD_BOARD_READ: begin
+                ram_read = 1'b1;
+                if (board_update_index < 7'd64) ram_address = board_update_index[6:1];
+                else unique case (board_update_index[1:0])
+                    2'd0: ram_address = 6'd32;
+                    2'd1: ram_address = 6'd34;
+                    2'd2: ram_address = 6'd33;
+                    2'd3: ram_address = 6'd35;
+                endcase
+            end
+            CMD_CACHE_RESULT: begin
+                ram_address = RESULT_BASE + {2'b0, response_index} - 6'd1;
+                ram_data = result_byte(response_index);
+                ram_write = search_resp_valid;
+            end
+            CMD_OUTPUT_READ: begin
+                ram_read = 1'b1;
+                ram_address = RESULT_BASE + {2'b0, response_index} - 6'd1;
+                if (response_kind == RESP_PERFT) ram_address = ram_address + 6'd4;
+            end
+            default: begin end
+        endcase
     end
 
-    assign ready = (state == CMD_IDLE) || (state == CMD_RECEIVE_PAYLOAD) || (state == CMD_WAIT_RESULT);
-    assign data_out_valid = (state == CMD_OUTPUT) && ready_for_result;
-    assign error_flag = error_code != '0;
-
+    // Expand shared wire-format operands only at the controller boundary.
     always_comb begin
-        // data_out is only meaningful while data_out_valid is asserted.
-        data_out = 'x;
-        if (response_index == 4'd0) begin
-            data_out = response_type_for(response_kind);
-        end else begin
-            // Response kinds have distinct encodings.
-            unique case (response_kind)
-                RESP_STATUS: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1: data_out = {4'b0000, response_status};
-                        5'd2: data_out = {5'b00000, response_error};
-                        5'd3: data_out = response_active_op;
-                        default: data_out = 'x;
-                    endcase
+        search_req = '0;
+        search_req.operation = ENGINE_CTRL_IDLE;
+        search_req.board_op = BOARD_IDLE_OP;
+        search_req_valid = 1'b0;
+        if (state == CMD_BOARD_UPDATE) begin
+            search_req_valid = 1'b1;
+            search_req.operation = ENGINE_CTRL_BOARD_UPDATE;
+            if (board_update_index < 7'd64) begin
+                search_req.board_op = BOARD_SET_TILE_OP;
+                search_req.move.to_pos = Position'(board_update_index[5:0]);
+                search_req.board_wr_data = {3'b0, board_update_index[0] ? ram_q[7:4] : ram_q[3:0]};
+            end else unique case (board_update_index[1:0])
+                2'd0: begin
+                    search_req.board_op = BOARD_SET_CASTLING_RIGHTS_OP;
+                    search_req.board_wr_data = {3'b0, ram_q[3:0]};
                 end
-
-                RESP_ACK: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1: data_out = {4'b0000, response_status};
-                        default: data_out = 'x;
-                    endcase
+                2'd1: begin
+                    search_req.board_op = BOARD_SET_TURN_OP;
+                    search_req.board_wr_data = {6'b0, ram_q[0]};
                 end
-
-                RESP_SEARCH: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1:  data_out = {
-                            last_move.to_pos,
-                            (last_move.from_pos == Position'(0) && last_move.to_pos == Position'(0))
-                                ? 2'b00 : last_move.promo_piece
-                        };
-                        5'd2:  data_out = {2'b00, last_move.from_pos};
-                        5'd3:  data_out = last_score[7:0];
-                        5'd4:  data_out = 8'($signed(last_score) >>> 8);
-                        5'd5:  data_out = last_node_count[7:0];
-                        5'd6:  data_out = last_node_count[15:8];
-                        5'd7:  data_out = last_node_count[23:16];
-                        5'd8:  data_out = last_node_count[31:24];
-                        5'd9:  data_out = last_node_count[39:32];
-                        5'd10: data_out = last_completed_depth;
-                        5'd11: data_out = last_end_reason;
-                        5'd12: data_out = {
-                            last_ponder_move.to_pos,
-                            (last_ponder_move.from_pos == Position'(0)
-                                && last_ponder_move.to_pos == Position'(0))
-                                ? 2'b00 : last_ponder_move.promo_piece
-                        };
-                        5'd13: data_out = {2'b00, last_ponder_move.from_pos};
-                        default: data_out = 'x;
-                    endcase
+                2'd2: begin
+                    search_req.board_op = BOARD_SET_EN_PASSANT_OP;
+                    search_req.board_wr_data = {3'b0, ram_q[3:0]};
                 end
-
-                RESP_PERFT: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1: data_out = last_node_count[7:0];
-                        5'd2: data_out = last_node_count[15:8];
-                        5'd3: data_out = last_node_count[23:16];
-                        5'd4: data_out = last_node_count[31:24];
-                        5'd5: data_out = last_node_count[39:32];
-                        5'd6: data_out = last_completed_depth;
-                        default: data_out = 'x;
-                    endcase
+                2'd3: begin
+                    search_req.board_op = BOARD_SET_HALFMOVE_CLOCK_OP;
+                    search_req.board_wr_data = ram_q[6:0];
                 end
-
-                RESP_DEBUG: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1: data_out = debug_stat_address_reg;
-                        5'd2: data_out = debug_stat_value[7:0];
-                        5'd3: data_out = debug_stat_value[15:8];
-                        5'd4: data_out = debug_stat_value[23:16];
-                        5'd5: data_out = debug_stat_value[31:24];
-                        5'd6: data_out = debug_stat_value[39:32];
-                        default: data_out = 'x;
-                    endcase
+            endcase
+        end else if (state == CMD_ISSUE_KILL) begin
+            // A completion that wins the stop race is already held for us to consume.
+            search_req_valid = !search_resp_valid;
+            search_req.operation = ENGINE_CTRL_KILL;
+        end else if (state == CMD_ISSUE_REQUEST) begin
+            search_req_valid = 1'b1;
+            unique case (curr_opcode)
+                ENGINE_CMD_NEW_GAME: search_req.operation = ENGINE_CTRL_NEW_GAME;
+                ENGINE_CMD_MAKE_MOVE: begin
+                    search_req.operation = ENGINE_CTRL_BOARD_UPDATE;
+                    search_req.board_op = BOARD_COMMIT_MOVE_OP;
+                    search_req.move = Move'({operands[13:8], operands[7:2], operands[1:0]});
                 end
-
-                RESP_ERROR: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1: data_out = {5'b00000, response_error};
-                        5'd2: data_out = {4'b0000, response_status};
-                        default: data_out = 'x;
-                    endcase
+                ENGINE_CMD_SEARCH_DEPTH, ENGINE_CMD_PERFT: begin
+                    search_req.operation = curr_opcode == ENGINE_CMD_PERFT ? ENGINE_CTRL_PERFT : ENGINE_CTRL_SEARCH_DEPTH;
+                    search_req.depth_limit = operands[7:0];
                 end
-
-                // Build metadata is constant-folded from engine parameters and needs no storage RAM.
-                RESP_BUILD_INFO: begin
-                    // Explicit byte indices are distinct; default retains unused-index behavior.
-                    unique case (response_index)
-                        5'd1:  data_out = BUILD_ID[7:0];
-                        5'd2:  data_out = BUILD_ID[15:8];
-                        5'd3:  data_out = BUILD_ID[23:16];
-                        5'd4:  data_out = BUILD_ID[31:24];
-                        5'd5:  data_out = BUILD_ID[39:32];
-                        5'd6:  data_out = BUILD_ID[47:40];
-                        5'd7:  data_out = BUILD_ID[55:48];
-                        5'd8:  data_out = BUILD_ID[63:56];
-                        5'd9:  data_out = BUILD_THREAD_COUNT;
-                        5'd10: data_out = BUILD_CLOCK_FREQ[7:0];
-                        5'd11: data_out = BUILD_CLOCK_FREQ[15:8];
-                        5'd12: data_out = BUILD_CLOCK_FREQ[23:16];
-                        5'd13: data_out = BUILD_CLOCK_FREQ[31:24];
-                        5'd14: data_out = BUILD_SEARCH_STACK_DEPTH;
-                        default: data_out = 'x;
-                    endcase
+                ENGINE_CMD_SEARCH_FIXED_TIME: begin
+                    search_req.operation = ENGINE_CTRL_SEARCH_FIXED_TIME;
+                    search_req.time_limit = operands[23:0];
+                    search_req.move_overhead = operands[47:24];
                 end
-
-                default: data_out = 'x;
+                ENGINE_CMD_SEARCH_ON_CLOCK: begin
+                    search_req.operation = ENGINE_CTRL_SEARCH_ON_CLOCK;
+                    search_req.remaining_time = operands[23:0];
+                    search_req.increment = operands[47:24];
+                    search_req.moves_to_go = operands[63:48];
+                    search_req.move_overhead = operands[87:64];
+                end
+                ENGINE_CMD_SEARCH_NODES: begin
+                    search_req.operation = ENGINE_CTRL_SEARCH_NODES;
+                    search_req.node_limit = operands[39:0];
+                end
+                default: begin end
             endcase
         end
     end
 
-    task automatic start_response(
-        input ResponseKind kind,
-        input logic [2:0] err,
-        input logic ready_bit,
-        input logic search_bit
-    );
+    assign ready = state == CMD_IDLE || state == CMD_RECEIVE_PAYLOAD || state == CMD_WAIT_RESULT;
+    assign data_out_valid = state == CMD_OUTPUT && ready_for_result;
+    assign error_flag = error_code != '0;
+    // Hold live search results for caching. Drain abandoned completions in all other states
+    // so a protocol error cannot leave a later command waiting behind an unaccepted response.
+    always_comb begin
+        search_resp_ready = 1'b1;
+        if (state == CMD_WAIT_RESULT && search_active && !search_resp.error)
+            search_resp_ready = 1'b0;
+        if (state == CMD_CACHE_RESULT) search_resp_ready = response_index == 4'd13;
+        if (state == CMD_ISSUE_KILL) search_resp_ready = 1'b0;
+    end
+
+    // Cache reads and constant/status responses share the same byte-at-a-time transmitter.
+    always_comb begin
+        data_out = 'x;
+        if (response_index == 4'd0) data_out = response_type_for(response_kind);
+        else unique case (response_kind)
+            RESP_STATUS: unique case (response_index)
+                4'd1: data_out = {4'b0, response_status};
+                4'd2: data_out = {5'b0, response_error};
+                4'd3: data_out = response_active_op;
+                default: data_out = 'x;
+            endcase
+            RESP_ACK: data_out = {4'b0, response_status};
+            RESP_ERROR: data_out = response_index == 4'd1 ? {5'b0, response_error} : {4'b0, response_status};
+            RESP_SEARCH, RESP_PERFT: begin
+                data_out = result_valid ? ram_q : 8'd0;
+                if (response_kind == RESP_SEARCH && response_index == 4'd11 && result_error)
+                    data_out = ENGINE_END_ERROR;
+            end
+            RESP_DEBUG: unique case (response_index)
+                4'd1: data_out = debug_stat_address_reg;
+                4'd2: data_out = debug_stat_value[7:0];
+                4'd3: data_out = debug_stat_value[15:8];
+                4'd4: data_out = debug_stat_value[23:16];
+                4'd5: data_out = debug_stat_value[31:24];
+                4'd6: data_out = debug_stat_value[39:32];
+                default: data_out = 'x;
+            endcase
+            RESP_BUILD_INFO: begin
+                // Explicit byte indices are distinct; default retains unused-index behavior.
+                unique case (response_index)
+                    4'd1:  data_out = BUILD_ID[7:0];
+                    4'd2:  data_out = BUILD_ID[15:8];
+                    4'd3:  data_out = BUILD_ID[23:16];
+                    4'd4:  data_out = BUILD_ID[31:24];
+                    4'd5:  data_out = BUILD_ID[39:32];
+                    4'd6:  data_out = BUILD_ID[47:40];
+                    4'd7:  data_out = BUILD_ID[55:48];
+                    4'd8:  data_out = BUILD_ID[63:56];
+                    4'd9:  data_out = BUILD_THREAD_COUNT;
+                    4'd10: data_out = BUILD_CLOCK_FREQ[7:0];
+                    4'd11: data_out = BUILD_CLOCK_FREQ[15:8];
+                    4'd12: data_out = BUILD_CLOCK_FREQ[23:16];
+                    4'd13: data_out = BUILD_CLOCK_FREQ[31:24];
+                    4'd14: data_out = BUILD_SEARCH_STACK_DEPTH;
+                    default: data_out = 'x;
+                endcase
+            end
+
+            default: data_out = 'x;
+        endcase
+    end
+
+    // Snapshot only response control; data lives in RAM or the held controller completion.
+    task automatic start_response(input ResponseKind kind, input logic [2:0] err, input logic searching);
         response_kind <= kind;
         response_index <= 4'd0;
         response_error <= err;
-        response_active_op <= search_bit ? active_operation : 8'h00;
-        response_status <= status_byte(ready_bit, search_bit, 1'b0, err != ENGINE_ERR_NONE);
-        state <= CMD_OUTPUT;
+        response_active_op <= searching ? active_operation : 8'd0;
+        response_status <= {err != 3'd0, 1'b0, searching, 1'b1};
+        state <= CMD_OUTPUT_READ;
     endtask : start_response
 
-    task automatic latch_error(input logic [2:0] err);
-        error_code <= err;
-        active_operation <= 8'h00;
+    // Protocol errors leave the last completed search cache intact.
+    task automatic latch_error(input logic [7:0] err);
+        error_code <= err[2:0];
+        active_operation <= 8'd0;
         search_active <= 1'b0;
-        start_response(RESP_ERROR, err, 1'b1, 1'b0);
+        start_response(RESP_ERROR, err[2:0], 1'b0);
     endtask : latch_error
 
-    task automatic issue_single_request(
-        input EngineControllerRequest req,
-        input ResponseKind response_after_accept,
-        input logic waits_for_result,
-        input logic clears_error
-    );
-        request_reg <= req;
-        request_response_kind <= response_after_accept;
-        request_waits_for_result <= waits_for_result;
-        request_clears_error <= clears_error;
-        state <= CMD_ISSUE_REQUEST;
-    endtask : issue_single_request
-
-    task automatic issue_kill_request();
-        automatic EngineControllerRequest req;
-
-        req = zero_request();
-        req.operation = ENGINE_CTRL_KILL;
-        request_reg <= req;
-        request_response_kind <= RESP_STATUS;
-        request_waits_for_result <= 1'b0;
-        request_clears_error <= 1'b0;
-        state <= CMD_ISSUE_KILL;
-    endtask : issue_kill_request
-
-    task automatic process_no_payload_command(input logic [7:0] opcode);
-        automatic EngineControllerRequest req;
-
-        req = zero_request();
-        // Command opcodes are distinct; default retains handling of other bytes.
-        unique case (opcode)
-            ENGINE_CMD_GET_STATUS: begin
-                start_response(RESP_STATUS, error_code, 1'b1, search_active);
-            end
-
-            ENGINE_CMD_NEW_GAME: begin
-                active_operation <= ENGINE_CMD_NEW_GAME;
-                req.operation = ENGINE_CTRL_NEW_GAME;
-                issue_single_request(req, RESP_ACK, 1'b0, 1'b1);
-            end
-
-            ENGINE_CMD_KILL: begin
-                // A late or repeated host stop may arrive after the search
-                // response completed. Ignore it so no stale Status packet can
-                // be mistaken for the next synchronous command's response.
-                active_operation <= 8'h00;
-            end
-
-            ENGINE_CMD_GET_SEARCH_RESULT: begin
-                active_operation <= ENGINE_CMD_GET_SEARCH_RESULT;
-                start_response(RESP_SEARCH, error_code, 1'b1, 1'b0);
-            end
-
-            ENGINE_CMD_GET_BUILD_INFO: begin
-                active_operation <= ENGINE_CMD_GET_BUILD_INFO;
-                start_response(RESP_BUILD_INFO, error_code, 1'b1, 1'b0);
-            end
-
-            default: begin
-                latch_error(ENGINE_ERR_UNKNOWN_OPCODE);
-            end
-        endcase
-    endtask : process_no_payload_command
-
-    task automatic process_payload_command();
-        automatic EngineControllerRequest req;
-
-        req = zero_request();
-        if (payload_error) begin
-            latch_error(ENGINE_ERR_MALFORMED_PAYLOAD);
-        end else begin
-            // Command opcodes are distinct; default retains handling of other bytes.
-            unique case (curr_opcode)
-                ENGINE_CMD_SET_BOARD: begin
-                    active_operation <= ENGINE_CMD_SET_BOARD;
-                    board_update_index <= 7'd0;
-                    board_update_request_inflight <= 1'b0;
-                    state <= CMD_BOARD_UPDATE;
-                end
-
-                ENGINE_CMD_MAKE_MOVE: begin
-                    active_operation <= ENGINE_CMD_MAKE_MOVE;
-                    req.operation = ENGINE_CTRL_BOARD_UPDATE;
-                    req.board_op = BOARD_COMMIT_MOVE_OP;
-                    req.move = decode_move();
-                    issue_single_request(req, RESP_ACK, 1'b0, 1'b0);
-                end
-
-                ENGINE_CMD_SEARCH_DEPTH: begin
-                    active_operation <= ENGINE_CMD_SEARCH_DEPTH;
-                    req.operation = ENGINE_CTRL_SEARCH_DEPTH;
-                    req.depth_limit = payload[0];
-                    issue_single_request(req, RESP_SEARCH, 1'b1, 1'b0);
-                end
-
-                ENGINE_CMD_SEARCH_FIXED_TIME: begin
-                    active_operation <= ENGINE_CMD_SEARCH_FIXED_TIME;
-                    req.operation = ENGINE_CTRL_SEARCH_FIXED_TIME;
-                    req.time_limit = decode_time(0);
-                    req.move_overhead = decode_time(3);
-                    issue_single_request(req, RESP_SEARCH, 1'b1, 1'b0);
-                end
-
-                ENGINE_CMD_SEARCH_ON_CLOCK: begin
-                    active_operation <= ENGINE_CMD_SEARCH_ON_CLOCK;
-                    req.operation = ENGINE_CTRL_SEARCH_ON_CLOCK;
-                    req.remaining_time = decode_time(0);
-                    req.increment = decode_time(3);
-                    req.moves_to_go = {payload[7], payload[6]};
-                    req.move_overhead = decode_time(8);
-                    issue_single_request(req, RESP_SEARCH, 1'b1, 1'b0);
-                end
-
-                ENGINE_CMD_SEARCH_NODES: begin
-                    active_operation <= ENGINE_CMD_SEARCH_NODES;
-                    req.operation = ENGINE_CTRL_SEARCH_NODES;
-                    req.node_limit = decode_node_count();
-                    issue_single_request(req, RESP_SEARCH, 1'b1, 1'b0);
-                end
-
-                ENGINE_CMD_PERFT: begin
-                    active_operation <= ENGINE_CMD_PERFT;
-                    req.operation = ENGINE_CTRL_PERFT;
-                    req.depth_limit = payload[0];
-                    issue_single_request(req, RESP_PERFT, 1'b1, 1'b0);
-                end
-
-                ENGINE_CMD_GET_DEBUG_STAT: begin
-                    debug_stat_address_reg <= payload[0];
-                    start_response(RESP_DEBUG, error_code, 1'b1, 1'b0);
-                end
-
-                default: begin
-                    latch_error(ENGINE_ERR_UNKNOWN_OPCODE);
-                end
-            endcase
+    // Advance a board replay only after the individual controller operation completes.
+    task automatic finish_board_update();
+        if (search_resp.error) latch_error(ENGINE_ERR_INTERNAL);
+        else if (board_update_index == 7'd67) start_response(RESP_ACK, error_code, 1'b0);
+        else begin
+            board_update_index <= board_update_index + 7'd1;
+            state <= CMD_BOARD_READ;
         end
-    endtask : process_payload_command
+    endtask : finish_board_update
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             state <= CMD_IDLE;
             response_kind <= RESP_NONE;
-            response_index <= 4'd0;
-            response_status <= 4'h0;
-            response_error <= ENGINE_ERR_NONE[2:0];
-            response_active_op <= 8'h00;
-            error_code <= ENGINE_ERR_NONE[2:0];
-            curr_opcode <= 8'h00;
-            payload_count <= 6'd0;
-            payload_error <= 1'b0;
-            board_update_index <= 7'd0;
-            request_reg <= zero_request();
             request_response_kind <= RESP_NONE;
-            request_waits_for_result <= 1'b0;
-            request_clears_error <= 1'b0;
-            board_update_request_inflight <= 1'b0;
+            response_index <= '0;
+            response_status <= '0;
+            response_error <= '0;
+            response_active_op <= '0;
+            error_code <= '0;
+            active_operation <= '0;
+            curr_opcode <= '0;
+            payload_count <= '0;
+            payload_error <= 1'b0;
             search_active <= 1'b0;
-            active_operation <= 8'h00;
-            last_move <= Move'('0);
-            last_ponder_move <= Move'('0);
-            last_score <= EvalScore'(0);
-            last_node_count <= NodeCountType'(0);
-            last_completed_depth <= 8'd0;
-            last_end_reason <= ENGINE_END_NORMAL[2:0];
-            debug_stat_address_reg <= 8'd0;
-        end else begin
-            // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
-            unique case (state)
-                CMD_IDLE: begin
-                    response_kind <= RESP_NONE;
-                    response_index <= 4'd0;
-                    active_operation <= 8'h00;
-                    if (data_in_valid) begin
-                        if (!command_known(data_in)) begin
-                            latch_error(ENGINE_ERR_UNKNOWN_OPCODE);
-                        end else if (payload_len(data_in) != 6'd0) begin
-                            curr_opcode <= data_in;
-                            payload_count <= 6'd0;
-                            payload_error <= 1'b0;
-                            active_operation <= data_in;
-                            state <= CMD_RECEIVE_PAYLOAD;
-                        end else begin
-                            process_no_payload_command(data_in);
+            result_valid <= 1'b0;
+            result_error <= 1'b0;
+            board_update_index <= '0;
+            debug_stat_address_reg <= '0;
+        end else unique case (state)
+            CMD_IDLE: begin
+                active_operation <= 8'd0;
+                if (data_in_valid) begin
+                    curr_opcode <= data_in;
+                    if (!command_known(data_in)) latch_error(ENGINE_ERR_UNKNOWN_OPCODE);
+                    else if (payload_len(data_in) != 0) begin
+                        payload_count <= 6'd0;
+                        payload_error <= 1'b0;
+                        active_operation <= data_in;
+                        state <= CMD_RECEIVE_PAYLOAD;
+                    end else unique case (data_in)
+                        ENGINE_CMD_GET_STATUS: start_response(RESP_STATUS, error_code, 1'b0);
+                        ENGINE_CMD_GET_SEARCH_RESULT: start_response(RESP_SEARCH, error_code, 1'b0);
+                        ENGINE_CMD_GET_BUILD_INFO: start_response(RESP_BUILD_INFO, error_code, 1'b0);
+                        ENGINE_CMD_NEW_GAME: begin
+                            request_response_kind <= RESP_ACK;
+                            state <= CMD_ISSUE_REQUEST;
                         end
+                        ENGINE_CMD_KILL: begin end
+                        default: latch_error(ENGINE_ERR_UNKNOWN_OPCODE);
+                    endcase
+                end
+            end
+            CMD_RECEIVE_PAYLOAD: if (data_in_valid) begin
+                payload_error <= payload_error || payload_byte_invalid(curr_opcode, payload_count, data_in);
+                if (payload_count == payload_len(curr_opcode) - 6'd1) state <= CMD_PROCESS_PAYLOAD;
+                else payload_count <= payload_count + 6'd1;
+            end
+            CMD_PROCESS_PAYLOAD: begin
+                if (payload_error) latch_error(ENGINE_ERR_MALFORMED_PAYLOAD);
+                else if (curr_opcode == ENGINE_CMD_SET_BOARD) begin
+                    board_update_index <= 7'd0;
+                    state <= CMD_BOARD_READ;
+                end else begin
+                    // Read all operand lanes in a fixed sequence; unused lanes are ignored by the opcode.
+                    payload_count <= 6'd0;
+                    state <= CMD_LOAD_READ;
+                end
+            end
+            CMD_LOAD_READ: state <= CMD_LOAD_LATCH;
+            CMD_LOAD_LATCH: begin
+                operands <= {ram_q, operands[87:8]};
+                if (payload_count == 6'd10) begin
+                    if (curr_opcode == ENGINE_CMD_GET_DEBUG_STAT) begin
+                        // Byte zero is the final low byte after this last shift.
+                        debug_stat_address_reg <= operands[15:8];
+                        start_response(RESP_DEBUG, error_code, 1'b0);
+                    end else begin
+                        request_response_kind <= curr_opcode == ENGINE_CMD_MAKE_MOVE ? RESP_ACK
+                            : curr_opcode == ENGINE_CMD_PERFT ? RESP_PERFT : RESP_SEARCH;
+                        state <= CMD_ISSUE_REQUEST;
                     end
+                end else begin
+                    payload_count <= payload_count + 6'd1;
+                    state <= CMD_LOAD_READ;
                 end
-
-                CMD_RECEIVE_PAYLOAD: begin
-                    if (data_in_valid) begin
-                        payload[payload_count] <= data_in;
-                        payload_error <= payload_error || payload_byte_invalid(curr_opcode, payload_count, data_in);
-                        if (payload_count == payload_len(curr_opcode) - 6'd1) begin
-                            state <= CMD_PROCESS_PAYLOAD;
-                        end else begin
-                            payload_count <= payload_count + 6'd1;
-                        end
-                    end
+            end
+            CMD_BOARD_READ: state <= CMD_BOARD_UPDATE;
+            CMD_BOARD_UPDATE: if (search_req_ready) begin
+                if (search_resp_valid) finish_board_update();
+                else state <= CMD_BOARD_WAIT;
+            end
+            CMD_BOARD_WAIT: if (search_resp_valid) finish_board_update();
+            CMD_ISSUE_REQUEST: if (search_req_ready) begin
+                search_active <= request_response_kind == RESP_SEARCH || request_response_kind == RESP_PERFT;
+                if (curr_opcode == ENGINE_CMD_NEW_GAME) begin
+                    error_code <= '0;
+                    result_valid <= 1'b0;
+                    result_error <= 1'b0;
                 end
-
-                CMD_PROCESS_PAYLOAD: begin
-                    process_payload_command();
+                state <= CMD_WAIT_RESULT;
+            end
+            CMD_WAIT_RESULT: begin
+                if (data_in_valid && !(search_active && data_in == ENGINE_CMD_KILL))
+                    latch_error(ENGINE_ERR_MALFORMED_PAYLOAD);
+                else if (search_resp_valid) begin
+                    if (search_resp.error) begin
+                        result_error <= 1'b1;
+                        latch_error(ENGINE_ERR_INTERNAL);
+                    end else if (search_active) begin
+                        if (data_in_valid) request_response_kind <= RESP_STATUS;
+                        response_index <= 4'd1;
+                        state <= CMD_CACHE_RESULT;
+                    end else start_response(request_response_kind, error_code, 1'b0);
+                end else if (data_in_valid) begin
+                    request_response_kind <= RESP_STATUS;
+                    state <= CMD_ISSUE_KILL;
                 end
-
-                CMD_BOARD_UPDATE: begin
-                    if (!board_update_request_inflight && search_req_ready && !search_resp_valid) begin
-                        board_update_request_inflight <= 1'b1;
-                    end else if ((board_update_request_inflight && search_resp_valid)
-                            || (!board_update_request_inflight && search_req_ready && search_resp_valid)) begin
-                        board_update_request_inflight <= 1'b0;
-                        if (search_resp_valid && search_resp.error) begin
-                            error_code <= ENGINE_ERR_INTERNAL[2:0];
-                            active_operation <= 8'h00;
-                            start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
-                        end else if (board_update_index == 7'd67) begin
-                            active_operation <= 8'h00;
-                            start_response(RESP_ACK, error_code, 1'b1, 1'b0);
-                        end else begin
-                            board_update_index <= board_update_index + 7'd1;
-                        end
-                    end
+            end
+            CMD_ISSUE_KILL: if (search_req_ready || search_resp_valid) state <= CMD_WAIT_RESULT;
+            CMD_CACHE_RESULT: if (search_resp_valid) begin
+                if (response_index == 4'd13) begin
+                    result_valid <= 1'b1;
+                    result_error <= 1'b0;
+                    search_active <= 1'b0;
+                    start_response(request_response_kind, error_code, 1'b0);
+                end else response_index <= response_index + 4'd1;
+            end
+            CMD_OUTPUT_READ: state <= CMD_OUTPUT;
+            CMD_OUTPUT: if (ready_for_result) begin
+                if (response_index == response_len(response_kind) - 4'd1) state <= CMD_IDLE;
+                else begin
+                    response_index <= response_index + 4'd1;
+                    state <= CMD_OUTPUT_READ;
                 end
-
-                CMD_ISSUE_REQUEST: begin
-                    if (search_req_ready) begin
-                        if (request_clears_error) begin
-                            error_code <= ENGINE_ERR_NONE[2:0];
-                            last_move <= Move'('0);
-                            last_ponder_move <= Move'('0);
-                            last_score <= EvalScore'(0);
-                            last_node_count <= NodeCountType'(0);
-                            last_completed_depth <= 8'd0;
-                            last_end_reason <= ENGINE_END_NORMAL[2:0];
-                        end
-
-                        search_active <= request_waits_for_result;
-                        state <= CMD_WAIT_RESULT;
-                    end
-                end
-
-                CMD_WAIT_RESULT: begin
-                    if (data_in_valid) begin
-                        if (search_active && data_in == ENGINE_CMD_KILL) begin
-                            issue_kill_request();
-                        end else begin
-                            latch_error(ENGINE_ERR_MALFORMED_PAYLOAD);
-                        end
-                    end else if (search_resp_valid) begin
-                        search_active <= 1'b0;
-                        active_operation <= 8'h00;
-                        if (search_resp.error) begin
-                            error_code <= ENGINE_ERR_INTERNAL[2:0];
-                            last_end_reason <= ENGINE_END_ERROR[2:0];
-                            start_response(RESP_ERROR, ENGINE_ERR_INTERNAL, 1'b1, 1'b0);
-                        end else begin
-                            last_move <= search_resp.best_move;
-                            last_ponder_move <= search_resp.ponder_move;
-                            last_score <= search_resp.score;
-                            last_node_count <= search_resp.nodes_count;
-                            last_completed_depth <= search_resp.completed_depth;
-                            last_end_reason <= search_resp.end_reason[2:0];
-                            active_operation <= 8'h00;
-                            start_response(
-                                request_response_kind,
-                                request_clears_error ? ENGINE_ERR_NONE : error_code,
-                                1'b1,
-                                1'b0
-                            );
-                        end
-                    end
-                end
-
-                CMD_ISSUE_KILL: begin
-                    if (search_req_ready) begin
-                        state <= CMD_WAIT_RESULT;
-                    end
-                end
-
-                CMD_OUTPUT: begin
-                    if (ready_for_result) begin
-                        if (response_index == response_len(response_kind) - 4'd1) begin
-                            response_kind <= RESP_NONE;
-                            response_index <= 4'd0;
-                            state <= CMD_IDLE;
-                        end else begin
-                            response_index <= response_index + 4'd1;
-                        end
-                    end
-                end
-
-                default: begin
-                    latch_error(ENGINE_ERR_INTERNAL);
-                end
-            endcase
-        end
+            end
+            default: latch_error(ENGINE_ERR_INTERNAL);
+        endcase
     end
-
 endmodule : engine_command_layer

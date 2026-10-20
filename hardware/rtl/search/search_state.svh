@@ -503,5 +503,7 @@
     logic [1:0] repetition_resp_count;
 
     assign resp = resp_reg;
-    assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE)
+    // Completed operations retain their response until the command sequencer consumes it.
+    assign resp_valid = state == CTRL_DIRECT_DONE || state == CTRL_RESPOND || state == CTRL_FLUSH_RESPOND;
+    assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE && !resp_valid)
         || state == CTRL_IDLE;

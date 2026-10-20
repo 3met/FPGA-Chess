@@ -20,6 +20,7 @@ module tb_engine;
     logic search_req_ready;
     EngineControllerRequest search_req;
     logic search_resp_valid;
+    logic search_resp_ready;
     EngineControllerResponse search_resp;
     logic [7:0] debug_stat_address;
     logic [39:0] debug_stat_value;
@@ -48,6 +49,7 @@ module tb_engine;
         .search_req_ready(search_req_ready),
         .search_req(search_req),
         .search_resp_valid(search_resp_valid),
+        .search_resp_ready(search_resp_ready),
         .search_resp(search_resp),
         .debug_stat_address(debug_stat_address),
         .debug_stat_value(debug_stat_value)
@@ -120,6 +122,8 @@ module tb_engine;
                 && captured.board_op != BOARD_REVERSE_MOVE_OP) begin
             search_resp = EngineControllerResponse'('0);
             search_resp_valid = 1'b1;
+            #1;
+            while (!search_resp_ready) do_clock(1);
             do_clock(1);
             search_resp_valid = 1'b0;
             search_resp = EngineControllerResponse'('0);
@@ -139,6 +143,8 @@ module tb_engine;
                 search_resp.end_reason = ENGINE_END_KILLED;
             end
             search_resp_valid = 1'b1;
+            #1;
+            while (!search_resp_ready) do_clock(1);
             do_clock(1);
             search_resp_valid = 1'b0;
             search_resp = EngineControllerResponse'('0);
@@ -184,6 +190,8 @@ module tb_engine;
         search_resp.completed_depth = depth;
         search_resp.end_reason = end_reason;
         search_resp_valid = 1'b1;
+        #1;
+        while (!search_resp_ready) do_clock(1);
         do_clock(1);
         search_resp_valid = 1'b0;
         search_resp = EngineControllerResponse'('0);
@@ -403,6 +411,8 @@ module tb_engine;
         expect_byte(8'h90, "search ponder move byte 0");
         expect_byte(8'h34, "search ponder move byte 1");
 
+        // Reusing the command RAM must preserve the last search result.
+        test_set_board_and_moves();
         send_byte(ENGINE_CMD_GET_SEARCH_RESULT);
         expect_byte(ENGINE_RESP_SEARCH_RESULT, "cached search response type");
         expect_byte(8'h70, "cached search best move byte 0");
@@ -577,6 +587,61 @@ module tb_engine;
         clear_error_with_new_game();
     endtask : test_kill_and_active_reject
 
+    // A rejected mid-search command abandons its result, which may return after another request starts.
+    task automatic test_abandoned_completion();
+        automatic EngineControllerRequest captured;
+        send_byte(ENGINE_CMD_SEARCH_DEPTH);
+        send_byte(8'd1);
+        accept_request(captured);
+        send_byte(ENGINE_CMD_GET_STATUS);
+        expect_error_response(ENGINE_ERR_MALFORMED_PAYLOAD);
+        search_req_ready = 1'b0;
+        send_byte(ENGINE_CMD_NEW_GAME);
+        while (!search_req_valid) do_clock(1);
+        search_resp = '0;
+        search_resp_valid = 1'b1;
+        #1;
+        check(search_resp_ready, "abandoned completion can drain while the next request waits");
+        do_clock(1);
+        search_resp_valid = 1'b0;
+        search_req_ready = 1'b1;
+        accept_request(captured);
+        check(captured.operation == ENGINE_CTRL_NEW_GAME, "recovery request remains pending after abandoned completion");
+        expect_ack(8'h01);
+        check(!error_flag, "new game recovers after abandoned search response");
+    endtask : test_abandoned_completion
+
+    // A completion arriving with, or immediately before, Kill must retire exactly once.
+    task automatic test_stop_completion_race();
+        automatic EngineControllerRequest captured;
+        for (int delayed = 0; delayed < 2; delayed++) begin
+            send_byte(ENGINE_CMD_SEARCH_DEPTH);
+            send_byte(8'd1);
+            accept_request(captured);
+            if (delayed != 0) send_byte(ENGINE_CMD_KILL);
+            else begin
+                data_in = ENGINE_CMD_KILL;
+                data_in_valid = 1'b1;
+            end
+            search_resp = '0;
+            search_resp.nodes_count = NodeCountType'(7);
+            search_resp.completed_depth = 8'd1;
+            search_resp_valid = 1'b1;
+            do_clock(1);
+            data_in_valid = 1'b0;
+            data_in = '0;
+            while (!search_resp_ready) begin
+                check(!search_req_valid, "completed operation suppresses redundant kill request");
+                do_clock(1);
+            end
+            do_clock(1);
+            search_resp_valid = 1'b0;
+            search_resp = '0;
+            expect_status_response(8'h01, ENGINE_ERR_NONE, 8'h00);
+            expect_no_output(4, "stop race produces exactly one response");
+        end
+    endtask : test_stop_completion_race
+
     initial begin
         reset_dut();
         test_status_and_errors();
@@ -584,6 +649,8 @@ module tb_engine;
         test_search_and_perft();
         test_search_limit_payloads();
         test_kill_and_active_reject();
+        test_stop_completion_race();
+        test_abandoned_completion();
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);

@@ -37,7 +37,7 @@ The headers are implementation fragments, not standalone modules. `search_run.sv
 | Perft | Count legal leaves through the production move and board paths without changing the active position. |
 | Kill | Cancel active search or perft work and invalidate or drain outstanding responses. |
 
-Requests and responses use ready/valid handshakes. Every accepted operation produces exactly one completion.
+Requests and responses use ready/valid handshakes. Each accepted operation produces one completion, held stable until `resp_ready`; new requests wait until that completion is accepted.
 
 ## Ports
 
@@ -47,6 +47,7 @@ Requests and responses use ready/valid handshakes. Every accepted operation prod
 | Input | `req_valid`, `req` | Typed operation request from the command layer. |
 | Output | `req_ready` | Request acceptance. |
 | Output | `resp_valid`, `resp` | Operation completion and result. |
+| Input | `resp_ready` | Accepts the pending operation completion. |
 | Input | `tt_memory_clk`, `tt_memory_rst_n` | External-memory interface clock and local reset. |
 | Input | `tt_memory_ready`, `tt_memory_error` | External-memory backend status synchronized to the engine clock. |
 | Request/response | `tt_mem_*` | Vendor-neutral TT memory channels described in [tt-memory.md](tt-memory.md). |

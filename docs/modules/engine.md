@@ -26,7 +26,7 @@ Engine profiles configure hardware resources, clocks, and instrumentation. Searc
 
 The engine command byte and payload formats are defined in [host-fpga-protocol.md](../protocols/host-fpga-protocol.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
-`Set board` replaces the position atomically; the engine translates it into board-update operations.
+The command layer runs on the engine clock and uses byte RAM for payloads and cached results, with shared scalar operand storage. `Set board` validates the complete payload before replaying board-update operations.
 
 ## New Game Semantics
 

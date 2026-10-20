@@ -107,6 +107,7 @@ module engine #(
     logic controller_req_ready;
     EngineControllerRequest controller_req;
     logic controller_resp_valid;
+    logic controller_resp_ready;
     EngineControllerResponse controller_resp;
     logic [7:0] debug_stat_address;
     logic [39:0] debug_stat_value;
@@ -130,6 +131,7 @@ module engine #(
         .search_req_ready(controller_req_ready),
         .search_req(controller_req),
         .search_resp_valid(controller_resp_valid),
+        .search_resp_ready(controller_resp_ready),
         .search_resp(controller_resp),
         .debug_stat_address(debug_stat_address),
         .debug_stat_value(debug_stat_value)
@@ -208,6 +210,7 @@ module engine #(
         .req_ready(controller_req_ready),
         .req(controller_req),
         .resp_valid(controller_resp_valid),
+        .resp_ready(controller_resp_ready),
         .resp(controller_resp),
         .debug_stat_address(debug_stat_address),
         .debug_stat_value(debug_stat_value),

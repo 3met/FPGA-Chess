@@ -7,7 +7,6 @@
             state <= CTRL_IDLE;
             active_req <= EngineControllerRequest'('0);
             resp_reg <= EngineControllerResponse'('0);
-            resp_valid <= 1'b0;
             board_wait_count <= BoardWaitCount'(0);
             move_wait_count <= MoveWaitCount'(0);
             active_board <= FullBoard'('0);
@@ -190,7 +189,6 @@
         end else begin
             if (move_pop_resp_valid)
                 move_pop_response_rr <= search_thread_after(move_pop_resp_thread);
-            resp_valid <= 1'b0;
             time_setup_start <= 1'b0;
             time_adaptive_start <= 1'b0;
             repetition_init_start <= 1'b0;
@@ -289,7 +287,7 @@
                 end
             end
 
-            if (req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE) begin
+            if (req_valid && req_ready && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE) begin
                 repetition_epoch <= repetition_epoch + 1'b1;
                 terminal_result_valid_pipe <= 1'b0;
                 resp_reg <= stopped_search_response(
@@ -608,8 +606,7 @@
                 end
 
                 CTRL_DIRECT_DONE: begin
-                    resp_valid <= 1'b1;
-                    state <= CTRL_IDLE;
+                    if (resp_ready) state <= CTRL_IDLE;
                 end
 
                 CTRL_NEW_CLEAR_START: begin
@@ -863,13 +860,11 @@
                 `include "hardware/rtl/search/search_run.svh"
 
                 CTRL_RESPOND: begin
-                    resp_valid <= 1'b1;
-                    state <= CTRL_IDLE;
+                    if (resp_ready) state <= CTRL_IDLE;
                 end
 
                 CTRL_FLUSH_RESPOND: begin
-                    resp_valid <= 1'b1;
-                    state <= CTRL_IDLE;
+                    if (resp_ready) state <= CTRL_IDLE;
                 end
 
                 default: begin

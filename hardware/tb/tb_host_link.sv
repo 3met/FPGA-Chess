@@ -33,6 +33,7 @@ module tb_host_link;
     logic search_req_ready = 1'b1;
     EngineControllerRequest search_req;
     logic search_resp_valid;
+    logic search_resp_ready;
     EngineControllerResponse search_resp;
     logic [7:0] debug_stat_address;
 
@@ -94,6 +95,7 @@ module tb_host_link;
         .search_req_ready,
         .search_req,
         .search_resp_valid,
+        .search_resp_ready,
         .search_resp,
         .debug_stat_address,
         .debug_stat_value(40'd0)
@@ -114,13 +116,14 @@ module tb_host_link;
         .full(tx_full)
     );
 
-    // A one-cycle delayed controller completion is enough to exercise command acknowledgments.
+    // Hold fake controller completions until the command sequencer consumes them.
     always_ff @(posedge clk) begin
         if (!engine_rst_n) begin
             search_resp_valid <= 1'b0;
             search_resp <= '0;
         end else begin
-            search_resp_valid <= search_req_valid && search_req_ready;
+            if (search_resp_valid && search_resp_ready) search_resp_valid <= 1'b0;
+            if (search_req_valid && search_req_ready) search_resp_valid <= 1'b1;
             search_resp <= '0;
         end
     end

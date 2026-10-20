@@ -90,6 +90,7 @@ module search_controller #(
     output logic req_ready,
     input EngineControllerRequest req,
     output logic resp_valid,
+    input logic resp_ready,
     output EngineControllerResponse resp,
     input logic [7:0] debug_stat_address,
     output logic [39:0] debug_stat_value,

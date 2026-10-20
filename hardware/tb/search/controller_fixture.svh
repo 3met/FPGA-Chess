@@ -10,6 +10,7 @@
     logic req_ready;
     EngineControllerRequest req;
     logic resp_valid;
+    logic resp_ready = 1'b1;
     EngineControllerResponse resp;
     logic [7:0] debug_stat_address;
     logic [39:0] debug_stat_value;
@@ -179,6 +180,7 @@
         .req_ready(req_ready),
         .req(req),
         .resp_valid(resp_valid),
+        .resp_ready(resp_ready),
         .resp(resp),
         .debug_stat_address(debug_stat_address),
         .debug_stat_value(debug_stat_value)

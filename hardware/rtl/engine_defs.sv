@@ -63,15 +63,11 @@ package engine_defs;
     localparam logic [7:0] ENGINE_END_ERROR       = 8'd5;
 
     // Shared FSM type keeps profiler decoding tied to the implementation.
-    typedef enum logic [2:0] {
-        CMD_IDLE,
-        CMD_RECEIVE_PAYLOAD,
-        CMD_PROCESS_PAYLOAD,
-        CMD_BOARD_UPDATE,
-        CMD_ISSUE_REQUEST,
-        CMD_WAIT_RESULT,
-        CMD_ISSUE_KILL,
-        CMD_OUTPUT
+    typedef enum logic [3:0] {
+        CMD_IDLE, CMD_RECEIVE_PAYLOAD, CMD_PROCESS_PAYLOAD,
+        CMD_LOAD_READ, CMD_LOAD_LATCH, CMD_BOARD_READ, CMD_BOARD_UPDATE,
+        CMD_BOARD_WAIT, CMD_ISSUE_REQUEST, CMD_WAIT_RESULT, CMD_ISSUE_KILL,
+        CMD_CACHE_RESULT, CMD_OUTPUT_READ, CMD_OUTPUT
     } EngineState;
 
     typedef enum logic [3:0] {

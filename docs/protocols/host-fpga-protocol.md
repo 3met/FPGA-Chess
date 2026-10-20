@@ -108,6 +108,8 @@ Search result payload:
 | End reason | 1 byte | `0` normal, `1` depth limit, `2` time limit, `3` node limit, `4` killed, `5` error. |
 | Ponder move | 2 bytes | `Move` containing the second move of the completed primary-thread PV, or the null move when unavailable. |
 
+The cached search result survives board setup, make-move, and metadata commands. Reset and New Game clear it.
+
 Kill retains the best completed iteration and any associated predicted reply in the cached search result. If no iteration completed, it may retain a legal root move from partial work and omits the predicted reply when none is safely associated with that move.
 
 Status byte bits:

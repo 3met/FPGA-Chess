@@ -3,6 +3,7 @@
 
     initial begin
         reset_dut();
+        test_response_backpressure();
         if (MATE_ONLY) begin
             new_game();
             setup_fifty_move_mate_position();

@@ -325,3 +325,29 @@
         end
         set_castling_rights(CastlingRights'(4'b0000), {label, " clear castling rights"});
     endtask : clear_start_position
+
+    // The command layer needs multiple cycles to cache a response before acknowledging it.
+    task automatic test_response_backpressure();
+        automatic EngineControllerRequest request = zero_request();
+        automatic EngineControllerResponse held;
+        request.operation = ENGINE_CTRL_PERFT;
+        request.depth_limit = 8'd0;
+        resp_ready = 1'b0;
+        pulse_request(request, "held completion perft");
+        while (!resp_valid) do_clock(1);
+        held = resp;
+        for (int idx = 0; idx < 17; idx++) begin
+            do_clock(1);
+            check(resp_valid && resp === held && !req_ready,
+                "controller holds completion and blocks new requests under response backpressure");
+        end
+        req.operation = ENGINE_CTRL_KILL;
+        req_valid = 1'b1;
+        do_clock(2);
+        check(resp_valid && resp === held && !req_ready, "late kill cannot overwrite a held completion");
+        req_valid = 1'b0;
+        req = zero_request();
+        resp_ready = 1'b1;
+        do_clock(1);
+        check(!resp_valid && req_ready, "controller retires completion once accepted");
+    endtask : test_response_backpressure
