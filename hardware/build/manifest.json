@@ -321,6 +321,11 @@
       "testbench": "hardware/tb/search/tb_search_controller.sv",
       "top": "tb_search_controller_multithread"
     },
+    "search-controller-three-threads": {
+      "source_set": "search-controller-test",
+      "testbench": "hardware/tb/search/tb_search_controller.sv",
+      "top": "tb_search_controller_three_threads"
+    },
     "search-controller-fifty-move-mate": {
       "source_set": "search-controller-test",
       "testbench": "hardware/tb/search/tb_search_controller.sv",

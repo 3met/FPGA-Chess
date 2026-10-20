@@ -269,6 +269,29 @@ module tb_move_generator_read_pipeline;
         request(0, 0);
         expect_response(0, 1, 602, 7, "restored parent second move");
 
+        // Switch to a child immediately after consuming a parent move, then
+        // restore the parent while the child's pointer write is still pending.
+        reset_inputs();
+        start_generation(0, 0, 0);
+        push(0, 7, 603);
+        push(0, 7, 604);
+        finish_generation(0);
+        request(0, 0);
+        tick();
+        check(pop_resp_valid[0] && pop_resp_move[0] == Move'(603),
+            "parent pop completes before immediate child initialization");
+        node_init_ply[0] = 1;
+        node_init_valid[0] = 1;
+        pop_resp_ready[0] = 1;
+        #1;
+        check(node_init_ready[0], "child accepts immediately after parent pop");
+        tick();
+        node_init_valid[0] = 0;
+        pop_resp_ready[0] = 0;
+        request(0, 0);
+        expect_response(0, 1, 604, 7,
+            "immediate parent restore retains the consumed head");
+
         // Poison ply one, clear only the logical state, then initialize a new
         // ply one without generation before creating and generating ply two.
         reset_inputs();

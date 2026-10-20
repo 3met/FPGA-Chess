@@ -28,6 +28,11 @@ module tb_search_controller_multithread;
     tb_search_controller #(.THREAD_COUNT(2)) bench();
 endmodule : tb_search_controller_multithread
 
+// Exercise arbitration wraparound with a non-power-of-two thread count.
+module tb_search_controller_three_threads;
+    tb_search_controller #(.THREAD_COUNT(3)) bench();
+endmodule : tb_search_controller_three_threads
+
 // Verify exact mate distance with both serial and shared-table search.
 module tb_search_controller_fifty_move_mate;
     tb_search_controller #(.MATE_ONLY(1)) bench();

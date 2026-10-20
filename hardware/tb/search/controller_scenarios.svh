@@ -260,10 +260,19 @@
         automatic Move best_move;
         automatic EvalScore score;
         automatic NodeCountType nodes;
+        automatic int active_threads_at_stop = 0;
 
         clear_tt_thread_seen();
         clear_root_push_seen();
         run_search_depth_record(8'd1, label, best_move, score, nodes);
+        // Lazy SMP returns when the primary finishes; helpers may be interrupted.
+        check(dut.search_thread_phase[0] == SEARCH_PHASE_DONE,
+            {label, " primary lifecycle done"});
+        for (int idx = 0; idx < THREAD_COUNT; idx++)
+            if (dut.search_thread_phase[idx] != SEARCH_PHASE_DONE)
+                active_threads_at_stop++;
+        check(int'(dut.search_active_thread_count) == active_threads_at_stop,
+            {label, " active-thread count matches interrupted helpers"});
         check(tt_thread_seen[0], {label, " used root TT lookup on primary thread"});
         check(tt_response_thread_seen[0], {label, " received root TT response on primary thread"});
         check(thread_tt_lookup_inflight_seen[0], {label, " tracked TT lookup in-flight on primary thread"});
@@ -300,24 +309,18 @@
                 $sformatf("%s thread %0d reached board-wait phase", label, idx));
             check(thread_eval_phase_seen[idx],
                 $sformatf("%s thread %0d reached eval-wait phase", label, idx));
-            check(thread_store_phase_seen[idx],
-                $sformatf("%s thread %0d reached store-wait phase", label, idx));
             check(thread_board_inflight_seen[idx],
                 $sformatf("%s thread %0d tracked board in-flight", label, idx));
             check(thread_move_inflight_seen[idx],
                 $sformatf("%s thread %0d tracked move in-flight", label, idx));
             check(thread_eval_inflight_seen[idx],
                 $sformatf("%s thread %0d tracked eval in-flight", label, idx));
-            check(thread_tt_store_inflight_seen[idx],
-                $sformatf("%s thread %0d tracked TT store in-flight", label, idx));
             check(thread_board_cursor_seen[idx],
                 $sformatf("%s thread %0d advanced board dispatch cursor", label, idx));
             check(thread_move_cursor_seen[idx],
                 $sformatf("%s thread %0d advanced move dispatch cursor", label, idx));
             check(thread_eval_cursor_seen[idx],
                 $sformatf("%s thread %0d advanced eval dispatch cursor", label, idx));
-            check(thread_tt_store_cursor_seen[idx],
-                $sformatf("%s thread %0d advanced TT store dispatch cursor", label, idx));
             check(thread_return_cursor_seen[idx],
                 $sformatf("%s thread %0d advanced return dispatch cursor", label, idx));
             check(!is_null_move(root_first_move[idx]),
@@ -327,16 +330,20 @@
                 $sformatf("%s thread %0d retained selected root move on stack", label, idx));
             check(dut.search_thread_nodes[idx] > NodeCountType'(0),
                 $sformatf("%s thread %0d searched nonzero nodes", label, idx));
-            check(dut.search_thread_phase[idx] == SEARCH_PHASE_DONE,
-                $sformatf("%s thread %0d lifecycle done", label, idx));
-            check(!dut.search_board_inflight[idx],
-                $sformatf("%s thread %0d board in-flight cleared", label, idx));
-            check(!dut.search_move_inflight[idx],
-                $sformatf("%s thread %0d move in-flight cleared", label, idx));
-            check(!dut.search_tt_lookup_inflight[idx],
-                $sformatf("%s thread %0d TT lookup in-flight cleared", label, idx));
-            check(dut.search_active_thread_count == 0,
-                $sformatf("%s active-thread count cleared after thread %0d checks", label, idx));
+            if (dut.search_thread_phase[idx] == SEARCH_PHASE_DONE) begin
+                check(thread_store_phase_seen[idx],
+                    $sformatf("%s thread %0d reached store-wait phase", label, idx));
+                check(thread_tt_store_inflight_seen[idx],
+                    $sformatf("%s thread %0d tracked TT store in-flight", label, idx));
+                check(thread_tt_store_cursor_seen[idx],
+                    $sformatf("%s thread %0d advanced TT store dispatch cursor", label, idx));
+                check(!dut.search_board_inflight[idx],
+                    $sformatf("%s thread %0d board in-flight cleared", label, idx));
+                check(!dut.search_move_inflight[idx],
+                    $sformatf("%s thread %0d move in-flight cleared", label, idx));
+                check(!dut.search_tt_lookup_inflight[idx],
+                    $sformatf("%s thread %0d TT lookup in-flight cleared", label, idx));
+            end
             check(thread_board_tag_seen[idx],
                 $sformatf("%s thread %0d produced board result tag", label, idx));
             check(thread_move_tag_seen[idx],
@@ -347,19 +354,21 @@
                 $sformatf("%s thread %0d restored scheduler thread after move result", label, idx));
             check(thread_eval_handoff_seen[idx],
                 $sformatf("%s thread %0d restored scheduler thread after eval result", label, idx));
-            check(dut.search_thread_completed_depth[idx] == 8'd1,
-                $sformatf("%s thread %0d completed depth", label, idx));
             check(nnue_root_rebuild_count[idx] == 1,
                 $sformatf("%s thread %0d built its root exactly once", label, idx));
-            check(dut.nnue_state_valid[idx],
-                $sformatf("%s thread %0d retained a valid root accumulator", label, idx));
-            check(!(dut.search_thread_completed_best_move[idx].from_pos == Position'(0)
-                    && dut.search_thread_completed_best_move[idx].to_pos == Position'(0)),
-                $sformatf("%s thread %0d completed best move non-null found %0d->%0d",
-                    label,
-                    idx,
-                    dut.search_thread_completed_best_move[idx].from_pos,
-                    dut.search_thread_completed_best_move[idx].to_pos));
+            if (dut.search_thread_phase[idx] == SEARCH_PHASE_DONE) begin
+                check(dut.search_thread_completed_depth[idx] == 8'd1,
+                    $sformatf("%s thread %0d completed depth", label, idx));
+                check(dut.nnue_state_valid[idx],
+                    $sformatf("%s thread %0d retained a valid root accumulator", label, idx));
+                check(!(dut.search_thread_completed_best_move[idx].from_pos == Position'(0)
+                        && dut.search_thread_completed_best_move[idx].to_pos == Position'(0)),
+                    $sformatf("%s thread %0d completed best move non-null found %0d->%0d",
+                        label,
+                        idx,
+                        dut.search_thread_completed_best_move[idx].from_pos,
+                        dut.search_thread_completed_best_move[idx].to_pos));
+            end
         end
     endtask : run_scheduler_lifecycle_test
 

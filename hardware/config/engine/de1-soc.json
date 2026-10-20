@@ -1,7 +1,7 @@
 {
   "search_config": "hardware/config/search/default.json",
   "engine": {
-    "threads": 2,
+    "threads": 3,
     "stack_depth": 32
   },
   "transposition_table": {

@@ -110,6 +110,7 @@ module move_generator_read_pipeline #(
     PlyIndex pointer_load_tag[THREAD_COUNT], pointer_read_ply[THREAD_COUNT];
     PointerAddress pointer_read_address[THREAD_COUNT], pointer_write_address[THREAD_COUNT];
     logic pointer_write_enable[THREAD_COUNT];
+    logic pointer_write_pending[THREAD_COUNT];
     logic [$bits(PackedMovePointerState)-1:0] pointer_read_bits[THREAD_COUNT];
 
     logic service[THREAD_COUNT], found[THREAD_COUNT], blocked[THREAD_COUNT];
@@ -408,8 +409,13 @@ module move_generator_read_pipeline #(
                 end
             end
             pointer_read_address[tid] = PointerAddress'(pointer_read_ply[tid]);
-            pointer_write_enable[tid] = state_update[tid] && rst_n && !clear && !flush;
-            pointer_write_address[tid] = PointerAddress'(state_update_ply[tid]);
+            // Commit the registered cache one cycle after its update. Defer a
+            // colliding read until that commit is visible on either RAM vendor.
+            if (pointer_write_pending[tid]
+                    && pointer_read_ply[tid] == cache_ply[tid])
+                pointer_load_issue[tid] = 1'b0;
+            pointer_write_enable[tid] = pointer_write_pending[tid] && rst_n && !clear && !flush;
+            pointer_write_address[tid] = PointerAddress'(cache_ply[tid]);
         end
     end
 
@@ -445,7 +451,7 @@ module move_generator_read_pipeline #(
             sync_read_simple_dual_port_ram #(
                 .NUM_WORDS(SEARCH_STACK_DEPTH), .WORD_SIZE($bits(PackedMovePointerState))
             ) pointer_stack (
-                .clock(clk), .data(next_state_bits[thread_index]),
+                .clock(clk), .data(cache_state_bits[thread_index]),
                 .rdaddress(pointer_read_address[thread_index]),
                 .rden(pointer_load_issue[thread_index]),
                 .wraddress(pointer_write_address[thread_index]),
@@ -454,6 +460,9 @@ module move_generator_read_pipeline #(
             );
 
             always_ff @(posedge clk) begin
+                // The cache already captures the complete write payload and ply.
+                pointer_write_pending[thread_index] <= state_update[thread_index]
+                    && rst_n && !clear && !flush;
                 if (!rst_n || clear) begin
                     stage_valid[thread_index] <= 1'b0;
                     result_valid[thread_index] <= 1'b0;
