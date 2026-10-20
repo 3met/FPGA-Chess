@@ -4,6 +4,8 @@
   "iterations": 50,
   "paired_openings": 500,
   "opening_start": 1,
+  "opening_seed": 1,
+  "validation_opening_seed": 2,
   "progress_interval_games": 100,
   "random_seed": 1,
   "synthesis_target": "quartus-de1-soc",
@@ -21,7 +23,7 @@
   "validation": {
     "maximum_finalists": 3,
     "maximum_blocks": 2,
-    "promotion_z_score": 1.5,
+    "block_stopping_z_score": 1.5,
     "minimum_success_probability": 0.20,
     "minimum_parameter_distance": 0.08
   },
@@ -38,9 +40,6 @@
   },
   "optimizer": {
     "candidate_pool_size": 200000,
-    "initial_candidate_pool_size": 20000,
-    "acquisition_shortlist_size": 5000,
-    "initial_design": 10,
     "mutation_axes": 4,
     "observation_noise_elo": 8.0,
     "acquisition_exploration_elo": 0.25,

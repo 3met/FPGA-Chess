@@ -60,6 +60,7 @@ class BenchmarkConfig:
     stockfish_threads: int = 1
     stockfish_hash_mb: int = 32
     opening_start: int = 1
+    opening_seed: int = OPENING_SEED
     sprt_elo0: float | None = None
     sprt_elo1: float | None = None
     sprt_alpha: float = 0.10
@@ -137,6 +138,8 @@ def _validate(config: BenchmarkConfig) -> str:
                          ("opening start", config.opening_start)):
         if value < 1:
             raise BenchmarkError(f"{label} must be positive")
+    if isinstance(config.opening_seed, bool) or not isinstance(config.opening_seed, int) or config.opening_seed < 0:
+        raise BenchmarkError("opening seed must be a nonnegative integer")
     _book_path(config.book)
     if not (REPO_ROOT / "software" / "engine").is_dir():
         raise BenchmarkError(f"FPGA UCI engine package not found: {REPO_ROOT / 'software' / 'engine'}")
@@ -172,7 +175,7 @@ def _fresh_command(config: BenchmarkConfig, run_dir: Path, name: str, rounds: in
         f"option.Threads={config.stockfish_threads}", f"option.Hash={config.stockfish_hash_mb}",
         "option.Ponder=false",
         "-openings", f"file={_book_path(config.book)}", "format=epd", "order=random",
-        f"start={config.opening_start}", "-srand", str(OPENING_SEED), *sprt,
+        f"start={config.opening_start}", "-srand", str(config.opening_seed), *sprt,
         "-rounds", str(rounds if rounds is not None else (config.matches or 500)),
         "-repeat", "-concurrency", "1", "-recover",
         # Adjudicate sustained decisive or drawn evaluations to shorten games.
@@ -525,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stockfish-threads", type=int, default=1)
     parser.add_argument("--stockfish-hash", type=int, default=32, metavar="MB")
     parser.add_argument("--opening-start", type=int, default=1)
+    parser.add_argument("--opening-seed", type=int, default=OPENING_SEED)
     parser.add_argument("--sprt-elo0", type=float)
     parser.add_argument("--sprt-elo1", type=float)
     parser.add_argument("--sprt-alpha", type=float, default=0.10)
@@ -553,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
                 fastchess=args.fastchess, stockfish=args.stockfish, fpga_time_control=args.fpga_tc,
                 stockfish_nodes=args.stockfish_nodes, stockfish_threads=args.stockfish_threads,
                 stockfish_hash_mb=args.stockfish_hash, opening_start=args.opening_start,
+                opening_seed=args.opening_seed,
                 sprt_elo0=args.sprt_elo0, sprt_elo1=args.sprt_elo1,
                 sprt_alpha=args.sprt_alpha, sprt_beta=args.sprt_beta, force=args.force,
             ))

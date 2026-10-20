@@ -30,14 +30,20 @@ class BenchmarkTests(unittest.TestCase):
     """Verify result handling and run-directory safety without FPGA hardware."""
 
     def test_command_uses_full_strength_and_configured_hash(self) -> None:
-        config = benchmark.BenchmarkConfig(stockfish_hash_mb=64)
+        config = benchmark.BenchmarkConfig(stockfish_hash_mb=64, opening_seed=73)
         with patch.object(benchmark, "_executable", side_effect=lambda value: value):
             command = benchmark._fresh_command(config, Path("results"), "test")
         self.assertIn("option.UCI_LimitStrength=false", command)
         self.assertIn("option.Hash=64", command)
         self.assertIn("order=random", command)
-        self.assertEqual(command[command.index("-srand") + 1], str(benchmark.OPENING_SEED))
+        self.assertEqual(command[command.index("-srand") + 1], str(config.opening_seed))
         self.assertFalse(any("UCI_Elo" in value or "Skill Level" in value for value in command))
+
+    def test_rejects_invalid_opening_seeds(self) -> None:
+        """Reject malformed seeds before opening files or launching Fastchess."""
+        for seed in (-1, True, 1.5, "seed"):
+            with self.subTest(seed=seed), self.assertRaisesRegex(benchmark.BenchmarkError, "opening seed"):
+                benchmark._validate(benchmark.BenchmarkConfig(opening_seed=seed))
 
     def test_run_returns_standings_and_protects_existing_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

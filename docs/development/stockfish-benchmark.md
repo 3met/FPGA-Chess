@@ -19,6 +19,7 @@ The count is paired openings: each opening is played with both colors, so this e
 | `--stockfish-nodes <count>` | Set Stockfish's per-move node budget. |
 | `--stockfish-threads <count>`, `--stockfish-hash <MB>` | Set Stockfish threads and hash memory. |
 | `--opening-start <index>` | Select the starting opening index. |
+| `--opening-seed <seed>` | Set the seed used to shuffle openings. |
 | `--results-root <directory>` | Change the results directory. |
 
 Use `--help` for all options. `Stockfish-unlimited` in the output means strength limiting is disabled; the node cap still applies.

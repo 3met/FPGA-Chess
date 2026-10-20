@@ -284,6 +284,11 @@ def validate_config(config: dict) -> None:
     for name in ("iterations", "paired_openings", "progress_interval_games", "opening_start"):
         if isinstance(config.get(name), bool) or not isinstance(config.get(name), int) or config[name] < 1:
             raise TuningError(f"{name} must be a positive integer")
+    for name in ("opening_seed", "validation_opening_seed"):
+        if isinstance(config.get(name), bool) or not isinstance(config.get(name), int) or config[name] < 0:
+            raise TuningError(f"{name} must be a nonnegative integer")
+    if config["opening_seed"] == config["validation_opening_seed"]:
+        raise TuningError("opening_seed and validation_opening_seed must differ")
     for name in ("stockfish_threads", "stockfish_hash_mb"):
         if isinstance(config.get(name), bool) or not isinstance(config.get(name), int) or config[name] < 1:
             raise TuningError(f"{name} must be a positive integer")
@@ -294,17 +299,12 @@ def validate_config(config: dict) -> None:
     if not isinstance(optimizer, dict):
         raise TuningError("optimizer must be an object")
     for name in (
-        "candidate_pool_size", "initial_candidate_pool_size",
-        "acquisition_shortlist_size", "initial_design", "mutation_axes",
+        "candidate_pool_size", "mutation_axes",
     ):
         if isinstance(optimizer.get(name), bool) or not isinstance(optimizer.get(name), int) or optimizer[name] < 1:
             raise TuningError(f"optimizer.{name} must be a positive integer")
     if optimizer["candidate_pool_size"] < 100:
         raise TuningError("optimizer.candidate_pool_size must be at least 100")
-    if optimizer["initial_candidate_pool_size"] < 100:
-        raise TuningError("optimizer.initial_candidate_pool_size must be at least 100")
-    if optimizer["acquisition_shortlist_size"] > optimizer["candidate_pool_size"]:
-        raise TuningError("optimizer.acquisition_shortlist_size must not exceed candidate_pool_size")
     for name in ("successes_before_expand", "failures_before_shrink"):
         if isinstance(optimizer.get(name), bool) or not isinstance(optimizer.get(name), int) or optimizer[name] < 1:
             raise TuningError(f"optimizer.{name} must be a positive integer")
@@ -381,12 +381,12 @@ def validate_config(config: dict) -> None:
     ):
         raise TuningError("validation.maximum_blocks must be a positive integer")
     if (
-        isinstance(validation.get("promotion_z_score"), bool)
-        or not isinstance(validation.get("promotion_z_score"), (int, float))
-        or not math.isfinite(validation["promotion_z_score"])
-        or validation["promotion_z_score"] < 0
+        isinstance(validation.get("block_stopping_z_score"), bool)
+        or not isinstance(validation.get("block_stopping_z_score"), (int, float))
+        or not math.isfinite(validation["block_stopping_z_score"])
+        or validation["block_stopping_z_score"] < 0
     ):
-        raise TuningError("validation.promotion_z_score must be nonnegative")
+        raise TuningError("validation.block_stopping_z_score must be nonnegative")
     probability = validation.get("minimum_success_probability")
     if (
         isinstance(probability, bool)
@@ -445,8 +445,6 @@ def experiment_snapshot(config: dict, baseline: dict, parameters: list[Any]) -> 
     """Capture settings whose changes would invalidate or reinterpret observations."""
     optimizer = dict(config["optimizer"])
     optimizer.pop("candidate_pool_size", None)
-    optimizer.pop("initial_candidate_pool_size", None)
-    optimizer.pop("acquisition_shortlist_size", None)
     benchmark_assets = {
         "fastchess": hash_file(platform_executable(config["fastchess_binary"])),
         "stockfish": hash_file(platform_executable(config["stockfish_binary"])),
@@ -469,6 +467,8 @@ def experiment_snapshot(config: dict, baseline: dict, parameters: list[Any]) -> 
         "baseline_hash": parameter_hash(baseline),
         "paired_openings": config["paired_openings"],
         "opening_start": config["opening_start"],
+        "opening_seed": config["opening_seed"],
+        "validation_opening_seed": config["validation_opening_seed"],
         "random_seed": config.get("random_seed", 1),
         "synthesis_target": config["synthesis_target"],
         "synthesis_seeds": config["synthesis_seeds"],
@@ -1008,6 +1008,8 @@ class Runner:
                         stockfish_threads=self.config["stockfish_threads"],
                         stockfish_hash_mb=self.config["stockfish_hash_mb"],
                         opening_start=int(environment["OPENING_START"]),
+                        # Repeats are validation blocks shared by baseline and finalists.
+                        opening_seed=self.config["validation_opening_seed" if repeat else "opening_seed"],
                         sprt_elo0=float(environment["SPRT_ELO0"]) if "SPRT_ELO0" in environment else None,
                         sprt_elo1=float(environment["SPRT_ELO1"]) if "SPRT_ELO1" in environment else None,
                         sprt_alpha=float(environment.get("SPRT_ALPHA", 0.10)),
@@ -1054,8 +1056,7 @@ class Runner:
             atomic_json(self.best_path, record["parameters"])
 
         center_id = pending["acquisition"].get("center_id")
-        adapt_region = record["id"] >= int(settings["initial_design"]) and center_id is not None
-        if adapt_region:
+        if center_id is not None:
             center = {
                 "score": float(pending["acquisition"]["center_posterior_elo"]),
                 "score_error": 1.96 * float(pending["acquisition"]["center_posterior_stddev"]),
@@ -1152,7 +1153,7 @@ class Runner:
         if result is None:
             return True
         standard_error = result["elo_error"] / 1.96
-        z_score = float(self.config["validation"]["promotion_z_score"])
+        z_score = float(self.config["validation"]["block_stopping_z_score"])
         if abs(result["elo_difference"]) > z_score * standard_error:
             return False
         return result["probability_better"] >= float(
@@ -1204,6 +1205,7 @@ class Runner:
         }
 
     def _finish_validation(self, state: dict) -> None:
+        """Select the highest measured validation Elo without an uncertainty penalty."""
         validation = state["validation"]
         results = []
         for trial_id in validation["finalist_ids"]:
@@ -1211,22 +1213,12 @@ class Runner:
                 result = self._paired_validation_result(state, trial_id)
                 if result is not None:
                     results.append(result)
-        z_score = float(self.config["validation"]["promotion_z_score"])
-        for result in results:
-            result["promotion_lower_bound"] = (
-                result["elo_difference"] - z_score * (result["elo_error"] / 1.96)
-            )
-        significant = [
-            result for result in results
-            if result["promotion_lower_bound"] > 0.0
-        ]
-        if significant:
-            winner = max(significant, key=lambda item: item["promotion_lower_bound"])
-            record = state["history"][winner["trial_id"]]
+        provisional = max(results, key=lambda item: item["elo_difference"], default=None)
+        if provisional is not None and provisional["elo_difference"] > 0.0:
+            record = state["history"][provisional["trial_id"]]
             record["promoted"] = True
             state["best_id"] = record["id"]
             atomic_json(self.best_path, record["parameters"])
-        provisional = max(results, key=lambda item: item["promotion_lower_bound"], default=None)
         if provisional is not None:
             atomic_json(self.provisional_path, state["history"][provisional["trial_id"]]["parameters"])
         else:
