@@ -26,11 +26,13 @@ Engine profiles configure hardware resources, clocks, and instrumentation. Searc
 
 The engine command byte and payload formats are defined in [host-fpga-protocol.md](../protocols/host-fpga-protocol.md). The engine assumes command payloads are legal chess commands because the Python host validates UCI input before encoding FPGA commands.
 
-The command layer runs on the engine clock and uses byte RAM for payloads and cached results, with shared scalar operand storage. `Set board` validates the complete payload before replaying board-update operations.
+The command layer runs on the engine clock and uses byte RAM for payloads and cached results, with shared scalar operand storage. `Set board` validates the complete payload before replaying board-update operations. Reset discards the current transaction and invalidates the cached result; scratch RAM and transaction metadata are overwritten before use rather than cleared.
 
 ## New Game Semantics
 
-The New Game command follows UCI `ucinewgame` semantics. It clears active search state, the compact TT, repetition/history state, latched errors, pending responses, and any command FIFO contents that can be safely discarded. It also resets the active board to the normal chess starting position.
+The New Game command follows UCI `ucinewgame` semantics. It clears active search state, the TT, repetition and move-ordering history, latched errors, and the cached result. It also resets the active board to the normal chess starting position and restarts shared search arbitration from fixed priorities. The host serializes commands; New Game does not flush transport FIFOs.
+
+Reset uses the same serial starting-position setup before the controller accepts work, without emitting an unsolicited response. Metadata commands can be answered while initialization runs; board and search requests wait for the controller. Bulk storage is initialized serially or protected by reset validity state to avoid wide reset networks on search datapaths.
 
 ## Child Modules
 

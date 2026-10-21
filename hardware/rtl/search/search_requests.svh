@@ -13,6 +13,24 @@
         board_update_thread_id = (state == CTRL_SEARCH_RUN) ? search_board_issue_thread : ThreadID'(0);
         board_update_ply = PlyIndex'(0);
 
+        // Command ownership is registered before the first operation. Select
+        // wide payloads from that stable ownership, outside live admission and
+        // perft response decoding; idle operations cannot publish the payload.
+        if (is_search_operation(active_req.operation)) begin
+            board_update_in = search_board[search_board_issue_thread];
+            board_update_zobrist_in = search_zobrist_key[search_board_issue_thread];
+            board_update_pst_in = search_pst_eval[search_board_issue_thread];
+            board_update_piece_count_in = search_piece_count[search_board_issue_thread];
+            board_update_ply = search_ply[search_board_issue_thread];
+        end else if (active_req.operation == ENGINE_CTRL_PERFT) begin
+            // Perft borrows context zero without owning a duplicate position.
+            board_update_in = search_board[0];
+            board_update_zobrist_in = search_zobrist_key[0];
+            board_update_pst_in = search_pst_eval[0];
+            board_update_piece_count_in = search_piece_count[0];
+            board_update_ply = search_ply[0];
+        end
+
         if (state == CTRL_BOARD_ISSUE) begin
             // New Game uses the same issue and writeback path as direct board updates.
             if (active_req.operation == ENGINE_CTRL_NEW_GAME) begin
@@ -26,36 +44,23 @@
                 && move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)
                 && move_pop_resp_found) begin
             board_update_op = BOARD_PUSH_MOVE_OP;
-            board_update_in = search_board[0];
-            board_update_zobrist_in = search_zobrist_key[0];
-            board_update_pst_in = search_pst_eval[0];
-            board_update_piece_count_in = search_piece_count[0];
             board_update_move = move_pop_resp_move;
-            board_update_ply = search_ply[0];
         end else if (state == CTRL_PERFT_PUSH_ISSUE || state == CTRL_PERFT_REVERSE_ISSUE) begin
             board_update_op = (state == CTRL_PERFT_REVERSE_ISSUE) ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
-            // Perft serially borrows search context zero instead of owning a duplicate position.
-            board_update_in = search_board[0];
-            board_update_zobrist_in = search_zobrist_key[0];
-            board_update_pst_in = search_pst_eval[0];
-            board_update_piece_count_in = search_piece_count[0];
             board_update_move = search_pending_move[0];
-            board_update_ply = search_ply[0];
-        end else if (search_board_issue_valid) begin
-            board_update_op = search_board_issue_is_null
+        end else if (state == CTRL_SEARCH_RUN) begin
+            // Select wide context independently of admission. Only the narrow
+            // operation needs validity; idle payloads cannot publish a result.
+            board_update_op = !search_board_issue_valid ? BOARD_IDLE_OP
+                : search_board_issue_is_null
                 ? BOARD_PUSH_NULL_OP
                 : !move_board_bypass_valid
                     && search_thread_phase[search_board_issue_thread] == SEARCH_PHASE_REVERSE_WAIT
                 ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
-            board_update_in = search_board[search_board_issue_thread];
-            board_update_zobrist_in = search_zobrist_key[search_board_issue_thread];
-            board_update_pst_in = search_pst_eval[search_board_issue_thread];
-            board_update_piece_count_in = search_piece_count[search_board_issue_thread];
             board_update_move = move_board_bypass_valid
                 ? move_board_bypass_move
                 : |search_board_mask
                 ? search_pending_move[search_board_work_thread] : NULL_MOVE;
-            board_update_ply = search_ply[search_board_issue_thread];
         end
 
     end

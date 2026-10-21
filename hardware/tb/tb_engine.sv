@@ -642,6 +642,46 @@ module tb_engine;
         end
     endtask : test_stop_completion_race
 
+    // Reset can interrupt any command phase without exposing stale scratch RAM
+    // or resuming a partially received command after release.
+    task automatic test_reset_interruption();
+        automatic EngineControllerRequest captured;
+        for (int phase = 0; phase < 4; phase++) begin
+            case (phase)
+                0: begin
+                    send_byte(ENGINE_CMD_SET_BOARD);
+                    repeat (7) send_byte(8'h55);
+                end
+                1: begin
+                    send_byte(ENGINE_CMD_SEARCH_DEPTH);
+                    send_byte(8'd2);
+                    accept_request(captured);
+                end
+                2: begin
+                    send_byte(ENGINE_CMD_SEARCH_DEPTH);
+                    send_byte(8'd2);
+                    accept_request(captured);
+                    search_resp = '1;
+                    search_resp.error = 0;
+                    search_resp_valid = 1;
+                    // Stop while only part of the cached result has been written.
+                    do_clock(5);
+                end
+                3: begin
+                    ready_for_result = 0;
+                    send_byte(ENGINE_CMD_GET_BUILD_INFO);
+                    do_clock(4);
+                end
+            endcase
+            reset_dut();
+            check(!search_req_valid && !data_out_valid, "reset discards interrupted transaction");
+            send_byte(ENGINE_CMD_GET_SEARCH_RESULT);
+            expect_byte(ENGINE_RESP_SEARCH_RESULT, "reset cached result header");
+            repeat (13) expect_byte(8'd0, "reset masks stale result RAM");
+            clear_error_with_new_game();
+        end
+    endtask : test_reset_interruption
+
     initial begin
         reset_dut();
         test_status_and_errors();
@@ -651,6 +691,7 @@ module tb_engine;
         test_kill_and_active_reject();
         test_stop_completion_race();
         test_abandoned_completion();
+        test_reset_interruption();
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);

@@ -424,6 +424,31 @@ module tb_tt_external_load_store;
             check(response_count == baseline+1, "clear drains the in-flight probe exactly once");
             probe(64'h1, 0);
         end
+        // A held New Game request performs one sweep and keeps ingress blocked
+        // until release, including when stale payloads remain in pipeline registers.
+        begin
+            int writes_before, writes_after;
+            writes_before = memory.write_count;
+            @(negedge clk); clear = 1;
+            @(negedge clk);
+            while (dut.state != TT_FRONTEND_IDLE) begin
+                check(!lookup_req_ready && !store_req_ready, "clear blocks new requests while sweeping");
+                @(negedge clk);
+            end
+            writes_after = memory.write_count;
+            check(writes_after-writes_before == TEST_ENTRIES*TT_WAYS,
+                "clear invalidates one memory word per external way");
+            repeat (20) begin
+                @(negedge clk);
+                check(clear_busy && !lookup_req_ready && !store_req_ready && !lookup_resp_valid,
+                    "held clear leaves ingress blocked without publishing stale response payload");
+            end
+            check(memory.write_count == writes_after, "held clear does not restart the sweep");
+            clear = 0;
+            @(negedge clk);
+            check(!clear_busy && lookup_req_ready && store_req_ready, "clear release restores request readiness");
+            probe(64'h1, 0);
+        end
         // Same-position move merging must reach both the cache and external writeback.
         begin
             int reads_before;

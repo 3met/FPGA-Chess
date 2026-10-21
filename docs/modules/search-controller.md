@@ -37,6 +37,8 @@ The headers are implementation fragments, not standalone modules. `search_run.sv
 | Perft | Count legal leaves through the production move and board paths without changing the active position. |
 | Kill | Cancel active search or perft work and invalidate or drain outstanding responses. |
 
+Reset automatically runs the same serial starting-position setup as New Game, waits for memory initialization, and establishes repetition history before accepting requests, including Kill. Startup produces no unsolicited completion. New Game also restores shared arbitration priority so a fresh game does not inherit scheduling state.
+
 Requests and responses use ready/valid handshakes. Each accepted operation produces one completion, held stable until `resp_ready`; new requests wait until that completion is accepted.
 
 ## Ports
@@ -58,6 +60,8 @@ The active board is canonical controller state between commands. Board operation
 
 Each search thread owns its current position, search stack, alpha/beta window, iterative-deepening state, and node count. The stack retains the state needed to reverse a child and resume its parent.
 
+Reset clears ownership and valid bits; per-thread board, stack, and response payloads are initialized when their work is admitted rather than by a wide reset network. Invalid pipeline tags and unused RAM contents need no clearing.
+
 The packed stack uses one synchronous simple dual-port RAM per thread, with the current node held in registers. Each cycle outside reset writes the current ply and reads the parent ply. Original alpha is reconstructed from the stored root window, the fixed beta of a scout or null child, or the saved parent's beta for a full-window child; it requires no additional RAM access or search cycle.
 
 The primary thread owns the published result and last completed iteration. Helper threads cooperate through the TT and never delay or overwrite the primary result. Threads advance through iterative deepening independently.
@@ -78,6 +82,8 @@ The controller schedules work across:
 A thread has at most one in-flight request in each subsystem, with generation and move reads tracked independently. Requests carry thread, ply, and operation metadata so completions can be routed independently of the controller's current dispatch choice. Work that unblocks an existing node takes priority over best-effort TT publication and history maintenance.
 
 TT store bounds and promotion filtering are decoded independently for each thread before arbitration selects the request payload.
+
+Board payloads select the active position, perft context, or search context from the held command independently of operation admission. Live response and valid decoding controls only the operation and move, keeping it off the wide board-data mux without adding a dispatch cycle.
 
 Move-command and bucket-pop responses update their thread before a continuation becomes eligible for normal dispatch on the next cycle. This keeps downstream admission out of response-state feedback; independent work from other threads can still issue during response handling.
 

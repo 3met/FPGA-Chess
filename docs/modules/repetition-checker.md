@@ -27,7 +27,7 @@ A request identifies the thread, current ply, reversible-history boundary, reque
 
 The epoch distinguishes a valid response from work invalidated by a search restart or flush. The controller accepts `resp_is_draw` only for the matching live request.
 
-Normal table lookups accept one request per cycle with fixed response latency. The exact RAM-scan path has variable latency and supports one outstanding request per search thread; the controller waits for its tagged response. Flush and history changes discard pending scans.
+Normal table lookups accept one request per cycle with fixed response latency. The exact RAM-scan path has variable latency and supports one outstanding request per search thread; the controller waits for its tagged response. Flush, history changes, and table initialization discard pending responses in both paths, including requests presented on the cancellation edge.
 
 ## Active-Game Updates
 

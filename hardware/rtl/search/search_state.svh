@@ -502,8 +502,11 @@
     logic [REPETITION_EPOCH_BITS-1:0] repetition_resp_epoch;
     logic [1:0] repetition_resp_count;
 
+    // Startup completes through the ordinary New Game setup before admission.
+    logic startup_active;
+
     assign resp = resp_reg;
     // Completed operations retain their response until the command sequencer consumes it.
     assign resp_valid = state == CTRL_DIRECT_DONE || state == CTRL_RESPOND || state == CTRL_FLUSH_RESPOND;
-    assign req_ready = (req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE && !resp_valid)
-        || state == CTRL_IDLE;
+    assign req_ready = !startup_active && ((req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE && !resp_valid)
+        || state == CTRL_IDLE);

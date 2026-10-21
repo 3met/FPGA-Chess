@@ -27,3 +27,5 @@ Victim quality is compared in parallel with stable lowest-way tie breaking. Repl
 ## Reset and New Game
 
 Reset serially invalidates both slots in every cache set and initializes LRU state. The external controller invalidates each way before releasing readiness. New Game stops new requests, drains outstanding metadata and memory traffic, clears one validity-containing memory word per way through a CDC toggle handshake, and sweeps cached ways. These serial operations minimize area.
+
+Pipeline payloads are initialized by their first accepted transaction; reset clears their validity instead of driving wide request and response buses. Response data is meaningful only while response-valid is asserted.

@@ -59,6 +59,15 @@ module pll_startup_controller #(
     (* ASYNC_REG = "TRUE", altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
     logic pll_locked_sync = 1'b0;
     logic delay_done;
+    logic startup_reset_n;
+
+    // Buttons are asynchronous to the reference clock. Qualify their release
+    // together so neither can release the FSM or lock history near a clock edge.
+    reset_release startup_reset (
+        .clk(clk),
+        .async_reset_n(reset_n && restart_n),
+        .reset_n(startup_reset_n)
+    );
 
     initial begin
         if (DELAY_BITS < 3 || FEEDBACK_TAP < 0 || FEEDBACK_TAP >= DELAY_BITS - 1) begin
@@ -74,7 +83,7 @@ module pll_startup_controller #(
 
     // Synchronize the asynchronous lock indication before using it for startup decisions.
     always_ff @(posedge clk) begin
-        if (!reset_n) begin
+        if (!startup_reset_n) begin
             pll_locked_meta <= 1'b0;
             pll_locked_sync <= 1'b0;
         end else begin
@@ -84,7 +93,7 @@ module pll_startup_controller #(
     end
 
     always_ff @(posedge clk) begin
-        if (!reset_n || !restart_n) begin
+        if (!startup_reset_n) begin
             state <= PLL_HOLD_RESET;
             delay_lfsr <= DELAY_SEED;
             pll_reset <= 1'b1;

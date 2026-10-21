@@ -81,6 +81,25 @@ module tb_reset_control;
         check(pll_reset && !clocks_ready, "manual restart returns to the safe state");
         restart_n = 1'b1;
 
+        // A short asynchronous restart must survive until the reference clock
+        // sees it, and a fresh lock must be qualified before clocks are ready.
+        pll_locked = 1'b1;
+        wait_for_clocks_ready();
+        @(negedge clk);
+        #1;
+        restart_n = 1'b0;
+        #1;
+        restart_n = 1'b1;
+        @(posedge clk);
+        #1;
+        check(pll_reset && !clocks_ready, "subcycle restart is captured by the reset synchronizer");
+        check(!pll_dut.pll_locked_sync, "restart clears stale synchronized lock history");
+        @(posedge clk);
+        #1;
+        check(pll_reset && !clocks_ready, "restart release remains qualified by reference-clock edges");
+        wait_for_clocks_ready();
+        check(!pll_reset, "PLL recovers after a short restart pulse");
+
         // Reset release asserts immediately but deasserts only after two local edges.
         async_reset_n = 1'b1;
         @(posedge clk);

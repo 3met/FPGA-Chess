@@ -3,6 +3,8 @@
 
     initial begin
         reset_dut();
+        // Reset alone establishes a playable board and repetition root.
+        run_perft(8'd2, NodeCountType'(400), "power-up startpos perft");
         test_response_backpressure();
         if (MATE_ONLY) begin
             new_game();
@@ -49,6 +51,9 @@
             if (fail_count != 0) $fatal(1, "early search integration failed");
             $finish;
         end
+
+        reset_active_search();
+        run_fresh_game_repeatability();
 
         `include "hardware/tb/search/controller_policy_checks.svh"
 

@@ -358,7 +358,10 @@
                             && dut.search_thread_root_beta[0] == dut.search_completed_score + EvalScore'(15),
                         "aspiration window is centered on the previous score");
                 end
-                if (dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
+                // Stack payload is meaningful only after a search root is initialized.
+                if (dut.state == CTRL_SEARCH_RUN
+                        && dut.search_thread_phase[idx] != SEARCH_PHASE_IDLE
+                        && dut.search_stack_top[idx].scout_search && !pvs_scout_seen) begin
                     pvs_scout_seen = 1'b1;
                     check(dut.search_stack_top[idx].beta == dut.search_stack_top[idx].alpha + EvalScore'(1),
                         "PVS scout window has unit width");

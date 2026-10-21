@@ -177,8 +177,10 @@ class FPGAClient:
         self.transport.reset_output_buffer()
         self.transport.reset_input_buffer()
         self.transport.send_break()
-        self.transport.reset_input_buffer()
         time.sleep(RESET_RECOVERY_SECONDS)
+        # Drain interrupted replies after recovery, including bytes that were
+        # still in the USB/serial receive path when BREAK finished.
+        self.transport.reset_input_buffer()
 
     def remote_reset(self) -> None:
         with self._normal_command_lock:

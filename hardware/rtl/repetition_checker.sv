@@ -96,6 +96,7 @@ module repetition_checker #(
     logic [HISTORY_COUNT_BITS-1:0] history_scan_index;
     logic [1:0] history_scan_count;
     logic history_scan_resp_valid;
+    logic cancel_lookups;
     ThreadID history_scan_resp_thread;
     logic [EPOCH_BITS-1:0] history_scan_resp_epoch;
     logic [1:0] history_scan_resp_count;
@@ -135,6 +136,8 @@ module repetition_checker #(
     assign resp_epoch = history_scan_mode ? history_scan_resp_epoch : epoch_pipe[1];
     assign resp_previous_count = history_scan_mode ? history_scan_resp_count : sat_add(line_count, static_count);
     assign resp_is_draw = resp_previous_count >= 2;
+    // Both lookup paths discard work when the history snapshot is replaced.
+    assign cancel_lookups = flush || active_history_reset || active_history_write || init_start;
 
     always_comb begin
         active_history_rden = init_state == REP_INIT_HISTORY_READ
@@ -277,7 +280,7 @@ module repetition_checker #(
                     default: history_scan_state <= SCAN_IDLE;
                 endcase
             end
-            if (flush || active_history_reset || active_history_write || init_start) begin
+            if (cancel_lookups) begin
                 history_scan_state <= SCAN_IDLE;
                 history_scan_resp_valid <= 1'b0;
                 for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
@@ -393,7 +396,7 @@ module repetition_checker #(
                     static_count <= request_is_root ? lookup.count - 1'b1 : lookup.count;
                 end
             end
-            if (flush) for (int stage = 0; stage < 2; stage++) valid_pipe[stage] <= 1'b0;
+            if (cancel_lookups) for (int stage = 0; stage < 2; stage++) valid_pipe[stage] <= 1'b0;
 
 `ifndef SYNTHESIS
             if (req_valid) begin

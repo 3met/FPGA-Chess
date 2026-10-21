@@ -720,12 +720,21 @@ class FPGAClientInitializationTests(unittest.TestCase):
         client = FPGAClient(transport)
 
         with mock.patch("software.engine.host.time.sleep") as sleep:
+            operations = mock.Mock()
+            operations.attach_mock(transport, "transport")
+            operations.attach_mock(sleep, "sleep")
             client.remote_reset()
 
-        transport.reset_output_buffer.assert_called_once_with()
-        transport.send_break.assert_called_once_with()
-        self.assertEqual(transport.reset_input_buffer.call_count, 2)
-        sleep.assert_called_once_with(RESET_RECOVERY_SECONDS)
+        self.assertEqual(
+            operations.mock_calls,
+            [
+                mock.call.transport.reset_output_buffer(),
+                mock.call.transport.reset_input_buffer(),
+                mock.call.transport.send_break(),
+                mock.call.sleep(RESET_RECOVERY_SECONDS),
+                mock.call.transport.reset_input_buffer(),
+            ],
+        )
 
     def test_initialize_always_breaks_then_verifies_status_and_new_game(self):
         transport = mock.Mock()

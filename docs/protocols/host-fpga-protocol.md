@@ -52,7 +52,7 @@ Perft is a supported hardware command in the engine/controller protocol and is e
 
 `Set board` replaces the active position atomically.
 
-`New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents, history used for repetition/draw handling, latched errors, pending responses, and command FIFOs where safe. It also resets the active board to the normal chess starting position.
+`New game` follows UCI `ucinewgame` semantics. It clears search state, TT contents, repetition and move-ordering history, latched errors, and the cached result. It also resets the active board to the normal chess starting position. Commands remain serialized; New Game does not flush transport FIFOs.
 
 Ack responses for Set Board, Make Move, and New Game are emitted only after the controller reports operation completion, not merely after request capture.
 
@@ -60,7 +60,9 @@ UART BREAK, defined as RX held low for at least 20 bit times, is the out-of-band
 
 The host must leave RX high for at least two bit times after BREAK before transmitting another byte and must wait for board memory to initialize. Normal command bytes, including `0x1f` Kill, remain in the byte stream because the same values may appear inside payloads.
 
-Every Python host connection clears queued output, sends BREAK, waits for board initialization, verifies idle status, and starts a new game. A failed reset sequence is retried as a complete unit.
+Reset initializes the normal chess starting position before accepting controller work and emits no unsolicited response. Metadata queries can complete during initialization; board and search commands wait for initialization to finish.
+
+Every Python host connection clears queued output, sends BREAK, waits for board initialization, drains delayed input from the interrupted session, verifies idle status, and starts a new game. A failed reset sequence is retried as a complete unit.
 
 Because packets have no request ID, length field, or checksum, a timeout, partial response, malformed response, or response of the wrong type makes the byte-stream position unknowable. The host marks that connection unusable, closes it, and requires the next connection to complete the BREAK sequence before sending normal commands. It never retries an ambiguous command in place. Repeated UCI `stop` commands produce at most one in-band Kill byte for a search.
 

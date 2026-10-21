@@ -4,8 +4,10 @@
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             move_pop_response_rr <= ThreadID'(0);
-            state <= CTRL_IDLE;
+            state <= CTRL_NEW_CLEAR_START;
+            startup_active <= 1'b1;
             active_req <= EngineControllerRequest'('0);
+            active_req.operation <= ENGINE_CTRL_NEW_GAME;
             resp_reg <= EngineControllerResponse'('0);
             board_wait_count <= BoardWaitCount'(0);
             move_wait_count <= MoveWaitCount'(0);
@@ -100,6 +102,8 @@
             profile_beta_cutoff_rank <= 8'd0;
             profile_beta_cutoff_move <= NULL_MOVE;
 `endif
+            // Reset ownership, not wide node/response/history payloads: search
+            // and perft initialize their root before any context can run.
             for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                 search_best_move[tid] <= NULL_MOVE;
                 search_ponder_move[tid] <= NULL_MOVE;
@@ -133,14 +137,8 @@
                 search_tt_validation_passed[tid] <= 1'b0;
                 search_tt_validation_forced[tid] <= 1'b0;
                 search_tt_history_required[tid] <= 1'b0;
-                search_tt_response[tid] <= TTLookupResponse'('0);
                 search_pending_move[tid] <= NULL_MOVE;
                 search_pending_move_bucket[tid] <= QUIET_MEDIUM_BUCKET;
-                search_board[tid] <= FullBoard'('0);
-                search_board_in_check[tid] <= 1'b0;
-                search_zobrist_key[tid] <= ZobristKey'(0);
-                search_pst_eval[tid] <= PstEvalPair'('0);
-                search_piece_count[tid] <= PieceCount'(0);
                 search_ply[tid] <= PlyIndex'(0);
                 search_return_score[tid] <= EvalScore'(0);
                 search_return_valid[tid] <= 1'b0;
@@ -162,29 +160,15 @@
                 nnue_plan[tid].real_move <= 1'b0;
                 nnue_plan[tid].reverse <= 1'b0;
                 nnue_state_valid[tid] <= 1'b0;
-                search_stack_top[tid] <= empty_search_stack_entry();
                 search_return_move[tid] <= NULL_MOVE;
                 search_return_ponder_move[tid] <= NULL_MOVE;
                 history_update_pending[tid] <= 1'b0;
-                history_update_pending_color[tid] <= WHITE;
-                history_update_pending_from[tid] <= Position'(0);
-                history_update_pending_to[tid] <= Position'(0);
-                history_update_pending_depth[tid] <= PlyIndex'(0);
-                history_update_pending_failed0[tid] <= 12'd0;
-                history_update_pending_failed1[tid] <= 12'd0;
-                history_update_pending_failed2[tid] <= 12'd0;
-                history_update_pending_failed_count[tid] <= 2'd0;
             end
             for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
-                search_board_tag_pipe[idx] <= ThreadID'(0);
-                search_board_op_tag_pipe[idx] <= BOARD_IDLE_OP;
-                search_board_ply_tag_pipe[idx] <= PlyIndex'(0);
                 search_board_tag_valid_pipe[idx] <= 1'b0;
             end
             for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
-                search_move_tag_pipe[idx] <= ThreadID'(0);
                 search_move_tag_valid_pipe[idx] <= 1'b0;
-                search_move_in_check_pipe[idx] <= 1'b0;
             end
         end else begin
             if (move_pop_resp_valid)
@@ -317,15 +301,10 @@
                     search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                 end
                 for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
-                    search_board_tag_pipe[idx] <= ThreadID'(0);
-                    search_board_op_tag_pipe[idx] <= BOARD_IDLE_OP;
-                    search_board_ply_tag_pipe[idx] <= PlyIndex'(0);
                     search_board_tag_valid_pipe[idx] <= 1'b0;
                 end
                 for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
-                    search_move_tag_pipe[idx] <= ThreadID'(0);
                     search_move_tag_valid_pipe[idx] <= 1'b0;
-                    search_move_in_check_pipe[idx] <= 1'b0;
                 end
                 state <= CTRL_FLUSH_RESPOND;
             end else begin
@@ -348,6 +327,9 @@
                             end
 
                             ENGINE_CTRL_NEW_GAME: begin
+                                // Fresh games start both shared arbiters at a fixed priority.
+                                move_pop_response_rr <= ThreadID'(0);
+                                nnue_plan_rr_ptr <= ThreadID'(0);
                                 repetition_epoch <= repetition_epoch + 1'b1;
                                 search_best_move[search_thread_id] <= NULL_MOVE;
                                 search_nodes <= NodeCountType'(0);
@@ -378,15 +360,10 @@
                                     nnue_state_valid[tid] <= 1'b0;
                                 end
                                 for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
-                                    search_board_tag_pipe[idx] <= ThreadID'(0);
-                                    search_board_op_tag_pipe[idx] <= BOARD_IDLE_OP;
-                                    search_board_ply_tag_pipe[idx] <= PlyIndex'(0);
                                     search_board_tag_valid_pipe[idx] <= 1'b0;
                                 end
                                 for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
-                                    search_move_tag_pipe[idx] <= ThreadID'(0);
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
-                                    search_move_in_check_pipe[idx] <= 1'b0;
                                 end
                                 tt_age <= TTAge'(0);
                                 state <= CTRL_NEW_CLEAR_START;
@@ -507,15 +484,10 @@
                                         nnue_state_valid[tid] <= 1'b0;
                                     end
                                     for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
-                                        search_board_tag_pipe[idx] <= ThreadID'(0);
-                                        search_board_op_tag_pipe[idx] <= BOARD_IDLE_OP;
-                                        search_board_ply_tag_pipe[idx] <= PlyIndex'(0);
                                         search_board_tag_valid_pipe[idx] <= 1'b0;
                                     end
                                     for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
-                                        search_move_tag_pipe[idx] <= ThreadID'(0);
                                         search_move_tag_valid_pipe[idx] <= 1'b0;
-                                        search_move_in_check_pipe[idx] <= 1'b0;
                                     end
                                     repetition_epoch <= repetition_epoch + 1'b1;
                                     // Time arithmetic starts from the registered request so the
@@ -538,15 +510,10 @@
                                     search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
                                 end
                                 for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
-                                    search_board_tag_pipe[idx] <= ThreadID'(0);
-                                    search_board_op_tag_pipe[idx] <= BOARD_IDLE_OP;
-                                    search_board_ply_tag_pipe[idx] <= PlyIndex'(0);
                                     search_board_tag_valid_pipe[idx] <= 1'b0;
                                 end
                                 for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
-                                    search_move_tag_pipe[idx] <= ThreadID'(0);
                                     search_move_tag_valid_pipe[idx] <= 1'b0;
-                                    search_move_in_check_pipe[idx] <= 1'b0;
                                 end
                                 state <= CTRL_FLUSH_RESPOND;
                             end
@@ -579,7 +546,9 @@
                                 repetition_history_reset <= 1'b1;
                                 repetition_history_key <= board_update_zobrist_out;
                                 resp_reg <= EngineControllerResponse'('0);
-                                state <= CTRL_DIRECT_DONE;
+                                // Power-up uses the normal serial setup without a response.
+                                startup_active <= 1'b0;
+                                state <= startup_active ? CTRL_IDLE : CTRL_DIRECT_DONE;
                             end else begin
                                 new_setup_index <= new_setup_index + 7'd1;
                                 state <= CTRL_BOARD_ISSUE;

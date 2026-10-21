@@ -380,22 +380,14 @@ module engine_command_layer #(
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
+            // Reset ownership/validity only. Every transaction sets its counters
+            // and response metadata before the FSM can consume those payloads.
             state <= CMD_IDLE;
-            response_kind <= RESP_NONE;
-            request_response_kind <= RESP_NONE;
-            response_index <= '0;
-            response_status <= '0;
-            response_error <= '0;
-            response_active_op <= '0;
             error_code <= '0;
             active_operation <= '0;
-            curr_opcode <= '0;
-            payload_count <= '0;
-            payload_error <= 1'b0;
             search_active <= 1'b0;
             result_valid <= 1'b0;
             result_error <= 1'b0;
-            board_update_index <= '0;
             debug_stat_address_reg <= '0;
         end else unique case (state)
             CMD_IDLE: begin

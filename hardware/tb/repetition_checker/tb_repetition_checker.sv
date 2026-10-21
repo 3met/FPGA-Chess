@@ -47,6 +47,35 @@ module tb_repetition_checker;
         end
     endtask
 
+    // Replacing/rebuilding history cancels both pipeline stages, including a
+    // request presented on the cancellation edge.
+    task automatic cancel_fast_lookup(input int cancel_kind);
+        @(negedge clk);
+        req_valid = 1;
+        req_ply = 0;
+        req_start_ply = 0;
+        req_key = 64'h7777;
+        @(negedge clk);
+        history_reset = cancel_kind == 0;
+        history_write = cancel_kind == 1;
+        init_start = cancel_kind == 2;
+        history_key = 64'h7777;
+        @(negedge clk);
+        req_valid = 0;
+        history_reset = 0;
+        history_write = 0;
+        init_start = 0;
+        check(!resp_valid, "history change cancels older lookup");
+        repeat (3) begin
+            @(negedge clk);
+            check(!resp_valid, "history change cancels coincident lookup");
+        end
+        if (cancel_kind != 2) initialize();
+        else wait (init_done || init_failed);
+        request(0, 0, 0, 64'h7777, 0,
+            "lookup uses rebuilt history");
+    endtask
+
     task automatic history_sample(input ZobristKey key, input logic reset_history);
         @(negedge clk); history_key = key; history_reset = reset_history; history_write = !reset_history;
         @(negedge clk); history_reset = 0; history_write = 0;
@@ -249,6 +278,7 @@ module tb_repetition_checker;
         history_sample(64'h7777, 1);
         initialize();
         request(0, 0, 0, 64'h7777, 0, "new history restores normal table lookup");
+        for (int kind = 0; kind < 3; kind++) cancel_fast_lookup(kind);
 
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);

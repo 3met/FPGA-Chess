@@ -353,13 +353,15 @@ module tt_external_load_store #(
         if (!rst_n) begin
             cache_store_valid <= 1'b0; commit_valid <= 1'b0;
             state <= TT_FRONTEND_CACHE_CLEAR; clear_index <= '0; clear_slot <= 1'b0; clear_toggle <= 1'b0; clear_prev <= 1'b0;
-            probe_buffer_valid <= 1'b0; probe_buffer <= '0;
+            // Payloads are overwritten before their valid bit is published; only
+            // control needs reset, keeping reset off the wide request/response buses.
+            probe_buffer_valid <= 1'b0;
             probe_pending <= 1'b0; store_pending <= 1'b0; store_buffer_valid <= 1'b0;
             probe_complete <= 1'b0; store_complete <= 1'b0;
             probe_way_word_count <= '0; probe_returned <= 1'b0; probe_memory_way <= '0;
             probe_word_count <= '0; store_word_count <= '0; fill_valid <= 1'b0;
             store_fill_valid <= 1'b0; bank_fill_pending <= '0;
-            lookup_resp_valid <= 1'b0; lookup_resp <= '0;
+            lookup_resp_valid <= 1'b0;
             cache_access <= 1'b0; cache_hit <= 1'b0; cache_store_access <= 1'b0; cache_store_hit <= 1'b0;
         end else begin
             cache_store_valid <= store_pending && store_position_hit;

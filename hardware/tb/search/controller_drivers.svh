@@ -44,14 +44,20 @@
     endfunction : expected_next_thread
 
     task automatic reset_dut();
+        automatic int startup_cycles = 0;
+        automatic bit startup_response_seen = 1'b0;
         req_valid = 1'b0;
         req = zero_request();
         rst_n = 1'b0;
         do_clock(3);
         rst_n = 1'b1;
-        do_clock(2);
-        check(req_ready, "controller ready after reset");
-        check(!resp_valid, "no response valid after reset");
+        while (!req_ready && startup_cycles < 200000) begin
+            startup_response_seen |= resp_valid;
+            do_clock(1);
+            startup_cycles++;
+        end
+        check(req_ready, "controller ready after reset initialization");
+        check(!startup_response_seen && !resp_valid, "startup emits no unsolicited response");
     endtask : reset_dut
 
     task automatic check_search_stats(input string label);

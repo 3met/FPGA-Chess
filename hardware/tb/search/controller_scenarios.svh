@@ -2,6 +2,35 @@
 // Included in tb_search_controller scope.
 
 
+    // Reset interrupts real pipeline ownership and rebuilds a usable starting board.
+    task automatic reset_active_search();
+        automatic EngineControllerRequest request = zero_request();
+        automatic int wait_cycles = 0;
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd3;
+        pulse_request(request, "search before hardware reset");
+        while (!dut.search_board_inflight[0] && wait_cycles < 200000) begin
+            do_clock(1);
+            wait_cycles++;
+        end
+        check(dut.search_board_inflight[0], "reset interrupts an in-flight board operation");
+        reset_dut();
+        run_perft(8'd2, NodeCountType'(400), "reset during search restores startpos");
+    endtask : reset_active_search
+
+    // A fresh game must not inherit arbitration priority or learned move order.
+    task automatic run_fresh_game_repeatability();
+        automatic Move first_move, second_move;
+        automatic EvalScore first_score, second_score;
+        automatic NodeCountType first_nodes, second_nodes;
+        new_game();
+        run_search_depth_record(8'd2, "fresh game baseline", first_move, first_score, first_nodes);
+        new_game();
+        run_search_depth_record(8'd2, "fresh game repeated", second_move, second_score, second_nodes);
+        check(first_move == second_move && first_score == second_score
+            && first_nodes == second_nodes, "fresh games repeat move, score, and node count");
+    endtask : run_fresh_game_repeatability
+
     task automatic run_tt_reuse_test(input string label);
         automatic Move first_move;
         automatic Move second_move;
