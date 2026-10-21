@@ -2,12 +2,10 @@
 // Included in CTRL_SEARCH_RUN so controller update precedence is preserved.
 
                     if (nnue_build_busy && !nnue_build_draining) begin
-                        automatic Tile build_tile =
-                            search_board[nnue_build_thread].tiles[nnue_build_pos];
                         // This producer owns the port; empty squares advance
                         // without consulting another producer's valid decode.
-                        if (build_tile.piece_type == NULL_PIECE || nnue_update_ready) begin
-                            if (build_tile.piece_type != NULL_PIECE)
+                        if (nnue_build_square_empty || nnue_update_ready) begin
+                            if (!nnue_build_square_empty)
                                 nnue_build_first <= 1'b0;
                             if (nnue_build_pos == Position'(63)) begin
                                 nnue_build_draining <= 1'b1;
@@ -61,12 +59,10 @@
                                 end
                             end
                         end else if (nnue_delta_replay) begin
-                            automatic Tile rebuild_tile =
-                                search_board[nnue_delta_thread].tiles[nnue_delta_pos];
-                            if (rebuild_tile.piece_type == NULL_PIECE
+                            if (nnue_delta_square_empty
                                     || ((!nnue_build_busy || nnue_build_draining)
                                         && nnue_update_ready)) begin
-                                if (rebuild_tile.piece_type != NULL_PIECE)
+                                if (!nnue_delta_square_empty)
                                     nnue_delta_first <= 1'b0;
                                 if (nnue_delta_pos == Position'(63)) begin
                                     nnue_delta_draining <= 1'b1;

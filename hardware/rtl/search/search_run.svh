@@ -326,6 +326,7 @@
                                 automatic Tile delta_capture =
                                     search_board[board_thread_id].tiles[
                                         search_pending_move[board_thread_id].to_pos];
+                                automatic Tile delta_placed = delta_mover;
                                 automatic Position delta_capture_pos =
                                     search_pending_move[board_thread_id].to_pos;
                                 automatic logic delta_capture_valid =
@@ -349,10 +350,32 @@
                                         search_pending_move[board_thread_id].from_pos[5:3],
                                         search_pending_move[board_thread_id].to_pos[2:0]
                                     };
-                                    delta_capture = search_board[board_thread_id].tiles[
-                                        delta_capture_pos];
+                                    // A legal en-passant capture always removes an
+                                    // opposing pawn; no third board read is needed.
+                                    delta_capture = '{piece_type: PAWN,
+                                        piece_color: Color'(~delta_mover.piece_color)};
                                     delta_capture_valid = 1'b1;
                                 end
+                                // Legal moves retain the mover's tile except on
+                                // promotion, whose result is encoded in the move.
+                                if (delta_mover.piece_type == PAWN
+                                        && (search_pending_move[board_thread_id].to_pos[5:3] == BoardRank'(0)
+                                            || search_pending_move[board_thread_id].to_pos[5:3] == BoardRank'(7))) begin
+                                    unique case (search_pending_move[board_thread_id].promo_piece)
+                                        PROMO_QUEEN: delta_placed.piece_type = QUEEN;
+                                        PROMO_KNIGHT: delta_placed.piece_type = KNIGHT;
+                                        PROMO_ROOK: delta_placed.piece_type = ROOK;
+                                        PROMO_BISHOP: delta_placed.piece_type = BISHOP;
+                                    endcase
+                                end
+`ifndef SYNTHESIS
+                                assert (delta_placed == board_update_out.tiles[
+                                        search_pending_move[board_thread_id].to_pos])
+                                    else $fatal(1, "NNUE placed tile differs from committed board");
+                                if (delta_is_ep)
+                                    assert (delta_capture == search_board[board_thread_id].tiles[delta_capture_pos])
+                                        else $fatal(1, "NNUE en-passant capture differs from parent board");
+`endif
                                 // A node is entered only after a speculative push
                                 // proves legal. Count that committed child here so
                                 // TT cutoffs, draws, and terminal children count too.
@@ -400,9 +423,7 @@
                                     <= search_pending_move[board_thread_id].to_pos;
                                 nnue_plan[board_thread_id].capture_pos <= delta_capture_pos;
                                 nnue_plan[board_thread_id].mover <= delta_mover;
-                                nnue_plan[board_thread_id].placed
-                                    <= board_update_out.tiles[
-                                        search_pending_move[board_thread_id].to_pos];
+                                nnue_plan[board_thread_id].placed <= delta_placed;
                                 nnue_plan[board_thread_id].capture <= delta_capture;
                                 nnue_plan[board_thread_id].capture_valid
                                     <= delta_capture_valid;
@@ -754,7 +775,27 @@
                                 automatic ThreadID return_thread_id = ThreadID'(return_idx);
                                 automatic EvalScore parent_score;
                                 automatic PlyIndex return_ply;
+                                // The completed undo plan stays owned by this thread
+                                // until its returned move is folded into the parent.
+                                automatic logic return_move_quiet =
+                                    !nnue_plan[return_thread_id].capture_valid
+                                    && nnue_plan[return_thread_id].mover.piece_type
+                                        == nnue_plan[return_thread_id].placed.piece_type;
 
+`ifndef SYNTHESIS
+                                if (!search_return_was_null[return_thread_id]) begin
+                                    assert (nnue_plan[return_thread_id].reverse
+                                            && nnue_plan[return_thread_id].from_pos
+                                                == search_return_move[return_thread_id].from_pos
+                                            && nnue_plan[return_thread_id].to_pos
+                                                == search_return_move[return_thread_id].to_pos)
+                                        else $fatal(1, "Returned move does not own its NNUE undo plan");
+                                    assert (return_move_quiet == is_quiet_move(
+                                            search_board[return_thread_id],
+                                            search_return_move[return_thread_id]))
+                                        else $fatal(1, "NNUE return quiet classification differs from parent board");
+                                end
+`endif
                                 return_ply = search_ply[return_thread_id];
                                 parent_score = -search_return_score[return_thread_id];
                                 search_thread_id <= return_thread_id;
@@ -840,10 +881,7 @@
                                             <= search_stack_top[return_thread_id].legal_move_count;
                                         profile_beta_cutoff_move <= search_return_move[return_thread_id];
     `endif
-                                        if (is_quiet_move(
-                                                search_board[return_thread_id],
-                                                search_return_move[return_thread_id]
-                                            ) && !history_update_pending[return_thread_id]) begin
+                                        if (return_move_quiet && !history_update_pending[return_thread_id]) begin
                                             history_update_pending[return_thread_id] <= 1'b1;
                                             history_update_pending_color[return_thread_id]
                                                 <= search_board[return_thread_id].turn;
@@ -890,10 +928,7 @@
                                         // Record a quiet only after its complete logical search, including
                                         // any PVS/LMR recovery, has definitively failed to cut off.
                                         if (!search_in_qsearch(return_thread_id)
-                                                && is_quiet_move(
-                                                    search_board[return_thread_id],
-                                                    search_return_move[return_thread_id]
-                                                )
+                                                && return_move_quiet
                                                 && search_stack_top[return_thread_id].failed_quiet_count < 2'd3) begin
                                             // Failed-quiet counts select distinct storage slots.
                                             unique case (search_stack_top[return_thread_id].failed_quiet_count)
@@ -1110,17 +1145,12 @@
                         end
 
                         if (search_tt_store_issue_valid && tt_store_req_ready) begin
-                            // Store publication completes from the searcher's
-                            // perspective as soon as the frontend consumes it.
-                            // The frontend may queue or drop it under pressure.
-                            search_dispatch.tt_store <= search_thread_after(search_tt_store_issue_thread);
-                        end
-
-                        if (search_has_store_complete_thread()) begin
-                            automatic ThreadID store_thread_id;
+                            automatic ThreadID store_thread_id = search_tt_store_issue_thread;
                             automatic PlyIndex store_ply;
 
-                            store_thread_id = search_store_complete_thread();
+                            // The single selected store completes when the frontend
+                            // accepts it, even if publication is queued or dropped.
+                            search_dispatch.tt_store <= search_thread_after(store_thread_id);
                             store_ply = search_ply[store_thread_id];
                             search_thread_id <= store_thread_id;
                             search_return_valid[store_thread_id] <= 1'b1;

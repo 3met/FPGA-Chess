@@ -64,24 +64,6 @@
         return search_thread_phase[thread_index] == SEARCH_PHASE_STORE_PUBLISH;
     endfunction : search_thread_store_pending
 
-    function automatic logic search_thread_store_complete(input int thread_index);
-        return search_thread_phase[thread_index] == SEARCH_PHASE_STORE_PUBLISH
-            && search_tt_store_issue_valid && tt_store_req_ready
-            && search_tt_store_issue_thread == ThreadID'(thread_index);
-    endfunction
-
-    function automatic logic search_has_store_complete_thread();
-        for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++)
-            if (search_thread_store_complete(idx)) return 1'b1;
-        return 1'b0;
-    endfunction
-
-    function automatic ThreadID search_store_complete_thread();
-        for (int idx = 0; idx < SEARCH_THREAD_COUNT; idx++)
-            if (search_thread_store_complete(idx)) return ThreadID'(idx);
-        return ThreadID'(0);
-    endfunction
-
     function automatic logic search_thread_return_pending(input int thread_index);
         return search_thread_phase[thread_index] == SEARCH_PHASE_MOVE_WAIT
             && search_return_valid[thread_index]
@@ -294,10 +276,17 @@
             || move_state == MOVE_ORDER_LOW_QUIET;
     endfunction : move_state_uses_pop
 
+    // A legal pawn promotion starts on one of the two penultimate ranks.
+    // Select only their pawn flags instead of muxing an arbitrary board tile.
     function automatic logic is_promotion_move(input FullBoard board, input Move move);
-        automatic Tile source_tile = board.tiles[move.from_pos];
-        return source_tile.piece_type == PAWN
-            && (move.to_pos[5:3] == BoardRank'(0) || move.to_pos[5:3] == BoardRank'(7));
+        automatic logic [15:0] promotion_pawns;
+        for (int file_index = 0; file_index < 8; file_index++) begin
+            promotion_pawns[file_index] = board.tiles[8 + file_index].piece_type == PAWN;
+            promotion_pawns[8 + file_index] = board.tiles[48 + file_index].piece_type == PAWN;
+        end
+        return ((move.from_pos[5:3] == BoardRank'(1) && move.to_pos[5:3] == BoardRank'(0))
+                || (move.from_pos[5:3] == BoardRank'(6) && move.to_pos[5:3] == BoardRank'(7)))
+            && promotion_pawns[{move.from_pos[5], move.from_pos[2:0]}];
     endfunction : is_promotion_move
 
     // History applies only to ordinary non-captures and castling. Promotions

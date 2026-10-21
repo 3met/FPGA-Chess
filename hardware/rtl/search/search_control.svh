@@ -10,7 +10,6 @@
             active_req.operation <= ENGINE_CTRL_NEW_GAME;
             resp_reg <= EngineControllerResponse'('0);
             board_wait_count <= BoardWaitCount'(0);
-            move_wait_count <= MoveWaitCount'(0);
             active_board <= FullBoard'('0);
             active_board_in_check <= 1'b0;
             active_zobrist_key <= ZobristKey'(0);
@@ -799,12 +798,10 @@
                 end
 
                 CTRL_SEARCH_ROOT_INIT: begin
-                    automatic Tile root_tile =
-                        search_board[nnue_root_init_thread].tiles[nnue_root_init_pos];
                     if (!nnue_root_init_draining) begin
-                        if (root_tile.piece_type == NULL_PIECE
+                        if (nnue_root_square_empty
                                 || (nnue_update_valid && nnue_update_ready)) begin
-                            if (root_tile.piece_type != NULL_PIECE)
+                            if (!nnue_root_square_empty)
                                 nnue_root_init_first <= 1'b0;
                             if (nnue_root_init_pos == Position'(63))
                                 nnue_root_init_draining <= 1'b1;

@@ -100,9 +100,6 @@
                     move_cmd = MOVE_GEN_GENERATE_NOISY;
                     move_cmd_valid = 1'b1;
                 end
-                MOVE_ORDER_GOOD_NOISY: begin
-                    move_pop_valid = 1'b1;
-                end
                 MOVE_ORDER_GENERATE_QUIET: begin
                     move_quiet_cmd_valid = 1'b1;
                     move_quiet_cmd_thread = ThreadID'(0);
@@ -110,9 +107,7 @@
                     move_quiet_cmd_board = search_board[0];
                     move_quiet_cmd_in_check = search_board_in_check[0];
                 end
-                MOVE_ORDER_QUIET: begin
-                    move_pop_valid = 1'b1;
-                end
+                MOVE_ORDER_GOOD_NOISY, MOVE_ORDER_QUIET,
                 MOVE_ORDER_BAD_NOISY, MOVE_ORDER_LOW_QUIET: begin
                     move_pop_valid = 1'b1;
                 end
@@ -120,10 +115,6 @@
             endcase
         end else if (search_move_issue_valid) begin
             automatic Move order_move = ordering_move_for_thread(search_move_issue_thread);
-            move_cmd_thread = search_move_issue_thread;
-            move_cmd_ply = search_ply[search_move_issue_thread];
-            move_cmd_board = search_board[search_move_issue_thread];
-            move_cmd_in_check = search_board_in_check[search_move_issue_thread];
             move_cmd_suppress_valid = search_stack_top[search_move_issue_thread].direct_attempted;
             move_cmd_suppress_move = search_stack_top[search_move_issue_thread].tt_move;
             move_cmd_valid = 1'b1;
@@ -138,10 +129,6 @@
 
         if (state == CTRL_SEARCH_RUN && search_quiet_issue_valid) begin
             move_quiet_cmd_valid = 1'b1;
-            move_quiet_cmd_thread = search_quiet_issue_thread;
-            move_quiet_cmd_ply = search_ply[search_quiet_issue_thread];
-            move_quiet_cmd_board = search_board[search_quiet_issue_thread];
-            move_quiet_cmd_in_check = search_board_in_check[search_quiet_issue_thread];
             move_quiet_cmd_suppress_valid =
                 search_stack_top[search_quiet_issue_thread].direct_attempted;
             move_quiet_cmd_suppress_move =
@@ -196,8 +183,8 @@
     // Decode each local store before arbitration selects its payload, keeping
     // scheduler selection out of bound comparison and promotion-tile lookup.
     always_comb begin
-        TTStoreRequest local_stores[THREAD_COUNT];
-        for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+        TTStoreRequest local_stores[SEARCH_THREAD_COUNT];
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
             local_stores[tid] = TTStoreRequest'('0);
             local_stores[tid].zobrist_key = search_zobrist_key[tid];
             local_stores[tid].depth = search_remaining_depth(tid);

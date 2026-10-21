@@ -1,6 +1,28 @@
 // Existing untimed search-policy checks under the controller fixture policy.
 // Included inside the main integration sequence.
 
+        // Promotion recognition must distinguish pawns from every other piece
+        // on both penultimate ranks, including capture destinations on each file.
+        for (int color_index = 0; color_index < 2; color_index++) begin
+            for (int file_index = 0; file_index < 8; file_index++) begin
+                for (int piece_index = 0; piece_index < 7; piece_index++) begin
+                    automatic FullBoard board = '0;
+                    automatic Move move = NULL_MOVE;
+                    move.from_pos = Position'((color_index == 0 ? 48 : 8) + file_index);
+                    board.tiles[move.from_pos] = Tile'({1'(color_index), 3'(piece_index)});
+                    for (int destination_file = 0; destination_file < 8; destination_file++) begin
+                        if (destination_file >= file_index - 1 && destination_file <= file_index + 1) begin
+                            move.to_pos = Position'((color_index == 0 ? 56 : 0) + destination_file);
+                            check(dut.is_promotion_move(board, move) == (PieceType'(piece_index) == PAWN),
+                                "promotion classification on either back rank");
+                        end
+                    end
+                    move.to_pos = Position'((color_index == 0 ? 40 : 16) + file_index);
+                    check(!dut.is_promotion_move(board, move), "non-promotion destination stays ordinary");
+                end
+            end
+        end
+
         // Wide operands must cancel before clipping into the finite score band.
         for (int base_index = 0; base_index < 5; base_index++) begin
             automatic int base = (base_index-2) * (PST_EVAL_BOUND / 2);

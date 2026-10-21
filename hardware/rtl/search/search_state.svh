@@ -3,7 +3,6 @@
 
     localparam int BOARD_WAIT_BITS = $clog2(BOARD_UPDATE_PIPELINE_STAGE_CNT + 1);
     localparam int MOVE_WAIT_CYCLES = 2;
-    localparam int MOVE_WAIT_BITS = $clog2(MOVE_WAIT_CYCLES + 1);
     localparam int SEARCH_BOARD_TAG_PIPE_LEN = (BOARD_UPDATE_PIPELINE_STAGE_CNT <= 1)
         ? 1 : BOARD_UPDATE_PIPELINE_STAGE_CNT;
     localparam int SEARCH_MOVE_TAG_PIPE_LEN = (MOVE_WAIT_CYCLES <= 1) ? 1 : MOVE_WAIT_CYCLES;
@@ -54,7 +53,6 @@
 `endif
 
     typedef logic [BOARD_WAIT_BITS-1:0] BoardWaitCount;
-    typedef logic [MOVE_WAIT_BITS-1:0] MoveWaitCount;
     typedef logic [THREAD_COUNT_BITS-1:0] ThreadCount;
     typedef logic [SEARCH_STACK_ADDR_BITS-1:0] SearchStackRamAddr;
     typedef logic [SEARCH_DEPTH_BITS-1:0] SearchDepth;
@@ -123,7 +121,6 @@
     EngineControllerRequest active_req;
     EngineControllerResponse resp_reg;
     BoardWaitCount board_wait_count;
-    MoveWaitCount move_wait_count;
 
     FullBoard active_board;
     logic active_board_in_check;
@@ -403,6 +400,13 @@
     logic nnue_plan_select_valid;
     logic [2:0] nnue_delta_step;
     Position nnue_delta_pos;
+
+    // Share replay payload reads while each producer independently skips empties.
+    ThreadID nnue_replay_thread;
+    Position nnue_replay_pos;
+    Tile nnue_replay_tile;
+    logic [63:0] nnue_empty_squares[0:SEARCH_THREAD_COUNT-1];
+    logic nnue_root_square_empty, nnue_build_square_empty, nnue_delta_square_empty;
 
     // Shared transposition-table frontend request and result signals.
     logic tt_clear;
