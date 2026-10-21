@@ -21,7 +21,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BOOK = REPO_ROOT.parent / "fastchess" / "books" / "UHO_Lichess_4852_v1.epd"
 BOOK_URL = "https://github.com/official-stockfish/books/raw/master/UHO_Lichess_4852_v1.epd.zip"
@@ -339,9 +338,14 @@ def _run_process(command: list[str], run_dir: Path, *, resume: bool, output: Tex
                     output.write(header)
                 standings = not standings
                 visible = True
-            elif standings or stripped.startswith(("Warning;", "Error;", "Fatal;", "Tournament finished", "Tournament was interrupted")):
-                visible = True
-            elif stripped.startswith("Finished game ") and any(word in stripped for word in ("loses on time", "illegal move", "crash")):
+            elif (
+                standings
+                or stripped.startswith(("Warning;", "Error;", "Fatal;", "Tournament finished", "Tournament was interrupted"))
+                or (
+                    stripped.startswith("Finished game ")
+                    and any(word in stripped for word in ("loses on time", "illegal move", "crash"))
+                )
+            ):
                 visible = True
             if visible:
                 summary.write(line)

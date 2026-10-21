@@ -10,8 +10,8 @@ from unittest import mock
 
 from tools.search_tuning.optimizer import posterior_rankings, suggest
 from tools.search_tuning.space import (
+    Parameter,
     configured_parameters,
-    get_path,
     json_from_vector,
     parameter_hash,
     vector_from_json,
@@ -21,11 +21,11 @@ from tools.search_tuning.workflow import (
     Runner,
     TuningError,
     aggregate_evaluations,
+    experiment_snapshot,
     paired_elo_difference,
     parse_tournament_completion,
     validate_config,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,6 +109,26 @@ class SearchSpaceTests(unittest.TestCase):
         self.assertLess(null["deep_reduction"], null["deep_depth_threshold"])
         thresholds = candidate["history"]["quiet_bucket_thresholds"]
         self.assertTrue(thresholds[0] < thresholds[1] < thresholds[2])
+
+    def test_fraction_decoding_returns_independent_policy_values(self):
+        """Mutating one decoded policy must not corrupt later proposals."""
+        parameter = Parameter("fraction", 0.25, 0.75, "fraction", maximum_denominator=8)
+        first = parameter.decode(0.5)
+        expected = first.copy()
+        first[0] = -1
+        self.assertEqual(parameter.decode(0.5), expected)
+        self.assertEqual(parameter.encode(expected), 0.5)
+
+    def test_experiment_snapshot_ignores_populated_fraction_caches(self):
+        """Reading a parameter's cached choices cannot change checkpoint identity."""
+        parameters = [Parameter("fraction", 0.25, 0.75, "fraction")]
+        with mock.patch("tools.search_tuning.workflow.hash_file", return_value="asset"), \
+                mock.patch("tools.search_tuning.workflow.hash_source_tree", return_value="source"):
+            before = json.dumps(experiment_snapshot(self.config, self.baseline, parameters), sort_keys=True)
+            parameters[0].decode(0.5)
+            after = experiment_snapshot(self.config, self.baseline, parameters)
+        self.assertEqual(before, json.dumps(after, sort_keys=True))
+        self.assertNotIn("fraction_values", after["parameters"][0])
 
     def test_startup_is_deterministic_unique_and_spans_parameter_groups(self):
         settings = dict(self.config["optimizer"], candidate_pool_size=250)

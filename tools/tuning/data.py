@@ -15,13 +15,13 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import BinaryIO
 
 from tools.common.files import atomic_write_json
 
 from .config import cache_key
-
 
 PIECE_COUNT = 6
 SQUARE_COUNT = 64
@@ -260,10 +260,6 @@ def _packed_sample(sample: Sample) -> bytes:
     return RECORD.pack(*sample.codes, sample.white_to_move, sample.target_cp)
 
 
-def _write_sample(handle: BinaryIO, sample: Sample | bytes) -> None:
-    handle.write(sample if isinstance(sample, bytes) else _packed_sample(sample))
-
-
 def _validation_group(sample: Sample | bytes, split_denominator: int) -> int:
     """Hash a color-flip-invariant, model-visible position into a split group."""
     if isinstance(sample, bytes):
@@ -286,7 +282,7 @@ def available_cpus() -> int:
     """Return the CPUs available to this process, respecting affinity where supported."""
     try:
         return len(os.sched_getaffinity(0))
-    except AttributeError:
+    except (AttributeError, OSError):
         return os.cpu_count() or 1
 
 
@@ -358,12 +354,7 @@ def build_cache(config: dict, print_fn=print, *, rebuild: bool = False) -> Path:
         ):
             finished = False
             while not finished:
-                batch = []
-                for _ in range(4096):
-                    line = lines.readline()
-                    if not line:
-                        break
-                    batch.append(line)
+                batch = list(islice(lines, 4096))
                 if not batch:
                     break
                 results = map(_parse_line, batch) if executor is None else executor.map(
@@ -374,19 +365,17 @@ def build_cache(config: dict, print_fn=print, *, rebuild: bool = False) -> Path:
                     if sample is None:
                         counts[reason or "malformed"] += 1
                     else:
-                        packed = sample
                         if _validation_group(sample, max_positions) < validation_size:
                             if validation_count < validation_size:
-                                _write_sample(validation_output, packed)
+                                validation_output.write(sample)
                                 validation_count += 1
                             else:
                                 counts["validation_quota"] += 1
+                        elif train_count < train_size:
+                            train_output.write(sample)
+                            train_count += 1
                         else:
-                            if train_count < train_size:
-                                _write_sample(train_output, packed)
-                                train_count += 1
-                            else:
-                                counts["training_quota"] += 1
+                            counts["training_quota"] += 1
                     if train_count >= train_size and validation_count >= validation_size:
                         finished = True
                         break
@@ -441,7 +430,7 @@ class CacheDataset:
     def __len__(self) -> int:
         return self.count
 
-    def __enter__(self) -> "CacheDataset":
+    def __enter__(self) -> CacheDataset:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -512,11 +501,9 @@ class CacheBatchLoader:
         iteration = self.iteration if self.reshuffle_each_iteration else 0
         rng = numpy.random.default_rng(self.seed + iteration)
         self.iteration += 1
+        block_starts = numpy.arange(start, stop, self.shuffle_buffer)
         if self.shuffle:
-            block_starts = numpy.arange(start, stop, self.shuffle_buffer)
             rng.shuffle(block_starts)
-        else:
-            block_starts = numpy.arange(start, stop, self.shuffle_buffer)
         for block_start in block_starts:
             block_stop = min(int(block_start) + self.shuffle_buffer, stop)
             indices = numpy.arange(int(block_start), block_stop)

@@ -4,31 +4,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tools.common.files import atomic_write_json
+
 from .config import public_config
 from .data import CacheBatchLoader, build_cache, cache_datasets
 from .model import (
-    EvaluationModel,
-    NNUE_ACCUMULATOR_BITS,
     NNUE_ACCUMULATOR_BIAS_BITS,
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_ACCUMULATOR_BITS,
     NNUE_ACTIVATION_BITS,
     NNUE_ACTIVATION_MAX,
     NNUE_CLIPPED_ACCUMULATOR_BITS,
     NNUE_CLIPPED_ACCUMULATOR_MAX,
-    NNUE_PIECE_CATEGORIES,
     NNUE_MAX_ENGINE_UNITS,
     NNUE_OUTPUT_BIAS_BITS,
     NNUE_OUTPUT_BIAS_MAX,
     NNUE_OUTPUT_WEIGHT_BITS,
     NNUE_OUTPUT_WEIGHT_MAX,
     NNUE_OUTPUT_WEIGHT_MIN,
+    NNUE_PIECE_CATEGORIES,
     NNUE_SCRELU_TOP_CODE,
     NNUE_SIDES,
     PIECE_ORDER,
+    EvaluationModel,
     _squared_clipped_activation,
     nnue_output_bucket,
 )
-from .reporting import atomic_json, format_table
+from .reporting import format_table
 
 
 def signed_bits(low: int, high: int) -> int:
@@ -254,7 +256,7 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
         },
         "config": public_config(config),
     }
-    atomic_json(run / "quantization.json", report)
+    atomic_write_json(run / "quantization.json", report)
     return report
 
 

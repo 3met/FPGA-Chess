@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import queue
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
-import sys
 
 
 class FPGAUCIError(RuntimeError):
@@ -37,7 +37,7 @@ class FPGAUCISession:
         self._recent: deque[str] = deque(maxlen=40)
         self._reader: threading.Thread | None = None
 
-    def __enter__(self) -> "FPGAUCISession":
+    def __enter__(self) -> FPGAUCISession:
         self.process = subprocess.Popen(
             self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,

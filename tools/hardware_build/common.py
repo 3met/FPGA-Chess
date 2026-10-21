@@ -144,7 +144,10 @@ def terminate_process_tree(proc: subprocess.Popen[str], force: bool = False) -> 
             check=False,
         )
         return
-    os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # The process group may exit after poll() above.
 
 
 def stop_process_tree(proc: subprocess.Popen[str]) -> None:
@@ -182,7 +185,7 @@ def run_command(
         timed_out = False
         try:
             output, _ = proc.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             timed_out = True
             terminate_process_tree(proc)
             try:
@@ -190,11 +193,9 @@ def run_command(
             except subprocess.TimeoutExpired:
                 terminate_process_tree(proc, force=True)
                 output, _ = proc.communicate()
-            partial_output = exc.output or ""
-            if isinstance(partial_output, bytes):
-                partial_output = partial_output.decode("utf-8", errors="replace")
             timeout_text = f"Command timed out after {timeout_seconds:.0f}s.\n"
-            output = partial_output + output + timeout_text
+            # Retrying communicate() includes the output buffered before timeout.
+            output += timeout_text
         except BaseException:
             # KeyboardInterrupt and termination signals are delivered to this
             # Python process, not the isolated vendor-tool process group.

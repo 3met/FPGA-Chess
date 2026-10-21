@@ -8,29 +8,35 @@ import json
 import math
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from tools.hardware_build.common import BuildError, REPO_ROOT, process_group_options, stop_process_tree
+from tools.hardware_build.common import (
+    REPO_ROOT,
+    BuildError,
+    process_group_options,
+    stop_process_tree,
+)
 from tools.hardware_build.engine_config import load_engine_config
 from tools.hardware_build.manifest import load_manifest
 from tools.stockfish_benchmark import (
+    DEFAULT_STOCKFISH_NODES,
     BenchmarkConfig,
     BenchmarkError,
-    DEFAULT_STOCKFISH_NODES,
     resume_tournament,
     run_tournament,
 )
 
 from .optimizer import posterior_rankings, suggest
 from .space import configured_parameters, get_path, parameter_hash
-
 
 REPORT_RE = re.compile(
     r"^Elo:\s+([-+]?(?:\d+(?:\.\d+)?|inf|nan))\s+\+/-\s+"
@@ -55,7 +61,7 @@ class RunLock:
         self.path = path
         self.handle: Any = None
 
-    def __enter__(self) -> "RunLock":
+    def __enter__(self) -> RunLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("a+", encoding="utf-8")
         try:
@@ -483,7 +489,7 @@ def experiment_snapshot(config: dict, baseline: dict, parameters: list[Any]) -> 
         "stockfish_nodes": config.get("stockfish_nodes", DEFAULT_STOCKFISH_NODES),
         "stockfish_threads": config["stockfish_threads"],
         "stockfish_hash_mb": config["stockfish_hash_mb"],
-        "parameters": [parameter.__dict__ for parameter in parameters],
+        "parameters": [asdict(parameter) for parameter in parameters],
         "optimizer": optimizer,
         "validation": config["validation"],
         "runtime_failures": config["runtime_failures"],

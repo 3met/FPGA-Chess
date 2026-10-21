@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.hardware_build.profile_fixtures import build_sample_report, make_report
 from tools.hardware_build.cli import build_parser
 from tools.hardware_build.common import BuildError
 from tools.hardware_build.profile_format import PROFILE_TOPICS, format_profile_topics
@@ -19,7 +20,6 @@ from tools.hardware_build.profile_runs import (
     profile_output_dir,
     write_profile_reports,
 )
-import test_profiling as fixtures
 
 
 class SavedProfileTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class SavedProfileTests(unittest.TestCase):
 
     def finish(self, path, report=None):
         """Save a complete run with internally consistent sample metrics."""
-        write_profile_reports(path, report or fixtures.ReportTests().build_sample_report())
+        write_profile_reports(path, report or build_sample_report())
         complete_profile_run(path)
 
     def view(self, *arguments):
@@ -125,9 +125,8 @@ class SavedProfileTests(unittest.TestCase):
             self.view("baseline", "--run", str(path))
 
     def test_suite_summary_and_per_position_topic_selection(self):
-        factory = fixtures.ProfileSuiteTests()
-        first = factory.make_report("first fen", 5, 0.5)
-        second = factory.make_report("second fen", 10, 1.5)
+        first = make_report("first fen", 5, 0.5)
+        second = make_report("second fen", 10, 1.5)
         suite = build_profile_suite_report([("first", first), ("second", second)])
         path = self.allocate("suite")
         for name, report in (("first", first), ("second", second)):
@@ -147,9 +146,8 @@ class SavedProfileTests(unittest.TestCase):
         self.assertIn("Suite elapsed wall time", self.view("suite", "--topic", "simulation"))
 
     def test_suite_summary_reports_only_failed_positions_and_overall_time(self):
-        factory = fixtures.ProfileSuiteTests()
-        first = factory.make_report("first fen", 5, 0.5)
-        second = factory.make_report("second fen", 10, 1.5)
+        first = make_report("first fen", 5, 0.5)
+        second = make_report("second fen", 10, 1.5)
         second["result"]["error"] = True
         suite = build_profile_suite_report(
             [("passed-position", first), ("failed-position", second)],
@@ -178,7 +176,7 @@ class SavedProfileTests(unittest.TestCase):
             self.view("broken")
 
     def test_summary_is_short_and_faults_are_visible(self):
-        report = fixtures.ReportTests().build_sample_report()
+        report = build_sample_report()
         report["result"]["error"] = True
         summary = format_profile_topics(report)
         self.assertIn("Engine fault: yes", summary)

@@ -18,21 +18,20 @@ def command_gen_data(args: argparse.Namespace) -> int:
         before = {path: path.read_bytes() if path.exists() else None for path in outputs}
 
         print(f"Generating {name}...")
-        code, output, elapsed = run_command([sys.executable, str(script)], REPO_ROOT)
-        if output.strip():
-            print(output.rstrip())
-        if code != 0:
-            if not args.update:
-                restore_outputs(before)
-            raise BuildError(f"{rel(script)} failed with exit code {code}")
-
-        for path in outputs:
-            old = before[path]
-            new = path.read_bytes() if path.exists() else None
-            if old != new:
-                changed.append(rel(path))
-                if not args.update:
-                    restore_outputs({path: old})
+        try:
+            code, output, elapsed = run_command([sys.executable, str(script)], REPO_ROOT)
+            if output.strip():
+                print(output.rstrip())
+            if code != 0:
+                raise BuildError(f"{rel(script)} failed with exit code {code}")
+        finally:
+            # Verification must restore changed outputs even when a tool is interrupted.
+            for path, old in before.items():
+                new = path.read_bytes() if path.exists() else None
+                if old != new:
+                    changed.append(rel(path))
+                    if not args.update:
+                        restore_outputs({path: old})
         print(f"  done in {elapsed:.2f}s")
 
     if changed and not args.update:

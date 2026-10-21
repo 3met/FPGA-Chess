@@ -51,6 +51,8 @@ def validate_manifest(manifest: object) -> None:
     for name, items in source_sets.items():
         if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
             raise BuildError(f"Source set '{name}' must be a list of paths or @references")
+    # Validate all entries before following references to later source sets.
+    for name in source_sets:
         expand_source_set(manifest, name)
 
     for name, test in tests.items():
@@ -159,6 +161,7 @@ def ensure_existing(paths: list[Path]) -> None:
 
 
 def expand_source_set(manifest: dict, name: str) -> list[Path]:
+    """Expand each referenced set once, preserving first-seen source order."""
     source_sets = manifest["source_sets"]
     if name not in source_sets:
         raise BuildError(f"Unknown source set '{name}'")
@@ -166,6 +169,7 @@ def expand_source_set(manifest: dict, name: str) -> list[Path]:
     expanded: list[Path] = []
     seen: set[Path] = set()
     active: list[str] = []
+    completed: set[str] = set()
 
     def visit(set_name: str) -> None:
         if set_name in active:
@@ -173,6 +177,8 @@ def expand_source_set(manifest: dict, name: str) -> list[Path]:
             raise BuildError(f"Recursive source-set reference: {chain}")
         if set_name not in source_sets:
             raise BuildError(f"Unknown source set '{set_name}'")
+        if set_name in completed:
+            return
 
         active.append(set_name)
         for item in source_sets[set_name]:
@@ -184,6 +190,7 @@ def expand_source_set(manifest: dict, name: str) -> list[Path]:
                     expanded.append(path)
                     seen.add(path)
         active.pop()
+        completed.add(set_name)
 
     visit(name)
     ensure_existing(expanded)

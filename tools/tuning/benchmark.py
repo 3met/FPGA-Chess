@@ -71,7 +71,7 @@ def benchmark(
             f"warmup={warmup}, timed={repeats} x {steps} steps."
         )
         compile_start = time.monotonic()
-        for step in range(warmup):
+        for _ in range(warmup):
             _train_batch(
                 torch, model, objective, optimizer, scaler, settings,
                 device, next_batch(),
@@ -79,7 +79,6 @@ def benchmark(
             scheduler.step()
         print(f"Warmup/compilation: {time.monotonic() - compile_start:.1f}s (excluded).")
 
-        step = warmup
         if profile_steps:
             with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
                 for _ in range(profile_steps):
@@ -88,7 +87,6 @@ def benchmark(
                         device, next_batch(),
                     )
                     scheduler.step()
-                    step += 1
             print(profile.key_averages().table(sort_by="self_cpu_time_total", row_limit=18))
 
         rates = []
@@ -110,7 +108,6 @@ def benchmark(
                 scheduler.step()
                 update_seconds += time.monotonic() - start
                 positions += count
-                step += 1
             seconds = data_seconds + update_seconds
             rate = positions / seconds
             rates.append(rate)

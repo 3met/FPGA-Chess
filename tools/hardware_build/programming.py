@@ -16,12 +16,10 @@ def resolve_artifact(target: dict, override: str | None) -> Path:
     """Return the requested artifact, resolving manifest paths from the repo root."""
     if override:
         artifact = Path(override).expanduser()
-        if not artifact.is_absolute():
-            artifact = REPO_ROOT / artifact
     else:
         artifact = Path(target["artifact"])
-        if not artifact.is_absolute():
-            artifact = REPO_ROOT / artifact
+    if not artifact.is_absolute():
+        artifact = REPO_ROOT / artifact
     artifact = artifact.resolve()
     if not artifact.is_file():
         raise BuildError(
@@ -38,6 +36,8 @@ def validate_synthesized_artifact(target: dict, artifact: Path) -> None:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BuildError(f"Synthesis receipt is unavailable or invalid: {metadata_path}") from exc
+    if not isinstance(metadata, dict):
+        raise BuildError(f"Synthesis receipt must contain a JSON object: {metadata_path}")
     digest_builder = hashlib.sha256()
     with artifact.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -49,6 +49,7 @@ def validate_synthesized_artifact(target: dict, artifact: Path) -> None:
         artifact_name = str(artifact)
     if (
         metadata.get("status") != "complete"
+        or metadata.get("build_id") is None
         or metadata.get("validated_build_id") != metadata.get("build_id")
         or metadata.get("artifact") != artifact_name
         or metadata.get("artifact_sha256") != digest

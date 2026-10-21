@@ -351,9 +351,10 @@ def load_engine_config(value: str) -> dict:
     if (not isinstance(ratios, list) or len(ratios) != 8
             or any(type(ratio) is not int or ratio <= 0 for ratio in ratios)):
         raise BuildError("move_memory.bucket_ratios_descending must contain eight positive integers")
-    if entries % sum(ratios):
+    bucket_unit, remainder = divmod(entries, sum(ratios))
+    if remainder:
         raise BuildError("move_memory.entries_per_thread must be a multiple of the bucket ratio sum")
-    if any(entries // sum(ratios) * ratio >= 2048 for ratio in ratios):
+    if any(bucket_unit * ratio >= 2048 for ratio in ratios):
         raise BuildError("move_memory bucket capacities must fit the 11-bit bucket pointers")
     resolved = {
         "move_memory_entries": entries,

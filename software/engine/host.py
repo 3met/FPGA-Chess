@@ -8,29 +8,30 @@ import math
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from software.engine.protocol import (
-    AckResponse,
     BAUD_RATE,
     BITS_TO_PROMOTION,
+    MATE_SCORE,
+    MATE_THRESHOLD,
+    AckResponse,
     BuildInfoResponse,
     Command,
     DebugStatAddress,
     DebugStatResponse,
     ErrorResponse,
-    MATE_SCORE,
-    MATE_THRESHOLD,
     PerftResultResponse,
     SearchResultResponse,
     StatusResponse,
-    cmd_get_search_result,
-    cmd_get_debug_stat,
     cmd_get_build_info,
+    cmd_get_debug_stat,
+    cmd_get_search_result,
     cmd_get_status,
     cmd_kill,
     cmd_make_move,
@@ -56,7 +57,6 @@ from software.engine.uci_commands import (
     parse_position_args,
     split_command_line,
 )
-
 
 SEARCH_TIMEOUT_SECONDS = 24 * 60 * 60
 # BREAK restarts the DE1 SDRAM path. Startup time is negligible beside search
@@ -746,6 +746,15 @@ class FPGAUCIHost:
         is_ponder: bool,
         resume_command: bytes | None,
     ) -> None:
+        released = False
+
+        def release_search() -> None:
+            """Release this search once, without clearing a successor's state."""
+            nonlocal released
+            if not released:
+                self._clear_search_state()
+                released = True
+
         try:
             client = self.connect()
             search_start = time.monotonic()
@@ -765,15 +774,17 @@ class FPGAUCIHost:
                 )
             elif wait_for_stop and not self._stop_event.is_set():
                 self._stop_event.wait()
+            if isinstance(response, StatusResponse):
+                response = self._get_killed_search_result()
             # UCI consumers may submit a new position as soon as bestmove is printed.
             # The FPGA response is complete here, so release the host search state first.
-            self._clear_search_state()
+            release_search()
             if isinstance(response, SearchResultResponse):
                 self._emit_search_result(response, board_snapshot, search_elapsed)
             elif isinstance(response, PerftResultResponse):
                 self.emit(f"info string perft depth {response.completed_depth} nodes {response.nodes}")
-            elif isinstance(response, StatusResponse):
-                self._emit_killed_search_result(board_snapshot)
+            elif response is None:
+                self.emit("bestmove 0000")
             elif isinstance(response, ErrorResponse):
                 self.emit(f"info string hardware error: {response.error}")
                 self.emit("bestmove 0000")
@@ -782,15 +793,17 @@ class FPGAUCIHost:
                 self.emit("bestmove 0000")
         except FPGACommunicationError as exc:
             self._invalidate_client()
+            release_search()
             self.emit(f"info string search failed: {exc}")
             self.logger.exception("Search worker lost FPGA synchronization")
             self.emit("bestmove 0000")
         except Exception as exc:
+            release_search()
             self.emit(f"info string search failed: {exc}")
             self.logger.exception("Search worker failed")
             self.emit("bestmove 0000")
         finally:
-            self._clear_search_state()
+            release_search()
 
     def _finish_ponder_search(
         self,
@@ -971,18 +984,18 @@ class FPGAUCIHost:
             return "mate", moves if score > 0 else -moves
         return "cp", FPGAUCIHost._eval_score_to_centipawns(score)
 
-    def _emit_killed_search_result(self, board_snapshot: Any) -> None:
+    def _get_killed_search_result(self) -> SearchResultResponse | None:
+        """Fetch the cached result while this search still owns the connection."""
         try:
             response = self.connect().request(cmd_get_search_result())
             if isinstance(response, SearchResultResponse):
-                self._emit_search_result(response, board_snapshot)
-                return
+                return response
         except Exception as exc:
             if isinstance(exc, FPGACommunicationError):
                 self._invalidate_client()
             self.logger.exception("Failed to fetch cached search result after kill")
             self.emit(f"info string cached result unavailable after stop: {exc}")
-        self.emit("bestmove 0000")
+        return None
 
     def _format_bestmove(self, move: Any, board_snapshot: Any) -> str:
         """Convert a hardware move and reject any non-null move that is illegal at the root."""

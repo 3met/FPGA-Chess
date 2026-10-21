@@ -6,10 +6,9 @@ library so they can be tested without a serial port or chess package.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable
-
 
 # These host constants mirror the named RTL constants shown in each comment.
 # Keep the assertions here so changes which exceed their wire representation fail loudly.

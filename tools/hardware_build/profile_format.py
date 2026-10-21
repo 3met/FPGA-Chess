@@ -96,7 +96,7 @@ def _format_lifecycle(report: dict) -> str:
         lines += [
             "",
             f"  {'Phase':<{label_width}}"
-            + "".join(f"  {f'T{thread['id']}':^{cell_width}}" for thread in group),
+            + "".join(f"  {('T' + str(thread['id'])):^{cell_width}}" for thread in group),
             f"  {'':<{label_width}}"
             + "".join(f"  {'cycles':>{count_width}}  {'% search':>{percent_width}}" for _ in group),
             f"  {'-' * label_width}"

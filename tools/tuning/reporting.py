@@ -10,9 +10,6 @@ from typing import Any
 from tools.common.files import atomic_write_json
 
 
-atomic_json = atomic_write_json
-
-
 def create_run(root: Path, config_hash: str) -> Path:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + config_hash[:8]
     run = root / "runs" / run_id
@@ -21,7 +18,7 @@ def create_run(root: Path, config_hash: str) -> Path:
         run = root / "runs" / f"{run_id}-{suffix}"
         suffix += 1
     run.mkdir(parents=True)
-    atomic_json(root / "latest.json", {"run": str(run.resolve())})
+    atomic_write_json(root / "latest.json", {"run": str(run.resolve())})
     return run
 
 

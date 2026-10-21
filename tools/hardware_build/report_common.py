@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .common import SYNTH_METADATA
 
+
 def report_timestamp(build_dir: Path, metadata: dict | None) -> str:
     if metadata and metadata.get("started"):
         return str(metadata["started"])
@@ -48,13 +49,15 @@ def report_lines(paths: list[Path]) -> list[str]:
 
 
 def matching_report_rows(lines: list[str], patterns: tuple[str, ...]) -> list[str]:
+    """Match report lines once per compiled pattern, preserving distinct rows."""
+    expressions = [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
     rows: list[str] = []
     seen: set[str] = set()
     for raw in lines:
         stripped = raw.strip()
         if not stripped or stripped in seen:
             continue
-        if any(re.search(pattern, stripped, re.IGNORECASE) for pattern in patterns):
+        if any(expression.search(stripped) for expression in expressions):
             rows.append(stripped)
             seen.add(stripped)
     return rows

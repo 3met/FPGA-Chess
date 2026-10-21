@@ -15,7 +15,6 @@ if __package__ in (None, ""):
 
 from software.engine.protocol import BAUD_RATE
 
-
 AUTO_SELECT_MIN_SCORE = 20
 AUTO_DISCOVERY_TIMEOUT_SECONDS = 2.0
 AUTO_DISCOVERY_POLL_SECONDS = 0.1
@@ -277,7 +276,7 @@ class SerialByteTransport:
         # mark-high interval so it can leave BREAK before the next byte.
         time.sleep(max(2.0 / self.baudrate, 0.001))
 
-    def __enter__(self) -> "SerialByteTransport":
+    def __enter__(self) -> SerialByteTransport:
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:

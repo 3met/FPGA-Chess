@@ -12,19 +12,21 @@ import sys
 import time
 from pathlib import Path
 
+from tools.common.files import atomic_write_json
+
 from .config import public_config
 from .data import CacheBatchLoader, available_cpus, cache_datasets
 from .model import (
-    EvaluationModel,
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_OUTPUT_BIAS_MAX,
+    NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_WEIGHT_MAX,
     NNUE_OUTPUT_WEIGHT_MIN,
-    NNUE_OUTPUT_BUCKETS,
-    NNUE_OUTPUT_BIAS_MAX,
     PIECE_ORDER,
+    EvaluationModel,
     engine_combined_cp,
 )
-from .reporting import atomic_json, create_run
+from .reporting import create_run
 
 
 class Tee:
@@ -270,27 +272,19 @@ def _parameter_report(model) -> dict:
     """Build report fields from the model's identifiable parameter groups."""
     material = model.material_cp().detach().cpu()
     pst = model.pst_cp().detach().cpu()
-    pst_ranges = {}
-    for index, piece in enumerate(PIECE_ORDER):
-        values = pst[index, 8:56] if piece == "pawn" else pst[index]
-        pst_ranges[piece] = [float(values.min()), float(values.max())]
     endgame_material = model.material_endgame_cp().detach().cpu()
     endgame_pst = model.pst_endgame_cp().detach().cpu()
-    endgame_pst_ranges = {}
-    for index, piece in enumerate(PIECE_ORDER):
-        values = endgame_pst[index, 8:56] if piece == "pawn" else endgame_pst[index]
-        endgame_pst_ranges[piece] = [float(values.min()), float(values.max())]
     return {
         "parameter_ranges_cp": _ranges(model.combined_cp()),
         "material_values_cp": {
             piece: float(material[index]) for index, piece in enumerate(PIECE_ORDER)
         },
-        "pst_ranges_cp": pst_ranges,
+        "pst_ranges_cp": _ranges(pst),
         "endgame_parameter_ranges_cp": _ranges(model.combined_endgame_cp()),
         "endgame_material_values_cp": {
             piece: float(endgame_material[index]) for index, piece in enumerate(PIECE_ORDER)
         },
-        "endgame_pst_ranges_cp": endgame_pst_ranges,
+        "endgame_pst_ranges_cp": _ranges(endgame_pst),
     }
 
 
@@ -325,7 +319,7 @@ def train(
         comparable_previous["training"]["max_steps"] = comparable_current["training"]["max_steps"]
         if comparable_previous != comparable_current:
             raise ValueError("resume config differs from the original run (only training.max_steps may change)")
-    atomic_json(run / "config.json", public_config(config))
+    atomic_write_json(run / "config.json", public_config(config))
     train_data, validation_data, metadata = cache_datasets(cache)
     report = (
         json.loads((run / "report.json").read_text(encoding="utf-8"))
@@ -339,7 +333,7 @@ def train(
         }
     )
     report.update({"status": "running", "max_steps": settings["max_steps"]})
-    atomic_json(run / "report.json", report)
+    atomic_write_json(run / "report.json", report)
 
     with (run / "train.log").open("a", encoding="utf-8") as log, contextlib.redirect_stdout(Tee(sys.stdout, log)):
         device = _device(torch, settings["device"])
@@ -358,7 +352,7 @@ def train(
             _initialize_model(model, checkpoint)
             model.project_parameters()
             report["initialized_from"] = initialize_run.name
-            atomic_json(run / "report.json", report)
+            atomic_write_json(run / "report.json", report)
             print(
                 f"Initialized from {initialize_run.name} best checkpoint; "
                 "all compatible parameters were preserved and optimizer state was reset."
@@ -423,7 +417,7 @@ def train(
                 report.update(initial_metric)
                 report.update({"best_validation_loss": best_loss, "best_step": best_step})
                 report.update(_parameter_report(model))
-                atomic_json(run / "report.json", report)
+                atomic_write_json(run / "report.json", report)
                 print(
                     f"Step 0/{settings['max_steps']:,}: validation={initial_loss:.4f}, "
                     f"MAE={initial_mae:.2f} cp (initialization candidate)."
@@ -513,7 +507,7 @@ def train(
                         "best_step": best_step,
                     })
                     report.update(_parameter_report(model))
-                    atomic_json(run / "report.json", report)
+                    atomic_write_json(run / "report.json", report)
                     print(
                         f"Step {step:,}/{settings['max_steps']:,}: "
                         f"train={metric['train_loss']:.4f} "
@@ -570,20 +564,20 @@ def train(
                 },
                 "best_step": best_step,
             }
-            atomic_json(run / "parameters.json", parameters)
+            atomic_write_json(run / "parameters.json", parameters)
             report.update({
                 "status": "complete",
                 "elapsed_seconds": time.monotonic() - start_time,
             })
             report.update(_parameter_report(best_model))
-            atomic_json(run / "report.json", report)
+            atomic_write_json(run / "report.json", report)
             if wandb_run is not None:
                 wandb_run.summary.update(report)
                 wandb_run.finish()
             print(f"Training complete; best validation loss {best_loss:.4f} at step {best_step:,}.")
         except BaseException as exc:
             report["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
-            atomic_json(run / "report.json", report)
+            atomic_write_json(run / "report.json", report)
             if wandb_run is not None:
                 wandb_run.finish(exit_code=1)
             raise

@@ -10,6 +10,26 @@ from tools.hardware_build.programming import validate_synthesized_artifact
 
 
 class ProgrammingReceiptTests(unittest.TestCase):
+    def test_rejects_non_object_receipts_and_missing_build_identity(self):
+        """A matching file hash alone cannot establish a successful build."""
+        with tempfile.TemporaryDirectory() as temporary:
+            build_root = Path(temporary)
+            build_dir = build_root / "fixture"
+            build_dir.mkdir()
+            artifact = build_dir / "image.sof"
+            artifact.write_bytes(b"image")
+            incomplete = {
+                "status": "complete",
+                "artifact": str(artifact),
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            }
+            for receipt in (None, [], "invalid", incomplete):
+                (build_dir / "synthesis.json").write_text(json.dumps(receipt), encoding="utf-8")
+                with self.subTest(receipt=receipt), mock.patch(
+                    "tools.hardware_build.programming.BUILD_ROOT", build_root
+                ), self.assertRaises(BuildError):
+                    validate_synthesized_artifact({"synthesis_target": "fixture"}, artifact)
+
     def test_accepts_only_the_artifact_named_by_a_successful_receipt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             build_root = Path(temp_dir)

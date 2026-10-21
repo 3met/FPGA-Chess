@@ -55,6 +55,43 @@ class UCIHostSpecTests(unittest.TestCase):
             host.handle_line(command)
         return [line.strip() for line in output.getvalue().splitlines() if line.strip()]
 
+    def test_finishing_search_cannot_clear_a_successor_started_at_bestmove(self):
+        """A consumer can submit its next go as soon as it receives bestmove."""
+        result = SearchResultResponse(
+            Move(12, 28), 0, nodes=1, completed_depth=1, end_reason=EndReason.DEPTH_LIMIT,
+        )
+        stopped = StatusResponse(status=1, error=EngineError.NONE, active_operation=0)
+        for response in (result, stopped, HostError("search failed")):
+            with self.subTest(response=response):
+                host = self.make_host()
+                host.client = mock.Mock()
+                host.position_synced = True
+                host._search_active = True
+                successor = mock.Mock()
+                if isinstance(response, Exception):
+                    host.client.search_request.side_effect = response
+                else:
+                    host.client.search_request.return_value = response
+
+                def cached_result(command):
+                    """Cached-result I/O must finish before another search is allowed."""
+                    self.assertTrue(host._is_search_active())
+                    return result
+
+                def next_search(line):
+                    """Start the successor at the precise terminal-output boundary."""
+                    if line.startswith("bestmove "):
+                        host._handle_go(["depth", "1"])
+
+                host.client.request.side_effect = cached_result
+                with mock.patch.object(host, "emit", side_effect=next_search), \
+                        mock.patch.object(host, "logger"), \
+                        mock.patch("software.engine.host.threading.Thread", return_value=successor):
+                    host._search_worker(cmd_search_depth(1), host.board.copy(), False, False, None)
+                successor.start.assert_called_once_with()
+                self.assertTrue(host._is_search_active())
+                self.assertIs(host._search_thread, successor)
+
     def test_input_lines_preserves_piped_uci_input(self):
         stream = io.StringIO("uci\nisready\n")
         with mock.patch("sys.stdin", stream):

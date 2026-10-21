@@ -48,6 +48,12 @@ A selected backend's failure is reported as a failure. Simulator builds are cach
 
 `check` includes host, build-tool, benchmark, search-tuning, and mocked live-FPGA Python tests. To include evaluation-tuning tests, install `requirements-tuning.txt` and run `check --tuning`.
 
+With the host and tuning dependencies installed, run all Python tests without invoking RTL tools or connected hardware:
+
+```text
+python -m unittest discover
+```
+
 Compile source sets without running a testbench:
 
 ```text

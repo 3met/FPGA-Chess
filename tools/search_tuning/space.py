@@ -6,8 +6,9 @@ import copy
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
+from functools import cached_property
 from typing import Any
 
 
@@ -22,16 +23,16 @@ class Parameter:
     step: float = 1.0
     maximum_denominator: int = 20
 
-    def values(self) -> list[Any] | None:
-        if self.kind != "fraction":
-            return None
+    @cached_property
+    def fraction_values(self) -> tuple[tuple[int, int], ...]:
+        """Enumerate each allowed fraction once per immutable parameter."""
         values = {
             Fraction(numerator, denominator)
             for denominator in range(1, self.maximum_denominator + 1)
             for numerator in range(0, denominator + 1)
             if self.low <= numerator / denominator <= self.high
         }
-        return [[value.numerator, value.denominator] for value in sorted(values)]
+        return tuple((value.numerator, value.denominator) for value in sorted(values))
 
     def encode(self, value: Any) -> float:
         if self.kind == "fraction":
@@ -41,12 +42,11 @@ class Parameter:
     def decode(self, coordinate: float) -> Any:
         raw = self.low + min(1.0, max(0.0, coordinate)) * (self.high - self.low)
         if self.kind == "fraction":
-            choices = self.values() or []
-            return min(choices, key=lambda item: abs(item[0] / item[1] - raw))
+            return list(min(self.fraction_values, key=lambda item: abs(item[0] / item[1] - raw)))
         quantized = self.low + round((raw - self.low) / self.step) * self.step
         quantized = min(self.high, max(self.low, quantized))
         if self.kind == "int":
-            return int(round(quantized))
+            return round(quantized)
         return float(round(quantized, 10))
 
 
@@ -138,10 +138,8 @@ def configured_parameters(config: dict) -> list[Parameter]:
     for parameter in DEFAULT_PARAMETERS:
         if parameter.path not in selected:
             continue
-        values = dict(parameter.__dict__)
-        values.update(overrides.get(parameter.path, {}))
         try:
-            candidate = Parameter(**values)
+            candidate = replace(parameter, **overrides.get(parameter.path, {}))
         except TypeError as exc:
             raise ValueError(f"invalid override for {parameter.path}: {exc}") from exc
         if (
@@ -152,7 +150,7 @@ def configured_parameters(config: dict) -> list[Parameter]:
             or isinstance(candidate.maximum_denominator, bool)
             or not isinstance(candidate.maximum_denominator, int)
             or candidate.maximum_denominator < 1
-            or (candidate.kind == "fraction" and not candidate.values())
+            or (candidate.kind == "fraction" and not candidate.fraction_values)
         ):
             raise ValueError(f"invalid range for {candidate.path}")
         result.append(candidate)

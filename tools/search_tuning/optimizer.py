@@ -63,14 +63,13 @@ class GaussianProcess:
         self.mean = sum(scores) / len(scores)
         self.scale = max(1.0, math.sqrt(sum((score - self.mean) ** 2 for score in scores) / len(scores)))
         targets = [(score - self.mean) / self.scale for score in scores]
+        noise = [max(configured_noise, error) / self.scale for error in errors]
         best = None
         for length in (0.06, 0.09, 0.13, 0.19, 0.28, 0.42, 0.63, 0.95, 1.4):
-            noise = [max(configured_noise, error) / self.scale for error in errors]
+            # Cholesky reads only the lower triangle of the symmetric covariance.
             matrix = [
-                [
-                    _kernel(left, right, length, groups) + (noise[row] ** 2 + 1e-8 if row == column else 0.0)
-                    for column, right in enumerate(points)
-                ]
+                [_kernel(left, points[column], length, groups) for column in range(row)]
+                + [1.0 + (noise[row] ** 2 + 1e-8)]
                 for row, left in enumerate(points)
             ]
             try:
@@ -123,6 +122,14 @@ PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67
           173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263]
 
 
+def _parameter_groups(parameters: list[Parameter]) -> list[list[int]]:
+    """Group coordinates by policy section in stable name order."""
+    groups: dict[str, list[int]] = {}
+    for axis, parameter in enumerate(parameters):
+        groups.setdefault(parameter.path.split(".", 1)[0], []).append(axis)
+    return [groups[name] for name in sorted(groups)]
+
+
 def posterior_rankings(
     parameters: list[Parameter], history: list[dict], settings: dict
 ) -> list[dict]:
@@ -130,11 +137,7 @@ def posterior_rankings(
     feasible = [record for record in history if not record.get("runtime_invalid", False)]
     if not feasible:
         return []
-    group_names = sorted({parameter.path.split(".", 1)[0] for parameter in parameters})
-    group_axes = [
-        [axis for axis, parameter in enumerate(parameters) if parameter.path.split(".", 1)[0] == name]
-        for name in group_names
-    ]
+    group_axes = _parameter_groups(parameters)
     points = [vector_from_json(record["parameters"], parameters) for record in feasible]
     scores = [float(record["score"]) for record in feasible]
     errors = [
@@ -181,11 +184,7 @@ def suggest(
                 return candidate, {"method": "random startup challenger", "pool": attempt + 1}
         raise RuntimeError("no untested startup candidate found at the current quantization")
 
-    group_names = sorted({parameter.path.split(".", 1)[0] for parameter in parameters})
-    group_axes = [
-        [axis for axis, parameter in enumerate(parameters) if parameter.path.split(".", 1)[0] == name]
-        for name in group_names
-    ]
+    group_axes = _parameter_groups(parameters)
     mutation_probability = min(1.0, float(settings["mutation_axes"]) / dimension)
     points = [vector_from_json(record["parameters"], parameters) for record in model_history]
     scores = [float(record["score"]) for record in model_history]
@@ -202,9 +201,9 @@ def suggest(
     center_record = model_history[center_index]
     incumbent = posterior_means[center_index]
     center_uncertainty = posterior_predictions[center_index][1]
-    center = vector_from_json(center_record["parameters"], parameters)
+    center = points[center_index]
     seen: set[str] = set()
-    selected: tuple[list[float], dict] | None = None
+    selected: dict | None = None
     selected_prediction: tuple[float, float] | None = None
     selected_acquisition = -math.inf
     proposal_count = 0
@@ -225,26 +224,26 @@ def suggest(
             axis = item % dimension
             vector[axis] = min(1.0, max(0.0, center[axis] + rng.choice((-1.0, 1.0)) * radius))
         candidate = json_from_vector(base_json, vector, parameters)
-        canonical_vector = vector_from_json(candidate, parameters)
         digest = parameter_hash(candidate)
         if digest in observed or digest in seen:
             continue
         seen.add(digest)
         proposal_count += 1
         # Score every unique, untested proposal with the full GP posterior.
+        canonical_vector = vector_from_json(candidate, parameters)
         predicted, uncertainty = model.predict(canonical_vector)
         acquisition = _expected_improvement(
             predicted, uncertainty, incumbent, float(settings["acquisition_exploration_elo"])
         )
         if acquisition > selected_acquisition:
             selected_acquisition = acquisition
-            selected = canonical_vector, candidate
+            selected = candidate
             selected_prediction = predicted, uncertainty
 
     if selected is None or selected_prediction is None:
         raise RuntimeError("candidate space is exhausted at the current quantization")
     predicted, uncertainty = selected_prediction
-    return selected[1], {
+    return selected, {
         "method": "Gaussian-process expected improvement",
         "pool": proposal_count,
         "predicted_elo": round(predicted, 2),

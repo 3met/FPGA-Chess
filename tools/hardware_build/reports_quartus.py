@@ -5,10 +5,17 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .common import BUILD_ROOT, BuildError, QUARTUS_ERROR_RE, quote_tcl_path, rel, require_tool, run_command
+from .common import (
+    BUILD_ROOT,
+    QUARTUS_ERROR_RE,
+    BuildError,
+    quote_tcl_path,
+    rel,
+    require_tool,
+    run_command,
+)
 from .manifest import load_manifest
 from .report_common import format_duration, print_table, print_unavailable, report_lines
-
 
 TIMING_PATH_LINE_WIDTH = 88
 
@@ -233,11 +240,11 @@ def quartus_bram_columns(headers: list[str]) -> list[int]:
     indices = []
     for index, header in enumerate(headers):
         normalized = header.strip()
-        if re.fullmatch(r"M\d+K(?:\s+blocks?|s)?", normalized, re.IGNORECASE):
-            indices.append(index)
-        elif re.fullmatch(r"(?:total\s+)?(?:block\s+)?RAM\s+blocks?", normalized, re.IGNORECASE):
-            indices.append(index)
-        elif re.fullmatch(r"(?:embedded\s+)?memory\s+blocks?", normalized, re.IGNORECASE):
+        if re.fullmatch(
+            r"M\d+K(?:\s+blocks?|s)?|(?:total\s+)?(?:block\s+)?RAM\s+blocks?|(?:embedded\s+)?memory\s+blocks?",
+            normalized,
+            re.IGNORECASE,
+        ):
             indices.append(index)
     return indices
 

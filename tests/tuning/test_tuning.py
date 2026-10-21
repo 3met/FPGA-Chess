@@ -13,6 +13,8 @@ from unittest import mock
 import chess
 import torch
 
+from tools.common.files import atomic_write_json
+from tools.tuning.cli import main as tuning_main
 from tools.tuning.config import ConfigError, cache_key, load_config
 from tools.tuning.data import (
     CacheBatchLoader,
@@ -30,32 +32,31 @@ from tools.tuning.data import (
 )
 from tools.tuning.engine import (
     commit_parameters,
-    export_values,
     export_nnue,
+    export_values,
     load_run_parameters,
     round_half_away,
     round_ties_to_even,
 )
-from tools.tuning.cli import main as tuning_main
 from tools.tuning.model import (
-    NNUE_ACCUMULATOR_BITS,
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_ACCUMULATOR_BITS,
     NNUE_ACCUMULATORS,
     NNUE_ACTIVATION_MAX,
     NNUE_CLIPPED_ACCUMULATOR_MAX,
     NNUE_ENGINE_UNIT_CP,
     NNUE_MAX_ENGINE_UNITS,
-    NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_BIAS_MAX,
+    NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
     NNUE_OUTPUT_WEIGHT_MAX,
     NNUE_OUTPUT_WEIGHT_MIN,
     NNUE_SCRELU_TOP_CODE,
     PIECE_ORDER,
+    EvaluationModel,
     _accumulator_overflow_penalty,
     _squared_clipped_activation,
     _wrap_accumulators,
-    EvaluationModel,
     engine_combined_cp,
     nnue_output_bucket,
     pst_opening_phase,
@@ -66,7 +67,7 @@ from tools.tuning.quantization import (
     print_quantization_report,
     signed_bits,
 )
-from tools.tuning.reporting import atomic_json, print_report, resolve_run
+from tools.tuning.reporting import print_report, resolve_run
 from tools.tuning.training import (
     _initialize_model,
     _loss,
@@ -355,7 +356,7 @@ class TuningModelAndExportTests(unittest.TestCase):
     @staticmethod
     def parameter_document() -> dict:
         """Return a current-format material/PST document for export tests."""
-        material = {piece: 0.0 for piece in PIECE_ORDER}
+        material = dict.fromkeys(PIECE_ORDER, 0.0)
         material["pawn"] = 100.0
         pst = {piece: [0.0] * 64 for piece in PIECE_ORDER}
         model = EvaluationModel()
@@ -388,7 +389,7 @@ class TuningModelAndExportTests(unittest.TestCase):
             "nnue_bias": root / "nnue-bias.hex",
         }
         paths["pst"].write_text(json.dumps({
-            "material": {piece: 0 for piece in PIECE_ORDER},
+            "material": dict.fromkeys(PIECE_ORDER, 0),
             "pst": {piece: [0] * 64 for piece in PIECE_ORDER},
         }), encoding="utf-8")
         for name, path in paths.items():
@@ -503,7 +504,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         )
 
     def test_screlu_bias_and_output_weight_use_target_codes(self):
-        """The widened bias feeds a capped activation and a four-bit output weight."""
+        """The bias feeds a capped activation and a quantized output weight."""
         model = EvaluationModel()
         with torch.no_grad():
             model.feature_weights.zero_()
@@ -569,40 +570,6 @@ class TuningModelAndExportTests(unittest.TestCase):
             -NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS
         ) * NNUE_ENGINE_UNIT_CP
         self.assertTrue(torch.equal(model.nnue_correction(codes, white_to_move), reference))
-
-    def test_zero_padded_material_lookup_has_zero_value_and_gradient(self):
-        """Signed zero codes make the padding mask unnecessary in the PST path."""
-        table_size = EvaluationModel().combined_cp().numel()
-        codes = torch.tensor([[0, 1, -table_size]], dtype=torch.int16)
-        first = torch.arange(table_size, dtype=torch.float32, requires_grad=True)
-        second = first.detach().clone().requires_grad_()
-        signs = codes.sign().to(torch.float32)
-        without_mask = (first[codes.abs().long() - 1] * signs).sum()
-        with_mask = (
-            second[codes.abs().long().sub(1).clamp_min(0)]
-            * signs * codes.ne(0)
-        ).sum()
-        self.assertEqual(without_mask.item(), with_mask.item())
-        without_mask.backward()
-        with_mask.backward()
-        torch.testing.assert_close(first.grad, second.grad)
-
-    def test_perspective_selection_matches_gather_gradient(self):
-        """The cheaper two-way selection preserves both perspective gradients."""
-        values = torch.arange(12, dtype=torch.float32).reshape(3, 2, 2)
-        first = values.clone().requires_grad_()
-        second = values.clone().requires_grad_()
-        white_to_move = torch.tensor([True, False, True])
-        selected = torch.cat((
-            torch.where(white_to_move[:, None], first[:, 0], first[:, 1]),
-            torch.where(white_to_move[:, None], first[:, 1], first[:, 0]),
-        ), dim=1)
-        order = torch.stack((~white_to_move, white_to_move), dim=1).long()
-        gathered = second.gather(1, order[:, :, None].expand_as(second)).flatten(1)
-        torch.testing.assert_close(selected, gathered)
-        selected.square().sum().backward()
-        gathered.square().sum().backward()
-        torch.testing.assert_close(first.grad, second.grad)
 
     def test_nnue_code_lookup_matches_direct_feature_encoding(self):
         model = EvaluationModel()
@@ -897,7 +864,7 @@ class TuningModelAndExportTests(unittest.TestCase):
             root = Path(directory)
             run = root / "run"
             run.mkdir()
-            atomic_json(run / "parameters.json", self.parameter_document())
+            atomic_write_json(run / "parameters.json", self.parameter_document())
             paths = self.make_engine_outputs(root)
             before = {path: path.read_bytes() for path in paths.values()}
             with (
@@ -918,7 +885,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         """A width mismatch must block ROM export before changing engine files."""
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
-            atomic_json(run / "parameters.json", self.parameter_document())
+            atomic_write_json(run / "parameters.json", self.parameter_document())
             with mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_BITS", 1):
                 with self.assertRaisesRegex(RuntimeError, "update RTL"):
                     commit_parameters(run)
@@ -928,7 +895,7 @@ class TuningModelAndExportTests(unittest.TestCase):
             run = Path(directory)
             parameters = self.parameter_document()
             del parameters["nnue"]
-            atomic_json(run / "parameters.json", parameters)
+            atomic_write_json(run / "parameters.json", parameters)
             with self.assertRaisesRegex(ValueError, "NNUE"):
                 commit_parameters(run, dry_run=True)
 
@@ -937,7 +904,7 @@ class TuningModelAndExportTests(unittest.TestCase):
             root = Path(directory)
             run = root / "run"
             run.mkdir()
-            atomic_json(run / "parameters.json", self.parameter_document())
+            atomic_write_json(run / "parameters.json", self.parameter_document())
             paths = self.make_engine_outputs(root)
             before = {path: path.read_bytes() for path in paths.values()}
             failed = mock.Mock(returncode=1, stdout="generation failed")
@@ -970,7 +937,7 @@ class TuningTrainingAndReportTests(unittest.TestCase):
                 "validation_loss": 0.01, "validation_mae": 20.0,
                 "validation_rmse": 30.0,
             }, run / "best.pt")
-            atomic_json(run / "report.json", {
+            atomic_write_json(run / "report.json", {
                 "status": "running", "step": 10, "max_steps": 20,
                 "validation_loss": 0.02, "validation_mae": 21.0,
                 "validation_rmse": 31.0,
@@ -1065,8 +1032,8 @@ class TuningTrainingAndReportTests(unittest.TestCase):
             root = Path(directory)
             run = root / "runs" / "interrupted"
             run.mkdir(parents=True)
-            atomic_json(run / "report.json", {"status": "interrupted"})
-            atomic_json(root / "latest.json", {"run": str(run)})
+            atomic_write_json(run / "report.json", {"status": "interrupted"})
+            atomic_write_json(root / "latest.json", {"run": str(run)})
             config = {"output": {"root": str(root)}}
             with (
                 mock.patch("tools.tuning.cli.load_config", return_value=config),

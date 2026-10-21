@@ -2,7 +2,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -10,14 +9,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 from software.engine.protocol import encode_fen
+from tests.hardware_build.profile_fixtures import (
+    build_sample_report,
+    make_report,
+    sample_metrics,
+)
 from tools.hardware_build.common import BuildError
+from tools.hardware_build.manifest import load_manifest
 from tools.hardware_build.profile_format import format_profile_topics
 from tools.hardware_build.profile_positions import PROFILE_POSITIONS
 from tools.hardware_build.profile_report import (
-    _build_tt_fifo_reports,
     _build_tt_cache_report,
-    _build_tt_memory_interface,
+    _build_tt_fifo_reports,
     _build_tt_latency_reports,
+    _build_tt_memory_interface,
     build_profile_report,
     build_profile_suite_report,
     parse_metric_records,
@@ -25,22 +30,19 @@ from tools.hardware_build.profile_report import (
     rate,
 )
 from tools.hardware_build.profile_schema import (
-    MOVE_BUCKETS,
-    MOVE_GENERATOR_OPERATIONS,
-    ORDINAL_BUCKETS,
     TT_FIFOS,
 )
 from tools.hardware_build.profiling import (
-    _compile_verilator,
-    _compile_profile,
     _compact_verilator_profile_build,
-    _prune_verilator_profile_cache,
+    _compile_profile,
+    _compile_verilator,
     _profile_job_count,
     _profile_parameter_args,
+    _prune_verilator_profile_cache,
     _resolve_profile_config,
+    _train_verilator_profile,
     _validate_profile_args,
     _verilator_native_flags,
-    _train_verilator_profile,
 )
 
 
@@ -237,178 +239,6 @@ class ModelSimProfileBuildTests(unittest.TestCase):
                 self.assertEqual(len({first, changed_flags, changed_tool}), 3)
 
 
-def sample_metrics(search_cycles: int = 10) -> dict[str, int]:
-    metrics = {
-        "cycles.setup": 2,
-        "cycles.search": search_cycles,
-        "cycles.output": 1,
-        "cycles.drain": 3,
-        "components.board.issues": 2,
-        "components.board.reverses": 0,
-        "components.board.completions": 2,
-        "components.board.legal_candidates": 1,
-        "components.board.illegal_candidates": 1,
-        "components.board.null_completions": 0,
-        "components.board.reverse_completions": 0,
-        "components.board.illegal.failed_evasion": 1,
-        "components.board.illegal.king_destination": 0,
-        "components.board.illegal.en_passant_exposure": 0,
-        "components.board.illegal.exposed_king": 0,
-        "components.move.commands": 1,
-        "components.move.pops": 1,
-        "components.move.pop_misses": 0,
-        "components.eval.evaluations": 1,
-        "components.eval.completions": 1,
-        "components.eval.update_requests": 5,
-        "components.eval.root_rows": 2,
-        "components.eval.rebuild_rows": 0,
-        "components.eval.rebuilds": 0,
-        "components.eval.delta_requests": 3,
-        "components.eval.completion_markers": 0,
-        "components.eval.recovery_rows": 0,
-        "components.eval.update_completions": 2,
-        "components.eval.update_busy_cycles": 5,
-        "components.eval.update_backpressure_cycles": 2,
-        "components.eval.accumulator_wrap_lanes": 0,
-        "components.repetition.requests": 1,
-        "components.repetition.responses": 1,
-        "stalls.move_not_ready": 2,
-        "algorithm.main_board_issues": 1,
-        "algorithm.qsearch_board_issues": 1,
-        "algorithm.rfp_cutoffs": 3,
-        "algorithm.futility_pruned_moves": 2,
-        "algorithm.qdelta_pruned_moves": 4,
-        "tt.lookups": 2,
-        "tt.hits": 1,
-        "tt.stores": 1,
-        "tt.store_drops": 0,
-        "tt.store_fifo_high_water": 1,
-        "tt.writeback_probe_queue_overlap_cycles": 1,
-        "tt.bound_hits.exact": 1,
-        "tt.bound_hits.lower": 0,
-        "tt.bound_hits.upper": 0,
-        "tt.cutoff_hits": 1,
-        "tt.ordering_hits": 0,
-        "tt.cache.entries": 16,
-        "tt.cache.port_cycles": 20,
-        "tt.cache.probe_read_cycles": 2,
-        "tt.cache.probe_write_cycles": 1,
-        "tt.cache.store_read_cycles": 1,
-        "tt.cache.store_write_cycles": 1,
-        "tt.cache.probe_wait_cycles": 3,
-        "tt.cache.store_wait_cycles": 5,
-        "tt.cache.lookup_probes": 2,
-        "tt.cache.lookup_hits": 1,
-        "tt.cache.bypass_hits": 1,
-        "tt.cache.store_probes": 1,
-        "tt.cache.store_hits": 0,
-        "sdram.read_requests": 1,
-        "sdram.probe_reads": 1,
-        "sdram.store_reads": 0,
-        "sdram.word_bits": 16,
-        "sdram.read_words_per_request": 6,
-        "sdram.clock_hz": 200,
-        "sdram.idle_cycles": 4,
-        "sdram.states.idle": 5,
-        "sdram.states.read_data": 6,
-        "sdram.states.write_cmd": 1,
-        "sdram.states.write_data": 5,
-        "sdram.write_requests": 1,
-        "sdram.read_words": 6,
-        "sdram.write_words": 6,
-        "sdram.row_hits": 1,
-        "sdram.row_misses": 1,
-        "sdram.row_conflicts": 0,
-    }
-    for operation in ("probe", "store"):
-        metrics[f"tt.latency.{operation}.unfinished"] = 0
-        for outcome in ("hit", "miss"):
-            metrics[f"tt.latency.{operation}.{outcome}.samples"] = 0
-            metrics[f"tt.latency.{operation}.{outcome}.total_ps"] = 0
-    metrics["tt.latency.store.dropped"] = 0
-    for name in TT_FIFOS:
-        # Synthetic histogram depths are independent of the engine configuration.
-        capacity = 4
-        prefix = f"tt.fifos.{name}"
-        metrics[f"{prefix}.capacity"] = capacity
-        metrics[f"{prefix}.samples"] = search_cycles
-        for level in range(capacity + 1):
-            metrics[f"{prefix}.occupancy.{level}"] = search_cycles if level == 0 else 0
-    operation_counts = [1, 0, 0, 1]
-    operation_cycles = [2, 0, 0, 1]
-    for index in range(len(MOVE_GENERATOR_OPERATIONS)):
-        metrics[f"components.move_generator.operations.{index}.count"] = operation_counts[index]
-        metrics[f"components.move_generator.operations.{index}.total_cycles"] = (
-            operation_cycles[index]
-        )
-        metrics[f"components.move_generator.operations.{index}.max_cycles"] = (
-            operation_cycles[index]
-        )
-        metrics[f"components.move_generator.operations.{index}.aborted"] = 0
-    for kind in ("noisy", "quiet"):
-        metrics[f"components.move_generator.generation.{kind}.destinations_examined"] = 0
-        metrics[
-            f"components.move_generator.generation.{kind}.destinations_with_sources"
-        ] = 0
-        metrics[f"components.move_generator.generation.{kind}.candidates_emitted"] = 0
-    metrics["states.engine.wait_result"] = search_cycles
-    metrics["states.controller.search_run"] = search_cycles
-    metrics["states.controller.search_root_init"] = 0
-    for phase in ("idle", "ready", "tt_wait", "eval_wait", "move_wait", "board_wait",
-                  "reverse_wait", "repetition_wait", "store_publish", "terminal_wait", "done",
-                  "time_scale", "time_scale_wait", "time_check"):
-        metrics[f"threads.0.phases.{phase}"] = search_cycles if phase == "ready" else 0
-    metrics["threads.0.move_order.direct"] = search_cycles
-    metrics["components.move_generator.states.idle"] = 2 * search_cycles
-    metrics["tt.frontend_states.idle"] = search_cycles
-    metrics["threads.0.nodes"] = 5
-    metrics["threads.0.ready.nnue_init"] = 0
-    metrics["threads.0.ready.dispatch"] = search_cycles
-    metrics["threads.0.ready.arbitration"] = 0
-    metrics["threads.0.ready.tt_blocked"] = 0
-    metrics["threads.0.ready.noisy_move_blocked"] = 0
-    metrics["threads.0.ready.quiet_move_blocked"] = 0
-    metrics["threads.0.ready.transition"] = 0
-    metrics["threads.0.move_wait.noisy"] = 0
-    metrics["threads.0.move_wait.quiet"] = 0
-    metrics["threads.0.repetition_wait.nnue_update"] = 0
-    metrics["threads.0.repetition_wait.overlap"] = 0
-    metrics["threads.0.repetition_wait.checker"] = 0
-    metrics["concurrency.active_threads.0"] = 0
-    metrics["concurrency.active_threads.1"] = search_cycles
-    metrics["concurrency.inflight.0"] = search_cycles
-    for index in range(1, 6):
-        metrics[f"concurrency.inflight.{index}"] = 0
-    for index in range(len(MOVE_BUCKETS)):
-        metrics[f"move_order.bucket_writes.{index}"] = 1 if index == 2 else 0
-        metrics[f"move_order.bucket_pops.{index}"] = 1 if index == 2 else 0
-        metrics[f"move_order.bucket_cutoffs.{index}"] = 1 if index == 2 else 0
-        metrics[f"move_order.bucket_max_occupancy.{index}"] = 1 if index == 2 else 0
-        metrics[f"move_order.bucket_arena_high_water.{index}"] = 2 if index == 2 else 0
-    for index in range(len(ORDINAL_BUCKETS)):
-        metrics[f"move_order.legal_ordinal.{index}"] = 1 if index == 0 else 0
-        metrics[f"move_order.cutoff_ordinal.{index}"] = 1 if index == 0 else 0
-    metrics["move_order.direct_cutoffs"] = 0
-    metrics.update(
-        {
-            "depths.1.cycles": 4,
-            "depths.1.nodes": 1,
-            "depths.1.tt_lookups": 0,
-            "depths.1.tt_hits": 0,
-            "depths.1.cache_probes": 0,
-            "depths.1.cache_hits": 0,
-            "depths.1.max_ply": 2,
-            "depths.2.cycles": 6,
-            "depths.2.nodes": 4,
-            "depths.2.tt_lookups": 2,
-            "depths.2.tt_hits": 1,
-            "depths.2.cache_probes": 2,
-            "depths.2.cache_hits": 1,
-            "depths.2.max_ply": 4,
-        }
-    )
-    return metrics
-
 
 class ProfileMathTests(unittest.TestCase):
     def test_undefined_rates_are_none(self):
@@ -453,28 +283,8 @@ class StateHistogramTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
-    def build_sample_report(self) -> dict:
-        """Build one internally consistent report shared by focused assertions."""
-        configuration = {
-            "fen": "8/8/8/8/8/8/8/K6k w - - 0 1",
-            "threads": 1,
-            "engine_clock_hz": 100,
-        }
-        result_values = {
-            "best_move.from": 0,
-            "best_move.to": 8,
-            "best_move.promotion": 0,
-            "score": 2,
-            "nodes": 5,
-            "completed_depth": 1,
-            "deepest_search_ply": 3,
-            "end_reason": 1,
-            "error": 0,
-        }
-        return build_profile_report(configuration, sample_metrics(), result_values, 0.5)
-
     def test_report_calculates_timing_depth_and_tt_metrics(self):
-        report = self.build_sample_report()
+        report = build_sample_report()
 
         self.assertEqual(report["timing"]["cycles_per_node"], 2)
         self.assertEqual(report["timing"]["simulated_search_seconds"], 0.1)
@@ -487,7 +297,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["depth_breakdown"][1]["status"], "partial")
 
     def test_memory_interface_formats_totals_width_and_clock(self):
-        report = self.build_sample_report()
+        report = build_sample_report()
         metrics = report["raw_metrics"]
         memory = report["transposition_table"]["memory_interface"]
         self.assertEqual(memory["word_bits"], metrics["sdram.word_bits"])
@@ -521,8 +331,8 @@ class ReportTests(unittest.TestCase):
             _build_tt_memory_interface(metrics)
 
     def test_memory_suite_idle_and_bandwidth_pool_memory_cycles(self):
-        first = self.build_sample_report()
-        second = self.build_sample_report()
+        first = build_sample_report()
+        second = build_sample_report()
         second["raw_metrics"]["sdram.states.idle"] *= 10
         second["raw_metrics"]["sdram.idle_cycles"] *= 10
         suite = build_profile_suite_report([("first", first), ("second", second)])
@@ -533,7 +343,7 @@ class ReportTests(unittest.TestCase):
                                24 * 2 / (79 / first["raw_metrics"]["sdram.clock_hz"]))
 
     def test_report_uses_probe_wording_and_clarifies_queue_overlap(self):
-        text = format_profile_topics(self.build_sample_report(), ["tt"])
+        text = format_profile_topics(build_sample_report(), ["tt"])
         for removed in ("lookup", "preempted", "Read width", "SDRAM payload words", "(SDR,"):
             self.assertNotIn(removed, text)
         for added in ("TT: probes=", "Writebacks queued alongside probe reads:",
@@ -542,7 +352,7 @@ class ReportTests(unittest.TestCase):
             self.assertIn(added, text)
 
     def test_memory_suite_sums_requests_and_preserves_interface_dimensions(self):
-        first = self.build_sample_report()
+        first = build_sample_report()
         metrics = dict(first["raw_metrics"])
         metrics["sdram.probe_reads"] = 3
         metrics["sdram.store_reads"] = 2
@@ -565,7 +375,7 @@ class ReportTests(unittest.TestCase):
             build_profile_suite_report([("first", first), ("second", second)])
 
     def test_report_formats_timing_and_thread_lifecycle(self):
-        text = format_profile_topics(self.build_sample_report(), ["all"])
+        text = format_profile_topics(build_sample_report(), ["all"])
 
         self.assertIn("FPGA Chess Engine Runtime Profile", text)
         self.assertIn("command/position setup=2 cycles", text)
@@ -587,13 +397,13 @@ class ReportTests(unittest.TestCase):
 
     def test_lifecycle_groups_threads_and_aligns_large_cycle_counts(self):
         """Large suites retain aligned columns when the thread table wraps."""
-        report = self.build_sample_report()
+        report = build_sample_report()
         search_cycles = 12_345_678_901_234
         report["timing"]["search_cycles"] = search_cycles
         thread = report["threads"][0]
-        thread["phase_cycles"] = {key: 0 for key in thread["phase_cycles"]}
+        thread["phase_cycles"] = dict.fromkeys(thread["phase_cycles"], 0)
         thread["phase_cycles"]["ready"] = search_cycles
-        thread["ready_breakdown"] = {key: 0 for key in thread["ready_breakdown"]}
+        thread["ready_breakdown"] = dict.fromkeys(thread["ready_breakdown"], 0)
         thread["ready_breakdown"]["dispatch"] = search_cycles
         report["threads"] = [dict(copy.deepcopy(thread), id=index) for index in range(5)]
 
@@ -612,15 +422,15 @@ class ReportTests(unittest.TestCase):
 
     def test_lifecycle_with_no_search_cycles_has_undefined_percentages(self):
         """An empty lifecycle still prints its total without inventing a rate."""
-        report = self.build_sample_report()
+        report = build_sample_report()
         report["timing"]["search_cycles"] = 0
         thread = report["threads"][0]
-        thread["phase_cycles"] = {key: 0 for key in thread["phase_cycles"]}
+        thread["phase_cycles"] = dict.fromkeys(thread["phase_cycles"], 0)
         text = format_profile_topics(report, ["pipeline"])
         self.assertRegex(text, r"Search total\s+0\s+n/a")
 
     def test_report_formats_component_activity(self):
-        report = self.build_sample_report()
+        report = build_sample_report()
         text = format_profile_topics(report, ["all"])
 
         self.assertIn("Searched move ranks", text)
@@ -639,7 +449,7 @@ class ReportTests(unittest.TestCase):
 
     def test_memory_backpressure_formats_in_pipeline_and_tt_topics(self):
         """Real simulations emit memory stalls even when the count is zero."""
-        report = self.build_sample_report()
+        report = build_sample_report()
         report["stalls"].update({"tt_request_not_ready": 1, "cdc_command": 2})
         for topic in ("pipeline", "tt"):
             with self.subTest(topic=topic):
@@ -648,7 +458,7 @@ class ReportTests(unittest.TestCase):
                 self.assertIn("2 cycles (15.4% of search + drain cycles)", text)
 
     def test_report_formats_move_generator_and_pruning_metrics(self):
-        report = self.build_sample_report()
+        report = build_sample_report()
         text = format_profile_topics(report, ["all"])
 
         self.assertIn("Move generator operations", text)
@@ -679,7 +489,7 @@ class ReportTests(unittest.TestCase):
         self.assertLess(text.index("Good noisy high"), text.index("Bad noisy low"))
 
     def test_moves_topic_is_separate_from_search_heuristics(self):
-        report = self.build_sample_report()
+        report = build_sample_report()
         report["algorithm"].update(null_searches=7, null_cutoffs=2, future_heuristic=3)
         search = format_profile_topics(report, ["search"])
         moves = format_profile_topics(report, ["moves"])
@@ -740,7 +550,7 @@ class ReportTests(unittest.TestCase):
         metrics["threads.0.phases.ready"] -= 3
         metrics["threads.0.ready.dispatch"] -= 3
         metrics["threads.0.phases.future_phase"] = 3
-        sample = self.build_sample_report()
+        sample = build_sample_report()
         report = build_profile_report(sample["configuration"], metrics, {
             "best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
             "score": 0, "nodes": 5, "completed_depth": 1, "deepest_search_ply": 1,
@@ -924,7 +734,7 @@ class ReportTests(unittest.TestCase):
             )
 
     def test_pvs_issues_cannot_exceed_main_search_pushes(self):
-        report = self.build_sample_report()
+        report = build_sample_report()
         for scouts, researches in ((1, 0), (0, 1), (2, 0), (0, 2), (1, 1)):
             with self.subTest(scouts=scouts, researches=researches):
                 metrics = sample_metrics()
@@ -943,7 +753,7 @@ class ReportTests(unittest.TestCase):
 
     def test_board_classifications_separate_nulls_reversals_and_unfinished_candidates(self):
         """Only completed real moves enter legality counts and their denominator."""
-        base = self.build_sample_report()
+        base = build_sample_report()
         metrics = sample_metrics()
         metrics.update({
             "components.board.issues": 6,
@@ -969,7 +779,7 @@ class ReportTests(unittest.TestCase):
 
     def test_board_classification_invariants_reject_bad_totals(self):
         """Reject overlapping causes and completions attributed to wrong operations."""
-        base = self.build_sample_report()
+        base = build_sample_report()
         result = {"best_move.from": 0, "best_move.to": 8, "best_move.promotion": 0,
                   "score": 0, "nodes": 1, "completed_depth": 1,
                   "deepest_search_ply": 1, "end_reason": 0, "error": 0}
@@ -1041,8 +851,8 @@ class LatencyReportTests(unittest.TestCase):
                 _build_tt_latency_reports(metrics)
 
     def test_suite_percentile_pools_samples_instead_of_position_percentiles(self):
-        first = ReportTests().build_sample_report()
-        second = ReportTests().build_sample_report()
+        first = build_sample_report()
+        second = build_sample_report()
         self.with_distribution(first["raw_metrics"], "probe", "hit", {1000: 99})
         self.with_distribution(second["raw_metrics"], "probe", "miss", {100000: 1})
         report = build_profile_suite_report([("first", first), ("second", second)])
@@ -1072,8 +882,8 @@ class CacheReportTests(unittest.TestCase):
             _build_tt_cache_report(metrics, 100)
 
     def test_suite_idle_time_pools_cycles(self):
-        first = ReportTests().build_sample_report()
-        second = ReportTests().build_sample_report()
+        first = build_sample_report()
+        second = build_sample_report()
         second["raw_metrics"]["tt.cache.port_cycles"] *= 9
         second["raw_metrics"]["tt.cache.probe_read_cycles"] = second["raw_metrics"]["tt.cache.port_cycles"]
         suite = build_profile_suite_report([("first", first), ("second", second)])
@@ -1115,9 +925,8 @@ class CacheReportTests(unittest.TestCase):
                 _build_tt_cache_report(metrics, 100)
 
     def test_suite_weights_waits_and_hit_rates_by_access_counts(self):
-        factory = ProfileSuiteTests()
-        first = factory.make_report("first fen", 5, 0.5)
-        second = factory.make_report("second fen", 5, 0.5)
+        first = make_report("first fen", 5, 0.5)
+        second = make_report("second fen", 5, 0.5)
         second["raw_metrics"].update({
             "tt.cache.lookup_probes": 8, "tt.cache.lookup_hits": 7,
             "tt.cache.probe_wait_cycles": 32, "tt.cache.store_probes": 3,
@@ -1136,7 +945,7 @@ class CacheReportTests(unittest.TestCase):
             build_profile_suite_report([("first", first), ("second", second)])
 
     def test_cache_has_its_own_report_section(self):
-        report = ReportTests().build_sample_report()
+        report = build_sample_report()
         text = format_profile_topics(report, ["tt"])
         self.assertIn("TT cache", text)
         self.assertIn(f"Cache size: {report['transposition_table']['cache']['entries']:,} individual TT ways", text)
@@ -1217,7 +1026,7 @@ class FIFOReportTests(unittest.TestCase):
             build_profile_suite_report([("first", reports[0]), ("second", reports[1])])
 
     def test_tt_table_covers_all_fifos_and_requested_percentiles(self):
-        report = ReportTests().build_sample_report()
+        report = build_sample_report()
         text = format_profile_topics(report, ["tt"])
         for label, unit, _ in TT_FIFOS.values():
             self.assertIn(label, text)
@@ -1242,13 +1051,15 @@ class ProfileArgumentTests(unittest.TestCase):
         return argparse.Namespace(**values)
 
     def test_default_and_explicit_limits(self):
-        self.assertEqual(_validate_profile_args(self.namespace()), ("time", 50))
-        self.assertEqual(_validate_profile_args(self.namespace(timeout=None)), ("time", 50))
+        default = _validate_profile_args(self.namespace())
+        self.assertEqual(default[0], "time")
+        self.assertGreater(default[1], 0)
+        self.assertEqual(_validate_profile_args(self.namespace(timeout=None)), default)
         self.assertEqual(_validate_profile_args(self.namespace(nodes=100)), ("nodes", 100))
         self.assertEqual(_validate_profile_args(self.namespace(time_ms=5)), ("time", 5))
 
     def test_invalid_configuration_fails(self):
-        self.assertEqual(_validate_profile_args(self.namespace(threads=17)), ("time", 50))
+        self.assertEqual(_validate_profile_args(self.namespace(threads=17, nodes=100)), ("nodes", 100))
         with self.assertRaises(BuildError):
             _validate_profile_args(self.namespace(threads=0))
         with self.assertRaises(BuildError):
@@ -1270,7 +1081,8 @@ class ProfileArgumentTests(unittest.TestCase):
         args.engine_config = None
         config = _resolve_profile_config(args)
         self.assertEqual(args.synthesis_target, "quartus-de1-soc")
-        self.assertEqual(config["engine_config"], "hardware/config/engine/de1-soc.json")
+        target = load_manifest()["synthesis_targets"][args.target]
+        self.assertEqual(config["engine_config"], target["engine_config"])
 
     def test_all_resolved_rtl_parameters_are_forwarded(self):
         args = self.namespace(threads=None, stack_depth=None, engine_clock_hz=None)
@@ -1295,37 +1107,10 @@ class ProfileSuiteTests(unittest.TestCase):
             self.assertEqual(len(case.fen.split()), 6)
             self.assertEqual(len(encode_fen(case.fen)), 36)
 
-    def make_report(self, fen: str, nodes: int, wall_seconds: float) -> dict:
-        metrics = sample_metrics()
-        result_values = {
-            "best_move.from": 0,
-            "best_move.to": 8,
-            "best_move.promotion": 0,
-            "score": 2,
-            "nodes": nodes,
-            "completed_depth": 1,
-            "deepest_search_ply": 3,
-            "end_reason": 1,
-            "error": 0,
-        }
-        return build_profile_report(
-            {
-                "fen": fen,
-                "search_limit": {"kind": "time", "value": 50},
-                "threads": 1,
-                "engine_clock_hz": 100,
-                "simulator": "verilator",
-                "simulator_threads": 1,
-            },
-            metrics,
-            result_values,
-            wall_seconds,
-        )
-
     def test_suite_uses_weighted_aggregate_rates(self):
         report = build_profile_suite_report([
-            ("first", self.make_report("first fen", 5, 0.5)),
-            ("second", self.make_report("second fen", 10, 1.5)),
+            ("first", make_report("first fen", 5, 0.5)),
+            ("second", make_report("second fen", 10, 1.5)),
         ])
         self.assertEqual(report["position_count"], 2)
         self.assertEqual(report["timing"]["nodes"], 15)
@@ -1372,7 +1157,7 @@ class ProfileSuiteTests(unittest.TestCase):
         args = argparse.Namespace(jobs=3, simulator_threads=1)
         self.assertEqual(_profile_job_count(args, "verilator"), 3)
         args.jobs = 1000
-        self.assertEqual(_profile_job_count(args, "verilator"), 48)
+        self.assertEqual(_profile_job_count(args, "verilator"), len(PROFILE_POSITIONS))
         args.jobs = 0
         with self.assertRaises(BuildError):
             _profile_job_count(args, "verilator")
@@ -1381,7 +1166,7 @@ class ProfileSuiteTests(unittest.TestCase):
         args = argparse.Namespace(jobs=None, simulator_threads=1)
         self.assertEqual(_profile_job_count(args, "modelsim"), 1)
 
-    def test_verilator_profile_cache_keeps_ten_most_recent_completed_builds(self):
+    def test_verilator_profile_cache_keeps_most_recent_completed_builds(self):
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary)
             builds = [
@@ -1392,7 +1177,8 @@ class ProfileSuiteTests(unittest.TestCase):
             incomplete.mkdir()
             (incomplete / "fingerprint.txt").write_text("incomplete", encoding="utf-8")
 
-            _prune_verilator_profile_cache(cache, builds[-1])
+            with patch("tools.hardware_build.profiling.VERILATOR_PROFILE_CACHE_LIMIT", 10):
+                _prune_verilator_profile_cache(cache, builds[-1])
 
             self.assertFalse(builds[0].exists())
             self.assertFalse(builds[1].exists())

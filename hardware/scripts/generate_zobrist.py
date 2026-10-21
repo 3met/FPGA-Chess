@@ -5,9 +5,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
-
 
 ROOT = Path(__file__).resolve().parents[2]
 TILE_REFERENCE_FILE = ROOT / "hardware" / "tb" / "board_update_pipeline" / "data" / "zobrist_tile_reference.hex"

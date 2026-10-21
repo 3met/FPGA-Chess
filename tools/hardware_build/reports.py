@@ -34,7 +34,7 @@ def command_synth_report(args: argparse.Namespace) -> int:
     details = [
         ["Tool", target["tool"]],
         ["Top", target["top"]],
-        ["Device", target.get("device", metadata.get("part") if metadata else "unspecified")],
+        ["Device", target.get("device") or (metadata or {}).get("part") or "unspecified"],
         ["Started", report_timestamp(build_dir, metadata)],
     ]
     if metadata:

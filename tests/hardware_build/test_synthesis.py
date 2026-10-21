@@ -11,6 +11,7 @@ from unittest import mock
 from tools.hardware_build.manifest import load_manifest
 from tools.hardware_build.engine_config import load_engine_config
 from tools.hardware_build.reports_quartus import quartus_bram_columns, quartus_bram_count, short_quartus_node, wrap_timing_node
+from tools.hardware_build.reports import command_synth_report
 from tools.hardware_build.synthesis import (
     command_synth,
     deterministic_build_id,
@@ -138,6 +139,21 @@ class EngineBuildConfigTests(unittest.TestCase):
 
 
 class QuartusReportTests(unittest.TestCase):
+    def test_report_without_device_metadata_still_renders(self):
+        """An incomplete synthesis receipt may not yet identify the device."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "fixture").mkdir()
+            manifest = {"synthesis_targets": {"fixture": {"tool": "vivado", "top": "top"}}}
+            output = io.StringIO()
+            with mock.patch("tools.hardware_build.reports.BUILD_ROOT", root), \
+                    mock.patch("tools.hardware_build.reports.load_manifest", return_value=manifest), \
+                    mock.patch("tools.hardware_build.reports.load_synth_metadata", return_value={"status": "failed"}), \
+                    mock.patch("tools.hardware_build.reports.vivado_synth_report", return_value=True), \
+                    redirect_stdout(output):
+                self.assertEqual(command_synth_report(argparse.Namespace(target="fixture", verbose=False)), 0)
+            self.assertIn("unspecified", output.getvalue())
+
     def test_timing_nodes_are_compacted_and_wrapped_at_hierarchy_boundaries(self):
         node = "engine:engine|search_controller:controller|move_generator:move_generator|move_generator_pipeline:noisy_pipeline|destination_mask[5]"
 

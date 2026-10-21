@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
+from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS
 from tests.live_fpga.positions import (
     FIFTY_MOVE_CASES,
     PERFT_POSITIONS,
@@ -15,8 +16,7 @@ from tests.live_fpga.positions import (
     FiftyMoveCase,
     RepetitionCase,
 )
-from tests.live_fpga.session import FPGAUCISession, FPGAUCIError
-from software.engine.uci_commands import DEFAULT_MOVE_OVERHEAD_MS
+from tests.live_fpga.session import FPGAUCIError, FPGAUCISession
 
 NODES_RE = re.compile(r"\bnodes\s+(\d+)\b")
 SCORE_RE = re.compile(r"\bscore\s+(cp|mate)\s+(-?\d+)\b")
