@@ -30,7 +30,7 @@ Direct-move path checks share a decoded square-occupancy map, avoiding full-tile
 
 Quiet generation caches both castling-legality results during destination preparation because its board remains fixed for the job. History lookup addresses select ordinary or castling payloads from the lane state independently of legality, keeping attack scans out of history-RAM enables and addresses.
 
-Move memory scans buckets in descending priority. While generation can still add to the highest eligible bucket, an empty bucket makes the read wait for a move or generation completion before considering lower buckets. Writes continue without waiting for reads, including when the same bucket is being read. Each thread has independent storage and a pop channel, so threads can read concurrently and a wait affects only its thread. Flush and New Game cancel pending requests and responses.
+Move memory scans buckets in descending priority. While generation can still add to the highest eligible bucket, an empty bucket makes the read wait for a move or generation completion before considering lower buckets. Writes continue without waiting for reads, including when the same bucket is being read. Each thread has independent storage and a pop channel, so threads can read concurrently and a wait affects only its thread. Flush and New Game cancel pending requests and responses. `pop_resp_pending` exposes registered response occupancy for payload preselection; `pop_resp_valid` separately suppresses acceptance during reset, clear, and flush. Cancellation clears occupancy on the clock edge, so consumers must use valid for acceptance.
 
 ## Ordering
 

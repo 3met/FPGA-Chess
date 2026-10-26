@@ -1,46 +1,48 @@
 # NNUE Evaluator (`nnue_evaluator`)
 
-The NNUE evaluator produces a side-to-move-relative correction and a blended White-relative material/PST score. Search converts the blended score to side-to-move point of view before adding the correction. It stores one live accumulator per search thread; callers must preserve per-thread update ordering and wait for outstanding updates before evaluating that thread.
+The evaluator keeps one live, two-perspective accumulator per search thread. Search orders each thread's updates and waits for completion before evaluating that thread. Results contain a side-to-move-relative NNUE correction and a White-relative material/PST blend; search combines them and saturates to the finite, non-mate score range.
 
-## Encoding
+## Model and Parameters
 
-Each perspective uses 768 direct piece-square features: six friendly and six opposing piece types over 64 vertically oriented squares. The Black perspective flips ranks before indexing, so both perspectives share one transformer. Kings are ordinary features; there are no king buckets or horizontal mirroring.
+`nnue_defs` defines the accumulator node count per perspective, vector multiplier width, output bucket count, and piece-count mapping. The node count must be a multiple of the vector width. Defaults are 512 nodes per side, 256 multipliers, and eight output buckets. The default buckets cover piece counts 2–5, 6–9, through 30–32. Model images and the training/export geometry must match these parameters.
 
-Each feature addition or removal updates both perspectives. All legal board changes are incremental, including castling; null moves require no feature change.
+Accumulator values are signed six-bit integers, transformer weights signed two-bit integers, activations unsigned four-bit integers, and output weights signed four-bit integers. Accumulator arithmetic wraps modulo 64 without saturation; add/remove updates therefore remain exact inverses. Training penalizes overflow. Activation is `min(15, floor(max(0, accumulator)^2 / 8))`. Output bias remains unsigned six-bit, and the complete dot product retains sufficient signed width until search applies score saturation.
 
-## Accumulator Updates
+Each perspective has 768 direct piece-square features: six friendly and six opposing piece types over 64 squares. The Black perspective flips ranks. Kings are ordinary features, and there are no king buckets or horizontal mirroring. The side-to-move perspective is first in the output layer. The datapath reads White then Black accumulator rows and permutes weight-row addresses to implement that ordering.
 
-Each thread owns White and Black accumulator vectors. A clear starts a perspective from its unsigned four-bit trained bias, while add and remove requests apply one transformer row. Accumulator arithmetic is modular and matches quantization-aware training, so removing a feature exactly reverses adding it even across a wrap.
+## Accumulator Storage and Updates
 
-Before search, the controller builds the root accumulator for every thread. An ordinary move applies compact feature deltas to the live child state, stores the reversible delta with the ply record, and applies its inverse after board reversal. Castling updates the king and rook features; a null child keeps the parent accumulator unchanged.
+The accumulator is a simple-dual-port BRAM with a registered read output and enabled write port. Each word contains one multiplier vector's worth of accumulator values. The read output directly feeds the activation registers and update adders. Forward-pass reads always take priority; a waiting transformer row holds until the port becomes available. The caller must prevent an evaluation from reading an address being updated.
 
-The per-ply undo record stores only the original moving piece type and capture kind. Capture kind includes no capture and en passant. The entering move supplies source, destination, and promotion choice; the restored parent's turn supplies colors, and en passant's capture square follows from the move squares. Existing null-child state suppresses accumulator updates. Undo expands into the existing plan register without additional memory reads or search cycles.
+Accumulator biases initialize thread storage and reserved bias rows in the same memory. A rebuild reads those reserved rows for its first feature, then adds subsequent features to the live state. Reset and clear flush pipeline validity without resetting RAM contents. Search rebuilds invalid thread state before use.
 
-The final request in an update plan marks completion and returns the tagged thread and ply. Requests from different threads share the update path, while evaluation has an independent accumulator read path. Both paths read the same live-state storage; evaluation captures a snapshot before processing its output rows, so another thread can update concurrently without a duplicate accumulator memory.
+The transformer uses three disjoint BRAM banks, each with two registered read ports. Bank selection is `(oriented_square + relative_color) mod 3`. Each bank reserves sixteen pawn entries and twenty-two entries per other piece type per color, plus a dedicated zero row. Unreachable pawn end-rank entries map to that zero row and are omitted from physical storage. The zero vector is initialized explicitly and cannot be overwritten by model data. Unused ports read that zero row. Ordinary captures separate mover and victim by color, and both en passant and standard castling fit within two reads per bank in each perspective. Promotions use the same square/color mapping.
 
-Search constructs these requests with `hardware/rtl/search/search_nnue_update_encoder.sv`, a combinational encoder for forward and inverse move deltas, rebuild rows, and ordered completion markers. The search controller retains sequencing and plan ownership, including immediate handoff between pending threads.
+An elastic input register separates search feature encoding from bank decoding and holds the next request during writeback. The controller emits move deltas with `combine` set. The evaluator collects their feature addresses and signs into bank slots until the final `complete` request. It then processes both perspectives as one ordered update. Rebuild requests are independent transactions, allowing an arbitrary number of pieces. A completion marker performs no write and returns its thread/ply tag after preceding transactions finish.
 
-Feature addresses are independent of request validity, and transformer ROMs read every cycle. Registered validity gates accumulator writes and completion, so unused rows require no address or data hold behavior and update latency is unchanged.
+The six ROM outputs are sign-adjusted, summed, and registered. On that same clock, the accumulator read port captures the old row. The registered sum and old accumulator drive the modular update adder and RAM write port. Transformer reads, sum/accumulator reads, and writes overlap across rows; without forward-pass contention, one row advances per cycle. Pending update transactions are processed one at a time.
 
-Reset, New Game, Kill, and search restart flush in-flight datapath work. Accumulator RAM contents need not be erased because the controller tracks which per-thread state is valid.
+## Forward Pipeline
 
-## Output Layer
+Each request streams all accumulator rows through registered memory output, registered activation, registered multiplier products, and one registered vector sum. The next request starts reading immediately after the previous request's last row, while older products and sums drain. Per-row validity, first/last markers, bias, and PST data preserve request ordering without resetting the datapath between evaluations.
 
-Evaluation maps each signed five-bit accumulator to the three-bit SCReLU code `min(7, floor(max(0, accumulator)² / 8))`, places the side-to-move perspective before the opposing perspective, and applies the three-bit signed output weights and six-bit unsigned output bias. Eight output heads cover piece counts 2-5, 6-9, 10-13, 14-17, 18-21, 22-25, 26-29, and 30-32. The hardware snapshots perspectives in fixed White/Black order and permutes output-weight row addresses for the side to move, avoiding a wide snapshot mux while preserving the same dot product. The correction uses `NnueCorrection`, sized for the complete dot-product range including bias; it is combined with `PstEvalScore` before finite-score saturation. The blend numerator and reciprocal multiply follow the generated material/PST width. Search saturates the final combined evaluation into the finite score band. In parallel, the evaluator blends the two incoming material/PST sums linearly from the two-king position through the full 32-piece position, using signed truncation. The blended result is aligned with the NNUE output.
+With `R = 2 * nodes_per_side / vector_width`, the minimum initiation interval is `R` clocks and the result latency is `R + 3` clocks from acceptance. A sustained request stream has no idle multiplier cycles. The registered partial sums accumulate across rows, and output bias is added once at the end.
 
-Swapping every piece color, flipping the board vertically, and flipping the turn leaves the ordered model input and correction unchanged. The RTL uses portable inferred memories and arithmetic; synthesis hints or target resource choices must not change numerical behavior.
+In parallel, material/PST scores interpolate from the two-king endgame value to the full-board first-phase value, using signed truncation. Reciprocal division runs through the same pipeline and remains aligned with its NNUE result.
 
-The output reduction registers four-product sums and then sixteen-product sums before accumulating each MAC group. The second reduction stage adds one cycle to evaluation latency and the minimum initiation interval, keeping the final adder tree out of a long feedback path. A new snapshot can still be accepted while the preceding result drains into clipping.
+## Multiplier Packing
+
+The Cyclone V wrapper groups two independent unsigned 18×18 multipliers into one DSP. Each multiplier computes `(a0 + 256*a1) * (abs(w0) + 256*abs(w1))`. Bits 7:0 and 23:16 hold the two magnitude products; each weight's sign is restored separately. The largest cross term is `2*15*8 = 240`, below 256, so it cannot carry into the high product. This gives four NNUE products per DSP. Other FPGA targets use equivalent inferred arithmetic.
 
 ## Model Data
 
-Generated parameters live under `hardware/data/nnue/`. Model dimensions and packing are defined in [`nnue_defs`](../../hardware/rtl/nnue/defs.sv):
+Model images are tracked inputs under `hardware/data/nnue/`, written by the training exporter. Builds require these files and never generate or replace them. Their contents participate in the build fingerprint.
 
 | File | Contents |
 | ---- | -------- |
-| `feature_transformer.hex` | Transformer rows with signed two-bit weights packed four per byte. |
-| `accumulator_bias.hex` | Per-lane accumulator bias. |
-| `output_weights.hex` | Packed output-layer weights. |
-| `output_bias.hex` | Output bias. |
+| `feature_transformer.hex` | Signed two-bit transformer weights, one complete node vector per feature. Unreachable pawn rows are zero. |
+| `accumulator_bias.hex` | Unsigned four-bit bias per node, loaded into accumulator BRAM initialization. |
+| `output_weights.hex` | Signed four-bit weights, one vector per row, grouped by bucket and perspective. |
+| `output_bias.hex` | Unsigned output bias per bucket. |
 
-The tuning and export workflow is described in [evaluation-tuning.md](../development/evaluation-tuning.md). `python hardware/scripts/generate_nnue_defaults.py` creates a legal zero-correction model for development and tests.
+Training and export use the same arithmetic; see [evaluation tuning](../development/evaluation-tuning.md).

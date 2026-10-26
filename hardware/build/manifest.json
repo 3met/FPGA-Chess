@@ -37,9 +37,13 @@
       "hardware/rtl/rx_decode.sv",
       "hardware/rtl/tx_encode.sv"
     ],
+    "nnue-packed-products": [
+      "hardware/rtl/nnue/nnue_packed_products.sv"
+    ],
     "nnue": [
       "@common",
       "hardware/rtl/nnue/defs.sv",
+      "@nnue-packed-products",
       "hardware/rtl/nnue/nnue_evaluator.sv"
     ],
     "move-generator": [
@@ -236,6 +240,11 @@
       "testbench": "hardware/tb/move_generator/tb_move_generator.sv",
       "top": "tb_move_generator"
     },
+    "nnue-packed-products": {
+      "source_set": "nnue-packed-products",
+      "testbench": "hardware/tb/nnue/tb_nnue_packed_products.sv",
+      "top": "tb_nnue_packed_products"
+    },
     "nnue": {
       "source_set": "nnue",
       "testbench": "hardware/tb/nnue/tb_nnue_evaluator.sv",
@@ -381,15 +390,6 @@
         "hardware/rtl/generated/evaluation_parameters.svh"
       ]
     },
-    "nnue-defaults": {
-      "script": "hardware/scripts/generate_nnue_defaults.py",
-      "outputs": [
-        "hardware/data/nnue/feature_transformer.hex",
-        "hardware/data/nnue/output_weights.hex",
-        "hardware/data/nnue/output_bias.hex",
-        "hardware/data/nnue/accumulator_bias.hex"
-      ]
-    },
     "zobrist": {
       "script": "hardware/scripts/generate_zobrist.py",
       "outputs": [
@@ -405,6 +405,9 @@
       "top": "de1_soc",
       "source_set": "quartus-de1-soc",
       "family": "Cyclone V",
+      "verilog_macros": [
+        "FPGA_CHESS_CYCLONE_V"
+      ],
       "device": "5CSEMA5F31C6",
       "engine_config": "hardware/config/engine/de1-soc.json",
       "clock_generator": {
@@ -413,7 +416,7 @@
         "reference_frequency_hz": 50000000,
         "reference_port": "CLOCK_50"
       },
-      "seed": 1,
+      "seed": 3,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",
@@ -466,5 +469,11 @@
       "mode": "jtag",
       "jtag_id": "02D120DD"
     }
-  }
+  },
+  "data_files": [
+    "hardware/data/nnue/feature_transformer.hex",
+    "hardware/data/nnue/output_weights.hex",
+    "hardware/data/nnue/output_bias.hex",
+    "hardware/data/nnue/accumulator_bias.hex"
+  ]
 }

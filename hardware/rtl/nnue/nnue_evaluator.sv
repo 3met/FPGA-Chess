@@ -25,268 +25,349 @@ module nnue_evaluator #(
     output PstEvalScore result_pst
 );
 
-    // Each thread owns one live accumulator. Search stores compact move deltas
-    // and applies their inverse while unwinding instead of retaining a copy per ply.
-    localparam int STATE_COUNT = STATE_THREAD_COUNT;
-    localparam int STATE_ADDR_BITS = (STATE_COUNT <= 1) ? 1 : $clog2(STATE_COUNT);
-    localparam int ACCUMULATOR_WORD_BITS =
-        NNUE_STATE_VALUE_COUNT * NNUE_ACCUMULATOR_BITS;
-    localparam int OUTPUT_WEIGHT_ROW_BITS =
-        NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS;
-    localparam int OUTPUT_WEIGHT_ROW_ADDR_BITS =
-        $clog2(NNUE_OUTPUT_WEIGHT_ROW_COUNT);
-    typedef logic [STATE_ADDR_BITS-1:0] StateAddress;
-    typedef logic [OUTPUT_WEIGHT_ROW_ADDR_BITS-1:0] OutputWeightRowAddress;
-    typedef logic signed [5:0] OutputProduct;
-    typedef logic signed [6:0] PairSum;
-    typedef logic signed [7:0] QuadSum;
-    typedef logic signed [8:0] OctetSum;
-    typedef logic signed [9:0] SixteenSum;
-    typedef logic signed [10:0] ThirtyTwoSum;
-    typedef logic signed [11:0] SixtyFourSum;
-    typedef logic signed [12:0] MacGroupSum;
-    typedef NnueCorrection OutputSum;
+    localparam int SIDE_ROWS = NNUE_ACCUMULATOR_COUNT / NNUE_OUTPUT_MAC_LANES;
+    localparam int STATE_ROWS = 2 * SIDE_ROWS;
+    localparam int WORD_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS;
+    localparam int FEATURE_WORD_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_FEATURE_WEIGHT_BITS;
+    localparam int BANK_ROWS = NNUE_FEATURE_BANK_ROW_COUNT * SIDE_ROWS;
+    localparam int BIAS_BASE = STATE_THREAD_COUNT * STATE_ROWS;
+    localparam int MEMORY_ROWS = BIAS_BASE + STATE_ROWS;
+    localparam int ADDRESS_BITS = $clog2(MEMORY_ROWS);
+    localparam int WEIGHT_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS;
+    localparam int PRODUCT_GROUPS = (NNUE_OUTPUT_MAC_LANES + 3) / 4;
+    localparam int TREE_LEAVES = 1 << $clog2(NNUE_OUTPUT_MAC_LANES);
+    typedef logic [ADDRESS_BITS-1:0] StateAddress;
+    typedef logic signed [7:0] OutputProduct;
+    typedef logic signed [$clog2(NNUE_OUTPUT_MAC_LANES)+7:0] PartialSum;
+    typedef logic signed [4:0] FeatureSum;
 
-    NnueUpdateRequest active_update;
-    logic update_busy;
-    logic [NNUE_FEATURE_ROW_BITS-1:0] feature_row_white, feature_row_black;
-
-    // Share live state between the update and evaluation reads. Two independent
-    // read addresses preserve concurrent work without a wide block-RAM mirror.
-    (* ramstyle = "MLAB", ram_style = "distributed" *)
-    logic [ACCUMULATOR_WORD_BITS-1:0] accumulator_update_memory[STATE_COUNT];
-    logic [ACCUMULATOR_WORD_BITS-1:0] eval_accumulators;
-    NnueOutputBucket eval_output_bucket;
-    Color eval_turn_q;
-    logic eval_busy;
-    logic partial_pending;
-    logic reduction_pending;
-    logic result_pending;
-    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] eval_cycle;
-    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] partial_cycle;
-    logic [$clog2(NNUE_OUTPUT_MAC_CYCLES)-1:0] reduction_cycle;
-    QuadSum partial_q[32];
-    SixteenSum reduction_q[8];
-    OutputSum eval_sum;
-    OutputSum result_sum;
-    PstEvalScore pst_blend_active, pst_blend_pending;
-    logic [5:0] pst_first_weight;
-    PstEvalScore pst_first_q, pst_endgame_q;
-    logic [5:0] pst_weight_q;
-    // Weights sum to 30. Nine guard bits make reciprocal division exact over
-    // the entire input type, including truncation of negative fractions.
-    localparam int PST_NUMERATOR_BITS = $bits(PstEvalScore) + 5;
-    localparam int PST_RECIPROCAL_SHIFT = $bits(PstEvalScore) + 9;
-    localparam int PST_RECIPROCAL_BITS = PST_RECIPROCAL_SHIFT - 4;
-    localparam logic [PST_RECIPROCAL_BITS-1:0] PST_RECIPROCAL =
-        PST_RECIPROCAL_BITS'(((64'd1 << PST_RECIPROCAL_SHIFT) + 29) / 30);
-    logic signed [PST_NUMERATOR_BITS-1:0] pst_numerator_q;
-    logic [PST_NUMERATOR_BITS-2:0] pst_magnitude;
-    logic [PST_NUMERATOR_BITS+PST_RECIPROCAL_BITS-2:0] pst_reciprocal_product_q;
-    logic pst_negative_q;
-    PstEvalScore pst_quotient;
-
-    // The legal endpoints are two kings and the 32-piece initial position.
-    // Compute the phase outside a function so Quartus preserves the PST data
-    // path. The reciprocal is exact for the generated score width.
-    always_comb begin
-        // Low and high piece-count clamps cannot both apply.
-        unique case (1'b1)
-            (eval_piece_count <= PieceCount'(2)): pst_first_weight = 6'd0;
-            (eval_piece_count >= PieceCount'(32)): pst_first_weight = 6'd30;
-            default: pst_first_weight = 6'(eval_piece_count - PieceCount'(2));
-        endcase
-    end
-    assign pst_magnitude = pst_numerator_q[PST_NUMERATOR_BITS-1]
-        ? (PST_NUMERATOR_BITS-1)'(-pst_numerator_q) : (PST_NUMERATOR_BITS-1)'(pst_numerator_q);
-    assign pst_quotient = PstEvalScore'(pst_reciprocal_product_q >> PST_RECIPROCAL_SHIFT);
-
-    (* ram_style = "block" *)
-    logic [NNUE_ROW_BYTES * 8-1:0] feature_rom[NNUE_FEATURE_COUNT];
-    // Prefetch each wide weight row from block ROM while the preceding row is
-    // consumed, avoiding a large bank of combinational bucket-selection muxes.
+    // One simple-dual-port BRAM: evaluation owns the shared synchronous read
+    // port whenever it has a row to issue. The extra rows hold trained biases.
     (* ramstyle = "M10K", ram_style = "block" *)
-    logic [OUTPUT_WEIGHT_ROW_BITS-1:0]
-        output_weight_rows[NNUE_OUTPUT_WEIGHT_ROW_COUNT];
-    OutputWeightRowAddress output_weight_row_address;
-    logic [OUTPUT_WEIGHT_ROW_BITS-1:0] output_weight_row_q;
-    // Keep byte-wide loader storage while only the unsigned low six bits enter
-    // the datapath.
-    logic [7:0] output_bias[NNUE_OUTPUT_BUCKET_COUNT];
-    // A hex digit holds the full unsigned four-bit bias.
-    logic [3:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
+    logic [WORD_BITS-1:0] accumulator_memory[MEMORY_ROWS];
+    StateAddress state_read_address, state_write_address;
+    logic [WORD_BITS-1:0] state_read_q, state_write_data;
+    logic state_write_enable;
 `ifdef FPGA_CHESS_PROFILE
     longint unsigned profile_accumulator_wrap_lanes;
 `endif
 
+    // Disjoint transformer banks, each with two registered ROM ports.
+    // Pawn end-rank rows (row zero in each bank) are the idle zero vectors.
+    (* ramstyle = "M10K", ram_style = "block" *)
+    logic [FEATURE_WORD_BITS-1:0] feature_bank0[BANK_ROWS];
+    (* ramstyle = "M10K", ram_style = "block" *)
+    logic [FEATURE_WORD_BITS-1:0] feature_bank1[BANK_ROWS];
+    (* ramstyle = "M10K", ram_style = "block" *)
+    logic [FEATURE_WORD_BITS-1:0] feature_bank2[BANK_ROWS];
+    logic [$clog2(BANK_ROWS)-1:0] feature_address[6];
+    logic [FEATURE_WORD_BITS-1:0] feature_q[6];
+    logic [5:0] feature_add_q;
+    FeatureSum feature_sum_q[NNUE_OUTPUT_MAC_LANES];
+
+    // Canonical model arrays are initialization sources, not additional RAM
+    // copies in the synthesized datapath.
+    logic [NNUE_FEATURE_ROW_BITS-1:0] feature_rom[NNUE_FEATURE_COUNT];
+    logic [NNUE_ACCUMULATOR_BIAS_BITS-1:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
+    logic [7:0] output_bias[NNUE_OUTPUT_BUCKET_COUNT];
+    (* ramstyle = "M10K", ram_style = "block" *)
+    logic [WEIGHT_BITS-1:0] output_weight_rows[NNUE_OUTPUT_WEIGHT_ROW_COUNT];
+    logic [WEIGHT_BITS-1:0] output_weight_read_q, output_weight_q;
+    logic [$clog2(NNUE_OUTPUT_WEIGHT_ROW_COUNT)-1:0] output_weight_address;
+
     initial begin
         $readmemh("hardware/data/nnue/feature_transformer.hex", feature_rom);
+        $readmemh("hardware/data/nnue/accumulator_bias.hex", accumulator_bias);
         $readmemh("hardware/data/nnue/output_weights.hex", output_weight_rows);
         $readmemh("hardware/data/nnue/output_bias.hex", output_bias);
-        $readmemh("hardware/data/nnue/accumulator_bias.hex", accumulator_bias);
+        for (int row = 0; row < BANK_ROWS; row++) begin
+            feature_bank0[row] = '0;
+            feature_bank1[row] = '0;
+            feature_bank2[row] = '0;
+        end
+        for (int feature = 0; feature < NNUE_FEATURE_COUNT; feature++)
+            // Never initialize the reserved zero vector from model contents.
+            if (nnue_feature_bank_row(NnueFeatureIndex'(feature)) != NNUE_ZERO_FEATURE_ROW)
+            for (int row = 0; row < SIDE_ROWS; row++) begin
+                case (nnue_feature_bank(NnueFeatureIndex'(feature)))
+                    0: feature_bank0[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row]
+                        = feature_rom[feature][row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
+                    1: feature_bank1[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row]
+                        = feature_rom[feature][row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
+                    2: feature_bank2[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row]
+                        = feature_rom[feature][row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
+                endcase
+            end
+        for (int thread = 0; thread <= STATE_THREAD_COUNT; thread++)
+            for (int row = 0; row < STATE_ROWS; row++)
+                for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++)
+                    accumulator_memory[thread*STATE_ROWS+row][lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
+                        = NNUE_ACCUMULATOR_BITS'(accumulator_bias[(row%SIDE_ROWS)*NNUE_OUTPUT_MAC_LANES+lane]);
     end
 
-
-    function automatic StateAddress state_address(input ThreadID thread_id);
-        return StateAddress'(thread_id);
-    endfunction
-
-    // Keep multiplication generic so each synthesis target may choose its own
-    // LUT, DSP, packing, and MAC implementation.
-    function automatic OutputProduct output_product(
-        input logic signed [3:0] activation,
-        input logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight
-    );
-        return activation * weight;
-    endfunction
-
-    // Decode floor(min(15, max(0, acc))^2 / 8), capped at seven, without
-    // putting a squaring multiplier on every output MAC lane.
-    function automatic logic signed [3:0] screlu(input NnueAccumulator accumulator);
-        if (accumulator < 0) return 4'sd0;
-        if (accumulator >= NnueAccumulator'(8)) return 4'sd7;
-        // Activation lookup values are distinct; default retains zero output.
-        unique case (accumulator)
-            NnueAccumulator'(3): return 4'sd1;
-            NnueAccumulator'(4): return 4'sd2;
-            NnueAccumulator'(5): return 4'sd3;
-            NnueAccumulator'(6): return 4'sd4;
-            NnueAccumulator'(7): return 4'sd6;
-            default: return 4'sd0;
+    // Full four-bit SCReLU, with a lookup instead of a squaring multiplier.
+    function automatic logic [3:0] screlu(input NnueAccumulator accumulator);
+        if (accumulator < 0) return 4'd0;
+        if (accumulator >= 11) return 4'd15;
+        case (accumulator)
+            3: return 4'd1;
+            4: return 4'd2;
+            5: return 4'd3;
+            6: return 4'd4;
+            7: return 4'd6;
+            8: return 4'd8;
+            9: return 4'd10;
+            10: return 4'd12;
+            default: return 4'd0;
         endcase
     endfunction
 
-    // The full-width update pipeline accepts one transformer row per cycle.
-    assign update_ready = 1'b1;
-    assign update_idle = !update_busy;
-    // Accept a new snapshot while the preceding registered partial sums drain.
-    assign eval_ready = !eval_busy || (eval_busy && reduction_pending
-        && reduction_cycle == NNUE_OUTPUT_MAC_CYCLES - 1);
+    // Capture a complete move in its bank slots before updating either side.
+    // Root replay uses one-row transactions; move requests combine until complete.
+    NnueUpdateRequest active_update;
+    // One elastic request register separates search feature encoding from bank
+    // decoding and can hold the next transaction while the current one writes.
+    NnueUpdateRequest queued_update;
+    logic queued_update_valid;
+    logic collecting;
+    logic [5:0] occupied[2], add_ports[2];
+    logic [8:0] bank_rows[2][6];
+    logic update_busy, update_issue_done, update_rom_valid, update_write_valid;
+    logic [$clog2(STATE_ROWS)-1:0] update_row, update_rom_row, update_write_row;
+    logic update_read_issue, update_rom_issue;
+    assign update_ready = !queued_update_valid || !update_busy;
+    assign update_idle = !update_busy && !collecting && !queued_update_valid;
+    // A single held ROM row absorbs read-port backpressure. Once the port is
+    // available, transformer, sum/read and write stages advance one row per cycle.
+    assign update_rom_issue = update_busy && !update_issue_done
+        && (!update_rom_valid || update_read_issue);
 
-    // An accepted evaluation primes its first row. Thereafter the ROM reads one row
-    // ahead so its synchronous output does not add a MAC cycle.
+    // Read rows of successive evaluations without a drain bubble. Metadata
+    // travels with each row so the reduction of one request can overlap another.
+    logic eval_read_busy;
+    logic [$clog2(STATE_ROWS)-1:0] eval_row;
+    ThreadID active_eval_thread;
+    Color active_eval_turn;
+    NnueOutputBucket active_eval_bucket;
+    PstEvalPair active_eval_pst;
+    PieceCount active_eval_piece_count;
+    logic eval_read_issue, eval_accept;
+    logic [$clog2(STATE_ROWS)-1:0] issue_row;
+    ThreadID issue_thread;
+    Color issue_turn;
+    NnueOutputBucket issue_bucket;
+    PstEvalPair issue_pst;
+    PieceCount issue_piece_count;
+    typedef struct packed {
+        logic valid;
+        logic first;
+        logic last;
+        logic [NNUE_OUTPUT_BIAS_BITS-1:0] bias;
+    } RowTag;
+    RowTag read_tag, activation_tag, product_tag, sum_tag;
+    logic [NNUE_OUTPUT_MAC_LANES*4-1:0] activations_q;
+    wire [PRODUCT_GROUPS*32-1:0] products;
+    OutputProduct products_q[NNUE_OUTPUT_MAC_LANES];
+    PartialSum sum_tree[2*TREE_LEAVES];
+    PartialSum partial_sum_q;
+    NnueCorrection running_sum;
+
+    // Exact signed phase interpolation; reciprocal division is pipelined with
+    // RAM, activation and products and uses truncation toward zero.
+    localparam int PST_BITS = $bits(PstEvalScore) + 5;
+    localparam int RECIP_SHIFT = $bits(PstEvalScore) + 9;
+    localparam int RECIP_BITS = RECIP_SHIFT - 4;
+    localparam logic [RECIP_BITS-1:0] RECIP =
+        RECIP_BITS'(((64'd1 << RECIP_SHIFT) + 29) / 30);
+    logic signed [PST_BITS-1:0] pst_numerator;
+    logic [PST_BITS-1:0] pst_magnitude;
+    logic [PST_BITS+RECIP_BITS-1:0] pst_product;
+    logic pst_negative;
+    PstEvalScore product_pst, sum_pst;
+
+    assign eval_ready = !eval_read_busy;
+    assign eval_accept = eval_valid && eval_ready;
+    assign eval_read_issue = eval_read_busy || eval_accept;
     always_comb begin
-        automatic int weight_cycle = int'(eval_cycle);
-        automatic NnueOutputBucket weight_bucket = eval_output_bucket;
-        automatic Color weight_turn = eval_turn_q;
-        if (eval_valid && eval_ready) begin
-            weight_cycle = 0;
-            weight_bucket = nnue_output_bucket(eval_piece_count);
-            weight_turn = eval_turn;
-        end else if (eval_busy && eval_cycle < NNUE_OUTPUT_MAC_CYCLES - 1)
-            weight_cycle = int'(eval_cycle) + 1;
-        else weight_cycle = 0;
-        // Reorder the weights instead of muxing the wide accumulator snapshot.
-        if (weight_turn == BLACK)
-            weight_cycle = (weight_cycle + NNUE_OUTPUT_MAC_CYCLES / 2)
-                % NNUE_OUTPUT_MAC_CYCLES;
-        output_weight_row_address = OutputWeightRowAddress'(
-            int'(weight_bucket) * NNUE_OUTPUT_MAC_CYCLES + weight_cycle);
+        issue_row = eval_read_busy ? eval_row : '0;
+        issue_thread = eval_read_busy ? active_eval_thread : eval_thread_id;
+        issue_turn = eval_read_busy ? active_eval_turn : eval_turn;
+        issue_bucket = eval_read_busy ? active_eval_bucket : nnue_output_bucket(eval_piece_count);
+        issue_pst = eval_read_busy ? active_eval_pst : eval_pst;
+        issue_piece_count = eval_read_busy ? active_eval_piece_count : eval_piece_count;
+        output_weight_address = $clog2(NNUE_OUTPUT_WEIGHT_ROW_COUNT)'(
+            int'(issue_bucket)*STATE_ROWS + ((int'(issue_row)
+                + (issue_turn == BLACK ? SIDE_ROWS : 0)) % STATE_ROWS));
+        update_read_issue = update_rom_valid && !eval_read_issue;
+        state_read_address = eval_read_issue
+            ? StateAddress'(int'(issue_thread)*STATE_ROWS + int'(issue_row))
+            : StateAddress'((active_update.clear ? BIAS_BASE
+                : int'(active_update.thread_id)*STATE_ROWS) + int'(update_rom_row));
+        state_write_address = StateAddress'(int'(active_update.thread_id)*STATE_ROWS + int'(update_write_row));
+        state_write_enable = rst_n && !clear && update_write_valid && active_update.apply;
+        for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++)
+            state_write_data[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
+                = NnueAccumulator'(state_read_q[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS])
+                    + NnueAccumulator'(feature_sum_q[lane]);
+        for (int port_index = 0; port_index < 6; port_index++)
+            feature_address[port_index] = $clog2(BANK_ROWS)'(
+                int'(bank_rows[int'(update_row)/SIDE_ROWS][port_index])*SIDE_ROWS
+                    + int'(update_row)%SIDE_ROWS);
     end
 
-    always_ff @(posedge clk)
-        output_weight_row_q <= output_weight_rows[output_weight_row_address];
-
-    // Unused rows need no hold behavior. Reading every cycle keeps request
-    // validity off the many transformer ROM address-register enables.
+    // RAM output registers deliberately have no reset or combinational read.
     always_ff @(posedge clk) begin
-        feature_row_white <= feature_rom[update_req.white_feature];
-        feature_row_black <= feature_rom[update_req.black_feature];
+        if (eval_read_issue || update_read_issue)
+            state_read_q <= accumulator_memory[state_read_address];
+        if (state_write_enable)
+            accumulator_memory[state_write_address] <= state_write_data;
+        output_weight_read_q <= output_weight_rows[output_weight_address];
+        if (update_rom_issue) begin
+            feature_q[0] <= feature_bank0[feature_address[0]];
+            feature_q[1] <= feature_bank0[feature_address[1]];
+            feature_q[2] <= feature_bank1[feature_address[2]];
+            feature_q[3] <= feature_bank1[feature_address[3]];
+            feature_q[4] <= feature_bank2[feature_address[4]];
+            feature_q[5] <= feature_bank2[feature_address[5]];
+        end
+    end
+
+    genvar group_index, lane_index;
+    generate
+        for (group_index = 0; group_index < PRODUCT_GROUPS; group_index++) begin : gen_products
+            wire [15:0] a, w;
+            for (lane_index = 0; lane_index < 4; lane_index++) begin : gen_lane
+                if (group_index*4 + lane_index < NNUE_OUTPUT_MAC_LANES) begin : gen_used
+                    assign a[lane_index*4 +: 4] = activations_q[(group_index*4+lane_index)*4 +: 4];
+                    assign w[lane_index*4 +: 4] = output_weight_q[(group_index*4+lane_index)*4 +: 4];
+                end else begin : gen_unused
+                    assign a[lane_index*4 +: 4] = '0;
+                    assign w[lane_index*4 +: 4] = '0;
+                end
+            end
+            nnue_packed_products multiplier (.activations(a), .weights(w),
+                .products(products[group_index*32 +: 32]));
+        end
+    endgenerate
+
+    // A balanced tree terminates at one registered partial sum per vector.
+    always_comb begin
+        sum_tree[0] = '0;
+        for (int lane = 0; lane < TREE_LEAVES; lane++)
+            sum_tree[TREE_LEAVES+lane] = lane < NNUE_OUTPUT_MAC_LANES
+                ? PartialSum'(products_q[lane]) : PartialSum'(0);
+        for (int node = TREE_LEAVES-1; node > 0; node--)
+            sum_tree[node] = sum_tree[node*2] + sum_tree[node*2+1];
     end
 
     always_ff @(posedge clk) begin
         if (!rst_n || clear) begin
-            update_busy <= 1'b0;
-            update_done_valid <= 1'b0;
-            update_done_thread <= '0;
-            update_done_ply <= '0;
-            eval_busy <= 1'b0;
-            partial_pending <= 1'b0;
-            reduction_pending <= 1'b0;
-            result_pending <= 1'b0;
-            result_valid <= 1'b0;
-            result <= '0;
-            result_pst <= '0;
 `ifdef FPGA_CHESS_PROFILE
             profile_accumulator_wrap_lanes <= 0;
 `endif
-        end else begin
-            result_valid <= 1'b0;
+            update_busy <= 1'b0;
+            update_issue_done <= 1'b0;
+            update_rom_valid <= 1'b0;
+            update_write_valid <= 1'b0;
+            collecting <= 1'b0;
+            active_update <= '0;
+            queued_update_valid <= 1'b0;
+            update_row <= '0;
             update_done_valid <= 1'b0;
-
-            // Divide the phase-weighted PST sum over existing MAC cycles.
-            // The reciprocal guard bits preserve exact division by 30 at every phase.
-            pst_numerator_q <= PST_NUMERATOR_BITS'(
-                int'(pst_first_q) * int'(pst_weight_q)
-                + int'(pst_endgame_q) * (30 - int'(pst_weight_q)));
-            pst_reciprocal_product_q <= pst_magnitude * PST_RECIPROCAL;
-            pst_negative_q <= pst_numerator_q[PST_NUMERATOR_BITS-1];
-            pst_blend_active <= pst_negative_q ? -pst_quotient : pst_quotient;
-
-            if (update_valid) begin
-                active_update <= update_req;
+            update_done_thread <= '0;
+            update_done_ply <= '0;
+            for (int perspective = 0; perspective < 2; perspective++) begin
+                occupied[perspective] <= '0;
+                add_ports[perspective] <= '0;
+                for (int port_index = 0; port_index < 6; port_index++)
+                    bank_rows[perspective][port_index] <= '0;
             end
-            update_busy <= update_valid;
-
-            if (update_busy) begin
-                automatic StateAddress destination_address =
-                    state_address(active_update.thread_id);
-                automatic logic [ACCUMULATOR_WORD_BITS-1:0] committed_state;
+            eval_read_busy <= 1'b0;
+            eval_row <= '0;
+            read_tag <= '0;
+            activation_tag <= '0;
+            product_tag <= '0;
+            sum_tag <= '0;
+            result_valid <= 1'b0;
+            result <= '0;
+            result_pst <= '0;
+            running_sum <= '0;
+        end else begin
+            update_done_valid <= 1'b0;
 `ifdef FPGA_CHESS_PROFILE
-                automatic longint unsigned wrapped_lanes = 0;
-`endif
-                // Chess feature deltas always affect both perspectives, so a
-                // coarse request enable avoids a mux on every accumulator lane.
-                if (active_update.apply) begin
-                    for (int perspective = 0; perspective < 2; perspective++) begin
-                        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
-                            automatic int source_bit_offset =
-                                (perspective * NNUE_ACCUMULATOR_COUNT + lane)
-                                    * NNUE_ACCUMULATOR_BITS;
-                            automatic NnueAccumulator old_value = active_update.clear
-                                ? NnueAccumulator'({{
-                                    (NNUE_ACCUMULATOR_BITS-NNUE_ACCUMULATOR_BIAS_BITS){1'b0}},
-                                    accumulator_bias[lane][NNUE_ACCUMULATOR_BIAS_BITS-1:0]})
-                                : $signed(accumulator_update_memory[
-                                    destination_address][
-                                    source_bit_offset +: NNUE_ACCUMULATOR_BITS]);
-                            automatic logic signed [1:0] feature_weight = perspective == 0
-                                ? $signed(feature_row_white[
-                                    lane * NNUE_FEATURE_WEIGHT_BITS
-                                        +: NNUE_FEATURE_WEIGHT_BITS])
-                                : $signed(feature_row_black[
-                                    lane * NNUE_FEATURE_WEIGHT_BITS
-                                        +: NNUE_FEATURE_WEIGHT_BITS]);
-                            // Reuse one carry chain for addition and subtraction.
-                            automatic NnueAccumulator weight_operand =
-                                NnueAccumulator'(feature_weight)
-                                    ^ {NNUE_ACCUMULATOR_BITS{!active_update.add}};
-                            automatic NnueAccumulator changed = old_value
-                                + weight_operand + NnueAccumulator'(!active_update.add);
-`ifdef FPGA_CHESS_PROFILE
-                            automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
-                                old_extended = {old_value[NNUE_ACCUMULATOR_BITS-1], old_value};
-                            automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
-                                weight_extended =
-                                    {{(NNUE_ACCUMULATOR_BITS-1){feature_weight[1]}},
-                                        feature_weight};
-                            automatic logic signed [NNUE_ACCUMULATOR_BITS:0]
-                                exact_changed = active_update.add
-                                    ? old_extended + weight_extended
-                                    : old_extended - weight_extended;
-                            if (exact_changed > 6'sd15 || exact_changed < -6'sd16)
-                                wrapped_lanes++;
-`endif
-                            committed_state[source_bit_offset
-                                    +: NNUE_ACCUMULATOR_BITS] = changed;
-                        end
-                    end
-                    accumulator_update_memory[destination_address] <= committed_state;
-`ifdef FPGA_CHESS_PROFILE
-                    profile_accumulator_wrap_lanes <=
-                        profile_accumulator_wrap_lanes + wrapped_lanes;
-`endif
+            if (state_write_enable) begin
+                automatic int wraps = 0;
+                for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
+                    automatic int exact_sum = int'($signed(state_read_q[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]))
+                        + int'(feature_sum_q[lane]);
+                    if (exact_sum < -(1 << (NNUE_ACCUMULATOR_BITS-1))
+                            || exact_sum >= (1 << (NNUE_ACCUMULATOR_BITS-1))) wraps++;
                 end
+                profile_accumulator_wrap_lanes <= profile_accumulator_wrap_lanes + 64'(wraps);
+            end
+`endif
+            if (update_ready) begin
+                queued_update_valid <= update_valid;
+                if (update_valid) queued_update <= update_req;
+            end
+            if (queued_update_valid && !update_busy) begin
+                active_update <= queued_update;
+                if (collecting) active_update.clear <= active_update.clear || queued_update.clear;
+                for (int perspective = 0; perspective < 2; perspective++) begin
+                    automatic NnueFeatureIndex feature = perspective == 0
+                        ? queued_update.white_feature : queued_update.black_feature;
+                    automatic int bank = nnue_feature_bank(feature);
+                    automatic logic [5:0] used = collecting ? occupied[perspective] : 6'b0;
+                    automatic int slot = bank*2 + int'(used[bank*2]);
+                    if (!collecting) begin
+                        add_ports[perspective] <= '0;
+                        for (int port_index = 0; port_index < 6; port_index++)
+                            bank_rows[perspective][port_index] <= '0;
+                    end
+                    if (queued_update.apply) begin
+`ifndef SYNTHESIS
+                        assert (!used[slot]) else $fatal(1, "NNUE transformer bank conflict");
+`endif
+                        used[slot] = 1'b1;
+                        bank_rows[perspective][slot] <= 9'(nnue_feature_bank_row(feature));
+                        add_ports[perspective][slot] <= queued_update.add;
+                    end
+                    occupied[perspective] <= used;
+                end
+                collecting <= queued_update.combine && !queued_update.complete;
+                if (!queued_update.combine || queued_update.complete) begin
+                    update_row <= '0;
+                    update_issue_done <= 1'b0;
+                    if (queued_update.apply) update_busy <= 1'b1;
+                    else if (queued_update.complete) begin
+                        update_done_valid <= 1'b1;
+                        update_done_thread <= queued_update.thread_id;
+                        update_done_ply <= queued_update.ply;
+                    end
+                end
+            end
+            if (update_rom_issue) begin
+                feature_add_q <= add_ports[int'(update_row)/SIDE_ROWS];
+                update_rom_row <= update_row;
+                if (update_row == STATE_ROWS-1) update_issue_done <= 1'b1;
+                else update_row <= update_row + 1'b1;
+            end
+            if (update_rom_issue || update_read_issue)
+                update_rom_valid <= update_rom_issue;
+            update_write_valid <= update_read_issue;
+            if (update_read_issue) begin
+                update_write_row <= update_rom_row;
+                for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
+                    automatic FeatureSum sum = '0;
+                    for (int port_index = 0; port_index < 6; port_index++) begin
+                        automatic FeatureSum weight = FeatureSum'($signed(feature_q[port_index][lane*2 +: 2]));
+                        sum += feature_add_q[port_index] ? weight : -weight;
+                    end
+                    feature_sum_q[lane] <= sum;
+                end
+            end
+            if (update_write_valid && update_write_row == STATE_ROWS-1) begin
+                update_busy <= 1'b0;
                 if (active_update.complete) begin
                     update_done_valid <= 1'b1;
                     update_done_thread <= active_update.thread_id;
@@ -294,131 +375,83 @@ module nnue_evaluator #(
                 end
             end
 
-            // Publish from a dedicated result register so output timing is
-            // independent of the fourth MAC tree.
-            if (result_pending) begin
-                result <= result_sum;
-                result_valid <= 1'b1;
-                result_pst <= pst_blend_pending;
-                result_pending <= 1'b0;
+            if (eval_accept) begin
+                active_eval_thread <= eval_thread_id;
+                active_eval_turn <= eval_turn;
+                active_eval_bucket <= nnue_output_bucket(eval_piece_count);
+                active_eval_pst <= eval_pst;
+                active_eval_piece_count <= eval_piece_count;
+                eval_read_busy <= 1'b1;
+                eval_row <= 1;
+            end else if (eval_read_busy) begin
+                if (eval_row == STATE_ROWS-1) eval_read_busy <= 1'b0;
+                else eval_row <= eval_row + 1'b1;
             end
-
-            // Idle snapshot contents are unused. Shift unconditionally so only
-            // accepting a new snapshot selects data on this wide register bank.
-            eval_accumulators <= eval_accumulators
-                >> (NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS);
-            if (eval_busy) begin
-                automatic OutputProduct products[NNUE_OUTPUT_MAC_LANES];
-                automatic PairSum pair_sums_a[32], pair_sums_b[32];
-                automatic OctetSum octet_sums[16];
-                automatic ThirtyTwoSum thirty_two_sums[4];
-                automatic SixtyFourSum sixty_four_sums[2];
-                automatic MacGroupSum lane_sum;
-                automatic OutputSum cycle_sum;
-                // Register 32 four-product sums to keep the block-ROM/DSP path
-                // short without adding a MAC cycle or retaining every product.
-                // The drain cycle overwrites these registers with unused data;
-                // unconditional writes avoid a high-fanout terminal-count enable.
-                for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
-                    automatic NnueAccumulator accumulator =
-                        $signed(eval_accumulators[
-                            lane * NNUE_ACCUMULATOR_BITS
-                                +: NNUE_ACCUMULATOR_BITS]);
-                    automatic logic signed [3:0] activation = screlu(accumulator);
-                    automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight =
-                        $signed(output_weight_row_q[
-                            lane * NNUE_OUTPUT_WEIGHT_BITS
-                                +: NNUE_OUTPUT_WEIGHT_BITS]);
-                    products[lane] = output_product(activation, weight);
-                end
-                for (int lane = 0; lane < 32; lane++) begin
-                    automatic int base = 4 * lane;
-                    pair_sums_a[lane] = PairSum'(products[base])
-                        + PairSum'(products[base + 1]);
-                    pair_sums_b[lane] = PairSum'(products[base + 2])
-                        + PairSum'(products[base + 3]);
-                    partial_q[lane] <= QuadSum'(pair_sums_a[lane])
-                        + QuadSum'(pair_sums_b[lane]);
-                end
-                partial_cycle <= eval_cycle;
-                partial_pending <= 1'b1;
-                eval_cycle <= eval_cycle + 1'b1;
-
-                if (partial_pending) begin
-                    for (int lane = 0; lane < 16; lane++)
-                        octet_sums[lane] = OctetSum'(partial_q[2 * lane])
-                            + OctetSum'(partial_q[2 * lane + 1]);
-                    // Split the remaining tree before its running-sum feedback.
-                    // Only eight narrow sums cross this extra pipeline stage.
-                    for (int lane = 0; lane < 8; lane++)
-                        reduction_q[lane] <= SixteenSum'(octet_sums[2 * lane])
-                            + SixteenSum'(octet_sums[2 * lane + 1]);
-                end
-                reduction_pending <= partial_pending;
-                reduction_cycle <= partial_cycle;
-                if (reduction_pending) begin
-                    for (int lane = 0; lane < 4; lane++)
-                        thirty_two_sums[lane] = ThirtyTwoSum'(reduction_q[2 * lane])
-                            + ThirtyTwoSum'(reduction_q[2 * lane + 1]);
-                    for (int lane = 0; lane < 2; lane++)
-                        sixty_four_sums[lane] = SixtyFourSum'(thirty_two_sums[2 * lane])
-                            + SixtyFourSum'(thirty_two_sums[2 * lane + 1]);
-                    lane_sum = MacGroupSum'(sixty_four_sums[0])
-                        + MacGroupSum'(sixty_four_sums[1]);
-                    cycle_sum = eval_sum + OutputSum'(lane_sum);
-                    if (reduction_cycle == NNUE_OUTPUT_MAC_CYCLES - 1) begin
-                        result_sum <= cycle_sum;
-                        pst_blend_pending <= pst_blend_active;
-                        result_pending <= 1'b1;
-                        if (eval_valid && eval_ready) begin
-                            eval_cycle <= '0;
-                            eval_sum <= OutputSum'({{
-                                ($bits(OutputSum)-NNUE_OUTPUT_BIAS_BITS){1'b0}},
-                                output_bias[nnue_output_bucket(eval_piece_count)][
-                                    NNUE_OUTPUT_BIAS_BITS-1:0]});
-                            partial_pending <= 1'b0;
-                            reduction_pending <= 1'b0;
-                        end else begin
-                            eval_busy <= 1'b0;
-                            partial_pending <= 1'b0;
-                            reduction_pending <= 1'b0;
-                        end
-                    end else begin
-                        eval_sum <= cycle_sum;
-                    end
-                end
-            end else if (eval_valid && eval_ready) begin
-                eval_cycle <= '0;
-                eval_sum <= OutputSum'({{
-                    ($bits(OutputSum)-NNUE_OUTPUT_BIAS_BITS){1'b0}},
-                    output_bias[nnue_output_bucket(eval_piece_count)][
-                        NNUE_OUTPUT_BIAS_BITS-1:0]});
-                partial_pending <= 1'b0;
-                reduction_pending <= 1'b0;
-                eval_busy <= 1'b1;
+            read_tag <= '{valid: eval_read_issue, first: issue_row == 0,
+                last: issue_row == STATE_ROWS-1,
+                bias: output_bias[issue_bucket][NNUE_OUTPUT_BIAS_BITS-1:0]};
+            activation_tag <= read_tag;
+            product_tag <= activation_tag;
+            sum_tag <= product_tag;
+            for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
+                activations_q[lane*4 +: 4] <= screlu(NnueAccumulator'(
+                    state_read_q[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]));
+                products_q[lane] <= OutputProduct'(products[lane*8 +: 8]);
             end
-
-            // Snapshot fixed White/Black order; ROM row addressing orders the weights.
-            if (eval_valid && eval_ready) begin
-                automatic logic [ACCUMULATOR_WORD_BITS-1:0] selected_state;
-                pst_first_q <= eval_pst.first;
-                pst_endgame_q <= eval_pst.endgame;
-                pst_weight_q <= pst_first_weight;
-
-                selected_state = accumulator_update_memory[
-                    state_address(eval_thread_id)];
-                eval_accumulators <= selected_state;
-                eval_turn_q <= eval_turn;
-                eval_output_bucket <= nnue_output_bucket(eval_piece_count);
+            output_weight_q <= output_weight_read_q;
+            partial_sum_q <= sum_tree[1];
+            begin
+                automatic int phase = issue_piece_count <= 2 ? 0
+                    : issue_piece_count >= 32 ? 30 : int'(issue_piece_count)-2;
+                pst_numerator <= PST_BITS'(int'(issue_pst.first)*phase + int'(issue_pst.endgame)*(30-phase));
+            end
+            pst_product <= pst_magnitude * RECIP;
+            pst_negative <= pst_numerator < 0;
+            product_pst <= pst_negative ? -(PstEvalScore'(pst_product >> RECIP_SHIFT))
+                : PstEvalScore'(pst_product >> RECIP_SHIFT);
+            sum_pst <= product_pst;
+            result_valid <= sum_tag.valid && sum_tag.last;
+            if (sum_tag.valid) begin
+                automatic NnueCorrection total = (sum_tag.first ? NnueCorrection'(0) : running_sum)
+                    + NnueCorrection'(partial_sum_q);
+                running_sum <= total;
+                if (sum_tag.last) begin
+                    result <= total + NnueCorrection'({1'b0, sum_tag.bias});
+                    result_pst <= sum_pst;
+                end
             end
         end
     end
+    assign pst_magnitude = pst_numerator < 0 ? PST_BITS'(-pst_numerator) : PST_BITS'(pst_numerator);
 
 `ifndef SYNTHESIS
+    // Test hooks update the actual banked storage and canonical reference data.
+    task automatic load_feature(input int feature, input logic [NNUE_FEATURE_ROW_BITS-1:0] value);
+        feature_rom[feature] = value;
+        if (nnue_feature_bank_row(NnueFeatureIndex'(feature)) != NNUE_ZERO_FEATURE_ROW)
+        for (int row = 0; row < SIDE_ROWS; row++)
+            case (nnue_feature_bank(NnueFeatureIndex'(feature)))
+                0: feature_bank0[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row] = value[row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
+                1: feature_bank1[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row] = value[row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
+                2: feature_bank2[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row] = value[row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
+            endcase
+    endtask
+    task automatic load_bias(input int lane, input logic [NNUE_ACCUMULATOR_BIAS_BITS-1:0] value);
+        accumulator_bias[lane] = value;
+        for (int perspective = 0; perspective < 2; perspective++)
+            accumulator_memory[BIAS_BASE+perspective*SIDE_ROWS+lane/NNUE_OUTPUT_MAC_LANES][(lane%NNUE_OUTPUT_MAC_LANES)*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
+                = NNUE_ACCUMULATOR_BITS'(value);
+    endtask
+    function automatic logic [NNUE_STATE_VALUE_COUNT*NNUE_ACCUMULATOR_BITS-1:0] read_state(input int thread);
+        for (int row = 0; row < STATE_ROWS; row++)
+            read_state[row*WORD_BITS +: WORD_BITS] = accumulator_memory[thread*STATE_ROWS+row];
+    endfunction
     initial begin
+        assert (NNUE_ACCUMULATOR_COUNT >= NNUE_OUTPUT_MAC_LANES
+            && NNUE_ACCUMULATOR_COUNT % NNUE_OUTPUT_MAC_LANES == 0)
+            else $fatal(1, "NNUE node count must be a multiple of vector width");
         assert (STATE_THREAD_COUNT >= 1 && STATE_THREAD_COUNT <= THREAD_COUNT)
-            else $fatal(1, "NNUE state thread count exceeds the ThreadID domain");
+            else $fatal(1, "NNUE thread count is outside the ThreadID domain");
     end
 `endif
-
 endmodule

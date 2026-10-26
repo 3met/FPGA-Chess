@@ -16,7 +16,7 @@ from .model import (
     NNUE_ACTIVATION_MAX,
     NNUE_CLIPPED_ACCUMULATOR_BITS,
     NNUE_CLIPPED_ACCUMULATOR_MAX,
-    NNUE_MAX_ENGINE_UNITS,
+    MAX_NON_MATE_ENGINE_UNITS,
     NNUE_OUTPUT_BIAS_BITS,
     NNUE_OUTPUT_BIAS_MAX,
     NNUE_OUTPUT_WEIGHT_BITS,
@@ -134,12 +134,12 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
         seed=int(config["training"]["seed"]),
         shuffle_buffer=min(8192, sample_positions),
     )
-    accumulator_range = clipped_range = activation_range = output_range = None
+    accumulator_range = clipped_range = activation_range = output_range = evaluation_range = None
     accumulator_values = accumulator_overflows = wrapped_positions = activation_zero = activation_max = 0
     accumulator_sum = accumulator_square_sum = 0.0
     clipped_histogram = torch.zeros(NNUE_CLIPPED_ACCUMULATOR_MAX + 1, dtype=torch.int64)
     activation_histogram = torch.zeros(NNUE_ACTIVATION_MAX + 1, dtype=torch.int64)
-    output_values = output_clipped = 0
+    output_values = evaluation_clipped = 0
     output_sum = output_square_sum = 0.0
     bucket_counts = torch.zeros(output_buckets, dtype=torch.int64)
     sampled = 0
@@ -200,7 +200,11 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
                 outputs = (ordered * output_weights[buckets]).sum(dim=1) + output_bias[buckets]
                 output_range = _update_range(output_range, outputs)
                 output_values += outputs.numel()
-                output_clipped += int((outputs.abs() > NNUE_MAX_ENGINE_UNITS).sum())
+                # The correction remains wide; only the combined STM score saturates.
+                stm_sign = torch.where(white_to_move, 1.0, -1.0)
+                evaluation = model._material_pst(codes) * stm_sign + outputs
+                evaluation_range = _update_range(evaluation_range, evaluation)
+                evaluation_clipped += int((evaluation.abs() > MAX_NON_MATE_ENGINE_UNITS).sum())
                 output_sum += float(outputs.sum())
                 output_square_sum += float(outputs.square().sum())
                 sampled += codes.shape[0]
@@ -243,7 +247,9 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
                 output_square_sum / max(output_values, 1) - output_mean ** 2,
                 0.0,
             ) ** 0.5,
-            "output_clipping_fraction": output_clipped / max(output_values, 1),
+            "evaluation_sum_range": evaluation_range,
+            "evaluation_clipping_fraction": evaluation_clipped / max(output_values, 1),
+            "finite_score_bound": MAX_NON_MATE_ENGINE_UNITS,
         },
         "target_bits": {
             "feature_weights": 2,
@@ -318,6 +324,8 @@ def print_quantization_report(report: dict) -> None:
         ("Output sum", f"{output_range[0]}..{output_range[1]}",
          str(nodes["output_sum_required_signed_bits"]),
          f"{nodes['output_sum_mean']:.2f}", f"{nodes['output_sum_stddev']:.2f}"),
+        ("Combined STM evaluation", f"{nodes['evaluation_sum_range'][0]}..{nodes['evaluation_sum_range'][1]}",
+         str(signed_bits(*nodes['evaluation_sum_range'])), "-", "-"),
     ]))
     print("\nWrap, activation, and clipping rates")
     print(format_table(("Condition", "Fraction"), [
@@ -326,7 +334,7 @@ def print_quantization_report(report: dict) -> None:
         ("SCReLU outputs at zero", f"{100 * nodes['activation_zero_fraction']:.2f}%"),
         (f"SCReLU outputs at top code {nodes['activation_top_code']}",
          f"{100 * nodes['activation_max_fraction']:.2f}%"),
-        ("Outputs clipped", f"{100 * nodes['output_clipping_fraction']:.3f}%"),
+        ("Combined evaluations clipped", f"{100 * nodes['evaluation_clipping_fraction']:.3f}%"),
     ]))
     input_counts = nodes["clipped_accumulator_histogram"]
     output_counts = nodes["activation_histogram"]

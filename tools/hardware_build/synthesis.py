@@ -106,6 +106,7 @@ def deterministic_build_id(manifest: dict, target: dict, resolved_config: dict |
         expand_source_set(manifest, target["source_set"]),
         generated_includes=generated_includes,
     ))
+    inputs.update(repo_path(path) for path in manifest.get("data_files", []))
     inputs.update(
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
@@ -226,19 +227,19 @@ def write_quartus_project(
     generated_build_config = None
     if "engine_config" in target:
         generated_build_config = write_engine_build_config(build_dir, build_id, resolved_config)
-    generated_outputs = [
+    data_inputs = [repo_path(path) for path in manifest.get("data_files", [])] + [
         repo_path(output)
         for item in manifest.get("generated_data", {}).values()
         for output in item["outputs"]
     ]
-    ensure_existing(generated_outputs)
+    ensure_existing(data_inputs)
 
-    copied_generated_outputs: dict[Path, Path] = {}
-    for source in generated_outputs:
+    copied_data_inputs: dict[Path, Path] = {}
+    for source in data_inputs:
         dest = build_dir / rel(source)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
-        copied_generated_outputs[source] = dest
+        copied_data_inputs[source] = dest
 
     qpf.write_text(
         'QUARTUS_VERSION = "20.1"\nPROJECT_REVISION = "fpga_chess"\n',
@@ -263,6 +264,9 @@ def write_quartus_project(
             f"[get_ports {{{board_clock['reference_port']}}}]\n", encoding="utf-8")
         # The reference must exist before the board SDC derives the PLL clocks.
         lines.insert(-1, f'set_global_assignment -name SDC_FILE "{quote_tcl_path(reference_sdc)}"')
+    # Vendor wrappers are selected by the target, leaving portable source sets generic.
+    for macro in target.get("verilog_macros", []):
+        lines.append(f'set_global_assignment -name VERILOG_MACRO "{macro}"')
     resolved_engine_config = resolved_config if "engine_config" in target else None
     if resolved_engine_config is not None:
         (build_dir / "resolved_engine_config.json").write_text(
@@ -302,8 +306,8 @@ def write_quartus_project(
     if generated_build_config is not None:
         lines.append(qsf_assignment_for_source(generated_build_config))
     lines.extend(
-        qsf_assignment_for_source(copied_generated_outputs[output])
-        for output in generated_outputs
+        qsf_assignment_for_source(copied_data_inputs[output])
+        for output in data_inputs
         if output not in assigned_sources
     )
     qip_files = [repo_path(qip) for qip in target.get("qip_files", [])]

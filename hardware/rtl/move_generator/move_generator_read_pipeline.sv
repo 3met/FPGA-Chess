@@ -14,6 +14,8 @@ module move_generator_read_pipeline #(
     input logic node_init_valid[THREAD_COUNT], output logic node_init_ready[THREAD_COUNT],
     input PlyIndex node_init_ply[THREAD_COUNT],
     input logic bad_noisy_enable[THREAD_COUNT],
+    // Registered occupancy selects payloads; valid additionally qualifies cancellation.
+    output logic pop_resp_pending[THREAD_COUNT],
     output logic pop_resp_valid[THREAD_COUNT], input logic pop_resp_ready[THREAD_COUNT],
     output PlyIndex pop_resp_ply[THREAD_COUNT],
     output logic pop_resp_found[THREAD_COUNT],
@@ -371,6 +373,7 @@ module move_generator_read_pipeline #(
 
             pop_ready[tid] = rst_n && !clear && !flush
                 && !generation_starting && (!stage_valid[tid] || service[tid]);
+            pop_resp_pending[tid] = result_valid[tid];
             pop_resp_valid[tid] = result_valid[tid] && rst_n && !clear && !flush;
             pop_resp_ply[tid] = result_ply[tid];
             pop_resp_found[tid] = result_found[tid];

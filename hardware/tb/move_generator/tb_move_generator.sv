@@ -109,6 +109,7 @@ module tb_move_generator;
         .node_init_valid(node_init_valid_vec), .node_init_ready(node_init_ready_vec),
         .node_init_ply(node_init_ply_vec),
         .bad_noisy_enable(bad_noisy_enable_vec),
+        .pop_resp_pending(),
         .pop_resp_valid(pop_resp_valid_vec),
         .pop_resp_ready(pop_resp_ready_vec), .pop_resp_ply(pop_resp_ply_vec),
         .pop_resp_found(pop_resp_found_vec),

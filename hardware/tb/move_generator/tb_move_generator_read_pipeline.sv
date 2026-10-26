@@ -9,6 +9,7 @@ module tb_move_generator_read_pipeline;
         +BUCKET_RATIOS[4]+BUCKET_RATIOS[5]+BUCKET_RATIOS[6]+BUCKET_RATIOS[7];
     logic clk = 0, rst_n = 0, clear = 0, flush = 0, overflow_sticky;
     logic pop_valid[THREADS], pop_ready[THREADS], pop_resp_valid[THREADS];
+    logic pop_resp_pending[THREADS];
     logic pop_resp_ready[THREADS], pop_resp_found[THREADS];
     PlyIndex pop_ply[THREADS], pop_resp_ply[THREADS];
     Move pop_resp_move[THREADS];
@@ -463,6 +464,24 @@ module tb_move_generator_read_pipeline;
         finish_generation(0);
         request(0, 0);
         expect_response(0, 0, 0, 0, "clear resets pointer ownership");
+
+        // Cancellation changes admission immediately, while the registered
+        // payload selector stays stable until the cancellation clock edge.
+        reset_inputs();
+        start_generation(0, 0, 0);
+        push(0, 7, 731);
+        request(0, 0);
+        for (int wait_cycle = 0; wait_cycle < 8 && !pop_resp_valid[0]; wait_cycle++) tick();
+        check(pop_resp_pending[0] && pop_resp_valid[0], "held response advertises registered occupancy");
+        flush = 1;
+        #1;
+        check(pop_resp_pending[0] && !pop_resp_valid[0], "flush gates valid without changing occupancy");
+        check(pop_resp_found[0] && pop_resp_move[0] == Move'(731), "flush preserves payload before the edge");
+        tick();
+        check(!pop_resp_pending[0] && !pop_resp_valid[0], "flush retires pending response on the edge");
+        flush = 0;
+        tick();
+        check(!pop_resp_pending[0] && !pop_resp_valid[0], "canceled response cannot reappear");
 
         // Overflow is detected while the tail continues advancing.
         reset_inputs();

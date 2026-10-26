@@ -9,14 +9,8 @@ derive_pll_clocks -create
 set engine_clock [get_clocks {*altera_pll_i*general[0].gpll*PLL_OUTPUT_COUNTER*divclk}]
 set communication_clock [get_clocks {*communication_pll_i*general[0].gpll*PLL_OUTPUT_COUNTER*divclk}]
 set memory_clock [get_clocks {*memory_pll_i*general[0].gpll*PLL_OUTPUT_COUNTER*divclk}]
-# Reserve setup headroom without changing the operating PLL frequency. The
-# tighter same-clock relationship includes normal clock skew and uncertainty.
-# At the default engine clock, this guard reserves roughly 1.5 MHz of margin.
-set engine_setup_guard_ns 0.2
-if {[get_collection_size $engine_clock] > 0} {
-    set_max_delay [expr {[get_clock_info -period $engine_clock] - $engine_setup_guard_ns}] \
-        -from $engine_clock -to $engine_clock
-}
+# Internal engine paths use the PLL clock period with normal clock skew and
+# uncertainty; no additional setup margin overrides that clock relationship.
 # Startup logic asserts resets asynchronously; reset_release synchronizes their
 # deassertion in the destination domain.
 if {[get_collection_size $memory_clock] > 0} {

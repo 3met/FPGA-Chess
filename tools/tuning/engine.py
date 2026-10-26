@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,10 @@ from tools.common.files import atomic_write_text
 from .config import REPO_ROOT
 from .model import (
     EvaluationModel,
+    ENGINE_EVAL_BITS,
+    ENGINE_MAX_MATE_DISTANCE,
     NNUE_ACCUMULATORS,
+    NNUE_ACTIVATION_BITS,
     NNUE_ACCUMULATOR_BITS,
     NNUE_ACCUMULATOR_BIAS_BITS,
     NNUE_ACCUMULATOR_BIAS_MAX,
@@ -39,7 +43,7 @@ NNUE_FEATURE_PATH = REPO_ROOT / "hardware/data/nnue/feature_transformer.hex"
 NNUE_OUTPUT_PATH = REPO_ROOT / "hardware/data/nnue/output_weights.hex"
 NNUE_OUTPUT_BIAS_PATH = REPO_ROOT / "hardware/data/nnue/output_bias.hex"
 NNUE_BIAS_PATH = REPO_ROOT / "hardware/data/nnue/accumulator_bias.hex"
-NNUE_OUTPUT_MAC_LANES = 128
+NNUE_OUTPUT_MAC_LANES = 256
 GENERATOR = REPO_ROOT / "hardware/scripts/generate_pst_values.py"
 FIXED_MATERIAL_128 = {"pawn": 128, "king": 0}
 PST_WORD_BITS = 10
@@ -185,7 +189,12 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
         raise ValueError("NNUE output parameters must use pawn/128 hardware score units")
     if nnue.get("output_buckets") != NNUE_OUTPUT_BUCKETS:
         raise ValueError(f"NNUE output layer must contain {NNUE_OUTPUT_BUCKETS} buckets")
-    feature_text = "\n".join(_pack_feature_row(row) for row in rows) + "\n"
+    # Spare hardware ports read unreachable pawn end-rank rows.
+    feature_text = "\n".join(
+        _pack_feature_row([0] * NNUE_ACCUMULATORS
+            if feature // 64 in (0, 6) and feature % 64 // 8 in (0, 7) else row)
+        for feature, row in enumerate(rows)
+    ) + "\n"
     weights = nnue["output_weights"]
     if len(weights) != NNUE_OUTPUT_BUCKETS or any(
         len(bucket) != NNUE_OUTPUT_INPUTS for bucket in weights
@@ -222,13 +231,30 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
 
 def _require_matching_rtl() -> None:
     """Reject ROM export if the training widths diverge from deployed RTL."""
-    if (
-        NNUE_ACCUMULATOR_BITS,
-        NNUE_ACCUMULATOR_BIAS_BITS,
-        NNUE_OUTPUT_WEIGHT_BITS,
-        NNUE_OUTPUT_BIAS_BITS,
-    ) != (5, 4, 3, 6):
-        raise RuntimeError("NNUE training widths differ from RTL; update RTL before engine-commit")
+    rtl = (REPO_ROOT / "hardware/rtl/nnue/defs.sv").read_text(encoding="utf-8")
+    expected = {
+        "NNUE_ACCUMULATOR_COUNT": NNUE_ACCUMULATORS,
+        "NNUE_OUTPUT_MAC_LANES": NNUE_OUTPUT_MAC_LANES,
+        "NNUE_OUTPUT_BUCKET_COUNT": NNUE_OUTPUT_BUCKETS,
+        "NNUE_ACCUMULATOR_BITS": NNUE_ACCUMULATOR_BITS,
+        "NNUE_ACCUMULATOR_BIAS_BITS": NNUE_ACCUMULATOR_BIAS_BITS,
+        "NNUE_ACTIVATION_BITS": NNUE_ACTIVATION_BITS,
+        "NNUE_OUTPUT_WEIGHT_BITS": NNUE_OUTPUT_WEIGHT_BITS,
+        "NNUE_OUTPUT_BIAS_BITS": NNUE_OUTPUT_BIAS_BITS,
+    }
+    for name, value in expected.items():
+        match = re.search(rf"\b(?:localparam|parameter)\s+int\s+{name}\s*=\s*(\d+)\s*;", rtl)
+        if match is None or int(match.group(1)) != value:
+            raise RuntimeError(
+                f"{name} differs from RTL; update RTL or training configuration before engine-commit"
+            )
+    # Keep training's finite-score band aligned with the search score encoding.
+    chess_rtl = (REPO_ROOT / "hardware/rtl/chess_defs.sv").read_text(encoding="utf-8")
+    score = re.search(r"typedef\s+logic\s+signed\s*\[\s*(\d+)\s*:\s*0\s*\]\s*EvalScore\s*;", chess_rtl)
+    mate = re.search(r"localparam\s+int\s+MAX_MATE_DISTANCE\s*=\s*(\d+)\s*;", chess_rtl)
+    if (score is None or int(score.group(1)) + 1 != ENGINE_EVAL_BITS
+            or mate is None or int(mate.group(1)) != ENGINE_MAX_MATE_DISTANCE):
+        raise RuntimeError("Score limits differ from RTL; update RTL or training configuration before engine-commit")
 
 
 def commit_parameters(run: Path, dry_run: bool = False) -> None:

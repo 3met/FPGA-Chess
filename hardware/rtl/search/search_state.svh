@@ -330,6 +330,8 @@
     PlyIndex move_pop_ply_vec[SEARCH_THREAD_COUNT], move_pop_resp_ply_vec[SEARCH_THREAD_COUNT];
     logic move_pop_resp_valid_vec[SEARCH_THREAD_COUNT], move_pop_resp_ready_vec[SEARCH_THREAD_COUNT];
     logic move_pop_resp_found_vec[SEARCH_THREAD_COUNT];
+    logic move_pop_resp_pending_vec[SEARCH_THREAD_COUNT];
+    logic move_pop_response_pending;
     Move move_pop_resp_move_vec[SEARCH_THREAD_COUNT];
     MoveBucketIndex move_pop_resp_bucket_vec[SEARCH_THREAD_COUNT];
     logic [SEARCH_THREAD_COUNT-1:0] move_pop_response_mask;
@@ -477,10 +479,9 @@
     ThreadID search_tt_store_issue_thread;
     ThreadID search_tt_consume_thread;
     TTLookupResponse search_tt_consume_response;
-    logic move_board_bypass_valid;
+    logic move_board_bypass_valid, move_board_bypass_pending;
     ThreadID move_board_bypass_thread;
     Move move_board_bypass_move;
-    MoveBucketIndex search_board_issue_bucket;
 
     // Repetition checker request, response, and epoch state.
     localparam int REPETITION_EPOCH_BITS = 4;

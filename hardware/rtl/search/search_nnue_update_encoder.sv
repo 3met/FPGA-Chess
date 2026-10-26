@@ -44,6 +44,7 @@ module search_nnue_update_encoder (
         req_valid = 1'b1;
         req.thread_id = thread_id;
         req.ply = plan.child_ply;
+        req.combine = !draining && delta_kind == NNUE_PLAN_DELTA;
         req.apply = 1'b1;
         if (draining) begin
             // An ordered no-op completion marker removes the rebuild's

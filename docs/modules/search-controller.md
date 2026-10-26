@@ -22,6 +22,8 @@ The implementation lives in `hardware/rtl/search/`. `search_controller.sv` defin
 | `search_run.svh` | Active-search node lifecycle and shared-pipeline completions. |
 | `search_iterations.svh` | Independent iterative-deepening passes, aspiration retries, and primary time decisions. |
 
+Move-response payload selection uses registered pending flags, while qualified valid signals control admission. Search and perft preselect board-update move data independently of lifecycle state and cancellation, preventing flush decoding from entering thread arbitration and square-data muxes. This preserves response ordering and board-pipeline latency.
+
 The headers are implementation fragments, not standalone modules. `search_run.svh` is included inside the state case in `search_control.svh` and includes NNUE control and iteration handling; sequential updates retain one clocked process and their precedence. The NNUE encoder adds no register boundary, and controller-owned launch state preserves immediate child preparation and plan handoff. Plan payloads travel together in a struct while pending, in-flight, and accumulator-valid flags remain separate. Compile the package and modules through the manifest; build fingerprints include the transitive headers.
 
 ## Operations
@@ -83,13 +85,15 @@ A thread has at most one in-flight request in each subsystem, with generation an
 
 TT store bounds and promotion filtering are decoded independently for each instantiated search thread before arbitration selects the request payload. Promotion filtering reads pawn flags only from the two penultimate ranks; accepted store completion uses the selected request handshake directly.
 
+Child-depth and late-move-reduction arithmetic use each thread's local parent state before arbitration enables the selected write. Immediate move responses supply their live bucket metadata, preserving the same dispatch cycle.
+
 Board payloads select the active position, perft context, or search context from the held command independently of operation admission. Live response and valid decoding controls only the operation and move, keeping it off the wide board-data mux without adding a dispatch cycle.
 
 Move-command and bucket-pop responses update their thread before a continuation becomes eligible for normal dispatch on the next cycle. This keeps downstream admission out of response-state feedback; independent work from other threads can still issue during response handling.
 
 Before search, NNUE builds a root accumulator for every thread. Legal child preparation completes NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator.
 
-NNUE root, evaluation-build, and child-rebuild replay share one board-tile payload read. Each producer independently selects from per-thread empty-square masks, preserving empty-square progress while another producer owns the update port and keeping feature decoding out of replay-position feedback. Accepted legal moves derive en-passant victims and promotion results directly from chess rules and move metadata instead of reading extra board tiles.
+NNUE root, evaluation-build, and child-rebuild replay share one board-tile payload read. Incremental move requests mark a combined transaction, which the evaluator collects into transformer bank slots before committing accumulator rows; root and rebuild features remain individual transactions. All producers honor update backpressure and tagged completion. Each producer independently selects from per-thread empty-square masks, preserving empty-square progress while another producer owns the update port and keeping feature decoding out of replay-position feedback. Accepted legal moves derive en-passant victims and promotion results directly from chess rules and move metadata instead of reading extra board tiles.
 
 Reset, New Game, Kill, and search restart prevent outstanding responses from changing a later operation. Each thread retains TT transport ownership until its accepted probe returns, even after search cancellation. A new probe for that thread waits for the old response to drain; canceled responses are discarded.
 

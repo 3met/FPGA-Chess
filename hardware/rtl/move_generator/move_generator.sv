@@ -68,6 +68,8 @@ module move_generator #(
     output logic node_init_ready[THREAD_COUNT],
     input PlyIndex node_init_ply[THREAD_COUNT],
     input logic bad_noisy_enable[THREAD_COUNT],
+    // Registered occupancy selects payloads; valid additionally qualifies cancellation.
+    output logic pop_resp_pending[THREAD_COUNT],
     output logic pop_resp_valid[THREAD_COUNT],
     input logic pop_resp_ready[THREAD_COUNT],
     output PlyIndex pop_resp_ply[THREAD_COUNT],
@@ -196,7 +198,7 @@ module move_generator #(
         .clk, .rst_n, .clear, .flush,
         .pop_valid(reader_valid), .pop_ready(reader_ready),
         .pop_ply, .node_init_valid, .node_init_ready, .node_init_ply, .bad_noisy_enable,
-        .pop_resp_valid, .pop_resp_ready, .pop_resp_ply, .pop_resp_found,
+        .pop_resp_pending, .pop_resp_valid, .pop_resp_ready, .pop_resp_ply, .pop_resp_found,
         .pop_resp_move, .pop_resp_bucket,
         .generation_request_valid, .generation_start_valid, .generation_start_ready,
         .generation_request_thread(generation_thread),

@@ -103,8 +103,8 @@
             lmr_bucket_check_pending[dut.move_pop_resp_thread] = 1'b1;
             lmr_expected_bucket[dut.move_pop_resp_thread] = dut.move_pop_resp_bucket;
             if (dut.search_board_issue_valid && dut.move_board_bypass_valid) begin
-                assert (dut.search_board_issue_bucket == dut.move_pop_resp_bucket)
-                    else $fatal(1, "LMR immediate board issue used a stale bucket tag");
+                assert (dut.search_board_issue_thread == dut.move_pop_resp_thread)
+                    else $fatal(1, "LMR immediate board issue selected the wrong thread");
             end
         end
         if (direct_reject_followup_check_pending) begin
@@ -280,8 +280,7 @@
                     nnue_en_passant_state_seen |= is_en_passant;
                     nnue_promotion_state_seen |= is_promotion;
                     nnue_special_state_correct &=
-                        dut.nnue_evaluator.accumulator_update_memory[
-                            completed_thread] === expected;
+                        dut.nnue_evaluator.read_state(int'(completed_thread)) === expected;
                 end
             end
             if (dut.state == CTRL_SEARCH_ROOT_INIT
@@ -295,9 +294,7 @@
                     nnue_root_initialization_correct &=
                         dut.nnue_state_valid[idx];
                     nnue_root_initialization_correct &=
-                        dut.nnue_evaluator.accumulator_update_memory[
-                            idx
-                        ] === dut.nnue_evaluator.accumulator_update_memory[0];
+                        dut.nnue_evaluator.read_state(idx) === dut.nnue_evaluator.read_state(0);
                 end
             end
             if (dut.state == CTRL_SEARCH_RUN && dut.nnue_build_busy
@@ -609,7 +606,14 @@
                         dut.search_stack_top[lmr_tid].legal_move_count,
                         dut.search_pvs_research[lmr_tid])) begin
                     lmr_reduced_issue_seen = 1'b1;
-                    lmr_expected_child_depth[lmr_tid] = 8'(dut.lmr_child_depth(dut.search_board_issue_thread, dut.search_board_issue_bucket));
+                    // Observe the candidate source, independently of the local
+                    // depth-write implementation inside the controller.
+                    lmr_expected_child_depth[lmr_tid] = 8'(dut.lmr_child_depth(
+                        dut.search_board_issue_thread,
+                        dut.move_board_bypass_valid
+                            ? (dut.move_pop_resp_valid && dut.move_pop_resp_found
+                                ? dut.move_pop_resp_bucket : QUIET_MEDIUM_BUCKET)
+                            : dut.search_pending_move_bucket[lmr_tid]));
                     lmr_depth_check_pending[lmr_tid] = 1'b1;
                 end
             end

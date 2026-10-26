@@ -62,6 +62,21 @@ class EngineBuildConfigTests(unittest.TestCase):
         with mock.patch.object(Path, "read_bytes", changed_header_bytes):
             self.assertNotEqual(deterministic_build_id(manifest, target), original_id)
 
+    def test_build_id_tracks_trained_model_inputs(self):
+        """A weight change must prevent reuse even though the model is not generated."""
+        manifest = load_manifest()
+        target = manifest["synthesis_targets"]["quartus-de1-soc"]
+        original_id = deterministic_build_id(manifest, target)
+        model_path = Path(manifest["data_files"][0]).resolve()
+        read_bytes = Path.read_bytes
+
+        def changed_model(path):
+            contents = read_bytes(path)
+            return contents + b"\n" if path.resolve() == model_path else contents
+
+        with mock.patch.object(Path, "read_bytes", changed_model):
+            self.assertNotEqual(deterministic_build_id(manifest, target), original_id)
+
     def test_engine_frequency_change_keeps_board_memory_clock_settings(self):
         """Independent PLLs retain memory timing when an engine profile changes."""
         manifest = load_manifest()
@@ -96,6 +111,8 @@ class EngineBuildConfigTests(unittest.TestCase):
             project = write_quartus_project(manifest, target, build_dir, 2, 0x0123456789ABCDEF)
 
             self.assertEqual(project, build_dir / "fpga_chess")
+            for path in manifest["data_files"]:
+                self.assertEqual((build_dir / path).read_bytes(), Path(path).read_bytes())
             self.assertTrue((build_dir / "engine_build_config.svh").is_file())
             self.assertTrue((build_dir / "resolved_engine_config.json").is_file())
             resolved = json.loads(
@@ -124,6 +141,8 @@ class EngineBuildConfigTests(unittest.TestCase):
                 generated_config,
             )
             qsf = project.with_suffix(".qsf").read_text(encoding="utf-8")
+            for macro in target.get("verilog_macros", []):
+                self.assertIn(f'VERILOG_MACRO "{macro}"', qsf)
             self.assertIn("engine_build_config.svh", qsf)
             self.assertIn("set_global_assignment -name SMART_RECOMPILE ON", qsf)
             self.assertIn("set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED", qsf)

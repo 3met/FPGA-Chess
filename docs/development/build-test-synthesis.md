@@ -19,7 +19,9 @@ python -m tools.hardware_build list
 python -m tools.hardware_build validate
 ```
 
-`list` shows source sets, tests, generated data, and targets from [`hardware/build/manifest.json`](../../hardware/build/manifest.json). `validate` checks the manifest and referenced files. Use `python -m tools.hardware_build <command> --help` for a command's options.
+`list` shows source sets, tests, data inputs, generated data, and targets from [`hardware/build/manifest.json`](../../hardware/build/manifest.json). `validate` checks the manifest and referenced files. Use `python -m tools.hardware_build <command> --help` for a command's options.
+
+The NNUE model images are explicit `data_files` inputs. They are validated, fingerprinted, and copied into Quartus projects; generated-data commands never modify them.
 
 ## Run Tests
 
@@ -54,6 +56,14 @@ With the host and tuning dependencies installed, run all Python tests without in
 python -m unittest discover
 ```
 
+The `nnue-packed-products` bench exhausts the packed arithmetic through the portable wrapper. To check the Cyclone V implementation against ModelSim's installed `cyclonev_ver` library, run from the repository root:
+
+```text
+vlib work/build/nnue-cyclone-v
+vlog -sv -work work/build/nnue-cyclone-v +define+FPGA_CHESS_CYCLONE_V hardware/rtl/nnue/nnue_packed_products.sv hardware/tb/nnue/tb_nnue_packed_products.sv
+vsim -c -lib work/build/nnue-cyclone-v -L cyclonev_ver tb_nnue_packed_products -do "run -all; quit -f"
+```
+
 Compile source sets without running a testbench:
 
 ```text
@@ -82,7 +92,7 @@ Quartus reuses valid build results. Use `--clean` to delete the target build dir
 
 `synth-report` shows utilization and timing from an existing result; omit `--target` to select the most recently modified result. Add `--verbose` for the complete component hierarchy. `timing-paths` reads an existing Quartus fit and reports failing setup paths, or the tightest passing paths when timing is met; `--limit <count>` controls the number shown.
 
-The DE1-SoC constraints reserve additional setup headroom on internal engine-clock paths while retaining the configured PLL frequency. Timing must pass with this guard included. Reported engine Fmax includes the guard; the nominal-clock setup margin is the guard plus the reported setup slack. See [engine timing validation](engine-timing.md) for the verified seeds and latency tradeoffs.
+The DE1-SoC constraints time internal engine paths against the configured PLL clock period, including clock skew and uncertainty, without an additional setup guard. All reported setup, hold, recovery, and removal checks must pass before the build retains a programming image.
 
 Generic Xilinx targets require a device part:
 
@@ -105,7 +115,7 @@ This programs the volatile `.sof` image over JTAG. Use `--dry-run` to inspect th
 
 ## Select Engine Settings
 
-Search policies live under `hardware/config/search/`; engine profiles under `hardware/config/engine/` select the policy, hardware capacities, clocks, and instrumentation. The `history_heuristic` object selects the history table entry count and signed entry width. History reset priors and the three ascending quiet-bucket boundaries may be negative. The prior and positive reward must fit the configured signed entry width. Vendor, device, constraints, and fitter settings belong to the manifest target.
+Search policies live under `hardware/config/search/`; engine profiles under `hardware/config/engine/` select the policy, hardware capacities, clocks, and instrumentation. The `history_heuristic` object selects the history table entry count and signed entry width. History reset priors and the three ascending quiet-bucket boundaries may be negative. The prior and positive reward must fit the configured signed entry width. Vendor, device, constraints, and fitter settings belong to the manifest target. Quartus targets may select vendor wrappers with a `verilog_macros` list of macro names.
 
 For a target with an engine profile, use another profile without editing the manifest:
 

@@ -10,7 +10,8 @@
         board_update_piece_count_in = active_piece_count;
         board_update_move = active_req.move;
         board_update_set_data = active_req.board_wr_data;
-        board_update_thread_id = (state == CTRL_SEARCH_RUN) ? search_board_issue_thread : ThreadID'(0);
+        board_update_thread_id = is_search_operation(active_req.operation)
+            ? search_board_issue_thread : ThreadID'(0);
         board_update_ply = PlyIndex'(0);
 
         // Command ownership is registered before the first operation. Select
@@ -22,6 +23,10 @@
             board_update_pst_in = search_pst_eval[search_board_issue_thread];
             board_update_piece_count_in = search_piece_count[search_board_issue_thread];
             board_update_ply = search_ply[search_board_issue_thread];
+            board_update_move = move_board_bypass_pending
+                ? move_board_bypass_move
+                : |search_board_mask
+                ? search_pending_move[search_board_work_thread] : NULL_MOVE;
         end else if (active_req.operation == ENGINE_CTRL_PERFT) begin
             // Perft borrows context zero without owning a duplicate position.
             board_update_in = search_board[0];
@@ -29,14 +34,17 @@
             board_update_pst_in = search_pst_eval[0];
             board_update_piece_count_in = search_piece_count[0];
             board_update_ply = search_ply[0];
+            board_update_move = move_pop_response_pending && move_pop_resp_found
+                ? move_pop_resp_move : search_pending_move[0];
+        end else if (active_req.operation == ENGINE_CTRL_NEW_GAME) begin
+            board_update_move = setup_req_comb.move;
+            board_update_set_data = setup_req_comb.board_wr_data;
         end
 
         if (state == CTRL_BOARD_ISSUE) begin
             // New Game uses the same issue and writeback path as direct board updates.
             if (active_req.operation == ENGINE_CTRL_NEW_GAME) begin
                 board_update_op = setup_req_comb.board_op;
-                board_update_move = setup_req_comb.move;
-                board_update_set_data = setup_req_comb.board_wr_data;
             end else begin
                 board_update_op = active_req.board_op;
             end
@@ -44,11 +52,10 @@
                 && move_pop_resp_valid && move_pop_resp_thread == ThreadID'(0)
                 && move_pop_resp_found) begin
             board_update_op = BOARD_PUSH_MOVE_OP;
-            board_update_move = move_pop_resp_move;
         end else if (state == CTRL_PERFT_PUSH_ISSUE || state == CTRL_PERFT_REVERSE_ISSUE) begin
             board_update_op = (state == CTRL_PERFT_REVERSE_ISSUE) ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
-            board_update_move = search_pending_move[0];
-        end else if (state == CTRL_SEARCH_RUN) begin
+        end else if (state == CTRL_SEARCH_RUN
+                && !(req_valid && req.operation == ENGINE_CTRL_KILL)) begin
             // Select wide context independently of admission. Only the narrow
             // operation needs validity; idle payloads cannot publish a result.
             board_update_op = !search_board_issue_valid ? BOARD_IDLE_OP
@@ -57,10 +64,6 @@
                 : !move_board_bypass_valid
                     && search_thread_phase[search_board_issue_thread] == SEARCH_PHASE_REVERSE_WAIT
                 ? BOARD_REVERSE_MOVE_OP : BOARD_PUSH_MOVE_OP;
-            board_update_move = move_board_bypass_valid
-                ? move_board_bypass_move
-                : |search_board_mask
-                ? search_pending_move[search_board_work_thread] : NULL_MOVE;
         end
 
     end

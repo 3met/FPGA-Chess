@@ -41,7 +41,7 @@ These commands also accept `--config <path>`. Omit `--run` to select the latest 
 | Command | Result |
 | ------- | ------ |
 | `view-report` | Shows training progress, latest and best-checkpoint validation metrics, and material/PST values. |
-| `quantization-report` | Analyzes integer ranges, accumulator wrapping, activation occupancy, output clipping, and phase-bucket coverage. Saves `quantization.json` in the run directory. Use `--sample-positions <count>` to control sample size. |
+| `quantization-report` | Analyzes integer ranges, accumulator wrapping, activation occupancy, combined-evaluation clipping, and phase-bucket coverage. Saves `quantization.json` in the run directory. Use `--sample-positions <count>` to control sample size. |
 | `engine-commit --dry-run` | Shows the exported material values without changing engine files. |
 | `engine-commit` | Validates hardware widths, updates opening/endgame material and PST data, writes NNUE ROM images, and regenerates tracked hardware data. |
 
@@ -61,7 +61,7 @@ The benchmark measures optimizer throughput and full validation time after warmu
 
 ## Model and Dataset
 
-Training follows the engine's [evaluation blend](../architecture/evaluation-design.md) and [NNUE feature encoding and integer arithmetic](../modules/nnue-evaluator.md). Quantization-aware training uses deployed integer arithmetic in the forward pass while retaining high-precision parameters. Opening and endgame material/PST values are learned separately; pawn and king material stay fixed.
+Training follows the engine's [evaluation blend](../architecture/evaluation-design.md) and [NNUE feature encoding and integer arithmetic](../modules/nnue-evaluator.md). Quantization-aware training uses deployed integer arithmetic in the forward pass while retaining high-precision parameters. Opening and endgame material/PST values are learned separately; pawn and king material stay fixed. The full NNUE correction is added to the blended material/PST score before saturation to the hardware finite, non-mate score range. Quantization reports measure clipping of that combined evaluation.
 
 Cache construction rejects invalid, terminal, and mate-scored positions. The default filters also exclude roots in check and positions whose selected principal-variation move is a capture, leaving quiet positions for static evaluation. Filtering thresholds are configured in the JSON file.
 

@@ -112,9 +112,13 @@
         move_board_bypass_valid = state == CTRL_SEARCH_RUN
             && ((move_pop_resp_valid && move_pop_resp_found)
                 || (move_cmd_resp_valid && move_cmd_resp_direct_valid));
-        move_board_bypass_thread = move_pop_resp_valid && move_pop_resp_found
+        // Payload selection uses only registered response ownership. The valid
+        // signal above independently controls whether a board request is issued.
+        move_board_bypass_pending = (move_pop_response_pending && move_pop_resp_found)
+            || (move_cmd_resp_valid && move_cmd_resp_direct_valid);
+        move_board_bypass_thread = move_pop_response_pending && move_pop_resp_found
             ? move_pop_resp_thread : move_cmd_resp_thread;
-        move_board_bypass_move = move_pop_resp_valid && move_pop_resp_found
+        move_board_bypass_move = move_pop_response_pending && move_pop_resp_found
             ? move_pop_resp_move : move_cmd_resp_direct_move;
 
         // Response continuations become ordinary ready work on the next cycle;
@@ -145,16 +149,10 @@
             search_board_mask, search_dispatch.board);
         search_null_issue_thread = search_select_thread(
             search_null_mask, search_dispatch.board);
-        search_board_issue_thread = move_board_bypass_valid
+        search_board_issue_thread = move_board_bypass_pending
             ? move_board_bypass_thread
             : |search_board_mask
             ? search_board_work_thread : search_null_issue_thread;
-        // Forward live pop metadata on immediate issue; pending registers update
-        // on the same edge and still describe the previous candidate here.
-        search_board_issue_bucket = move_board_bypass_valid
-            ? (move_pop_resp_valid && move_pop_resp_found
-                ? move_pop_resp_bucket : QUIET_MEDIUM_BUCKET)
-            : search_pending_move_bucket[search_board_issue_thread];
         // Derive the operation kind from the selected source so this remains
         // correct if the null-request valid qualification is later refactored.
         search_board_issue_is_null = !move_board_bypass_valid

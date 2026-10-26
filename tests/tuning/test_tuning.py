@@ -31,6 +31,8 @@ from tools.tuning.data import (
     select_evaluation,
 )
 from tools.tuning.engine import (
+    NNUE_OUTPUT_MAC_LANES,
+    NNUE_OUTPUT_WEIGHT_BITS,
     commit_parameters,
     export_nnue,
     export_values,
@@ -45,7 +47,9 @@ from tools.tuning.model import (
     NNUE_ACTIVATION_MAX,
     NNUE_CLIPPED_ACCUMULATOR_MAX,
     NNUE_ENGINE_UNIT_CP,
-    NNUE_MAX_ENGINE_UNITS,
+    MAX_NON_MATE_ENGINE_UNITS,
+    ENGINE_EVAL_BITS,
+    ENGINE_MAX_MATE_DISTANCE,
     NNUE_OUTPUT_BIAS_MAX,
     NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_INPUTS,
@@ -407,6 +411,16 @@ class TuningModelAndExportTests(unittest.TestCase):
             [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7],
         )
 
+    def test_nnue_bucket_geometry_matches_integer_mapping(self):
+        counts = list(range(2, 33))
+        codes = torch.zeros((len(counts), 32), dtype=torch.int16)
+        for row, count in enumerate(counts):
+            codes[row, :count] = 1
+        for buckets in (1, 3, 5, 8, 31):
+            expected = [buckets - 1 if count == 32 else (count - 2) * buckets // 32
+                        for count in counts]
+            self.assertEqual(nnue_output_bucket(codes, buckets).tolist(), expected)
+
     def test_qat_projection_keeps_latent_parameters_deployable(self):
         model = EvaluationModel()
         with torch.no_grad():
@@ -415,7 +429,10 @@ class TuningModelAndExportTests(unittest.TestCase):
             model.output_weights.fill_(100.0)
             model.output_bias.fill_(-100.0)
             model.project_parameters()
-        self.assertEqual(model.feature_weights.unique().tolist(), [1.0])
+        self.assertEqual(model.feature_weights[8:56].unique().tolist(), [1.0])
+        for category in (0, 6):
+            self.assertEqual(model.feature_weights[category*64:category*64+8].unique().tolist(), [0.0])
+            self.assertEqual(model.feature_weights[category*64+56:category*64+64].unique().tolist(), [0.0])
         self.assertEqual(model.accumulator_bias.unique().tolist(), [0.0])
         self.assertEqual(model.output_weights.unique().tolist(), [float(NNUE_OUTPUT_WEIGHT_MAX)])
         self.assertEqual(model.output_bias.unique().tolist(), [0.0])
@@ -464,12 +481,12 @@ class TuningModelAndExportTests(unittest.TestCase):
         """The forward codes use integer division while QAT retains useful slopes."""
         values = torch.arange(-1, 32, dtype=torch.float32, requires_grad=True)
         actual = _squared_clipped_activation(values)
-        expected = [0, 0, 0, 0, 1, 2, 3, 4, 6] + [7] * 24
+        expected = [min(NNUE_SCRELU_TOP_CODE, max(0, value)**2 // 8) for value in range(-1, 32)]
         self.assertEqual(actual.tolist(), expected)
         actual.sum().backward()
         self.assertEqual(values.grad[2].item(), 0.25)
         self.assertEqual(values.grad[4].item(), 0.75)
-        self.assertEqual(values.grad[9].item(), 0.0)
+        self.assertEqual(values.grad[9].item(), 2.0)
         self.assertEqual(values.grad[17].item(), 0.0)
 
     def test_nnue_initialization_is_zero_output_but_has_live_gradients(self):
@@ -519,11 +536,75 @@ class TuningModelAndExportTests(unittest.TestCase):
             correction.item(),
             NNUE_SCRELU_TOP_CODE * NNUE_OUTPUT_WEIGHT_MAX * NNUE_ENGINE_UNIT_CP,
         )
-        self.assertEqual(NNUE_CLIPPED_ACCUMULATOR_MAX, NNUE_ACCUMULATOR_BIAS_MAX)
         self.assertEqual(
             model._output_weight_quantized(torch.tensor([float(NNUE_OUTPUT_WEIGHT_MIN)])).item(),
             float(NNUE_OUTPUT_WEIGHT_MIN),
         )
+
+    def test_nnue_correction_retains_full_dot_product_range(self):
+        """Only the combined score saturates; the correction preserves its extrema."""
+        model = EvaluationModel()
+        codes = torch.tensor([encode_board(chess.Board())], dtype=torch.int16)
+        with torch.no_grad():
+            model.feature_weights.zero_()
+            model.accumulator_bias.fill_(NNUE_ACCUMULATOR_BIAS_MAX)
+            model.output_bias.fill_(NNUE_OUTPUT_BIAS_MAX)
+        for weight in (NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX):
+            with torch.no_grad():
+                model.output_weights.fill_(weight)
+            expected = (NNUE_OUTPUT_INPUTS * NNUE_ACTIVATION_MAX * weight
+                        + NNUE_OUTPUT_BIAS_MAX) * NNUE_ENGINE_UNIT_CP
+            for turn in (False, True):
+                self.assertEqual(model.nnue_correction(codes, torch.tensor([turn])).item(), expected)
+
+    def test_score_combination_preserves_cancellation_and_gradients(self):
+        """Large opposing contributions must cancel before the finite clamp."""
+        codes = torch.tensor([encode_board(chess.Board(
+            "7k/8/8/8/8/3Q4/8/K7 w - - 0 1"
+        ))], dtype=torch.int16)
+        for weight in (-4, 4):
+            for turn in (False, True):
+                with self.subTest(weight=weight, white_to_move=turn):
+                    model = EvaluationModel()
+                    stm_sign = 1 if turn else -1
+                    raw = NNUE_OUTPUT_INPUTS * weight
+                    expected_white = stm_sign * (1 if weight > 0 else -1)
+                    pst = expected_white - stm_sign * raw
+                    with torch.no_grad():
+                        model.feature_weights.zero_()
+                        model.accumulator_bias.fill_(3)  # One activation unit per lane.
+                        model.output_weights.fill_(weight)
+                        model.output_bias.zero_()
+                        for name, values in model.terms.items():
+                            values.zero_()
+                            if name.startswith("material"):
+                                values[3] = pst * NNUE_ENGINE_UNIT_CP  # Queen.
+                    prediction = model(codes, torch.tensor([turn]))
+                    self.assertEqual(prediction.item(), expected_white * NNUE_ENGINE_UNIT_CP)
+                    prediction.sum().backward()
+                    self.assertGreater(model.output_weights.grad.abs().sum().item(), 0)
+                    self.assertGreater(model.terms["material_endgame"].grad.abs().sum().item(), 0)
+
+    def test_final_evaluation_saturates_at_finite_score_bound(self):
+        """Check both sides of the boundary and POV without an NNUE contribution."""
+        codes = torch.tensor([encode_board(chess.Board(
+            "7k/8/8/8/8/3Q4/8/K7 w - - 0 1"
+        ))], dtype=torch.int16)
+        model = EvaluationModel()
+        with torch.no_grad():
+            model.output_weights.zero_()
+            model.output_bias.zero_()
+        for sign in (-1, 1):
+            for offset in (-1, 0, 1):
+                raw = sign * (MAX_NON_MATE_ENGINE_UNITS + offset)
+                with torch.no_grad():
+                    for name, values in model.terms.items():
+                        values.zero_()
+                        if name.startswith("material"):
+                            values[3] = raw * NNUE_ENGINE_UNIT_CP
+                expected = sign * min(abs(raw), MAX_NON_MATE_ENGINE_UNITS) * NNUE_ENGINE_UNIT_CP
+                for turn in (False, True):
+                    self.assertEqual(model(codes, torch.tensor([turn])).item(), expected)
 
     def test_nnue_cpu_embedding_bag_matches_masked_reference(self):
         """The CPU-optimized reduction must retain the original masked sum."""
@@ -566,9 +647,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         reference = (torch.cat((first, second), dim=1)
             * model._output_weight_quantized(model.output_weights)[buckets]).sum(dim=1)
         reference += model._output_bias_quantized(model.output_bias)[buckets]
-        reference = reference.clamp(
-            -NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS
-        ) * NNUE_ENGINE_UNIT_CP
+        reference = reference * NNUE_ENGINE_UNIT_CP
         self.assertTrue(torch.equal(model.nnue_correction(codes, white_to_move), reference))
 
     def test_nnue_code_lookup_matches_direct_feature_encoding(self):
@@ -623,7 +702,7 @@ class TuningModelAndExportTests(unittest.TestCase):
     def test_nnue_export_packs_signed_two_bit_weights_output_and_safe_bias(self):
         parameters = {
             "nnue": {
-                "feature_weights": [([-2, -1, 0, 1] * 64)] * 768,
+                "feature_weights": [([-2, -1, 0, 1] * (NNUE_ACCUMULATORS // 4))] * 768,
                 "accumulator_bias": [200.0] + [0.0] * (NNUE_ACCUMULATORS - 1),
                 "output_units": "pawn/128",
                 "output_buckets": NNUE_OUTPUT_BUCKETS,
@@ -637,18 +716,19 @@ class TuningModelAndExportTests(unittest.TestCase):
         parameters["nnue"]["output_weights"][0][1] = 8.0
         features, outputs, output_bias, biases = export_nnue(parameters)
         self.assertEqual(len(features.splitlines()), 768)
-        self.assertEqual(len(features.splitlines()[0]), 128)
-        self.assertTrue(features.splitlines()[0].endswith("4e"))
-        self.assertEqual(len(outputs.splitlines()), 4 * NNUE_OUTPUT_BUCKETS)
-        self.assertTrue(all(len(row) == 96 for row in outputs.splitlines()))
-        self.assertEqual(outputs.splitlines()[0][-2:], "19")
+        self.assertEqual(len(features.splitlines()[0]), NNUE_ACCUMULATORS // 2)
+        self.assertTrue(features.splitlines()[8].endswith("4e"))
+        self.assertEqual(int(features.splitlines()[0], 16), 0)
+        self.assertEqual(len(outputs.splitlines()), NNUE_OUTPUT_INPUTS // NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_BUCKETS)
+        self.assertTrue(all(len(row) == (NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS + 3) // 4 for row in outputs.splitlines()))
+        self.assertEqual(int(outputs.splitlines()[0], 16), 1 | (NNUE_OUTPUT_WEIGHT_MAX << NNUE_OUTPUT_WEIGHT_BITS))
         self.assertEqual(output_bias, f"{NNUE_OUTPUT_BIAS_MAX:02x}\n" * NNUE_OUTPUT_BUCKETS)
         self.assertEqual(biases.splitlines()[0], f"{NNUE_ACCUMULATOR_BIAS_MAX:x}")
         parameters["nnue"]["output_weights"][0][0:4] = [0.5, 1.5, 2.5, -0.5]
         parameters["nnue"]["accumulator_bias"][0:4] = [0.5, 1.5, 2.5, -0.5]
         parameters["nnue"]["output_bias"][0:4] = [0.5, 1.5, 2.5, -0.5]
         _, tied_outputs, tied_output_bias, tied_biases = export_nnue(parameters)
-        self.assertEqual(tied_outputs.splitlines()[0][-3:], "090")
+        self.assertEqual(int(tied_outputs.splitlines()[0], 16), (2 << NNUE_OUTPUT_WEIGHT_BITS) | (2 << (2*NNUE_OUTPUT_WEIGHT_BITS)))
         self.assertEqual(tied_biases.splitlines()[0:4], ["0", "2", "2", "0"])
         self.assertEqual(tied_output_bias.splitlines()[:4], ["00", "02", "02", "00"])
         parameters["nnue"]["output_units"] = "centipawns"
@@ -881,6 +961,19 @@ class TuningModelAndExportTests(unittest.TestCase):
             self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
             generate.assert_not_called()
 
+    def test_current_training_geometry_matches_rtl(self):
+        from tools.tuning.engine import _require_matching_rtl
+
+        _require_matching_rtl()
+        for name, value in (("ENGINE_EVAL_BITS", ENGINE_EVAL_BITS),
+                            ("ENGINE_MAX_MATE_DISTANCE", ENGINE_MAX_MATE_DISTANCE)):
+            with self.subTest(name=name), mock.patch(f"tools.tuning.engine.{name}", value + 1):
+                with self.assertRaisesRegex(RuntimeError, "Score limits"):
+                    _require_matching_rtl()
+        with mock.patch("tools.tuning.engine.NNUE_ACCUMULATORS", NNUE_ACCUMULATORS + 1):
+            with self.assertRaisesRegex(RuntimeError, "NNUE_ACCUMULATOR_COUNT"):
+                _require_matching_rtl()
+
     def test_engine_commit_waits_for_matching_rtl(self):
         """A width mismatch must block ROM export before changing engine files."""
         with tempfile.TemporaryDirectory() as directory:
@@ -1065,6 +1158,45 @@ class TuningTrainingAndReportTests(unittest.TestCase):
             train_run.assert_called_once_with(
                 config, cache, resume_run=None, initialize_run=None,
             )
+
+    def test_quantization_reports_combined_score_saturation(self):
+        """A large correction can cancel for one turn and saturate for the other."""
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            model = EvaluationModel()
+            raw = NNUE_OUTPUT_INPUTS * 4
+            with torch.no_grad():
+                model.feature_weights.zero_()
+                model.accumulator_bias.fill_(3)
+                model.output_weights.fill_(4)
+                model.output_bias.zero_()
+                for name, values in model.terms.items():
+                    values.zero_()
+                    if name.startswith("material"):
+                        values[3] = -(raw - 1) * NNUE_ENGINE_UNIT_CP
+            torch.save({"model": model.state_dict(), "step": 0}, run / "best.pt")
+            codes = torch.tensor([encode_board(chess.Board(
+                "7k/8/8/8/8/3Q4/8/K7 w - - 0 1"
+            ))] * 2, dtype=torch.int16)
+            batch = (codes, torch.tensor([True, False]), torch.zeros(2))
+            train_data, validation_data = mock.Mock(), mock.Mock()
+            with (
+                mock.patch("tools.tuning.quantization.build_cache", return_value=run),
+                mock.patch("tools.tuning.quantization.cache_datasets", return_value=(train_data, validation_data, {})),
+                mock.patch("tools.tuning.quantization.CacheBatchLoader", return_value=[batch]),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                report = analyze_quantization(config_for(run, run / "positions.jsonl"), run, sample_positions=2)
+            self.assertEqual(report["nodes"]["output_sum_range"], [raw, raw])
+            self.assertEqual(report["nodes"]["evaluation_sum_range"], [1, 2*raw - 1])
+            self.assertEqual(report["nodes"]["evaluation_clipping_fraction"], 0.5)
+            train_data.close.assert_called_once()
+            validation_data.close.assert_called_once()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                print_quantization_report(report)
+            self.assertIn("Combined evaluations clipped", output.getvalue())
+            self.assertIn("50.000%", output.getvalue())
 
     def test_tiny_training_run_and_report_resolution(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -39,3 +39,25 @@ class SourceSetTests(unittest.TestCase):
             manifest["source_sets"] = {"root": ["@invalid"], "invalid": invalid}
             with self.subTest(invalid=invalid), self.assertRaisesRegex(BuildError, "Source set 'invalid'"):
                 validate_manifest(manifest)
+
+
+class VendorMacroTests(unittest.TestCase):
+    def test_rejects_malformed_vendor_macro_names(self):
+        """Target macros are identifiers, not Tcl expressions or command fragments."""
+        for macros in ("FLAG", [""], ["FLAG; puts bad"], ["FLAG=1"], [4]):
+            with self.subTest(macros=macros):
+                manifest = load_manifest()
+                manifest["synthesis_targets"]["quartus-de1-soc"]["verilog_macros"] = macros
+                with self.assertRaises(BuildError):
+                    validate_manifest(manifest)
+
+
+class DataInputTests(unittest.TestCase):
+    def test_model_inputs_must_be_existing_paths(self):
+        """Malformed or absent inputs fail validation instead of creating empty models."""
+        for inputs in ("model.hex", [None], ["hardware/data/nnue/missing-model.hex"]):
+            with self.subTest(inputs=inputs):
+                manifest = load_manifest()
+                manifest["data_files"] = inputs
+                with self.assertRaises(BuildError):
+                    validate_manifest(manifest)

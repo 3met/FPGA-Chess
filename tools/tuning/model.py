@@ -17,34 +17,37 @@ FIXED_MATERIAL_CP = {"pawn": 100.0, "king": 0.0}
 NNUE_SIDES = 2
 NNUE_PIECE_CATEGORIES = 6
 NNUE_FEATURE_COUNT = NNUE_SIDES * NNUE_PIECE_CATEGORIES * 64
-NNUE_ACCUMULATORS = 256
+NNUE_ACCUMULATORS = 512
 NNUE_OUTPUT_INPUTS = NNUE_SIDES * NNUE_ACCUMULATORS
 NNUE_OUTPUT_BUCKETS = 8
-NNUE_ACCUMULATOR_BITS = 5
+NNUE_ACCUMULATOR_BITS = 6
 NNUE_ACCUMULATOR_BIAS_BITS = 4
 NNUE_ACCUMULATOR_BIAS_MAX = (1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1
 NNUE_CLIPPED_ACCUMULATOR_BITS = NNUE_ACCUMULATOR_BITS - 1
 NNUE_CLIPPED_ACCUMULATOR_MAX = (1 << NNUE_CLIPPED_ACCUMULATOR_BITS) - 1
-NNUE_ACTIVATION_BITS = 3
+NNUE_ACTIVATION_BITS = 4
 NNUE_ACTIVATION_MAX = (1 << NNUE_ACTIVATION_BITS) - 1
-NNUE_SCRELU_DIVISOR = 1 << NNUE_ACTIVATION_BITS
+NNUE_SCRELU_DIVISOR = 8
 NNUE_SCRELU_TOP_CODE = NNUE_ACTIVATION_MAX
-NNUE_OUTPUT_WEIGHT_BITS = 3
+NNUE_OUTPUT_WEIGHT_BITS = 4
 NNUE_OUTPUT_WEIGHT_MIN = -(1 << (NNUE_OUTPUT_WEIGHT_BITS - 1))
 NNUE_OUTPUT_WEIGHT_MAX = (1 << (NNUE_OUTPUT_WEIGHT_BITS - 1)) - 1
 NNUE_OUTPUT_BIAS_BITS = 6
 NNUE_OUTPUT_BIAS_MAX = (1 << NNUE_OUTPUT_BIAS_BITS) - 1
 NNUE_ENGINE_UNIT_CP = 100.0 / 128.0
-NNUE_MAX_ENGINE_UNITS = 0x3FFF
+# Match chess_defs: infinity and mate distances are outside finite evaluations.
+ENGINE_EVAL_BITS = 13
+ENGINE_MAX_MATE_DISTANCE = 255
+MAX_NON_MATE_ENGINE_UNITS = (1 << (ENGINE_EVAL_BITS - 1)) - 1 - (ENGINE_MAX_MATE_DISTANCE + 1)
 
 
 def nnue_output_bucket(codes: torch.Tensor, bucket_count: int = NNUE_OUTPUT_BUCKETS) -> torch.Tensor:
     """Map the legal two-piece minimum upward into near-equal phase buckets."""
     piece_count = codes.ne(0).sum(dim=1)
-    pieces_per_bucket = 32 // bucket_count
-    scaled = piece_count.sub(2).clamp_min(0).div(
-        pieces_per_bucket, rounding_mode="floor"
+    scaled = piece_count.sub(2).clamp_min(0).mul(bucket_count).div(
+        32, rounding_mode="floor"
     )
+    scaled = torch.where(piece_count >= 32, bucket_count - 1, scaled)
     return scaled.clamp_max(bucket_count - 1).to(torch.long)
 
 
@@ -204,6 +207,10 @@ class EvaluationModel(nn.Module):
         # Projecting the latent values prevents straight-through gradients from
         # stranding parameters far beyond a deployable quantization bin.
         self.feature_weights.clamp_(-2, 1)
+        # Unreachable pawn rows supply zero vectors to unused transformer ports.
+        for category in (0, 6):
+            self.feature_weights[category * 64:category * 64 + 8] = 0
+            self.feature_weights[category * 64 + 56:category * 64 + 64] = 0
         self.accumulator_bias.clamp_(0, NNUE_ACCUMULATOR_BIAS_MAX)
         self.output_weights.clamp_(NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX)
         self.output_bias.clamp_(0, NNUE_OUTPUT_BIAS_MAX)
@@ -262,7 +269,7 @@ class EvaluationModel(nn.Module):
         white_to_move: torch.Tensor,
         phase: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate the correction and a differentiable accumulator overflow penalty."""
+        """Return the full correction in engine units and the QAT overflow penalty."""
         indices = self._nnue_index_lut[
             codes.to(torch.long) + FEATURE_COUNT
         ].permute(0, 2, 1)
@@ -296,10 +303,7 @@ class EvaluationModel(nn.Module):
         # the same output without constraining the two halves of the head.
         output_bias = self._output_bias_quantized(self.output_bias)[buckets]
         engine_units = (ordered_activations * weights).sum(dim=1) + output_bias
-        correction = engine_units.clamp(
-            -NNUE_MAX_ENGINE_UNITS, NNUE_MAX_ENGINE_UNITS
-        ) * NNUE_ENGINE_UNIT_CP
-        return correction, overflow_penalty
+        return engine_units, overflow_penalty
 
     def nnue_correction(
         self,
@@ -307,15 +311,14 @@ class EvaluationModel(nn.Module):
         white_to_move: torch.Tensor,
     ) -> torch.Tensor:
         """Evaluate the deployed side-to-move-relative NNUE correction."""
-        return self._nnue_correction(codes, white_to_move)[0]
+        return self._nnue_correction(codes, white_to_move)[0] * NNUE_ENGINE_UNIT_CP
 
-    def forward(
+    def _material_pst(
         self,
         codes: torch.Tensor,
-        white_to_move: torch.Tensor,
-        return_overflow_penalty: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate a position and optionally return the QAT overflow penalty."""
+        phase: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the unsaturated White-relative material/PST blend in engine units."""
         # Zero codes may index the final table entry: their zero sign removes
         # both the value and its gradient without a separate mask operation.
         indices = codes.abs().to(torch.long).sub(1)
@@ -332,17 +335,33 @@ class EvaluationModel(nn.Module):
         endgame = endgame_table[indices] * signs
         opening_sum = opening.sum(dim=1)
         endgame_sum = endgame.sum(dim=1)
-        phase = pst_opening_phase(codes).to(opening_sum.dtype)
+        if phase is None:
+            phase = pst_opening_phase(codes)
+        phase = phase.to(opening_sum.dtype)
         blended = (opening_sum * phase + endgame_sum * (30.0 - phase)) / 30.0
         # RTL truncates the signed blend toward zero after accumulating integer scores.
         white_relative = blended + (torch.trunc(blended) - blended).detach()
+        return white_relative
+
+    def forward(
+        self,
+        codes: torch.Tensor,
+        white_to_move: torch.Tensor,
+        return_overflow_penalty: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Combine scores before finite saturation, then return White-relative centipawns."""
+        phase = pst_opening_phase(codes)
+        white_relative = self._material_pst(codes, phase)
         stm_sign = torch.where(
             white_to_move.to(device=codes.device, dtype=torch.bool),
             white_relative.new_tensor(1.0),
             white_relative.new_tensor(-1.0),
         )
         correction, overflow_penalty = self._nnue_correction(codes, white_to_move, phase)
-        prediction = white_relative * NNUE_ENGINE_UNIT_CP + stm_sign * correction
+        combined = white_relative * stm_sign + correction
+        prediction = combined.clamp(
+            -MAX_NON_MATE_ENGINE_UNITS, MAX_NON_MATE_ENGINE_UNITS
+        ) * stm_sign * NNUE_ENGINE_UNIT_CP
         if return_overflow_penalty:
             return prediction, overflow_penalty
         return prediction

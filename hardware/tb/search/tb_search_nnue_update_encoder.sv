@@ -40,6 +40,7 @@ module tb_search_nnue_update_encoder;
         int expected[NNUE_SIDE_COUNT][NNUE_FEATURE_COUNT];
         int observed[NNUE_SIDE_COUNT][NNUE_FEATURE_COUNT];
         int request_count;
+        int bank_reads[2][3];
         logic protocol_ok, features_ok;
         Position rank_flip;
         Position rook_from, rook_to;
@@ -134,15 +135,20 @@ module tb_search_nnue_update_encoder;
             // from independently constructed before/after boards above.
             if (undo)
                 plan = nnue_undo_plan(entering_move, undo_record, color, parent_ply);
+            foreach (bank_reads[side, bank]) bank_reads[side][bank] = 0;
             for (int index = 0; index < request_count; index++) begin
                 step = 3'(index);
                 #1;
-                protocol_ok &= req_valid && req.apply && !req.clear
+                protocol_ok &= req_valid && req.apply && req.combine && !req.clear
                     && req.complete == (index == request_count - 1)
                     && req.thread_id == thread_id && req.ply == plan.child_ply;
+                bank_reads[WHITE][nnue_feature_bank(req.white_feature)]++;
+                bank_reads[BLACK][nnue_feature_bank(req.black_feature)]++;
                 observed[WHITE][req.white_feature] += req.add ? 1 : -1;
                 observed[BLACK][req.black_feature] += req.add ? 1 : -1;
             end
+            foreach (bank_reads[side, bank])
+                check(bank_reads[side][bank] <= 2, "move/undo fits two read ports per bank");
             features_ok = 1'b1;
             foreach (expected[side, feature])
                 features_ok &= observed[side][feature] == (undo ? 0 : expected[side][feature]);
@@ -160,7 +166,7 @@ module tb_search_nnue_update_encoder;
             #1;
             if (replay_tile.piece_type == NULL_PIECE) protocol_ok &= !req_valid;
             else begin
-                protocol_ok &= req_valid && req.apply && req.add && !req.complete
+                protocol_ok &= req_valid && req.apply && !req.combine && req.add && !req.complete
                     && req.clear == first && req.thread_id == thread_id
                     && req.ply == plan.child_ply
                     && req.white_feature == nnue_feature_index(replay_pos, replay_tile, WHITE)
@@ -176,8 +182,56 @@ module tb_search_nnue_update_encoder;
         draining = 1'b0;
     endtask
 
+    // Prove every reachable feature has a unique stored address and every
+    // unreachable pawn row selects the reserved zero vector.
+    task automatic check_bank_layout();
+        bit seen[3][NNUE_FEATURE_BANK_ROW_COUNT];
+        bit unique_rows = 1, zero_rows = 1, captures_fit = 1;
+        foreach (seen[bank,row]) seen[bank][row] = 0;
+        for (int feature = 0; feature < NNUE_FEATURE_COUNT; feature++) begin
+            automatic int bank = nnue_feature_bank(NnueFeatureIndex'(feature));
+            automatic int row = nnue_feature_bank_row(NnueFeatureIndex'(feature));
+            automatic bit unused = (feature/64 == 0 || feature/64 == 6)
+                && (feature%64 < 8 || feature%64 >= 56);
+            if (unused) zero_rows &= row == NNUE_ZERO_FEATURE_ROW;
+            else begin
+                unique_rows &= row != NNUE_ZERO_FEATURE_ROW && !seen[bank][row];
+                seen[bank][row] = 1;
+            end
+        end
+        // The bank depends only on square and color, so one piece type covers
+        // every capture, including promotions and king steps, without geometry assumptions.
+        for (int side = 0; side < 2; side++)
+            for (int color = 0; color < 2; color++)
+                for (int source = 0; source < 64; source++)
+                    for (int target = 0; target < 64; target++) begin
+                        automatic int a = nnue_feature_bank(nnue_feature_index(Position'(source), Tile'({Color'(color), KNIGHT}), Color'(side)));
+                        automatic int b = nnue_feature_bank(nnue_feature_index(Position'(target), Tile'({Color'(color), KNIGHT}), Color'(side)));
+                        automatic int c = nnue_feature_bank(nnue_feature_index(Position'(target), Tile'({Color'(!color), ROOK}), Color'(side)));
+                        captures_fit &= !(a == b && b == c);
+                    end
+        for (int side = 0; side < 2; side++)
+            for (int color = 0; color < 2; color++)
+                for (int file_index = 0; file_index < 8; file_index++)
+                    for (int direction = -1; direction <= 1; direction += 2)
+                        if (file_index + direction >= 0 && file_index + direction < 8) begin
+                            automatic int rank_index = color == int'(WHITE) ? 4 : 3;
+                            automatic Position source = Position'(rank_index*8 + file_index);
+                            automatic Position target = Position'((rank_index + (color == int'(WHITE) ? 1 : -1))*8 + file_index + direction);
+                            automatic Position victim = Position'(rank_index*8 + file_index + direction);
+                            automatic int a = nnue_feature_bank(nnue_feature_index(source, Tile'({Color'(color), PAWN}), Color'(side)));
+                            automatic int b = nnue_feature_bank(nnue_feature_index(target, Tile'({Color'(color), PAWN}), Color'(side)));
+                            automatic int c = nnue_feature_bank(nnue_feature_index(victim, Tile'({Color'(!color), PAWN}), Color'(side)));
+                            captures_fit &= !(a == b && b == c);
+                        end
+        check(unique_rows, "reachable features have distinct nonzero bank rows");
+        check(zero_rows, "unused pawn rows select the reserved zero vector");
+        check(captures_fit, "all capture square pairs fit the bank ports");
+    endtask
+
     initial begin
         PieceType promotion_pieces[4] = '{QUEEN, KNIGHT, ROOK, BISHOP};
+        check_bank_layout();
         thread_id = ThreadID'(THREAD_COUNT - 1);
         step = '0;
         draining = 1'b0;
@@ -192,6 +246,7 @@ module tb_search_nnue_update_encoder;
                             PromoType'(promotion), promotion_pieces[promotion]);
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
+        if (fail_count != 0) $fatal(1, "NNUE update encoder failed");
         $finish;
     end
 

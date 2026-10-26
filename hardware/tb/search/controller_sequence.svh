@@ -289,13 +289,13 @@
             run_search_depth_record(8'd0, "NNUE baseline search",
                 baseline_move, baseline_score, baseline_nodes);
             for (int row = 0; row < NNUE_FEATURE_COUNT; row++)
-                dut.nnue_evaluator.feature_rom[row] = 0;
-            dut.nnue_evaluator.feature_rom[8] = {NNUE_ROW_BYTES{8'h55}};
+                dut.nnue_evaluator.load_feature(row, '0);
+            dut.nnue_evaluator.load_feature(8, {NNUE_ROW_BYTES{8'h55}});
             for (int row = bucket * NNUE_OUTPUT_MAC_CYCLES;
                     row < (bucket + 1) * NNUE_OUTPUT_MAC_CYCLES; row++)
-                dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
+                dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h1}};
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-                dut.nnue_evaluator.accumulator_bias[lane] = 4'd2;
+                dut.nnue_evaluator.load_bias(lane, 4'd2);
             new_game();
             setup_kings_only();
             set_tile(WHITE_PAWN, Position'(8), "NNUE correction white pawn a2");
@@ -303,7 +303,7 @@
                 nnue_move, nnue_score, nnue_nodes);
             // Only White's direct a2-pawn feature is nonzero, so the ordered
             // concatenation contributes one activation in every White lane.
-            check(nnue_score == baseline_score + EvalScore'(256),
+            check(nnue_score == baseline_score + EvalScore'(NNUE_ACCUMULATOR_COUNT),
                 $sformatf("search adds NNUE correction: baseline=%0d corrected=%0d",
                     baseline_score, nnue_score));
         end

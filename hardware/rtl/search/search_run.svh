@@ -1112,33 +1112,45 @@
                             search_thread_id <= search_board_issue_thread;
                             search_thread_phase[search_board_issue_thread] <= SEARCH_PHASE_BOARD_WAIT;
                             search_board_inflight[search_board_issue_thread] <= 1'b1;
-                            if (search_board_issue_is_null) begin
-                                search_stack_top[search_board_issue_thread].null_attempted <= 1'b1;
-                                search_pending_child_depth[search_board_issue_thread]
-                                    <= null_child_depth(search_board_issue_thread);
-                            end else if (search_thread_phase[search_board_issue_thread] != SEARCH_PHASE_REVERSE_WAIT) begin
-                                if (search_pvs_research[search_board_issue_thread]) begin
-                                    search_pending_child_depth[search_board_issue_thread]
-                                        <= search_stack_top[search_board_issue_thread].remaining_depth == SearchDepth'(0)
-                                            ? SearchDepth'(0)
-                                            : search_stack_top[search_board_issue_thread].remaining_depth - SearchDepth'(1);
-                                end else if (lmr_eligible(
-                                        search_ply[search_board_issue_thread],
-                                        search_stack_top[search_board_issue_thread].remaining_depth,
-                                        search_stack_top[search_board_issue_thread].legal_move_count,
-                                        search_pvs_research[search_board_issue_thread])) begin
-                                    search_pending_child_depth[search_board_issue_thread] <= lmr_child_depth(search_board_issue_thread, search_board_issue_bucket);
+                            // Compute each thread's depth locally so arbitration only
+                            // enables the write, rather than preceding LMR arithmetic.
+                            for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                                // Immediate issue uses live response metadata; the
+                                // pending bucket is written on this same edge.
+                                automatic MoveBucketIndex child_bucket = move_board_bypass_valid
+                                    ? (move_pop_resp_valid && move_pop_resp_found
+                                        ? move_pop_resp_bucket : QUIET_MEDIUM_BUCKET)
+                                    : search_pending_move_bucket[tid];
+                                if (search_board_issue_thread == ThreadID'(tid)) begin
+                                    if (search_board_issue_is_null) begin
+                                        search_stack_top[tid].null_attempted <= 1'b1;
+                                        search_pending_child_depth[tid]
+                                            <= null_child_depth(ThreadID'(tid));
+                                    end else if (search_thread_phase[tid] != SEARCH_PHASE_REVERSE_WAIT) begin
+                                        if (search_pvs_research[tid]) begin
+                                            search_pending_child_depth[tid]
+                                                <= search_stack_top[tid].remaining_depth == SearchDepth'(0)
+                                                    ? SearchDepth'(0)
+                                                    : search_stack_top[tid].remaining_depth - SearchDepth'(1);
+                                        end else if (lmr_eligible(
+                                                search_ply[tid],
+                                                search_stack_top[tid].remaining_depth,
+                                                search_stack_top[tid].legal_move_count,
+                                                search_pvs_research[tid])) begin
+                                            search_pending_child_depth[tid] <= lmr_child_depth(ThreadID'(tid), child_bucket);
 `ifndef SYNTHESIS
-                                    assert (floor_log2_8(8'(search_stack_top[search_board_issue_thread].remaining_depth))
-                                            < LMR_DEPTH_BUCKETS);
-                                    assert (lmr_child_depth(search_board_issue_thread, search_board_issue_bucket)
-                                            < search_stack_top[search_board_issue_thread].remaining_depth);
+                                            assert (floor_log2_8(8'(search_stack_top[tid].remaining_depth))
+                                                    < LMR_DEPTH_BUCKETS);
+                                            assert (lmr_child_depth(ThreadID'(tid), child_bucket)
+                                                    < search_stack_top[tid].remaining_depth);
 `endif
-                                end else begin
-                                    search_pending_child_depth[search_board_issue_thread]
-                                        <= search_stack_top[search_board_issue_thread].remaining_depth == SearchDepth'(0)
-                                            ? SearchDepth'(0)
-                                            : search_stack_top[search_board_issue_thread].remaining_depth - SearchDepth'(1);
+                                        end else begin
+                                            search_pending_child_depth[tid]
+                                                <= search_stack_top[tid].remaining_depth == SearchDepth'(0)
+                                                    ? SearchDepth'(0)
+                                                    : search_stack_top[tid].remaining_depth - SearchDepth'(1);
+                                        end
+                                    end
                                 end
                             end
                             search_dispatch.board <= search_thread_after(search_board_issue_thread);

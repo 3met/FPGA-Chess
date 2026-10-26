@@ -1,571 +1,260 @@
 `timescale 1ns/1ps
-
 import chess_defs::*;
 import nnue_defs::*;
 
 module tb_nnue_evaluator;
-    // A non-power-of-two fixture exercises the highest allocated thread ID.
-    localparam int TEST_THREADS = 9;
-    localparam ThreadID LAST_THREAD = ThreadID'(TEST_THREADS-1);
-    logic clk = 1'b0;
-    logic rst_n = 1'b0;
-    logic clear;
-    logic update_valid, update_ready, update_idle;
-    NnueUpdateRequest update_req;
+    localparam int TEST_THREADS = 3;
+    logic clk = 0, rst_n = 0, clear = 0;
+    always #5 clk = !clk;
+    logic update_valid = 0, update_ready, update_idle;
+    NnueUpdateRequest update_req = '0;
     logic update_done_valid;
     ThreadID update_done_thread;
     PlyIndex update_done_ply;
-    logic eval_valid, eval_ready, result_valid;
-    ThreadID eval_thread_id;
-    Color eval_turn;
-    PieceCount eval_piece_count;
-    PstEvalPair eval_pst;
+    logic eval_valid = 0, eval_ready, result_valid;
+    ThreadID eval_thread_id = 0;
+    Color eval_turn = WHITE;
+    PieceCount eval_piece_count = 2;
+    PstEvalPair eval_pst = '0;
     NnueCorrection result;
     PstEvalScore result_pst;
-    logic single_update_valid, single_update_ready, single_update_idle;
-    NnueUpdateRequest single_update_req;
-    logic single_eval_valid, single_eval_ready, single_result_valid;
-    NnueCorrection single_result;
-    int pass_count = 0;
-    int fail_count = 0;
+    int pass_count = 0, fail_count = 0;
+    int reference_state[TEST_THREADS][NNUE_STATE_VALUE_COUNT];
+    int expected_result[$], expected_pst[$];
+    int results_seen = 0, updates_seen = 0;
+    int cycle_count = 0, last_product_cycle = -1, stream_rows = 0;
+    bit check_stream = 0;
+    nnue_evaluator #(.STATE_THREAD_COUNT(TEST_THREADS)) dut (.*);
 
-    always #5 clk = ~clk;
-
-    nnue_evaluator #(.STATE_THREAD_COUNT(TEST_THREADS)) dut (
-        .clk, .rst_n, .clear, .update_valid, .update_ready, .update_idle, .update_req,
-        .update_done_valid, .update_done_thread, .update_done_ply,
-        .eval_valid, .eval_ready, .eval_thread_id, .eval_turn, .eval_piece_count,
-        .eval_pst, .result_valid, .result, .result_pst
-    );
-
-    // Exercise the minimum allocation with a single accumulator state.
-    nnue_evaluator #(.STATE_THREAD_COUNT(1)) single_dut (
-        .clk, .rst_n, .clear,
-        .update_valid(single_update_valid), .update_ready(single_update_ready),
-        .update_idle(single_update_idle), .update_req(single_update_req),
-        .update_done_valid(), .update_done_thread(), .update_done_ply(),
-        .eval_valid(single_eval_valid), .eval_ready(single_eval_ready),
-        .eval_thread_id(ThreadID'(0)), .eval_turn(WHITE),
-        .eval_piece_count(PieceCount'(2)),
-        .eval_pst(PstEvalPair'('0)),
-        .result_valid(single_result_valid), .result(single_result)
-    );
-
-    task automatic check(input logic condition, input string label);
-        if (condition)
-            pass_count++;
-        else begin
-            fail_count++;
-            $error("[FAIL] %s", label);
-        end
+    task automatic check(input bit ok, input string label);
+        if (ok) pass_count++;
+        else begin fail_count++; $error("%s", label); end
     endtask
 
-    task automatic enqueue(input NnueUpdateRequest request);
-        @(negedge clk);
-        while (!update_ready)
-            @(negedge clk);
-        update_req = request;
-        update_valid = 1;
-        @(negedge clk);
-        update_valid = 0;
-    endtask
+    // Independent scalar reference covers all signed accumulator and weight codes.
+    function automatic int activation(input int value);
+        int positive;
+        positive = value < 0 ? 0 : value;
+        return positive*positive/8 > 15 ? 15 : positive*positive/8;
+    endfunction
+    function automatic int wrap(input int value);
+        int code;
+        code = value & ((1 << NNUE_ACCUMULATOR_BITS)-1);
+        return code >= (1 << (NNUE_ACCUMULATOR_BITS-1)) ? code-(1 << NNUE_ACCUMULATOR_BITS) : code;
+    endfunction
+    function automatic int feature_value(input int feature, input int lane);
+        if (feature/64 inside {0,6} && (feature%64)/8 inside {0,7}) return 0;
+        return (feature*7 + lane*3 + lane/11)%4 - 2;
+    endfunction
+    function automatic int bias_value(input int lane);
+        return lane % (1 << NNUE_ACCUMULATOR_BIAS_BITS);
+    endfunction
+    function automatic int weight_value(input int bucket, input int lane);
+        return (bucket*3 + lane*7 + lane/13)%16 - 8;
+    endfunction
 
-    task automatic evaluate(input NnueCorrection expected, input string label);
-        @(negedge clk);
-        eval_valid = 1;
-        @(negedge clk);
-        eval_valid = 0;
-        wait (result_valid);
-        check(result == expected, label);
-    endtask
-
-    task automatic test_single_thread_state_path();
-        @(negedge clk);
-        single_update_req = '0;
-        single_update_req.black_feature = 1;
-        single_update_req.apply = 1'b1;
-        single_update_req.add = 1'b1;
-        single_update_req.clear = 1'b1;
-        single_update_valid = 1'b1;
-        @(negedge clk);
-        single_update_valid = 1'b0;
-        wait (single_update_idle);
-        @(negedge clk);
-        single_eval_valid = 1'b1;
-        @(negedge clk);
-        single_eval_valid = 1'b0;
-        wait (single_result_valid);
-        check(single_result == NnueCorrection'(256),
-            "single-thread evaluation reuses the update-state mirror");
-    endtask
-
-    // Exhaust the small exact arithmetic domain but report it as one behavioral
-    // property rather than 64 nominal test cases.
-    task automatic test_output_products();
-        automatic bit product_exact = 1'b1;
-
-        for (int activation = 0; activation <= 7; activation++) begin
-            for (int weight = -4; weight <= 3; weight++) begin
-                automatic logic signed [3:0] activation_bits = activation;
-                automatic logic signed [NNUE_OUTPUT_WEIGHT_BITS-1:0] weight_bits = weight;
-                product_exact &= $signed(dut.output_product(
-                    activation_bits, weight_bits)) == activation * weight;
-            end
-        end
-        check(product_exact, "output product is exact over its reachable domain");
-    endtask
-
-    // Check every signed accumulator code against the training-side integer SCReLU.
-    task automatic test_screlu();
-        automatic bit activation_exact = 1'b1;
-
-        for (int accumulator = -(1 << (NNUE_ACCUMULATOR_BITS - 1));
-                accumulator < (1 << (NNUE_ACCUMULATOR_BITS - 1)); accumulator++) begin
-            automatic int clipped = accumulator < 0 ? 0 : accumulator;
-            automatic int expected = (clipped * clipped) / 8;
-            if (expected > 7) expected = 7;
-            activation_exact &= $signed(dut.screlu(NnueAccumulator'(accumulator)))
-                == expected;
-        end
-        check(activation_exact, "SCReLU matches the quantized model for every accumulator");
-    endtask
-
-    initial begin
-        clear = 0;
-        update_valid = 0;
-        update_req = '0;
-        eval_valid = 0;
-        eval_thread_id = 0;
-        eval_turn = WHITE;
-        eval_piece_count = PieceCount'(2);
-        eval_pst = '{first: PstEvalScore'(300), endgame: PstEvalScore'(-300)};
-        single_update_valid = 0;
-        single_update_req = '0;
-        single_eval_valid = 0;
-        #1;
-        dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
-        dut.feature_rom[1] = '0;
-        for (int row = 0; row < NNUE_OUTPUT_WEIGHT_ROW_COUNT; row++)
-            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-        for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++)
-            dut.output_bias[bucket] = 0;
-        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 4'd2;
-        single_dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
-        single_dut.feature_rom[1] = '0;
-        for (int row = 0; row < NNUE_OUTPUT_WEIGHT_ROW_COUNT; row++)
-            single_dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-        for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++)
-            single_dut.output_bias[bucket] = 0;
-        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            single_dut.accumulator_bias[lane] = 4'd2;
-
-        repeat (2) @(negedge clk);
-        rst_n = 1;
-        check(NNUE_FEATURE_COUNT == 768,
-            "NNUE transformer uses 2 sides x 6 pieces x 64 squares");
-        check(NNUE_ACCUMULATOR_COUNT == 256,
-            "NNUE keeps 256 accumulators per perspective");
-        check(nnue_output_bucket(PieceCount'(1)) == NnueOutputBucket'(0)
-                && nnue_output_bucket(PieceCount'(2)) == NnueOutputBucket'(0)
-                && nnue_output_bucket(PieceCount'(5)) == NnueOutputBucket'(0)
-                && nnue_output_bucket(PieceCount'(6)) == NnueOutputBucket'(1)
-                && nnue_output_bucket(PieceCount'(29)) == NnueOutputBucket'(6)
-                && nnue_output_bucket(PieceCount'(30)) == NnueOutputBucket'(7)
-                && nnue_output_bucket(PieceCount'(32)) == NnueOutputBucket'(7),
-            "piece counts map from the legal minimum through the full-board bucket");
-        check(nnue_feature_index(
-            Position'(8), WHITE_PAWN, WHITE) == NnueFeatureIndex'(8),
-            "white pawn maps to its direct friendly feature");
-        check(nnue_feature_index(
-            Position'(8), WHITE_PAWN, BLACK) == NnueFeatureIndex'(432),
-            "white pawn maps to the black perspective enemy feature");
-        check(nnue_feature_index(
-            Position'(4), WHITE_KING, BLACK) == NnueFeatureIndex'(764),
-            "friendly kings are direct input features for the other perspective");
-        check(dut.state_address(LAST_THREAD) == int'(LAST_THREAD),
-            "one accumulator state is addressed by thread, not ply");
-        check(dut.STATE_COUNT == TEST_THREADS,
-            "accumulator memory allocates one logical word per thread");
-
-        test_output_products();
-        test_screlu();
-        test_single_thread_state_path();
-
-        update_req.thread_id = LAST_THREAD;
-        update_req.ply = PlyIndex'(2);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        wait (update_idle);
-        eval_thread_id = LAST_THREAD;
-        evaluate(NnueCorrection'(256), "state memory supports the highest configured thread ID");
-        check(result_pst == PstEvalScore'(-300), "two-piece position uses endgame PST");
-        eval_piece_count = PieceCount'(17);
-        evaluate(NnueCorrection'(256), "midpoint PST blend runs alongside NNUE");
-        check(result_pst == PstEvalScore'(0), "seventeen pieces blend both PST sets equally");
-        eval_piece_count = PieceCount'(32);
-        evaluate(NnueCorrection'(256), "full-board PST blend runs alongside NNUE");
-        check(result_pst == PstEvalScore'(300), "full board uses first PST set");
-        // Preserve signed truncation and the full input range through the
-        // pipelined reciprocal used by synthesized hardware.
-        eval_pst = '{first: PstEvalScore'(0), endgame: PstEvalScore'(-1)};
-        eval_piece_count = PieceCount'(3);
-        evaluate(NnueCorrection'(256), "negative fractional PST blend keeps NNUE result");
-        check(result_pst == PstEvalScore'(0), "negative fractional PST blend truncates toward zero");
-        eval_pst = '{first: PstEvalScore'(-(1 << ($bits(PstEvalScore)-1))), endgame: PstEvalScore'(-(1 << ($bits(PstEvalScore)-1)))};
-        eval_piece_count = PieceCount'(2);
-        evaluate(NnueCorrection'(256), "minimum PST blend keeps NNUE result");
-        check(result_pst == PstEvalScore'(-(1 << ($bits(PstEvalScore)-1))), "minimum PST blend retains signed range");
-        // Exercise every phase at opposite signed endpoints through the real pipeline.
-        for (int polarity = 0; polarity < 2; polarity++) begin
-            eval_pst.first = PstEvalScore'(-(1 << ($bits(PstEvalScore)-1)));
-            eval_pst.endgame = PstEvalScore'((1 << ($bits(PstEvalScore)-1))-1);
-            if (polarity != 0)
-                eval_pst = {eval_pst.endgame, eval_pst.first};
-            for (int weight = 0; weight <= 30; weight++) begin
-                automatic int expected = (int'(eval_pst.first) * weight
-                    + int'(eval_pst.endgame) * (30-weight)) / 30;
-                eval_piece_count = PieceCount'(weight+2);
-                evaluate(NnueCorrection'(256), "extreme phase blend preserves NNUE result");
-                check(int'(result_pst) == expected, "extreme phase blend truncates exactly");
-            end
-        end
-        eval_pst = '{first: PstEvalScore'(300), endgame: PstEvalScore'(-300)};
-        eval_piece_count = PieceCount'(2);
-        dut.output_weight_rows[0] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-        dut.output_weight_rows[1] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-        dut.output_weight_rows[2] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
-        dut.output_weight_rows[3] = {NNUE_OUTPUT_MAC_LANES{3'h7}};
-        evaluate(NnueCorrection'(256), "side to move selects the first concatenated perspective");
-        eval_turn = BLACK;
-        evaluate(NnueCorrection'(-256), "opponent perspective moves to the second half");
-        // Consecutive snapshots must keep their own perspective ordering while
-        // the preceding evaluation drains its last partial sum.
-        begin
-            automatic int perspective_results = 0;
-            @(negedge clk);
-            eval_turn = WHITE;
-            eval_valid = 1;
-            @(negedge clk);
-            eval_valid = 0;
-            while (!eval_ready)
-                @(negedge clk);
-            eval_turn = BLACK;
-            eval_valid = 1;
-            @(negedge clk);
-            eval_valid = 0;
-            while (perspective_results != 2) begin
-                @(negedge clk);
-                if (result_valid) begin
-                    check(result == (perspective_results == 0
-                            ? PstEvalScore'(256) : PstEvalScore'(-256)),
-                        "overlapping evaluations preserve opposite perspective weights");
-                    perspective_results++;
+    // The scoreboard checks every response, including overlapped requests.
+    always @(negedge clk) begin
+        if (rst_n && !clear) begin
+            cycle_count++;
+            if (result_valid) begin
+                int expected;
+                check(expected_result.size() != 0, "result has an owning request");
+                if (expected_result.size() != 0) begin
+                    expected = expected_result.pop_front();
+                    check(int'(result) == expected, $sformatf("dot product expected %0d got %0d", expected, result));
+                    expected = expected_pst.pop_front();
+                    check(int'(result_pst) == expected, "PST stays aligned with its result");
                 end
+                results_seen++;
+            end
+            if (update_done_valid) begin
+                check(update_done_thread == update_req.thread_id && update_done_ply == update_req.ply,
+                    "update completion carries the accepted tag");
+                updates_seen++;
+            end
+            if (check_stream && dut.product_tag.valid) begin
+                if (stream_rows != 0) check(cycle_count == last_product_cycle+1, "stream has no idle multiplier cycles");
+                last_product_cycle = cycle_count;
+                stream_rows++;
             end
         end
-        eval_turn = WHITE;
-        dut.output_bias[0] = {NNUE_OUTPUT_BIAS_BITS{1'b1}};
-        evaluate(NnueCorrection'(256 + ((1 << NNUE_OUTPUT_BIAS_BITS) - 1)),
-            "unsigned output bias is added once");
-        dut.output_bias[0] = 8'(1 << (NNUE_OUTPUT_BIAS_BITS - 1));
-        evaluate(NnueCorrection'(256 + (1 << (NNUE_OUTPUT_BIAS_BITS - 1))),
-            "highest output-bias bit reaches the result");
-        dut.output_bias[0] = 0;
-        for (int row = NNUE_OUTPUT_MAC_CYCLES;
-                row < 2 * NNUE_OUTPUT_MAC_CYCLES; row++)
-            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h2}};
-        eval_piece_count = PieceCount'(6);
-        evaluate(NnueCorrection'(512), "piece count selects an independent output bucket");
-        eval_piece_count = PieceCount'(2);
-        for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
-            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h1}};
-
-        // A tagged child completion identifies the request that just committed.
-        update_req = '0;
-        update_req.thread_id = LAST_THREAD;
-        update_req.ply = PlyIndex'(1);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        update_req.complete = 1;
-        fork
-            begin
-                wait (update_done_valid);
-                check(update_done_thread == LAST_THREAD && update_done_ply == PlyIndex'(1),
-                    "tagged completion identifies the finished child state");
-            end
-            begin
-                enqueue(update_req);
-                update_req.complete = 0;
-                update_req.thread_id = ThreadID'(0);
-                update_req.ply = PlyIndex'(2);
-                repeat (3)
-                    enqueue(update_req);
-            end
-        join
-        wait (update_idle);
-
-        update_req.thread_id = ThreadID'(0);
-        update_req.ply = PlyIndex'(0);
-        eval_thread_id = ThreadID'(0);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        wait (update_idle);
-        evaluate(NnueCorrection'(256), "perspective activations feed the output layer");
-        check(eval_ready, "evaluator becomes ready after its MAC and clipping cycles");
-
-        update_req = '0;
-        update_req.ply = PlyIndex'(1);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 0;
-        enqueue(update_req);
-        wait (update_idle);
-        evaluate(NnueCorrection'(0), "a feature delta forwards updated state");
-
-        // A normal child updates its thread's live state without a copy request.
-        update_req = '0;
-        update_req.thread_id = ThreadID'(1);
-        update_req.ply = PlyIndex'(0);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        update_req = '0;
-        update_req.thread_id = ThreadID'(1);
-        update_req.ply = PlyIndex'(1);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 0;
-        enqueue(update_req);
-        wait (update_idle);
-        eval_thread_id = ThreadID'(1);
-        evaluate(NnueCorrection'(0),
-            "first delta reads the live parent without a standalone copy request");
-
-        // The shared state store must support an evaluation read while a
-        // different thread commits its next accumulator update.
-        update_req = '0;
-        update_req.thread_id = ThreadID'(3);
-        update_req.ply = PlyIndex'(0);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        wait (update_idle);
-        update_req.thread_id = ThreadID'(4);
-        enqueue(update_req);
-        wait (update_idle);
-        update_req.clear = 0;
-        enqueue(update_req);
-        eval_thread_id = ThreadID'(3);
-        eval_valid = 1;
-        @(negedge clk);
-        eval_valid = 0;
-        wait (result_valid);
-        check(result == NnueCorrection'(256),
-            "evaluation overlaps another thread's accumulator commit");
-        wait (update_idle);
-        eval_thread_id = ThreadID'(4);
-        evaluate(NnueCorrection'(512),
-            "overlapped update is visible in its destination thread");
-
-        // Consecutive requests for one thread must observe each preceding
-        // distributed-memory commit without an issue bubble.
-        update_req = '0;
-        update_req.thread_id = ThreadID'(2);
-        update_req.ply = PlyIndex'(1);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        @(negedge clk);
-        update_valid = 1;
-        @(negedge clk);
-        update_req.clear = 0;
-        @(negedge clk);
-        update_req.complete = 1;
-        @(negedge clk);
-        update_valid = 0;
-        update_req.complete = 0;
-        wait (update_done_valid);
-        wait (update_idle);
-        eval_thread_id = ThreadID'(2);
-        evaluate(NnueCorrection'(768),
-            "full-width update pipeline commits back-to-back same-thread rows");
-
-        // The maximum unsigned bias must survive the clear without sign extension.
-        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = {NNUE_ACCUMULATOR_BIAS_BITS{1'b1}};
-        dut.feature_rom[0] = '0;
-        eval_thread_id = ThreadID'(0);
-        update_req = '0;
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        wait (update_idle);
-        check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
-                == NnueAccumulator'((1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1),
-            "unsigned accumulator bias is zero-extended on clear");
-        evaluate(NnueCorrection'(NNUE_SIDE_COUNT * NNUE_ACCUMULATOR_COUNT * 7),
-            "unsigned bias activates both perspectives");
-        dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
-        enqueue(update_req);
-        wait (update_idle);
-        check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
-                == NnueAccumulator'(-(1 << (NNUE_ACCUMULATOR_BITS - 1))),
-            "maximum bias plus a feature wraps the signed accumulator");
-        evaluate(NnueCorrection'(NNUE_ACCUMULATOR_COUNT * 7),
-            "wrapped perspective contributes zero after SCReLU");
-
-        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 4'd3;
-        eval_thread_id = ThreadID'(0);
-        update_req = '0;
-        update_req.ply = PlyIndex'(2);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        update_req.clear = 0;
-        repeat (11) enqueue(update_req);
-        wait (update_idle);
-        check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
-                == NnueAccumulator'(15),
-            "five-bit accumulators retain the trained positive range");
-        evaluate(NnueCorrection'(2048), "concatenated perspective activations reach the output");
-        update_req.add = 0;
-        repeat (12)
-            enqueue(update_req);
-        wait (update_idle);
-        check($signed(dut.accumulator_update_memory[0][0 +: NNUE_ACCUMULATOR_BITS])
-                == NnueAccumulator'(3),
-            "modular inverse deltas exactly restore the accumulator bias");
-        evaluate(NnueCorrection'(512), "both biased perspectives remain in the concatenated output");
-
-        // Flush an accepted evaluation and queued update together, then prove
-        // that no result or update survives and a fresh rebuild still works.
-        @(negedge clk);
-        update_req = '0;
-        update_req.thread_id = LAST_THREAD;
-        update_req.ply = PlyIndex'(2);
-        update_req.white_feature = 0;
-        update_req.black_feature = 1;
-        update_req.apply = 1;
-        update_req.add = 1;
-        update_valid = 1;
-        eval_thread_id = ThreadID'(0);
-        eval_valid = 1;
-        @(negedge clk);
-        update_valid = 0;
-        eval_valid = 0;
-        clear = 1;
-        @(negedge clk);
-        clear = 0;
-        check(update_idle && eval_ready, "clear retires queued update and evaluation work");
-        begin
-            automatic bit stale_result_seen = 1'b0;
-            repeat (7) begin
-                @(negedge clk);
-                stale_result_seen |= result_valid;
-            end
-            check(!stale_result_seen, "clear suppresses stale evaluation results");
-        end
-        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 4'd2;
-        update_req.clear = 1;
-        enqueue(update_req);
-        wait (update_idle);
-        eval_thread_id = LAST_THREAD;
-        evaluate(NnueCorrection'(256), "evaluation restarts correctly after clear");
-
-        // Exercise the signed activation product extrema; an unsigned
-        // multiply produces a non-clipped value with this model.
-        dut.feature_rom[0] = {NNUE_ROW_BYTES{8'h55}};
-        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
-            dut.accumulator_bias[lane] = 4'd3;
-        for (int row = 0; row < NNUE_OUTPUT_MAC_CYCLES; row++)
-            dut.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{3'h4}};
-        update_req.ply = PlyIndex'(1);
-        update_req.black_feature = 0;
-        update_req.add = 1;
-        update_req.clear = 1;
-        enqueue(update_req);
-        update_req.clear = 0;
-        repeat (11)
-            enqueue(update_req);
-        wait (update_idle);
-        evaluate(NnueCorrection'(-14336), "signed activation products retain their full width");
-        dut.output_bias[0] = 8'h10;
-        evaluate(NnueCorrection'(-14320), "negative MAC sum and unsigned bias retain their full width");
-        dut.output_bias[0] = 0;
-
-        begin
-            automatic time first_issue, second_issue;
-            automatic int stream_results = 0;
-
-            @(negedge clk);
-            eval_pst = '{first: PstEvalScore'(0), endgame: PstEvalScore'(137)};
-            first_issue = $time;
-            eval_valid = 1;
-            @(negedge clk);
-            eval_valid = 0;
-            while (!eval_ready)
-                @(negedge clk);
-            second_issue = $time;
-            eval_pst = '{first: PstEvalScore'(0), endgame: PstEvalScore'(-83)};
-            eval_valid = 1;
-            @(negedge clk);
-            eval_valid = 0;
-            check(second_issue - first_issue
-                    == (NNUE_OUTPUT_MAC_CYCLES + 2) * 10ns,
-                "evaluation initiation interval includes both partial-sum stages");
-            while (stream_results != 2) begin
-                @(negedge clk);
-                if (result_valid) begin
-                    check(result == NnueCorrection'(-14336),
-                        "pipelined evaluation preserves result ordering");
-                    check(result_pst == (stream_results == 0
-                            ? PstEvalScore'(137) : PstEvalScore'(-83)),
-                        "pipelined PST blend preserves result ordering");
-                    stream_results++;
-                end
-            end
-        end
-
-        $display("Pass Count: %0d", pass_count);
-        $display("Fail Count: %0d", fail_count);
-        if (fail_count != 0)
-            $fatal(1, "NNUE evaluator testbench failed");
-        $finish;
     end
 
+    // Honor backpressure and update the reference with modular arithmetic.
+    task automatic send_update(input NnueUpdateRequest req);
+        @(negedge clk);
+        while (!update_ready) @(negedge clk);
+        update_req = req;
+        update_valid = 1;
+        @(posedge clk);
+        if (req.apply)
+            for (int side = 0; side < 2; side++)
+                for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
+                    automatic int index = side*NNUE_ACCUMULATOR_COUNT+lane;
+                    automatic int value = req.clear ? bias_value(lane) : reference_state[req.thread_id][index];
+                    automatic int weight = feature_value(side == 0 ? int'(req.white_feature) : int'(req.black_feature), lane);
+                    reference_state[req.thread_id][index] = wrap(value + (req.add ? weight : -weight));
+                end
+        @(negedge clk);
+        update_valid = 0;
+    endtask
+
+    task automatic send_eval(input int thread, input Color turn, input int piece_count, input int first, input int endgame);
+        int expected, bucket, phase;
+        @(negedge clk);
+        while (!eval_ready) @(negedge clk);
+        eval_thread_id = ThreadID'(thread);
+        eval_turn = turn;
+        eval_piece_count = PieceCount'(piece_count);
+        eval_pst = '{first: PstEvalScore'(first), endgame: PstEvalScore'(endgame)};
+        eval_valid = 1;
+        bucket = int'(nnue_output_bucket(PieceCount'(piece_count)));
+        expected = bucket*7;
+        for (int lane = 0; lane < NNUE_OUTPUT_INPUT_COUNT; lane++) begin
+            automatic int state_lane = (lane + (turn == BLACK ? NNUE_ACCUMULATOR_COUNT : 0)) % NNUE_OUTPUT_INPUT_COUNT;
+            expected += activation(reference_state[thread][state_lane])*weight_value(bucket,lane);
+        end
+        phase = piece_count <= 2 ? 0 : piece_count >= 32 ? 30 : piece_count-2;
+        expected_result.push_back(expected);
+        expected_pst.push_back((first*phase + endgame*(30-phase))/30);
+        @(negedge clk);
+        eval_valid = 0;
+    endtask
+
+    task automatic check_state(input int thread);
+        logic [NNUE_STATE_VALUE_COUNT*NNUE_ACCUMULATOR_BITS-1:0] actual;
+        wait (update_idle);
+        @(negedge clk);
+        actual = dut.read_state(thread);
+        for (int lane = 0; lane < NNUE_STATE_VALUE_COUNT; lane++)
+            check(int'($signed(actual[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS])) == reference_state[thread][lane],
+                "committed accumulator matches reversible scalar update");
+    endtask
+
     initial begin
-        #1_000_000;
-        $fatal(1, "NNUE evaluator testbench timed out (pass=%0d fail=%0d)",
-            pass_count, fail_count);
+        #1;
+        for (int feature = 0; feature < NNUE_FEATURE_COUNT; feature++) begin
+            automatic logic [NNUE_FEATURE_ROW_BITS-1:0] value;
+            for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
+                value[lane*2 +: 2] = 2'(feature_value(feature,lane));
+            dut.load_feature(feature,value);
+        end
+        // Model contents at unreachable features must never corrupt idle reads.
+        for (int square = 0; square < 8; square++)
+            dut.load_feature(square, '1);
+        for (int row = 0; row < dut.SIDE_ROWS; row++)
+            check(dut.feature_bank0[row] == '0 && dut.feature_bank1[row] == '0
+                && dut.feature_bank2[row] == '0, "zero vectors survive unused model entries");
+        for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) dut.load_bias(lane, NNUE_ACCUMULATOR_BIAS_BITS'(bias_value(lane)));
+        for (int bucket = 0; bucket < NNUE_OUTPUT_BUCKET_COUNT; bucket++) begin
+            dut.output_bias[bucket] = 8'(bucket*7);
+            for (int lane = 0; lane < NNUE_OUTPUT_INPUT_COUNT; lane++)
+                dut.output_weight_rows[bucket*NNUE_OUTPUT_MAC_CYCLES+lane/NNUE_OUTPUT_MAC_LANES][(lane%NNUE_OUTPUT_MAC_LANES)*4 +: 4]
+                    = 4'(weight_value(bucket,lane));
+        end
+        for (int acc = -(1 << (NNUE_ACCUMULATOR_BITS-1)); acc < (1 << (NNUE_ACCUMULATOR_BITS-1)); acc++)
+            check(int'(dut.screlu(NnueAccumulator'(acc))) == activation(acc), "SCReLU matches every accumulator code");
+        repeat (2) @(negedge clk);
+        rst_n = 1;
+        for (int thread = 0; thread < TEST_THREADS; thread++) begin
+            automatic NnueUpdateRequest req = '0;
+            req.thread_id = ThreadID'(thread);
+            req.white_feature = 8;
+            req.black_feature = 432;
+            req.apply = 1;
+            req.add = 1;
+            req.clear = 1;
+            req.complete = 1;
+            req.ply = PlyIndex'(thread+1);
+            send_update(req);
+            check_state(thread);
+        end
+        for (int piece_count = 2; piece_count <= 32; piece_count++) begin
+            send_eval(piece_count%TEST_THREADS, WHITE, piece_count, -327, 191);
+            send_eval(piece_count%TEST_THREADS, BLACK, piece_count, 333, -99);
+        end
+        wait (expected_result.size() == 0);
+        @(negedge clk);
+        check_stream = 1;
+        for (int request = 0; request < 6; request++)
+            send_eval(request%TEST_THREADS, request[0] ? BLACK : WHITE, 2+request*4, 137+request, -83-request);
+        wait (expected_result.size() == 0);
+        @(negedge clk);
+        check_stream = 0;
+        check(stream_rows == 6*NNUE_OUTPUT_MAC_CYCLES, "all requested rows used the continuous multiplier stream");
+
+        // A capture batches three features; an inverse batch restores all lanes.
+        for (int reverse_move = 0; reverse_move < 2; reverse_move++) begin
+            for (int step = 0; step < 3; step++) begin
+                automatic NnueUpdateRequest req = '0;
+                automatic Position square = step == 0 ? Position'(18) : Position'(27);
+                automatic Tile piece = step == 1 ? BLACK_PAWN : WHITE_KNIGHT;
+                req.thread_id = 1;
+                req.ply = 4;
+                req.apply = 1;
+                req.combine = 1;
+                req.complete = step == 2;
+                req.add = (step == 2) ^ (reverse_move != 0);
+                req.white_feature = nnue_feature_index(square,piece,WHITE);
+                req.black_feature = nnue_feature_index(square,piece,BLACK);
+                send_update(req);
+            end
+            check_state(1);
+            send_eval(1, WHITE, 17, 20, -20);
+        end
+        wait (expected_result.size() == 0);
+
+        // Repeated modular overflow and underflow must reverse exactly.
+        for (int direction = 0; direction < 2; direction++) begin
+            for (int repeat_index = 0; repeat_index < (1 << NNUE_ACCUMULATOR_BITS); repeat_index++) begin
+                automatic NnueUpdateRequest req = '0;
+                req.apply = 1;
+                req.add = direction == 0;
+                req.white_feature = 8;
+                req.black_feature = 432;
+                send_update(req);
+            end
+            check_state(0);
+        end
+
+        // Forward reads take priority while a different thread's update waits.
+        fork
+            begin
+                automatic NnueUpdateRequest req = '0;
+                req.thread_id = 2;
+                req.apply = 1;
+                req.add = 1;
+                req.white_feature = 9;
+                req.black_feature = 433;
+                send_update(req);
+            end
+            begin
+                repeat (5) send_eval(0, BLACK, 32, -1, 0);
+            end
+        join
+        check_state(2);
+        send_eval(2, WHITE, 2, 0, 137);
+        wait (expected_result.size() == 0);
+
+        // Clear flushes every valid stage without resetting RAM contents.
+        send_eval(0, WHITE, 2, 0, 0);
+        clear = 1;
+        expected_result.delete(); expected_pst.delete();
+        @(negedge clk);
+        clear = 0;
+        repeat (NNUE_OUTPUT_MAC_CYCLES+6) @(negedge clk);
+        check(update_idle && eval_ready, "clear returns both request paths to idle");
+        send_eval(0, WHITE, 2, 0, 0);
+        wait (expected_result.size() == 0);
+        @(negedge clk);
+        $display("Pass Count: %0d", pass_count);
+        $display("Fail Count: %0d", fail_count);
+        if (fail_count) $fatal(1,"NNUE evaluator failed");
+        $finish;
+    end
+    initial begin
+        #2_000_000;
+        $fatal(1,"NNUE evaluator timed out");
     end
 endmodule

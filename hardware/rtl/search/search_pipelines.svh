@@ -17,24 +17,23 @@
     // Collapse independent reader responses in a separate combinational block
     // so scheduler logic sees the current response without relying on
     // procedural assignment order inside its larger control block.
+    // Select response data from register occupancy, before reset/flush validity
+    // qualification. Cancellation must not steer the board's wide move/board muxes.
     always_comb begin
         move_pop_response_mask = '0;
-        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
-            move_pop_response_mask[tid] = move_pop_resp_valid_vec[tid];
-        move_pop_resp_valid = |move_pop_response_mask;
+        move_pop_resp_valid = 1'b0;
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+            move_pop_response_mask[tid] = move_pop_resp_pending_vec[tid];
+            move_pop_resp_valid |= move_pop_resp_valid_vec[tid];
+        end
+        move_pop_response_pending = |move_pop_response_mask;
         move_pop_response_thread = search_select_thread(
             move_pop_response_mask, move_pop_response_rr);
         move_pop_resp_thread = move_pop_response_thread;
-        move_pop_resp_ply = PlyIndex'(0);
-        move_pop_resp_found = 1'b0;
-        move_pop_resp_move = NULL_MOVE;
-        move_pop_resp_bucket = MoveBucketIndex'(0);
-        if (move_pop_resp_valid) begin
-            move_pop_resp_ply = move_pop_resp_ply_vec[move_pop_response_thread];
-            move_pop_resp_found = move_pop_resp_found_vec[move_pop_response_thread];
-            move_pop_resp_move = move_pop_resp_move_vec[move_pop_response_thread];
-            move_pop_resp_bucket = move_pop_resp_bucket_vec[move_pop_response_thread];
-        end
+        move_pop_resp_ply = move_pop_resp_ply_vec[move_pop_response_thread];
+        move_pop_resp_found = move_pop_resp_found_vec[move_pop_response_thread];
+        move_pop_resp_move = move_pop_resp_move_vec[move_pop_response_thread];
+        move_pop_resp_bucket = move_pop_resp_bucket_vec[move_pop_response_thread];
     end
 
     always_ff @(posedge clk) begin
@@ -193,6 +192,7 @@
         .node_init_valid(move_node_init_valid), .node_init_ready(move_node_init_ready),
         .node_init_ply(move_node_init_ply),
         .bad_noisy_enable(move_bad_noisy_enable),
+        .pop_resp_pending(move_pop_resp_pending_vec),
         .pop_resp_valid(move_pop_resp_valid_vec), .pop_resp_ready(move_pop_resp_ready_vec),
         .pop_resp_ply(move_pop_resp_ply_vec), .pop_resp_found(move_pop_resp_found_vec),
         .pop_resp_move(move_pop_resp_move_vec), .pop_resp_bucket(move_pop_resp_bucket_vec),
