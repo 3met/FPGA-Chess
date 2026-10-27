@@ -19,7 +19,7 @@ class RTLConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for threads, stack_depth in ((1, 1), (3, 33), (17, 65)):
-                config = {"threads": threads, "stack_depth": stack_depth}
+                config = {"threads": threads, "stack_depth": stack_depth, "nnue_cache_entries": 4}
                 path = write_rtl_config(root / str(threads), config)
                 self.assertEqual(path.read_text(), rtl_config_source(config))
             self.assertIn("THREAD_CAPACITY = 1;", (root / "1/rtl_config.sv").read_text())
@@ -34,11 +34,20 @@ class RTLConfigTests(unittest.TestCase):
             with self.subTest(target=target), self.assertRaises(BuildError):
                 type_config_for_target(target)
 
+    def test_cache_capacity_is_validated_and_rendered(self):
+        """Cache geometry travels with the shared slot type in each generated package."""
+        for entries in (2, 4, 16):
+            source = rtl_config_source({"threads": 3, "stack_depth": 33, "nnue_cache_entries": entries})
+            self.assertIn(f"NNUE_CACHE_ENTRIES = {entries};", source)
+        for entries in (0, 1, 3, True):
+            with self.subTest(entries=entries), self.assertRaises(BuildError):
+                rtl_config_source({"threads": 3, "stack_depth": 33, "nnue_cache_entries": entries})
+
     def test_standalone_profile_rejects_independent_width_settings(self):
         """Widths must be derived from capacities rather than independently configured."""
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "types.json"
-            path.write_text(json.dumps({"threads": 3, "stack_depth": 33, "thread_id_bits": 2}))
+            path.write_text(json.dumps({"threads": 3, "stack_depth": 33, "thread_id_bits": 2, "nnue_cache_entries": 4}))
             with self.assertRaisesRegex(BuildError, "unknown thread_id_bits"):
                 load_type_config(str(path))
 
@@ -47,7 +56,7 @@ class RTLConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_path = root / "types.json"
-            config = {"threads": 3, "stack_depth": 33}
+            config = {"threads": 3, "stack_depth": 33, "nnue_cache_entries": 4}
             config_path.write_text(json.dumps(config))
             source = root / "chess_defs.sv"
             with mock.patch("tools.hardware_build.simulation.modelsim_tools", return_value={"vlib": "vlib", "vlog": "vlog"}), \

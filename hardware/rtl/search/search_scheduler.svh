@@ -4,7 +4,7 @@
     // Budget comparators have their own register boundary instead of gating
     // every search-state update. A reached budget is observed one clock later.
     always_ff @(posedge clk) begin
-        if (!rst_n || state != CTRL_SEARCH_RUN) begin
+        if (!core_rst_n || state != CTRL_SEARCH_RUN) begin
             search_node_stop_q <= 1'b0;
             search_time_stop_q <= 1'b0;
         end else begin
@@ -23,12 +23,13 @@
     // Classify the unchanged parent one stage before the board result arrives.
     // Only the child's check flag remains to be applied at commitment, keeping
     // move decoding and margin arithmetic off the child-state write path.
+    // Accepted board tags still need classification while cancellation drains.
     always_ff @(posedge clk) begin
-        if (!rst_n) begin
+        if (!core_rst_n) begin
             parent_futility_eligible_q <= 1'b0;
             parent_futility_prunes_q <= 1'b0;
             parent_qdelta_prunes_q <= 1'b0;
-        end else if (state == CTRL_SEARCH_RUN
+        end else if ((state == CTRL_SEARCH_RUN || state == CTRL_SEARCH_DRAIN)
                 && search_board_tag_valid_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 2]) begin
             automatic ThreadID thread_id =
                 search_board_tag_pipe[SEARCH_BOARD_TAG_PIPE_LEN - 2];
@@ -87,8 +88,7 @@
                 && !search_node_init_request[idx];
             search_quiet_mask[idx] = search_thread_quiet_ready(idx);
             search_eval_mask[idx] = search_thread_eval_ready(idx)
-                && (!(nnue_delta_busy || nnue_plan_any)
-                    || nnue_state_valid[idx]);
+                && nnue_state_valid[idx];
             search_tt_lookup_mask[idx] = search_thread_tt_lookup_ready(idx)
                 && !tt_transport_pending[idx];
             search_return_mask[idx] = search_thread_return_pending(idx);
@@ -104,12 +104,12 @@
         // Always consume a registered response. Keeping backend response
         // routing separate from score/window decisions breaks the bypass path
         // through TT classification into the board and move schedulers.
-        search_tt_consume_valid = state == CTRL_SEARCH_RUN && |search_tt_response_mask;
+        search_tt_consume_valid = state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested() && |search_tt_response_mask;
         search_tt_consume_thread = search_select_thread(
             search_tt_response_mask, search_dispatch.tt_response);
         search_tt_consume_response = search_tt_response[search_tt_consume_thread];
 
-        move_board_bypass_valid = state == CTRL_SEARCH_RUN
+        move_board_bypass_valid = state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested()
             && ((move_pop_resp_valid && move_pop_resp_found)
                 || (move_cmd_resp_valid && move_cmd_resp_direct_valid));
         // Payload selection uses only registered response ownership. The valid
@@ -123,24 +123,24 @@
 
         // Response continuations become ordinary ready work on the next cycle;
         // downstream admission never feeds the current response's state write.
-        search_null_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_null_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && !move_board_bypass_valid
             && !(|search_board_mask)
             && |search_null_mask;
-        search_board_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_board_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && (move_board_bypass_valid
                 || |search_board_mask
                 || search_null_issue_valid);
-        search_move_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_move_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && |search_move_mask;
-        search_quiet_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_quiet_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && |search_quiet_mask;
-        search_eval_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_eval_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && !nnue_build_busy
             && |search_eval_mask;
-        search_tt_lookup_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_tt_lookup_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && |search_tt_lookup_mask;
-        search_tt_store_issue_valid = (state == CTRL_SEARCH_RUN)
+        search_tt_store_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
             && |search_store_mask;
         // Keep null eligibility out of the normal move payload mux. A null
         // board operation ignores move_in, but allowing its thread choice to

@@ -115,7 +115,7 @@ This programs the volatile `.sof` image over JTAG. Use `--dry-run` to inspect th
 
 ## Select Engine Settings
 
-Search policies live under `hardware/config/search/`; engine profiles under `hardware/config/engine/` select the policy, hardware capacities, clocks, and instrumentation. The `history_heuristic` object selects the history table entry count and signed entry width. History reset priors and the three ascending quiet-bucket boundaries may be negative. The prior and positive reward must fit the configured signed entry width. Vendor, device, constraints, and fitter settings belong to the manifest target. Quartus targets may select vendor wrappers with a `verilog_macros` list of macro names.
+Search policies live under `hardware/config/search/`; engine profiles under `hardware/config/engine/` select the policy, hardware capacities, clocks, and instrumentation. The `engine.nnue_cache_entries` field selects a power-of-two snapshot count of at least two per thread; slot and reverse-counter widths derive from it. Cache depth must fit the accumulator BRAM budget. The `history_heuristic` object selects the history table entry count and signed entry width. History reset priors and the three ascending quiet-bucket boundaries may be negative. The prior and positive reward must fit the configured signed entry width. Vendor, device, constraints, and fitter settings belong to the manifest target. Quartus targets may select vendor wrappers with a `verilog_macros` list of macro names.
 
 For a target with an engine profile, use another profile without editing the manifest:
 

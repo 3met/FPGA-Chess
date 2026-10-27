@@ -341,7 +341,7 @@ def load_engine_config(value: str) -> dict:
     history = _object(engine_profile, "history_heuristic", rel(engine_path))
     move_memory = _object(engine_profile, "move_memory", rel(engine_path))
     instrumentation = _object(engine_profile, "instrumentation", rel(engine_path))
-    _require_keys(engine, {"threads", "stack_depth"}, f"{rel(engine_path)}.engine")
+    _require_keys(engine, {"threads", "stack_depth", "nnue_cache_entries"}, f"{rel(engine_path)}.engine")
     _require_keys(tt, {"tag_bits", "cache_index_bits", "store_fifo_depth", "outstanding_depth", "response_fifo_depth", "writeback_fifo_depth"}, f"{rel(engine_path)}.transposition_table")
     _require_keys(history, {"entry_count", "entry_bits"}, f"{rel(engine_path)}.history_heuristic")
     _require_keys(instrumentation, {"search_statistics"}, f"{rel(engine_path)}.instrumentation")
@@ -363,6 +363,7 @@ def load_engine_config(value: str) -> dict:
         "search_config": rel(search_path),
         "threads": _integer(engine, "threads", f"{rel(engine_path)}.engine", 1),
         "stack_depth": _integer(engine, "stack_depth", f"{rel(engine_path)}.engine", 1),
+        "nnue_cache_entries": _integer(engine, "nnue_cache_entries", f"{rel(engine_path)}.engine", 2),
         "clocks": resolve_clocks(engine_profile.get("clocks")),
         "tt_tag_bits": _integer(tt, "tag_bits", f"{rel(engine_path)}.transposition_table", 1, 63),
         "tt_cache_index_bits": _integer(tt, "cache_index_bits", f"{rel(engine_path)}.transposition_table", 1),
@@ -375,6 +376,8 @@ def load_engine_config(value: str) -> dict:
         "search_statistics": _boolean(instrumentation, "search_statistics", f"{rel(engine_path)}.instrumentation"),
         "search": search,
     }
+    if resolved["nnue_cache_entries"] & (resolved["nnue_cache_entries"] - 1):
+        raise BuildError("engine.nnue_cache_entries must be a power of two")
     # CDC queues use Gray pointers; matching metadata shares the read depth.
     for key in ("tt_outstanding_depth", "tt_response_fifo_depth", "tt_writeback_fifo_depth"):
         depth = resolved[key]

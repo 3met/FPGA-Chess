@@ -1,27 +1,12 @@
-// NNUE replay progress, evaluation tags, plan handoff, and completion routing.
-// Included in CTRL_SEARCH_RUN so controller update precedence is preserved.
+// NNUE move progress, evaluation tags, plan handoff, and completion routing.
+// Included in CTRL_SEARCH_RUN and CTRL_SEARCH_DRAIN so controller update precedence is preserved.
 
-                    if (nnue_build_busy && !nnue_build_draining) begin
-                        // This producer owns the port; empty squares advance
-                        // without consulting another producer's valid decode.
-                        if (nnue_build_square_empty || nnue_update_ready) begin
-                            if (!nnue_build_square_empty)
-                                nnue_build_first <= 1'b0;
-                            if (nnue_build_pos == Position'(63)) begin
-                                nnue_build_draining <= 1'b1;
-                            end else begin
-                                nnue_build_pos <= nnue_build_pos + Position'(1);
-                            end
-                        end
-                    end
                     if (nnue_eval_enqueued) begin
                         nnue_eval_tag[nnue_eval_tag_write_ptr].thread_id <= nnue_build_thread;
                         nnue_eval_tag[nnue_eval_tag_write_ptr].ply
                             <= search_ply[nnue_build_thread];
                         nnue_eval_tag_write_ptr <= !nnue_eval_tag_write_ptr;
                         nnue_build_busy <= 1'b0;
-                        nnue_build_draining <= 1'b0;
-                        nnue_build_wait_updates <= 1'b0;
                     end
                     if (nnue_eval_dequeued)
                         nnue_eval_tag_read_ptr <= !nnue_eval_tag_read_ptr;
@@ -34,61 +19,16 @@
 
                     if (!nnue_delta_busy && !nnue_build_busy
                             && nnue_plan_select_valid) begin
-                        start_nnue_plan(nnue_plan_select_thread,
-                            nnue_plan[nnue_plan_select_thread].kind == NNUE_PLAN_REBUILD);
+                        start_nnue_plan(nnue_plan_select_thread);
                     end
 
-                    if (nnue_delta_busy) begin
-                        // Match the update-port arbiter locally, keeping root
-                        // feature decoding out of incremental replay feedback.
-                        automatic logic delta_update_accepted =
-                            (!nnue_build_busy || nnue_build_draining)
-                            && nnue_delta_update_valid && nnue_update_ready;
-                        if (nnue_delta_draining) begin
-                            if (delta_update_accepted) begin
-                                // The ordered marker now owns completion; hand
-                                // directly to another pending child if possible.
-                                nnue_plan_inflight[nnue_delta_thread] <= 1'b1;
-                                nnue_delta_draining <= 1'b0;
-                                if (nnue_plan_select_valid) begin
-                                    start_nnue_plan(nnue_plan_select_thread,
-                                        nnue_plan[nnue_plan_select_thread].kind == NNUE_PLAN_REBUILD);
-                                end else begin
-                                    nnue_delta_busy <= 1'b0;
-                                    nnue_delta_replay <= 1'b0;
-                                end
-                            end
-                        end else if (nnue_delta_replay) begin
-                            if (nnue_delta_square_empty
-                                    || ((!nnue_build_busy || nnue_build_draining)
-                                        && nnue_update_ready)) begin
-                                if (!nnue_delta_square_empty)
-                                    nnue_delta_first <= 1'b0;
-                                if (nnue_delta_pos == Position'(63)) begin
-                                    nnue_delta_draining <= 1'b1;
-                                    nnue_delta_replay <= 1'b0;
-                                end else begin
-                                    nnue_delta_pos <= nnue_delta_pos + Position'(1);
-                                end
-                            end
-                        end else if (delta_update_accepted) begin
-                            // The encoder marks exactly the last physical delta request.
-                            if (nnue_delta_update_req.complete) begin
-                                // A tagged writeback completes this plan;
-                                // start the next plan without an arbitration
-                                // or request-issue bubble.
-                                nnue_plan_inflight[nnue_delta_thread] <= 1'b1;
-                                if (nnue_plan_select_valid) begin
-                                    start_nnue_plan(nnue_plan_select_thread,
-                                        nnue_plan[nnue_plan_select_thread].kind == NNUE_PLAN_REBUILD);
-                                end else begin
-                                    nnue_delta_busy <= 1'b0;
-                                    nnue_delta_replay <= 1'b0;
-                                end
-                            end else begin
-                                nnue_delta_step <= nnue_delta_step + 3'd1;
-                            end
-                        end
+                    if (nnue_delta_busy && nnue_delta_update_valid && nnue_update_ready) begin
+                        if (nnue_delta_update_req.complete) begin
+                            nnue_plan_inflight[nnue_delta_thread] <= 1'b1;
+                            if (nnue_plan_select_valid)
+                                start_nnue_plan(nnue_plan_select_thread);
+                            else nnue_delta_busy <= 1'b0;
+                        end else nnue_delta_step <= nnue_delta_step + 3'd1;
                     end
 
                     if (nnue_update_done_valid) begin
@@ -109,6 +49,10 @@
                                 && nnue_plan[completed_thread].child_ply == completed_ply)
                             else $fatal(1, "NNUE update completion tag does not own a child plan");
 `endif
+                        if (nnue_plan[completed_thread].reverse)
+                            nnue_cached_reverses[completed_thread] <= '0;
+                        else if (nnue_cached_reverses[completed_thread] != NnueSlot'(NNUE_CACHE_ENTRIES-1))
+                            nnue_cached_reverses[completed_thread] <= nnue_cached_reverses[completed_thread] + NnueSlot'(1);
                         nnue_state_valid[completed_thread] <= 1'b1;
                         nnue_plan_pending[completed_thread] <= 1'b0;
                         nnue_plan_inflight[completed_thread] <= 1'b0;

@@ -153,7 +153,7 @@ class EngineConfigTests(unittest.TestCase):
             engine_path.write_text(
                 json.dumps({
                     "search_config": str(search_path),
-                    "engine": {"threads": 17, "stack_depth": 65},
+                    "engine": {"threads": 17, "stack_depth": 65, "nnue_cache_entries": 4},
                     "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"],
                     "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
@@ -169,6 +169,15 @@ class EngineConfigTests(unittest.TestCase):
             self.assertEqual(config["threads"], 17)
             self.assertEqual(config["stack_depth"], 65)
 
+    def test_nnue_snapshot_cache_geometry(self):
+        """Only powers of two with separate source/destination slots are accepted."""
+        for entries in (2, 4, 16):
+            config = self.load_temporary_config(engine_updates={"engine": {"nnue_cache_entries": entries}})
+            self.assertEqual(config["nnue_cache_entries"], entries)
+        for entries in (0, 1, 3, 6, True):
+            with self.subTest(entries=entries), self.assertRaises(BuildError):
+                self.load_temporary_config(engine_updates={"engine": {"nnue_cache_entries": entries}})
+
     def test_zero_thread_count_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -176,7 +185,7 @@ class EngineConfigTests(unittest.TestCase):
             engine_path.write_text(
                 json.dumps({
                     "search_config": "hardware/config/search/default.json",
-                    "engine": {"threads": 0, "stack_depth": 1},
+                    "engine": {"threads": 0, "stack_depth": 1, "nnue_cache_entries": 4},
                     "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"],
                     "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
                     "history_heuristic": {"entry_count": 8192, "entry_bits": 8},

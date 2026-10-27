@@ -8,9 +8,6 @@ module tb_search_nnue_update_encoder;
     ThreadID thread_id;
     SearchNnuePlan plan;
     logic [2:0] step;
-    logic draining, first;
-    Position replay_pos;
-    Tile replay_tile;
     logic req_valid;
     NnueUpdateRequest req;
     int pass_count = 0;
@@ -52,7 +49,6 @@ module tb_search_nnue_update_encoder;
         before_board.tiles[4] = WHITE_KING;
         before_board.tiles[60] = BLACK_KING;
         plan = SearchNnuePlan'('0);
-        plan.kind = NNUE_PLAN_DELTA;
         plan.child_ply = PlyIndex'(3);
         plan.real_move = 1'b1;
         plan.from_pos = Position'(1) ^ rank_flip;
@@ -139,7 +135,7 @@ module tb_search_nnue_update_encoder;
             for (int index = 0; index < request_count; index++) begin
                 step = 3'(index);
                 #1;
-                protocol_ok &= req_valid && req.apply && req.combine && !req.clear
+                protocol_ok &= req_valid && req.apply && req.combine
                     && req.complete == (index == request_count - 1)
                     && req.thread_id == thread_id && req.ply == plan.child_ply;
                 bank_reads[WHITE][nnue_feature_bank(req.white_feature)]++;
@@ -156,30 +152,14 @@ module tb_search_nnue_update_encoder;
         end
         check(protocol_ok, {label, " request tags and completion"});
 
-        // Rebuild adds the whole board, clears on its first piece, then emits a marker.
-        plan.kind = NNUE_PLAN_REBUILD;
-        first = 1'b1;
-        protocol_ok = 1'b1;
-        for (int square = 0; square < 64; square++) begin
-            replay_pos = Position'(square);
-            replay_tile = after_board.tiles[square];
-            #1;
-            if (replay_tile.piece_type == NULL_PIECE) protocol_ok &= !req_valid;
-            else begin
-                protocol_ok &= req_valid && req.apply && !req.combine && req.add && !req.complete
-                    && req.clear == first && req.thread_id == thread_id
-                    && req.ply == plan.child_ply
-                    && req.white_feature == nnue_feature_index(replay_pos, replay_tile, WHITE)
-                    && req.black_feature == nnue_feature_index(replay_pos, replay_tile, BLACK);
-                first = 1'b0;
-            end
-        end
-        draining = 1'b1;
+        // Null moves preserve both perspectives while assigning a child slot.
+        plan = '0;
+        plan.child_ply = parent_ply;
+        plan.copy = 1'b1;
         #1;
-        protocol_ok &= req_valid && !req.apply && req.complete && !req.clear
-            && req.thread_id == thread_id && req.ply == plan.child_ply;
-        check(protocol_ok, {label, " rebuild and ordered marker"});
-        draining = 1'b0;
+        check(req_valid && req.apply && req.copy && req.complete && !req.combine
+            && req.thread_id == thread_id && req.ply == parent_ply,
+            {label, " null move requests a complete zero-delta copy"});
     endtask
 
     // Prove every reachable feature has a unique stored address and every
@@ -234,10 +214,6 @@ module tb_search_nnue_update_encoder;
         check_bank_layout();
         thread_id = ThreadID'(THREAD_COUNT - 1);
         step = '0;
-        draining = 1'b0;
-        first = 1'b0;
-        replay_pos = '0;
-        replay_tile = EMPTY_TILE;
         for (int color = 0; color < NNUE_SIDE_COUNT; color++)
             for (int scenario = 0; scenario < 7; scenario++)
                 for (int promotion = 0; promotion < 4; promotion++)

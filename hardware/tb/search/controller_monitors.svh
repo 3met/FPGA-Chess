@@ -231,22 +231,21 @@
                 stats_reset_pending <= 1'b1;
             end
             if (dut.nnue_update_valid && dut.nnue_update_ready) begin
-                if (dut.nnue_update_req.clear) begin
+                if (dut.state == CTRL_SEARCH_ROOT_INIT) begin
                     nnue_rebuild_seen = 1'b1;
-                    if (dut.nnue_update_req.ply == PlyIndex'(0))
-                        nnue_root_rebuild_count[dut.nnue_update_req.thread_id] += 1;
+
                 end else if (dut.nnue_delta_busy
-                        && dut.nnue_plan[dut.nnue_delta_thread].kind == NNUE_PLAN_DELTA)
+                        && !dut.nnue_plan[dut.nnue_delta_thread].copy)
                     nnue_delta_seen = 1'b1;
                 if (dut.nnue_delta_busy
-                        && dut.nnue_plan[dut.nnue_delta_thread].kind == NNUE_PLAN_DELTA
+                        && !dut.nnue_plan[dut.nnue_delta_thread].copy
                         && dut.nnue_plan[dut.nnue_delta_thread].mover.piece_type == KING
                         && dut.nnue_plan[dut.nnue_delta_thread].from_pos[2:0] == BoardFile'(4)
                         && (dut.nnue_plan[dut.nnue_delta_thread].to_pos[2:0] == BoardFile'(2)
                             || dut.nnue_plan[dut.nnue_delta_thread].to_pos[2:0] == BoardFile'(6)))
                     nnue_castle_request_count[dut.nnue_delta_thread] += 1;
             end
-            if (dut.nnue_update_done_valid
+            if (dut.state != CTRL_SEARCH_ROOT_INIT && dut.nnue_update_done_valid
                     && dut.nnue_plan[dut.nnue_update_done_thread].mover.piece_type == KING
                     && dut.nnue_plan[dut.nnue_update_done_thread].from_pos[2:0] == BoardFile'(4)
                     && (dut.nnue_plan[dut.nnue_update_done_thread].to_pos[2:0] == BoardFile'(2)
@@ -256,7 +255,7 @@
                     nnue_castle_request_count[dut.nnue_update_done_thread] == 4;
                 nnue_castle_request_count[dut.nnue_update_done_thread] = 0;
             end
-            if (dut.nnue_update_done_valid) begin
+            if (dut.state != CTRL_SEARCH_ROOT_INIT && dut.nnue_update_done_valid) begin
                 automatic ThreadID completed_thread = dut.nnue_update_done_thread;
                 automatic logic is_castle =
                     dut.nnue_plan[completed_thread].mover.piece_type == KING
@@ -280,13 +279,17 @@
                     nnue_en_passant_state_seen |= is_en_passant;
                     nnue_promotion_state_seen |= is_promotion;
                     nnue_special_state_correct &=
-                        dut.nnue_evaluator.read_state(int'(completed_thread)) === expected;
+                        dut.nnue_evaluator.read_state(int'(completed_thread), nnue_defs::NnueSlot'(dut.nnue_update_done_ply)) === expected;
                 end
             end
             if (dut.state == CTRL_SEARCH_ROOT_INIT
-                    && dut.nnue_root_init_pos == Position'(0)
-                    && dut.nnue_root_init_first)
-                nnue_root_initialization_correct &= dut.nnue_update_idle;
+                    && (previous_setup_state != CTRL_SEARCH_ROOT_INIT
+                        || previous_setup_thread != dut.nnue_root_init_thread)) begin
+                nnue_root_rebuild_count[dut.nnue_root_init_thread]++;
+                nnue_rebuild_seen = 1'b1;
+            end
+            previous_setup_state = dut.state;
+            previous_setup_thread = dut.nnue_root_init_thread;
             if (dut.state == CTRL_SEARCH_RUN && dut.nnue_roots_initialized
                     && !nnue_root_initialization_seen) begin
                 nnue_root_initialization_seen = 1'b1;
@@ -294,13 +297,9 @@
                     nnue_root_initialization_correct &=
                         dut.nnue_state_valid[idx];
                     nnue_root_initialization_correct &=
-                        dut.nnue_evaluator.read_state(idx) === dut.nnue_evaluator.read_state(0);
+                        dut.nnue_evaluator.read_state(idx, dut.nnue_slot[idx]) === reference_nnue_state(dut.active_board);
                 end
             end
-            if (dut.state == CTRL_SEARCH_RUN && dut.nnue_build_busy
-                    && dut.nnue_update_valid && dut.nnue_update_ready
-                    && dut.nnue_update_req.clear)
-                nnue_recovery_rebuild_seen = 1'b1;
             for (int idx = 0; idx < THREAD_COUNT; idx++) begin
                 if (dut.search_stack_top[idx].entered_by_null
                         && dut.search_thread_phase[idx] == SEARCH_PHASE_READY) begin
@@ -324,15 +323,15 @@
                             || dut.nnue_plan[idx].to_pos[2:0] == BoardFile'(6));
                     if (is_castle) begin
                         nnue_king_delta_correct &=
-                            dut.nnue_plan[idx].kind == NNUE_PLAN_DELTA;
+                            !dut.nnue_plan[idx].copy;
                     end else begin
                         nnue_king_delta_seen = 1'b1;
                         nnue_king_delta_correct &=
-                            dut.nnue_plan[idx].kind == NNUE_PLAN_DELTA;
+                            !dut.nnue_plan[idx].copy;
                     end
                     if (dut.nnue_plan[idx].from_pos == Position'(4)
                             && dut.nnue_plan[idx].to_pos == Position'(6)
-                            && dut.nnue_plan[idx].kind == NNUE_PLAN_DELTA)
+                            && !dut.nnue_plan[idx].copy)
                         nnue_castle_delta_seen = 1'b1;
                 end
                 if (lmr_depth_check_pending[idx]) begin
@@ -730,4 +729,38 @@
                 end
             end
         end
+    end
+
+    // A cached pop retires on the board-result edge without touching NNUE.
+    always @(posedge clk) if (rst_n && dut.core_rst_n
+            && (dut.state == CTRL_SEARCH_RUN || dut.state == CTRL_SEARCH_DRAIN)
+            && dut.search_board_tag_valid_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN-1]
+            && dut.search_board_op_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN-1] == BOARD_REVERSE_MOVE_OP) begin
+        automatic ThreadID tid = dut.search_board_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN-1];
+        automatic nnue_defs::NnueSlot before_count = dut.nnue_cached_reverses[tid];
+        automatic PlyIndex parent = dut.search_board_ply_tag_pipe[dut.SEARCH_BOARD_TAG_PIPE_LEN-1] - PlyIndex'(1);
+        if (before_count != 0) begin
+            automatic logic [NNUE_STATE_VALUE_COUNT*NNUE_ACCUMULATOR_BITS-1:0] expected
+                = reference_nnue_state(dut.board_update_out);
+            nnue_cached_pop_seen = 1'b1;
+            check(!(dut.nnue_update_valid && dut.nnue_update_req.thread_id == tid),
+                "cached pop issues no NNUE request");
+            #1;
+            check(dut.nnue_cached_reverses[tid] == before_count-1
+                    && dut.nnue_slot[tid] == nnue_defs::NnueSlot'(parent)
+                    && dut.nnue_state_valid[tid] && !dut.nnue_plan_pending[tid],
+                "cached pop selects its parent and decrements the counter");
+            check(dut.nnue_evaluator.read_state(int'(tid), nnue_defs::NnueSlot'(parent)) === expected,
+                "cached parent matches independent full-board NNUE reconstruction");
+        end
+    end
+
+    // Optional request trace for debugging ordered multi-feature transactions.
+    always @(posedge clk) begin
+        if ($test$plusargs("NNUE_TRACE") && dut.nnue_update_valid && dut.nnue_update_ready)
+            $display("NNUE_REQ t=%0t state=%0d setup=%0d square=%0d step=%0d thread=%0d ply=%0d features=%0d/%0d add=%b complete=%b copy=%b", $time,
+                dut.state, dut.nnue_setup_step, dut.nnue_root_init_pos, dut.nnue_delta_step,
+                dut.nnue_update_req.thread_id, dut.nnue_update_req.ply,
+                dut.nnue_update_req.white_feature, dut.nnue_update_req.black_feature,
+                dut.nnue_update_req.add, dut.nnue_update_req.complete, dut.nnue_update_req.copy);
     end

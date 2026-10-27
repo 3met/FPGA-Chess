@@ -129,8 +129,8 @@
             wait_cycles += 1;
         end
         if (!resp_valid) begin
-            $display("timeout %s state=%0d active=%0d", label, dut.state,
-                dut.search_active_thread_count);
+            $display("timeout %s state=%0d active=%0d tt_clear_busy=%b move_init_busy=%b", label, dut.state,
+                dut.search_active_thread_count, dut.tt_clear_busy, dut.move_init_busy);
             for (int tid = 0; tid < THREAD_COUNT; tid++)
                 $display("tid=%0d phase=%0d ply=%0d order=%0d gen=%0b cache_valid=%0b cache_ply=%0d mem_phase=%0d stage=%0b load=%0b",
                     tid, dut.search_thread_phase[tid], dut.search_ply[tid],
@@ -155,9 +155,9 @@
         check(!resp.error, "new game response has no error");
         for (int tid = 0; tid < THREAD_COUNT; tid++) begin
             nnue_metadata_clear &= !dut.nnue_plan_pending[tid];
-            nnue_metadata_clear &= !dut.nnue_state_valid[tid];
+            nnue_metadata_clear &= dut.nnue_state_valid[tid];
         end
-        check(nnue_metadata_clear, "new game invalidates queued NNUE plans and accumulator states");
+        check(nnue_metadata_clear, "new game drains NNUE plans and prepares valid start-position states");
         check(dut.nnue_update_idle && dut.nnue_eval_ready,
             "new game leaves the NNUE datapath idle and ready");
     endtask : new_game

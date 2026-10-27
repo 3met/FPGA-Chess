@@ -1037,26 +1037,11 @@ module tb_engine_profile #(
                 end else if (dut.controller.nnue_update_req.complete
                         && !dut.controller.nnue_update_req.apply) begin
                     nnue_completion_markers = nnue_completion_markers + 1;
-                end else if (dut.controller.nnue_delta_busy
-                        && dut.controller.nnue_delta_replay
-                        && dut.controller.nnue_plan[dut.controller.nnue_delta_thread].kind
-                            == NNUE_PLAN_REBUILD) begin
-                    nnue_rebuild_rows = nnue_rebuild_rows + 1;
-                    if (dut.controller.nnue_update_req.clear)
-                        nnue_rebuilds = nnue_rebuilds + 1;
-                end else if (dut.controller.nnue_build_busy
-                        && !dut.controller.nnue_build_draining) begin
-                    nnue_recovery_rows = nnue_recovery_rows + 1;
                 end else begin
                     nnue_delta_requests = nnue_delta_requests + 1;
                 end
             end
-            if (dut.controller.nnue_update_done_valid)
-                nnue_update_completions = nnue_update_completions + 1;
-            if (dut.controller.nnue_delta_busy && dut.controller.nnue_delta_draining
-                    && dut.controller.nnue_update_idle
-                    && dut.controller.nnue_plan[dut.controller.nnue_delta_thread].kind
-                        == NNUE_PLAN_REBUILD)
+            if (dut.controller.nnue_update_done_valid && dut.controller.state != CTRL_SEARCH_ROOT_INIT)
                 nnue_update_completions = nnue_update_completions + 1;
             if (dut.controller.repetition_req_valid) repetition_requests <= repetition_requests + 1;
             if (dut.controller.repetition_resp_valid) repetition_responses <= repetition_responses + 1;

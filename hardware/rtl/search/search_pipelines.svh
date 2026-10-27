@@ -4,7 +4,7 @@
     // Canceled searches still own their accepted TT probes until they return.
     // Prevent thread reuse from associating an old response with a new position.
     always_ff @(posedge clk) begin
-        if (!rst_n) tt_transport_pending <= '0;
+        if (!core_rst_n) tt_transport_pending <= '0;
         else begin
             if (tt_lookup_resp_valid) tt_transport_pending[tt_lookup_resp.thread_id] <= 1'b0;
             if (tt_lookup_req_valid && tt_lookup_req_ready)
@@ -38,7 +38,7 @@
 
     always_ff @(posedge clk) begin
         for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
-            if (!rst_n || state != CTRL_SEARCH_RUN
+            if (!core_rst_n || state != CTRL_SEARCH_RUN
                     || (req_valid && req.operation == ENGINE_CTRL_KILL)) begin
                 search_generation_inflight[tid] <= 1'b0;
                 search_generation_ply[tid] <= '0;
@@ -89,9 +89,9 @@
                 .clock(clk),
                 .data(search_stack_top[stack_tid]),
                 .rdaddress(search_stack_read_addr[stack_tid]),
-                .rden(rst_n),
+                .rden(core_rst_n),
                 .wraddress(search_stack_write_addr[stack_tid]),
-                .wren(rst_n),
+                .wren(core_rst_n),
                 .q(search_stack_parent_bits[stack_tid])
             );
         end
@@ -123,7 +123,7 @@
         .SEARCH_THREAD_COUNT(SEARCH_THREAD_COUNT), .SEARCH_STACK_DEPTH(SEARCH_STACK_DEPTH),
         .ACTIVE_HISTORY_DEPTH(ACTIVE_REPETITION_DEPTH), .EPOCH_BITS(REPETITION_EPOCH_BITS)
     ) repetition_checker_inst (
-        .clk(clk), .rst_n(rst_n), .flush(state == CTRL_FLUSH_RESPOND),
+        .clk(clk), .rst_n(core_rst_n), .flush(state == CTRL_FLUSH_RESPOND),
         .active_history_reset(repetition_history_reset), .active_history_write(repetition_history_write),
         .active_history_key(repetition_history_key), .init_start(repetition_init_start),
         .init_busy(), .init_done(repetition_init_done), .init_failed(repetition_init_failed),
@@ -163,7 +163,7 @@
         .ENABLE_STATS(ENABLE_SEARCH_STATS)
     ) move_generator (
         .clk(clk),
-        .rst_n(rst_n),
+        .rst_n(core_rst_n),
         .clear(state == CTRL_NEW_CLEAR_START),
         .flush((req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE)
             || state == CTRL_NEW_CLEAR_START || state == CTRL_FLUSH_RESPOND),
@@ -212,6 +212,8 @@
         .stat_bucket_count(move_stat_bucket_count), .stat_bucket_high_water(move_stat_bucket_high_water)
     );
 
+    // TT transport resets with its external memory domain; NNUE draining
+    // delays only controller ownership and position-dependent pipelines.
     tt_external_load_store #(
         .CACHE_INDEX_BITS(TT_CACHE_INDEX_BITS),
         .STORE_FIFO_DEPTH(TT_STORE_FIFO_DEPTH),
@@ -253,7 +255,7 @@
     generate
         if (ENABLE_SEARCH_STATS) begin : gen_search_stats
             always_ff @(posedge clk) begin
-                if (!rst_n) begin
+                if (!core_rst_n) begin
                     stat_tt_lookups <= 40'd0;
                     stat_tt_hits <= 40'd0;
                     stat_cache_lookups <= 40'd0;
@@ -378,7 +380,7 @@
         .SINGLE_LEGAL_MOVE_MS(SINGLE_LEGAL_MOVE_MS)
     ) search_time_management (
         .clk(clk),
-        .rst_n(rst_n),
+        .rst_n(core_rst_n),
         .cancel(time_management_cancel),
         .timer_reset(timer_rst),
         .timer_run(timer_run),
@@ -408,7 +410,7 @@
         .STATE_THREAD_COUNT(SEARCH_THREAD_COUNT)
     ) nnue_evaluator (
         .clk(clk),
-        .rst_n(rst_n),
+        .rst_n(core_rst_n),
         .clear(nnue_clear),
         .update_valid(nnue_update_valid),
         .update_ready(nnue_update_ready),
@@ -420,6 +422,7 @@
         .eval_valid(nnue_eval_valid),
         .eval_ready(nnue_eval_ready),
         .eval_thread_id(nnue_build_thread),
+        .eval_slot(nnue_slot[nnue_build_thread]),
         .eval_turn(search_board[nnue_build_thread].turn),
         .eval_piece_count(search_piece_count[nnue_build_thread]),
         .eval_pst(search_pst_eval[nnue_build_thread]),
@@ -430,5 +433,11 @@
 
     // Accumulator contents need not be erased because validity is tracked per
     // state, but queued and in-flight work must not cross lifecycle boundaries.
-    assign nnue_clear = state == CTRL_NEW_CLEAR_START || state == CTRL_FLUSH_RESPOND
-        || (state == CTRL_SEARCH_ITER_START && !nnue_roots_initialized);
+    assign nnue_clear = state == CTRL_FLUSH_RESPOND;
+    assign nnue_draining = state == CTRL_SEARCH_DRAIN || kill_pending || reset_requested;
+    always_comb begin
+        nnue_quiescent = nnue_update_idle && nnue_eval_ready && nnue_eval_tag_count == 0
+            && !nnue_delta_busy && !nnue_build_busy && !nnue_plan_any;
+        for (int stage = 0; stage < SEARCH_BOARD_TAG_PIPE_LEN; stage++)
+            nnue_quiescent &= !search_board_tag_valid_pipe[stage];
+    end

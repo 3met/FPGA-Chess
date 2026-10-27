@@ -219,11 +219,11 @@
             move_bad_noisy_enable[tid] = 1'b0;
             move_node_init_valid[tid] = 1'b0;
             move_node_init_ply[tid] = PlyIndex'(0);
-            if (state == CTRL_SEARCH_RUN && search_node_init_pending[tid]) begin
+            if (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested() && search_node_init_pending[tid]) begin
                 move_node_init_valid[tid] = 1'b1;
                 move_node_init_ply[tid] = search_ply[tid];
             end
-            move_pop_valid_vec[tid] = state == CTRL_SEARCH_RUN
+            move_pop_valid_vec[tid] = state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested()
                 && search_thread_move_ready(tid) && move_state_uses_pop(order_state);
             // Every pop addresses its own thread's current ply, including shared
             // perft; keep command selection out of this payload.

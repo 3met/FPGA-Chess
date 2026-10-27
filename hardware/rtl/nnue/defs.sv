@@ -2,6 +2,9 @@ package nnue_defs;
 
     import chess_defs::*;
 
+    localparam int NNUE_CACHE_ENTRIES = rtl_config::NNUE_CACHE_ENTRIES;
+    typedef logic [$clog2(NNUE_CACHE_ENTRIES)-1:0] NnueSlot;
+
     localparam int NNUE_SIDE_COUNT = 2;
     localparam int NNUE_PIECE_CATEGORY_COUNT = 6;
     localparam int NNUE_FEATURE_COUNT = NNUE_SIDE_COUNT * NNUE_PIECE_CATEGORY_COUNT * 64;
@@ -73,9 +76,51 @@ package nnue_defs;
 
     // Opposing colors separate mover and victim on a capture square. Standard
     // castling and en passant also need at most two ports in each bank.
+    // Six-bit square remainders and quotients are small LUTs; no runtime
+    // divider belongs on the feature-collection path.
+    function automatic logic [1:0] nnue_square_mod3(input logic [5:0] square);
+        case (square)
+            6'd0, 6'd3, 6'd6, 6'd9, 6'd12, 6'd15, 6'd18, 6'd21, 6'd24, 6'd27, 6'd30, 6'd33, 6'd36, 6'd39, 6'd42, 6'd45, 6'd48, 6'd51, 6'd54, 6'd57, 6'd60, 6'd63: return 2'd0;
+            6'd1, 6'd4, 6'd7, 6'd10, 6'd13, 6'd16, 6'd19, 6'd22, 6'd25, 6'd28, 6'd31, 6'd34, 6'd37, 6'd40, 6'd43, 6'd46, 6'd49, 6'd52, 6'd55, 6'd58, 6'd61: return 2'd1;
+            default: return 2'd2;
+        endcase
+    endfunction
+    function automatic logic [4:0] nnue_square_div3(input logic [5:0] square);
+        case (square)
+            6'd0, 6'd1, 6'd2: return 5'd0;
+            6'd3, 6'd4, 6'd5: return 5'd1;
+            6'd6, 6'd7, 6'd8: return 5'd2;
+            6'd9, 6'd10, 6'd11: return 5'd3;
+            6'd12, 6'd13, 6'd14: return 5'd4;
+            6'd15, 6'd16, 6'd17: return 5'd5;
+            6'd18, 6'd19, 6'd20: return 5'd6;
+            6'd21, 6'd22, 6'd23: return 5'd7;
+            6'd24, 6'd25, 6'd26: return 5'd8;
+            6'd27, 6'd28, 6'd29: return 5'd9;
+            6'd30, 6'd31, 6'd32: return 5'd10;
+            6'd33, 6'd34, 6'd35: return 5'd11;
+            6'd36, 6'd37, 6'd38: return 5'd12;
+            6'd39, 6'd40, 6'd41: return 5'd13;
+            6'd42, 6'd43, 6'd44: return 5'd14;
+            6'd45, 6'd46, 6'd47: return 5'd15;
+            6'd48, 6'd49, 6'd50: return 5'd16;
+            6'd51, 6'd52, 6'd53: return 5'd17;
+            6'd54, 6'd55, 6'd56: return 5'd18;
+            6'd57, 6'd58, 6'd59: return 5'd19;
+            6'd60, 6'd61, 6'd62: return 5'd20;
+            default: return 5'd21;
+        endcase
+    endfunction
     function automatic int nnue_feature_bank(input NnueFeatureIndex feature);
-        automatic logic [6:0] index = {1'b0, feature[5:0]} + 7'(feature >= 10'd384);
-        return int'(index % 7'd3);
+        automatic logic [1:0] remainder = nnue_square_mod3(feature[5:0]);
+        if (feature >= 10'd384) begin
+            case (remainder)
+                0: return 1;
+                1: return 2;
+                default: return 0;
+            endcase
+        end
+        return int'(remainder);
     endfunction
 
     localparam int NNUE_FEATURE_BANK_ROW_COUNT = 253;
@@ -91,7 +136,7 @@ package nnue_defs;
             4'd0, 4'd6: begin
                 if (square < 6'd8 || square >= 6'd56) return NNUE_ZERO_FEATURE_ROW;
                 base = feature[9:6] == 4'd0 ? 8'd1 : 8'd127;
-                return int'(base + 8'((square - 6'd8) / 6'd3));
+                return int'(base + 8'(nnue_square_div3(square - 6'd8)));
             end
             4'd1: base = 8'd17;
             4'd2: base = 8'd39;
@@ -105,22 +150,25 @@ package nnue_defs;
             4'd11: base = 8'd231;
             default: base = 8'd0;
         endcase
-        return int'(base + 8'(square / 6'd3));
+        return int'(base + 8'(nnue_square_div3(square)));
     endfunction
 
     typedef struct packed {
         ThreadID thread_id;
         PlyIndex ply;
+        // Physical snapshot addresses are supplied by the search cache controller.
+        NnueSlot source_slot;
+        NnueSlot destination_slot;
+        // Logical cache operations; the arithmetic evaluator only uses copy.
+        logic copy;
         NnueFeatureIndex white_feature;
         NnueFeatureIndex black_feature;
         // False denotes an ordered completion marker with no accumulator write.
-        // Real feature deltas always update both perspectives together.
-        // Consecutive move deltas form one six-port transaction. Rebuild rows
-        // are independent transactions and may stream an arbitrary piece count.
+        // Feature deltas and zero-delta copies update both perspectives together.
+        // Consecutive move or square-replacement deltas form one transaction.
         logic combine;
         logic apply;
         logic add;
-        logic clear;
         // Marks the last physical request belonging to one child-state update.
         logic complete;
     } NnueUpdateRequest;

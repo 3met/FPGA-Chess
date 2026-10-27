@@ -24,7 +24,9 @@ package search_defs;
         CTRL_SEARCH_ROOT_INIT,
         CTRL_SEARCH_RUN,
         CTRL_RESPOND,
-        CTRL_FLUSH_RESPOND
+        CTRL_FLUSH_RESPOND,
+        CTRL_SEARCH_DRAIN,
+        CTRL_NNUE_SETUP_START
     } SearchControllerState;
 
     typedef enum logic [3:0] {
@@ -44,12 +46,8 @@ package search_defs;
         SEARCH_PHASE_TIME_CHECK
     } SearchThreadPhase;
 
-    localparam logic NNUE_PLAN_DELTA = 1'b0;
-    localparam logic NNUE_PLAN_REBUILD = 1'b1;
-
     // Metadata travels together while pending and in-flight ownership stays separate.
     typedef struct packed {
-        logic kind;
         PlyIndex child_ply;
         Position from_pos;
         Position to_pos;
@@ -60,6 +58,7 @@ package search_defs;
         logic capture_valid;
         logic real_move;
         logic reverse;
+        logic copy;
     } SearchNnuePlan;
 
     // Standard chess never captures a king; the spare piece code marks en
@@ -80,7 +79,6 @@ package search_defs;
     );
         SearchNnuePlan plan;
         plan = '0;
-        plan.kind = NNUE_PLAN_DELTA;
         plan.child_ply = parent_ply;
         plan.from_pos = move.from_pos;
         plan.to_pos = move.to_pos;

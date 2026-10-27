@@ -53,6 +53,8 @@
         end
 
         reset_active_search();
+        reset_active_search(1);
+        kill_before_pruning_classification();
         run_fresh_game_repeatability();
 
         `include "hardware/tb/search/controller_policy_checks.svh"
@@ -296,6 +298,12 @@
                 dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h1}};
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
                 dut.nnue_evaluator.load_bias(lane, 4'd2);
+            // Replacing model RAM also replaces all accumulator images with
+            // biases; reset their matching existing board contexts to empty.
+            for (int tid = 0; tid < THREAD_COUNT; tid++) begin
+                dut.search_board[tid] = '0;
+                dut.search_ply[tid] = '0;
+            end
             new_game();
             setup_kings_only();
             set_tile(WHITE_PAWN, Position'(8), "NNUE correction white pawn a2");
@@ -308,13 +316,13 @@
                     baseline_score, nnue_score));
         end
         check(nnue_delta_seen, "NNUE child states apply physical move deltas");
-        check(nnue_reverse_delta_seen,
-            "NNUE restores parent state with an inverse stack delta");
-        check(nnue_rebuild_seen, "NNUE rebuild path initializes root accumulators");
+        check(nnue_cached_pop_seen,
+            "NNUE restores cached parents without inverse updates");
+        check(nnue_rebuild_seen, "NNUE square replacements initialize root accumulators");
         check(nnue_pending_state_invalid,
             "pending NNUE child slots stay invalid until their tagged completion");
         check(nnue_root_initialization_seen && nnue_root_initialization_correct,
-            "pre-search NNUE roots are flushed, valid, and identical for every thread");
+            "pre-search NNUE roots match the full active-board reference");
         check(nnue_king_delta_seen && nnue_king_delta_correct,
             "king moves use direct incremental NNUE features");
         check(nnue_castle_delta_seen,
@@ -325,9 +333,7 @@
                 && nnue_promotion_state_seen && nnue_special_state_correct,
             "special-move deltas and inverses exactly match full NNUE rebuilds");
         check(nnue_null_state_seen && nnue_null_state_correct,
-            "null children retain valid NNUE state without an update plan");
-        check(!nnue_recovery_rebuild_seen,
-            "ordinary evaluation never repairs an unexpectedly invalid accumulator");
+            "null children become runnable only with valid copied NNUE state");
         check(stats_reset_correct, "every new search resets all statistics");
         check(tt_lookup_depth_correct, "every TT lookup uses the node remaining depth");
         check(tt_store_depth_correct, "every TT store uses the node remaining depth");

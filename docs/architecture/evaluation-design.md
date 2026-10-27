@@ -16,7 +16,7 @@ The board update pipeline updates two material/PST sums and the total occupied-p
 
 ## NNUE Correction
 
-The NNUE uses direct piece-square features for White and Black perspectives. Black squares are vertically flipped into its point of view, and each perspective distinguishes friendly from opposing pieces. Incremental add/remove updates preserve one accumulator per search thread.
+The NNUE uses direct piece-square features for White and Black perspectives. Black squares are vertically flipped into its point of view, and each perspective distinguishes friendly from opposing pieces. Incremental add/remove updates maintain a circular accumulator snapshot cache per search thread.
 
 The output orders the side-to-move perspective before the opposing perspective and produces a side-to-move-relative correction. Piece count selects the phase bucket. Model arithmetic, update behavior, and generated files are defined in [nnue-evaluator.md](../modules/nnue-evaluator.md).
 

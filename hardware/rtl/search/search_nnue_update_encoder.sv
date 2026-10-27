@@ -7,17 +7,12 @@ module search_nnue_update_encoder (
     input ThreadID thread_id,
     input SearchNnuePlan plan,
     input logic [2:0] step,
-    input logic draining,
-    input logic first,
-    input Position replay_pos,
-    input Tile replay_tile,
     output logic req_valid,
     output NnueUpdateRequest req
 );
     // Standard chess castling needs king and rook deltas; captures also restore
     // the captured feature on undo, including en passant's separate capture square.
     always_comb begin
-        automatic logic delta_kind = plan.kind;
         automatic logic delta_reverse = plan.reverse;
         // Standard castling always moves the rook from a/h to d/f on the
         // king's rank, so it needs two additional incremental rows.
@@ -44,21 +39,9 @@ module search_nnue_update_encoder (
         req_valid = 1'b1;
         req.thread_id = thread_id;
         req.ply = plan.child_ply;
-        req.combine = !draining && delta_kind == NNUE_PLAN_DELTA;
+        req.combine = 1'b1;
         req.apply = 1'b1;
-        if (draining) begin
-            // An ordered no-op completion marker removes the rebuild's
-            // dependence on global FIFO/pipeline idle.
-            req.apply = 1'b0;
-            req.complete = 1'b1;
-        end else if (delta_kind == NNUE_PLAN_REBUILD) begin
-            feature_tile = replay_tile;
-            req_valid = feature_tile.piece_type != NULL_PIECE;
-            feature_pos = replay_pos;
-            feature_add = 1'b1;
-            req.apply = 1'b1;
-            req.clear = first;
-        end else if (!delta_reverse) begin
+        if (!delta_reverse) begin
             // Feature-update step indices are distinct; default retains completion behavior.
             unique case (step)
                 3'd0: begin
@@ -94,7 +77,7 @@ module search_nnue_update_encoder (
             req.apply = 1'b1;
         end else begin
             // Undo exactly the same physical rows in reverse order so a
-            // thread's single live accumulator returns to its parent.
+            // selected child accumulator reconstructs its evicted parent.
             // Feature-update step indices are distinct; default retains completion behavior.
             unique case (step)
                 3'd0: begin
@@ -133,20 +116,18 @@ module search_nnue_update_encoder (
                 end
             endcase
         end
-        // Invalid requests are ignored; keep the empty-tile validity decode
-        // off the feature-address data path into the transformer ROM.
-        if (!draining) begin
-            req.white_feature = nnue_feature_index(
-                feature_pos, feature_tile, WHITE);
-            req.black_feature = nnue_feature_index(
-                feature_pos, feature_tile, BLACK);
-            req.add = feature_add;
+        req.white_feature = nnue_feature_index(feature_pos, feature_tile, WHITE);
+        req.black_feature = nnue_feature_index(feature_pos, feature_tile, BLACK);
+        req.add = feature_add;
+        req.complete = delta_is_castle ? step == 3'd3
+            : (step == 3'd1 && !plan.capture_valid) || step == 3'd2;
+        if (plan.copy) begin
+            req = '0;
+            req.thread_id = thread_id;
+            req.ply = plan.child_ply;
+            req.copy = 1'b1;
+            req.apply = 1'b1;
+            req.complete = 1'b1;
         end
-        if (!draining && delta_kind == NNUE_PLAN_DELTA)
-            req.complete =
-                delta_is_castle ? step == 3'd3
-                : (step == 3'd1
-                    && !plan.capture_valid)
-                || step == 3'd2;
     end
 endmodule : search_nnue_update_encoder

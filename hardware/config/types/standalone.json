@@ -1,4 +1,5 @@
 {
   "threads": 16,
-  "stack_depth": 64
+  "stack_depth": 64,
+  "nnue_cache_entries": 8
 }

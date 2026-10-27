@@ -368,13 +368,10 @@
     logic [11:0] history_update_pending_failed2[0:SEARCH_THREAD_COUNT-1];
     logic [1:0] history_update_pending_failed_count[0:SEARCH_THREAD_COUNT-1];
 
-    // NNUE evaluations are serialized while one board is replayed through the
-    // physical feature-update port; search threads remain independently schedulable.
-    logic nnue_build_busy, nnue_build_draining, nnue_build_first;
-    logic nnue_build_wait_updates;
-    Position nnue_build_pos;
+    // One pending evaluation and one streaming move plan share NNUE admission.
+    logic nnue_build_busy;
     ThreadID nnue_build_thread;
-    logic nnue_roots_initialized, nnue_root_init_draining, nnue_root_init_first;
+    logic nnue_roots_initialized, nnue_setup_copy_pending;
     ThreadID nnue_root_init_thread;
     Position nnue_root_init_pos;
     logic nnue_clear;
@@ -396,19 +393,12 @@
     logic nnue_plan_inflight[0:SEARCH_THREAD_COUNT-1];
     SearchNnuePlan nnue_plan[0:SEARCH_THREAD_COUNT-1];
     logic nnue_plan_any;
-    logic nnue_delta_busy, nnue_delta_draining, nnue_delta_replay, nnue_delta_first;
+    logic nnue_delta_busy;
     ThreadID nnue_delta_thread;
     ThreadID nnue_plan_rr_ptr, nnue_plan_select_thread;
     logic nnue_plan_select_valid;
     logic [2:0] nnue_delta_step;
-    Position nnue_delta_pos;
 
-    // Share replay payload reads while each producer independently skips empties.
-    ThreadID nnue_replay_thread;
-    Position nnue_replay_pos;
-    Tile nnue_replay_tile;
-    logic [63:0] nnue_empty_squares[0:SEARCH_THREAD_COUNT-1];
-    logic nnue_root_square_empty, nnue_build_square_empty, nnue_delta_square_empty;
 
     // Shared transposition-table frontend request and result signals.
     logic tt_clear;
@@ -416,7 +406,7 @@
     // Reset work is infrequent: register the clear pulse rather than routing
     // the controller's wide state decoder into cache-bank read controls.
     always_ff @(posedge clk) begin
-        if (!rst_n) tt_clear <= 1'b0;
+        if (!core_rst_n) tt_clear <= 1'b0;
         else tt_clear <= state == CTRL_NEW_CLEAR_START;
     end
 
@@ -512,6 +502,45 @@
 
     assign resp = resp_reg;
     // Completed operations retain their response until the command sequencer consumes it.
-    assign resp_valid = state == CTRL_DIRECT_DONE || state == CTRL_RESPOND || state == CTRL_FLUSH_RESPOND;
-    assign req_ready = !startup_active && ((req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE && !resp_valid)
+    assign resp_valid = core_rst_n && rst_n && !reset_pending && (state == CTRL_DIRECT_DONE || state == CTRL_RESPOND || state == CTRL_FLUSH_RESPOND);
+    assign req_ready = core_rst_n && rst_n && !reset_pending && !kill_pending && !startup_active && ((req_valid && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE && !resp_valid)
         || state == CTRL_IDLE);
+
+    // One saturating counter per thread; slot selection reuses the existing ply.
+    NnueSlot nnue_cached_reverses[SEARCH_THREAD_COUNT];
+    NnueSlot nnue_slot[SEARCH_THREAD_COUNT];
+    always_comb begin
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
+            nnue_slot[tid] = NnueSlot'(search_ply[tid]);
+    end
+    // Serial setup reuses the existing thread board, never a shadow placement.
+    typedef enum logic [1:0] {SETUP_REMOVE, SETUP_ADD, SETUP_WAIT, SETUP_COPY} NnueSetupStep;
+    NnueSetupStep nnue_setup_step;
+    SearchControllerState nnue_setup_return;
+    Tile nnue_setup_old_tile, nnue_setup_new_tile;
+    logic nnue_setup_same, nnue_quiescent, nnue_draining;
+    logic kill_pending;
+    logic reset_active = 1'b1, reset_pending = 1'b0;
+    wire core_rst_n = !reset_active;
+    wire reset_requested = reset_pending || !rst_n;
+    initial begin
+        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+            search_board[tid] = '0;
+            search_ply[tid] = '0;
+        end
+    end
+    // A warm reset drains accepted board/NNUE work before resetting ownership.
+    // The selected RAM image and its existing board survive together.
+    always_ff @(posedge clk) begin
+        if (reset_active) begin
+            reset_pending <= 1'b0;
+            if (rst_n) reset_active <= 1'b0;
+        end else begin
+            if (!rst_n) reset_pending <= 1'b1;
+            if (reset_requested && nnue_quiescent
+                    && state != CTRL_SEARCH_ROOT_INIT) begin
+                reset_active <= 1'b1;
+                reset_pending <= 1'b0;
+            end
+        end
+    end

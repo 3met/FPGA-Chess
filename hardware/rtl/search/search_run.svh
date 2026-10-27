@@ -1,7 +1,7 @@
 // Active-search node lifecycle, pipeline completions, and iterative-deepening results.
 // Included inside the controller state case; all updates retain its single clocked process.
 
-                CTRL_SEARCH_RUN: begin
+                CTRL_SEARCH_RUN, CTRL_SEARCH_DRAIN: begin
                     automatic ThreadCount active_count_next;
                     automatic NodeCountType nodes_next;
                     automatic logic nnue_eval_enqueued;
@@ -47,14 +47,15 @@
 
                     `include "hardware/rtl/search/search_iterations.svh"
 
-                    if (search_stop_requested()) begin
+                    if (state == CTRL_SEARCH_RUN && search_stop_requested()) begin
                         resp_reg <= stopped_search_response(
                             1'b1,
                             active_req.operation != ENGINE_CTRL_SEARCH_FIXED_TIME
                                 && active_req.operation != ENGINE_CTRL_SEARCH_ON_CLOCK,
                             search_node_stop_q ? ENGINE_END_NODE_LIMIT : ENGINE_END_TIME_LIMIT);
-                        state <= CTRL_FLUSH_RESPOND;
-                    end else begin
+                        state <= CTRL_SEARCH_DRAIN;
+                    end
+                    begin
                         if (terminal_result_valid_pipe) begin
                             automatic ThreadID terminal_thread_id;
                             automatic PlyIndex terminal_ply;
@@ -171,26 +172,37 @@
                                 end
                                 search_ply[board_thread_id] <= board_ply - PlyIndex'(1);
                                 if (!search_stack_top[board_thread_id].entered_by_null) begin
-                                    nnue_plan_pending[board_thread_id] <= 1'b1;
+                                    nnue_plan_pending[board_thread_id] <= nnue_cached_reverses[board_thread_id] == 0;
                                     nnue_plan_inflight[board_thread_id] <= 1'b0;
                                     nnue_plan[board_thread_id] <= nnue_undo_plan(
                                         search_stack_top[board_thread_id].move,
                                         search_stack_top[board_thread_id].nnue_undo,
                                         board_update_out.turn,
                                         board_ply - PlyIndex'(1));
-                                    nnue_state_valid[board_thread_id] <= 1'b0;
+                                    nnue_state_valid[board_thread_id] <= nnue_cached_reverses[board_thread_id] != 0;
                                     // Start a newly created plan immediately when
                                     // arbitration has no older work, saving one
                                     // child-update-pending controller cycle.
-                                    if (!nnue_delta_busy && !nnue_build_busy
+                                    if (nnue_cached_reverses[board_thread_id] == 0 && !nnue_delta_busy && !nnue_build_busy
                                             && !nnue_plan_select_valid) begin
-                                        start_nnue_plan(board_thread_id, 1'b0);
+                                        start_nnue_plan(board_thread_id);
                                     end
                                     search_thread_phase[board_thread_id]
-                                        <= SEARCH_PHASE_REPETITION_WAIT;
+                                        <= nnue_cached_reverses[board_thread_id] != 0
+                                            ? SEARCH_PHASE_MOVE_WAIT : SEARCH_PHASE_REPETITION_WAIT;
                                 end else begin
-                                    search_thread_phase[board_thread_id]
-                                        <= SEARCH_PHASE_MOVE_WAIT;
+                                    nnue_plan[board_thread_id] <= '0;
+                                    nnue_plan[board_thread_id].copy <= 1'b1;
+                                    nnue_plan[board_thread_id].reverse <= 1'b1;
+                                    nnue_plan[board_thread_id].child_ply <= board_ply - PlyIndex'(1);
+                                    nnue_plan_pending[board_thread_id] <= nnue_cached_reverses[board_thread_id] == 0;
+                                    nnue_plan_inflight[board_thread_id] <= 1'b0;
+                                    nnue_state_valid[board_thread_id] <= nnue_cached_reverses[board_thread_id] != 0;
+                                    search_thread_phase[board_thread_id] <= nnue_cached_reverses[board_thread_id] != 0
+                                        ? SEARCH_PHASE_MOVE_WAIT : SEARCH_PHASE_REPETITION_WAIT;
+                                end
+                                if (nnue_cached_reverses[board_thread_id] != 0) begin
+                                    nnue_cached_reverses[board_thread_id] <= nnue_cached_reverses[board_thread_id] - NnueSlot'(1);
                                 end
                             end else if (null_push_complete) begin
                                 // Enter a synthetic child without legal-node or
@@ -243,9 +255,14 @@
                                 search_futility_eval_pending[board_thread_id] <= 1'b0;
                                 search_return_valid[board_thread_id] <= 1'b0;
                                 search_ply[board_thread_id] <= child_ply;
-                                // Null moves preserve the thread's live
-                                // accumulator and require no update-plan join.
-                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
+                                // Fixed ply-to-slot mapping gives null children a zero-delta copy.
+                                nnue_plan[board_thread_id] <= '0;
+                                nnue_plan[board_thread_id].copy <= 1'b1;
+                                nnue_plan[board_thread_id].child_ply <= child_ply;
+                                nnue_plan_pending[board_thread_id] <= 1'b1;
+                                nnue_plan_inflight[board_thread_id] <= 1'b0;
+                                nnue_state_valid[board_thread_id] <= 1'b0;
+                                search_thread_phase[board_thread_id] <= SEARCH_PHASE_REPETITION_WAIT;
                             end else if (search_tt_validation_pending[board_thread_id]) begin
                                 if (board_update_mover_in_check) begin
                                     // A pseudo-legal TT move that leaves its king
@@ -336,8 +353,6 @@
                                     && search_pending_move[board_thread_id].from_pos[2:0]
                                         != search_pending_move[board_thread_id].to_pos[2:0]
                                     && !delta_capture_valid;
-                                automatic logic parent_state_invalid =
-                                    !nnue_state_valid[board_thread_id];
                                 automatic PlyIndex child_repetition_start =
                                     committed_move_is_irreversible(
                                         search_board[board_thread_id],
@@ -379,8 +394,10 @@
                                 // A node is entered only after a speculative push
                                 // proves legal. Count that committed child here so
                                 // TT cutoffs, draws, and terminal children count too.
-                                nodes_next += NodeCountType'(1);
-                                search_thread_nodes[board_thread_id] <= search_thread_nodes[board_thread_id] + NodeCountType'(1);
+                                if (state == CTRL_SEARCH_RUN && !search_stop_requested() && !nnue_draining) begin
+                                    nodes_next += NodeCountType'(1);
+                                    search_thread_nodes[board_thread_id] <= search_thread_nodes[board_thread_id] + NodeCountType'(1);
+                                end
                                 if (board_thread_id == ThreadID'(0)) begin
                                     total_root_nodes <= total_root_nodes + NodeCountType'(1);
                                 end
@@ -413,9 +430,7 @@
                                 nnue_plan_pending[board_thread_id] <= 1'b1;
                                 nnue_plan_inflight[board_thread_id] <= 1'b0;
                                 nnue_state_valid[board_thread_id] <= 1'b0;
-                                nnue_plan[board_thread_id].kind
-                                    <= parent_state_invalid
-                                        ? NNUE_PLAN_REBUILD : NNUE_PLAN_DELTA;
+                                nnue_plan[board_thread_id].copy <= 1'b0;
                                 nnue_plan[board_thread_id].child_ply <= child_ply;
                                 nnue_plan[board_thread_id].from_pos
                                     <= search_pending_move[board_thread_id].from_pos;
@@ -433,7 +448,7 @@
                                 // the update planner is otherwise completely idle.
                                 if (!nnue_delta_busy && !nnue_build_busy
                                         && !nnue_plan_select_valid) begin
-                                    start_nnue_plan(board_thread_id, parent_state_invalid);
+                                    start_nnue_plan(board_thread_id);
                                 end
                                 search_stack_top[board_thread_id].nnue_undo.mover
                                     <= delta_mover.piece_type;
@@ -1052,13 +1067,6 @@
                                 <= search_futility_eval_pending[search_eval_issue_thread];
                             search_dispatch.eval <= search_thread_after(search_eval_issue_thread);
                             nnue_build_busy <= 1'b1;
-                            nnue_build_draining
-                                <= nnue_state_valid[search_eval_issue_thread];
-                            nnue_build_first
-                                <= !nnue_state_valid[search_eval_issue_thread];
-                            nnue_build_wait_updates
-                                <= !nnue_state_valid[search_eval_issue_thread];
-                            nnue_build_pos <= Position'(0);
                             nnue_build_thread <= search_eval_issue_thread;
                         end
 
@@ -1185,4 +1193,40 @@
                         search_nodes <= nodes_next;
                         search_active_thread_count <= active_count_next;
                     end
+                    if (state == CTRL_SEARCH_DRAIN && nnue_quiescent) begin
+                        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
+                            search_board_inflight[tid] <= 1'b0;
+                            search_move_inflight[tid] <= 1'b0;
+                            search_tt_lookup_inflight[tid] <= 1'b0;
+                            search_tt_response_pending[tid] <= 1'b0;
+                            search_repetition_pending[tid] <= 1'b0;
+                            search_repetition_done[tid] <= 1'b0;
+                            search_repetition_draw[tid] <= 1'b0;
+                            search_repetition_seen_before[tid] <= 1'b0;
+                            search_tt_validation_pending[tid] <= 1'b0;
+                            search_tt_validation_passed[tid] <= 1'b0;
+                            search_tt_validation_forced[tid] <= 1'b0;
+                            search_root_has_completed_move[tid] <= 1'b0;
+                            search_root_best_exact[tid] <= 1'b0;
+                            search_return_was_scout[tid] <= 1'b0;
+                            search_return_was_reduced[tid] <= 1'b0;
+                            search_return_was_null[tid] <= 1'b0;
+                            search_pvs_research[tid] <= 1'b0;
+                            history_update_pending[tid] <= 1'b0;
+                            nnue_plan_pending[tid] <= 1'b0;
+                            nnue_plan_inflight[tid] <= 1'b0;
+                            if (kill_pending) nnue_state_valid[tid] <= 1'b0;
+                            if (kill_pending || search_thread_phase[tid] != SEARCH_PHASE_DONE)
+                                search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
+                        end
+                        for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
+                            search_board_tag_valid_pipe[idx] <= 1'b0;
+                        end
+                        for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
+                            search_move_tag_valid_pipe[idx] <= 1'b0;
+                        end
+                        state <= CTRL_FLUSH_RESPOND;
+                    end
+                    if (state == CTRL_SEARCH_RUN && (reset_requested || kill_pending))
+                        state <= CTRL_SEARCH_DRAIN;
                 end

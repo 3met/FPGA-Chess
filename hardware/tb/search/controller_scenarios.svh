@@ -3,20 +3,65 @@
 
 
     // Reset interrupts real pipeline ownership and rebuilds a usable starting board.
-    task automatic reset_active_search();
+    task automatic reset_active_search(input bit during_nnue_write = 0);
         automatic EngineControllerRequest request = zero_request();
         automatic int wait_cycles = 0;
         request.operation = ENGINE_CTRL_SEARCH_DEPTH;
         request.depth_limit = 8'd3;
         pulse_request(request, "search before hardware reset");
-        while (!dut.search_board_inflight[0] && wait_cycles < 200000) begin
+        while (!(during_nnue_write ? dut.nnue_evaluator.state_write_enable : dut.search_board_inflight[0]) && wait_cycles < 200000) begin
             do_clock(1);
             wait_cycles++;
         end
-        check(dut.search_board_inflight[0], "reset interrupts an in-flight board operation");
+        check(during_nnue_write ? dut.nnue_evaluator.state_write_enable : dut.search_board_inflight[0],
+            "reset interrupts the selected board/NNUE operation");
         reset_dut();
         run_perft(8'd2, NodeCountType'(400), "reset during search restores startpos");
     endtask : reset_active_search
+
+    // Cancel before the classifier stage, with its old flag deliberately different
+    // from the accepted move's classification, so drain must advance that stage.
+    task automatic kill_before_pruning_classification();
+        automatic EngineControllerRequest request = zero_request();
+        automatic int wait_cycles = 0;
+        automatic bit found = 0;
+        new_game();
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd4;
+        pulse_request(request, "search before pruning-stage cancellation");
+        while (!found && wait_cycles < 200000) begin
+            automatic int stage_index = dut.SEARCH_BOARD_TAG_PIPE_LEN - 3;
+            automatic ThreadID tid = dut.search_board_tag_pipe[stage_index];
+            found = dut.search_board_tag_valid_pipe[stage_index]
+                && !dut.search_board_tag_valid_pipe[stage_index+1]
+                && dut.search_board_op_tag_pipe[stage_index] == BOARD_PUSH_MOVE_OP
+                && !dut.parent_futility_eligible_q
+                && dut.futility_move_eligible(
+                    dut.search_ply[tid], dut.search_pending_child_depth[tid],
+                    dut.search_board_in_check[tid], 1'b0,
+                    dut.is_quiet_move(dut.search_board[tid], dut.search_pending_move[tid]),
+                    dut.is_promotion_move(dut.search_board[tid], dut.search_pending_move[tid]),
+                    dut.search_stack_top[tid].has_tt_move
+                        && dut.search_pending_move[tid] == dut.search_stack_top[tid].tt_move,
+                    dut.search_stack_top[tid].has_legal, dut.search_pvs_research[tid]);
+            if (!found) begin
+                do_clock(1);
+                wait_cycles++;
+            end
+        end
+        check(found, "cancellation targets a pending change in pruning classification");
+        request = zero_request();
+        request.operation = ENGINE_CTRL_KILL;
+        pulse_request(request, "kill before pruning classification");
+        check(dut.state == CTRL_SEARCH_DRAIN, "kill enters drain before classification");
+        do_clock(1);
+        check(dut.parent_futility_eligible_q,
+            "drain classifies the accepted board request instead of retaining stale flags");
+        wait_response("pruning-stage cancellation");
+        check(resp.end_reason == ENGINE_END_KILLED && !resp.error,
+            "pruning-stage cancellation completes without a search fault");
+        do_clock(1);
+    endtask : kill_before_pruning_classification
 
     // A fresh game must not inherit arbitration priority or learned move order.
     task automatic run_fresh_game_repeatability();
@@ -872,6 +917,7 @@
         pulse_request(request, "TT validation fallback search");
         while (!resp_valid && cycles < 200000) begin
             if (!injected && dut.search_tt_consume_valid
+                    && dut.search_tt_consume_thread == ThreadID'(0)
                     && dut.search_ply[0] == PlyIndex'(1)
                     && dut.search_stack_top[0].move == checking_move) begin
                 // Force history validation at shallow depth to keep this

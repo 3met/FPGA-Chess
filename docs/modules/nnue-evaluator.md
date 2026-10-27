@@ -1,6 +1,6 @@
 # NNUE Evaluator (`nnue_evaluator`)
 
-The evaluator keeps one live, two-perspective accumulator per search thread. Search orders each thread's updates and waits for completion before evaluating that thread. Results contain a side-to-move-relative NNUE correction and a White-relative material/PST blend; search combines them and saturates to the finite, non-mate score range.
+The evaluator keeps a circular set of two-perspective accumulator snapshots per search thread. Search orders each thread's updates and waits for completion before evaluating that thread. Results contain a side-to-move-relative NNUE correction and a White-relative material/PST blend; search combines them and saturates to the finite, non-mate score range.
 
 ## Model and Parameters
 
@@ -14,13 +14,15 @@ Each perspective has 768 direct piece-square features: six friendly and six oppo
 
 The accumulator is a simple-dual-port BRAM with a registered read output and enabled write port. Each word contains one multiplier vector's worth of accumulator values. The read output directly feeds the activation registers and update adders. Forward-pass reads always take priority; a waiting transformer row holds until the port becomes available. The caller must prevent an evaluation from reading an address being updated.
 
-Accumulator biases initialize thread storage and reserved bias rows in the same memory. A rebuild reads those reserved rows for its first feature, then adds subsequent features to the live state. Reset and clear flush pipeline validity without resetting RAM contents. Search rebuilds invalid thread state before use.
+The engine configuration selects a power-of-two `nnue_cache_entries`. Cache index occupies the low address bits; vector row and thread select the higher bits. Each update reads its source snapshot and writes the result directly into its destination snapshot. A zero-delta copy supports null moves and setup. No separate parent copy is needed for a normal move. Increasing cache depth uses the spare depth of the existing BRAM banks until their capacity is exhausted.
+
+At FPGA configuration, all snapshot rows initialize to accumulator biases; there are no reserved bias rows or runtime bias reload path. Search retains the existing thread board and its selected ply alongside RAM across a warm reset. Setup serially removes each old square feature and adds its replacement, committing that board tile only after completion. A selected snapshot outside slot zero is first copied to slot zero. Reset and cancellation drain accepted board and NNUE work before clearing ownership, preserving the board/accumulator correspondence.
 
 The transformer uses three disjoint BRAM banks, each with two registered read ports. Bank selection is `(oriented_square + relative_color) mod 3`. Each bank reserves sixteen pawn entries and twenty-two entries per other piece type per color, plus a dedicated zero row. Unreachable pawn end-rank entries map to that zero row and are omitted from physical storage. The zero vector is initialized explicitly and cannot be overwritten by model data. Unused ports read that zero row. Ordinary captures separate mover and victim by color, and both en passant and standard castling fit within two reads per bank in each perspective. Promotions use the same square/color mapping.
 
-An elastic input register separates search feature encoding from bank decoding and holds the next request during writeback. The controller emits move deltas with `combine` set. The evaluator collects their feature addresses and signs into bank slots until the final `complete` request. It then processes both perspectives as one ordered update. Rebuild requests are independent transactions, allowing an arbitrary number of pieces. A completion marker performs no write and returns its thread/ply tag after preceding transactions finish.
+An elastic input register separates search feature encoding from bank decoding and holds the next request during writeback. The controller emits move deltas with `combine` set. The evaluator collects their feature addresses and signs into bank slots until the final `complete` request. It then processes both perspectives as one ordered update. Setup combines at most one removed and one added feature per square. A completion marker performs no write and returns its thread/ply tag after preceding transactions finish.
 
-The six ROM outputs are sign-adjusted, summed, and registered. On that same clock, the accumulator read port captures the old row. The registered sum and old accumulator drive the modular update adder and RAM write port. Transformer reads, sum/accumulator reads, and writes overlap across rows; without forward-pass contention, one row advances per cycle. Pending update transactions are processed one at a time.
+The six ROM outputs are sign-adjusted, summed into a signed four-bit delta, and registered. Standard moves add/remove at most four signed two-bit features; opposite signs bound the total to four bits. On that same clock, the accumulator read port captures the old row. The registered sum and old accumulator drive the modular update adder and RAM write port. Transformer reads, sum/accumulator reads, and writes overlap across rows; without forward-pass contention, one row advances per cycle. Pending update transactions are processed one at a time.
 
 ## Forward Pipeline
 

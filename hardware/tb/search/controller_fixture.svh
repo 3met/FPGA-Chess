@@ -86,7 +86,9 @@
     bit nnue_promotion_state_seen;
     bit nnue_special_state_correct = 1'b1;
     bit nnue_reverse_delta_seen;
-    bit nnue_recovery_rebuild_seen;
+    bit nnue_cached_pop_seen;
+    SearchControllerState previous_setup_state;
+    ThreadID previous_setup_thread;
     bit nnue_null_state_seen;
     bit nnue_null_state_correct = 1'b1;
     int nnue_root_rebuild_count[0:THREAD_COUNT-1];

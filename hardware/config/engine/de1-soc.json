@@ -2,7 +2,8 @@
   "search_config": "hardware/config/search/default.json",
   "engine": {
     "threads": 3,
-    "stack_depth": 32
+    "stack_depth": 32,
+    "nnue_cache_entries": 8
   },
   "transposition_table": {
     "tag_bits": 32,

@@ -15,9 +15,9 @@ The implementation lives in `hardware/rtl/search/`. `search_controller.sv` defin
 | `search_results.svh` | Shared completed/partial result selection for Kill and budget stops. |
 | `search_scheduler.svh` | Registered stop/pruning checks, eligibility masks, and arbitration. |
 | `search_requests.svh` | Board, move, TT, and timer request construction from selected tags. |
-| `search_nnue_requests.svh` | NNUE plan arbitration, common plan launch, and replay/update request selection. |
-| `search_nnue_control.svh` | NNUE replay progress, evaluation tags, plan handoff, and completion routing. |
-| `search_nnue_update_encoder.sv` | Combinational module encoding incremental/undo features, rebuild rows, and completion markers. |
+| `search_nnue_requests.svh` | NNUE plan arbitration, common plan launch, and serial square replacement. |
+| `search_nnue_control.svh` | NNUE evaluation tags, plan handoff, and completion routing. |
+| `search_nnue_update_encoder.sv` | Combinational module encoding incremental/undo features and null-move copies. |
 | `search_control.svh` | Reset, cancellation, response routing, command handling, and initialization. |
 | `search_run.svh` | Active-search node lifecycle and shared-pipeline completions. |
 | `search_iterations.svh` | Independent iterative-deepening passes, aspiration retries, and primary time decisions. |
@@ -62,7 +62,7 @@ The active board is canonical controller state between commands. Board operation
 
 Each search thread owns its current position, search stack, alpha/beta window, iterative-deepening state, and node count. The stack retains the state needed to reverse a child and resume its parent.
 
-Reset clears ownership and valid bits; per-thread board, stack, and response payloads are initialized when their work is admitted rather than by a wide reset network. Invalid pipeline tags and unused RAM contents need no clearing.
+Reset drains accepted board and NNUE work before clearing ownership and valid bits. Existing per-thread boards and plies survive with the selected accumulator snapshots so serial setup can replace their features without reloading biases. Stack and response payloads initialize when their work is admitted; invalid pipeline tags and unused RAM contents need no clearing.
 
 The packed stack uses one synchronous simple dual-port RAM per thread, with the current node held in registers. Each cycle outside reset writes the current ply and reads the parent ply. Original alpha is reconstructed from the stored root window, the fixed beta of a scout or null child, or the saved parent's beta for a full-window child; it requires no additional RAM access or search cycle.
 
@@ -91,9 +91,11 @@ Board payloads select the active position, perft context, or search context from
 
 Move-command and bucket-pop responses update their thread before a continuation becomes eligible for normal dispatch on the next cycle. This keeps downstream admission out of response-state feedback; independent work from other threads can still issue during response handling.
 
-Before search, NNUE builds a root accumulator for every thread. Legal child preparation completes NNUE and repetition work before the child becomes runnable. Null children reuse the parent's accumulator.
+Before search, serial setup brings each thread's existing board and accumulator to the active position by replacing only differing squares. Legal child preparation completes NNUE and repetition work before the child becomes runnable. Incremental requests combine the complete move into one transformer transaction and stream its result directly from the parent slot into the child slot.
 
-NNUE root, evaluation-build, and child-rebuild replay share one board-tile payload read. Incremental move requests mark a combined transaction, which the evaluator collects into transformer bank slots before committing accumulator rows; root and rebuild features remain individual transactions. All producers honor update backpressure and tagged completion. Each producer independently selects from per-thread empty-square masks, preserving empty-square progress while another producer owns the update port and keeping feature decoding out of replay-position feedback. Accepted legal moves derive en-passant victims and promotion results directly from chess rules and move metadata instead of reading extra board tiles.
+Each thread retains only a saturating count of cached parents. A push increments it up to `nnue_cache_entries - 1`; a cached reverse decrements it and selects the parent through the existing ply, with no NNUE request or transformer work. Once that count reaches zero, reversal applies inverse deltas from the child into the parent's circular slot. Slots are the low `log2(nnue_cache_entries)` bits of ply, so overwriting an old slot needs no tags or validity table. Null pushes copy the parent with zero delta; their reversals follow the same counter rule. Cached snapshots become usable only after the corresponding update completes.
+
+All producers honor update backpressure and tagged completion. Accepted legal moves derive en-passant victims and promotion results directly from chess rules and move metadata instead of reading extra board tiles.
 
 Reset, New Game, Kill, and search restart prevent outstanding responses from changing a later operation. Each thread retains TT transport ownership until its accepted probe returns, even after search cancellation. A new probe for that thread waits for the old response to drain; canceled responses are discarded.
 
@@ -115,7 +117,7 @@ Depth, node, and time limits are checked at safe search boundaries. Hard time li
 
 Completed primary iterations retain the best root move and its searched child reply as a two-move principal-variation prefix for UCI pondering.
 
-Kill stops new work and completes only after outstanding responses can no longer change the active operation. A killed search selects and snapshots its result before completing.
+Kill stops new work and completes only after outstanding responses can no longer change the active operation. Accepted board results retain their aligned pruning classifications through drain, including after a time or node limit. A killed search selects and snapshots its result before completing.
 
 Node-limited search can commit at most one additional node beyond its requested count.
 

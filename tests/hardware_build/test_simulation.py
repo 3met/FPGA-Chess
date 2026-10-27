@@ -93,7 +93,7 @@ class VerilatorBackendTests(unittest.TestCase):
             header = root / 'fixture.svh'
             header.write_text('// original fixture')
             config = root / 'types.json'
-            config.write_text(json.dumps({'threads': 3, 'stack_depth': 33}))
+            config.write_text(json.dumps({'threads': 3, 'stack_depth': 33, 'nnue_cache_entries': 4}))
             versions = {'verilator': 'Verilator fixture', 'g++': 'C++ fixture'}
             builds = []
             backend_flags = []
@@ -121,7 +121,7 @@ class VerilatorBackendTests(unittest.TestCase):
                 self.assertEqual(len(builds), 2)
                 source.write_text('module bench; initial $finish; endmodule')
                 self.assertTrue(compile_bench()['ok'])
-                config.write_text(json.dumps({'threads': 5, 'stack_depth': 17}))
+                config.write_text(json.dumps({'threads': 5, 'stack_depth': 17, 'nnue_cache_entries': 4}))
                 self.assertTrue(compile_bench()['ok'])
                 versions['verilator'] = 'changed toolchain fixture'
                 self.assertTrue(compile_bench()['ok'])

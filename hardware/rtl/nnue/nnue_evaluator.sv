@@ -17,6 +17,7 @@ module nnue_evaluator #(
     input logic eval_valid,
     output logic eval_ready,
     input ThreadID eval_thread_id,
+    input NnueSlot eval_slot,
     input Color eval_turn,
     input PieceCount eval_piece_count,
     input PstEvalPair eval_pst,
@@ -30,19 +31,19 @@ module nnue_evaluator #(
     localparam int WORD_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_ACCUMULATOR_BITS;
     localparam int FEATURE_WORD_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_FEATURE_WEIGHT_BITS;
     localparam int BANK_ROWS = NNUE_FEATURE_BANK_ROW_COUNT * SIDE_ROWS;
-    localparam int BIAS_BASE = STATE_THREAD_COUNT * STATE_ROWS;
-    localparam int MEMORY_ROWS = BIAS_BASE + STATE_ROWS;
+    localparam int MEMORY_ROWS = STATE_THREAD_COUNT * STATE_ROWS * NNUE_CACHE_ENTRIES;
     localparam int ADDRESS_BITS = $clog2(MEMORY_ROWS);
     localparam int WEIGHT_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS;
     localparam int PRODUCT_GROUPS = (NNUE_OUTPUT_MAC_LANES + 3) / 4;
-    localparam int TREE_LEAVES = 1 << $clog2(NNUE_OUTPUT_MAC_LANES);
+    localparam int TREE_LEAVES = 1 << $clog2(PRODUCT_GROUPS);
     typedef logic [ADDRESS_BITS-1:0] StateAddress;
     typedef logic signed [7:0] OutputProduct;
+    typedef logic signed [9:0] ProductGroupSum;
     typedef logic signed [$clog2(NNUE_OUTPUT_MAC_LANES)+7:0] PartialSum;
-    typedef logic signed [4:0] FeatureSum;
+    typedef logic signed [3:0] FeatureSum;
 
     // One simple-dual-port BRAM: evaluation owns the shared synchronous read
-    // port whenever it has a row to issue. The extra rows hold trained biases.
+    // port whenever it has a row to issue. Slots use the low address bits.
     (* ramstyle = "M10K", ram_style = "block" *)
     logic [WORD_BITS-1:0] accumulator_memory[MEMORY_ROWS];
     StateAddress state_read_address, state_write_address;
@@ -98,11 +99,12 @@ module nnue_evaluator #(
                         = feature_rom[feature][row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
                 endcase
             end
-        for (int thread = 0; thread <= STATE_THREAD_COUNT; thread++)
-            for (int row = 0; row < STATE_ROWS; row++)
-                for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++)
-                    accumulator_memory[thread*STATE_ROWS+row][lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
-                        = NNUE_ACCUMULATOR_BITS'(accumulator_bias[(row%SIDE_ROWS)*NNUE_OUTPUT_MAC_LANES+lane]);
+        for (int thread = 0; thread < STATE_THREAD_COUNT; thread++)
+            for (int slot = 0; slot < NNUE_CACHE_ENTRIES; slot++)
+                for (int row = 0; row < STATE_ROWS; row++)
+                    for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++)
+                        accumulator_memory[(thread*STATE_ROWS+row)*NNUE_CACHE_ENTRIES+slot][lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
+                            = NNUE_ACCUMULATOR_BITS'(accumulator_bias[(row%SIDE_ROWS)*NNUE_OUTPUT_MAC_LANES+lane]);
     end
 
     // Full four-bit SCReLU, with a lookup instead of a squaring multiplier.
@@ -127,6 +129,8 @@ module nnue_evaluator #(
     NnueUpdateRequest active_update;
     // One elastic request register separates search feature encoding from bank
     // decoding and can hold the next transaction while the current one writes.
+    // Keep recovery/source selection separate from transformer bank decoding.
+    (* dont_retime, dont_touch = "true" *)
     NnueUpdateRequest queued_update;
     logic queued_update_valid;
     logic collecting;
@@ -147,6 +151,7 @@ module nnue_evaluator #(
     logic eval_read_busy;
     logic [$clog2(STATE_ROWS)-1:0] eval_row;
     ThreadID active_eval_thread;
+    NnueSlot active_eval_slot;
     Color active_eval_turn;
     NnueOutputBucket active_eval_bucket;
     PstEvalPair active_eval_pst;
@@ -167,23 +172,26 @@ module nnue_evaluator #(
     RowTag read_tag, activation_tag, product_tag, sum_tag;
     logic [NNUE_OUTPUT_MAC_LANES*4-1:0] activations_q;
     wire [PRODUCT_GROUPS*32-1:0] products;
-    OutputProduct products_q[NNUE_OUTPUT_MAC_LANES];
+    ProductGroupSum products_q[PRODUCT_GROUPS];
     PartialSum sum_tree[2*TREE_LEAVES];
     PartialSum partial_sum_q;
     NnueCorrection running_sum;
 
-    // Exact signed phase interpolation; reciprocal division is pipelined with
-    // RAM, activation and products and uses truncation toward zero.
+    // Capture blend inputs beside the RAM read before doing arithmetic. This
+    // keeps board selection/phase decoding out of the blend multiplier path.
+    // The result still aligns with the NNUE sum and truncates toward zero.
     localparam int PST_BITS = $bits(PstEvalScore) + 5;
     localparam int RECIP_SHIFT = $bits(PstEvalScore) + 9;
     localparam int RECIP_BITS = RECIP_SHIFT - 4;
     localparam logic [RECIP_BITS-1:0] RECIP =
         RECIP_BITS'(((64'd1 << RECIP_SHIFT) + 29) / 30);
+    PstEvalPair pst_input_q;
+    logic [4:0] pst_phase_q, pst_endgame_phase_q;
     logic signed [PST_BITS-1:0] pst_numerator;
     logic [PST_BITS-1:0] pst_magnitude;
     logic [PST_BITS+RECIP_BITS-1:0] pst_product;
     logic pst_negative;
-    PstEvalScore product_pst, sum_pst;
+    PstEvalScore product_pst;
 
     assign eval_ready = !eval_read_busy;
     assign eval_accept = eval_valid && eval_ready;
@@ -200,10 +208,12 @@ module nnue_evaluator #(
                 + (issue_turn == BLACK ? SIDE_ROWS : 0)) % STATE_ROWS));
         update_read_issue = update_rom_valid && !eval_read_issue;
         state_read_address = eval_read_issue
-            ? StateAddress'(int'(issue_thread)*STATE_ROWS + int'(issue_row))
-            : StateAddress'((active_update.clear ? BIAS_BASE
-                : int'(active_update.thread_id)*STATE_ROWS) + int'(update_rom_row));
-        state_write_address = StateAddress'(int'(active_update.thread_id)*STATE_ROWS + int'(update_write_row));
+            ? StateAddress'((int'(issue_thread)*STATE_ROWS + int'(issue_row))*NNUE_CACHE_ENTRIES
+                + int'(eval_read_busy ? active_eval_slot : eval_slot))
+            : StateAddress'((int'(active_update.thread_id)*STATE_ROWS + int'(update_rom_row))*NNUE_CACHE_ENTRIES
+                + int'(active_update.source_slot));
+        state_write_address = StateAddress'((int'(active_update.thread_id)*STATE_ROWS + int'(update_write_row))*NNUE_CACHE_ENTRIES
+            + int'(active_update.destination_slot));
         state_write_enable = rst_n && !clear && update_write_valid && active_update.apply;
         for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++)
             state_write_data[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
@@ -254,7 +264,7 @@ module nnue_evaluator #(
     always_comb begin
         sum_tree[0] = '0;
         for (int lane = 0; lane < TREE_LEAVES; lane++)
-            sum_tree[TREE_LEAVES+lane] = lane < NNUE_OUTPUT_MAC_LANES
+            sum_tree[TREE_LEAVES+lane] = lane < PRODUCT_GROUPS
                 ? PartialSum'(products_q[lane]) : PartialSum'(0);
         for (int node = TREE_LEAVES-1; node > 0; node--)
             sum_tree[node] = sum_tree[node*2] + sum_tree[node*2+1];
@@ -312,7 +322,6 @@ module nnue_evaluator #(
             end
             if (queued_update_valid && !update_busy) begin
                 active_update <= queued_update;
-                if (collecting) active_update.clear <= active_update.clear || queued_update.clear;
                 for (int perspective = 0; perspective < 2; perspective++) begin
                     automatic NnueFeatureIndex feature = perspective == 0
                         ? queued_update.white_feature : queued_update.black_feature;
@@ -324,9 +333,9 @@ module nnue_evaluator #(
                         for (int port_index = 0; port_index < 6; port_index++)
                             bank_rows[perspective][port_index] <= '0;
                     end
-                    if (queued_update.apply) begin
+                    if (queued_update.apply && !queued_update.copy) begin
 `ifndef SYNTHESIS
-                        assert (!used[slot]) else $fatal(1, "NNUE transformer bank conflict");
+                        assert (!used[slot]) else $fatal(1, "NNUE transformer bank conflict: thread=%0d ply=%0d feature=%0d bank=%0d used=%b complete=%b", queued_update.thread_id, queued_update.ply, feature, bank, used, queued_update.complete);
 `endif
                         used[slot] = 1'b1;
                         bank_rows[perspective][slot] <= 9'(nnue_feature_bank_row(feature));
@@ -359,10 +368,21 @@ module nnue_evaluator #(
                 update_write_row <= update_rom_row;
                 for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
                     automatic FeatureSum sum = '0;
+`ifndef SYNTHESIS
+                    automatic int exact_delta = 0;
+`endif
                     for (int port_index = 0; port_index < 6; port_index++) begin
                         automatic FeatureSum weight = FeatureSum'($signed(feature_q[port_index][lane*2 +: 2]));
                         sum += feature_add_q[port_index] ? weight : -weight;
+`ifndef SYNTHESIS
+                        if (feature_add_q[port_index]) exact_delta += weight;
+                        else exact_delta -= weight;
+`endif
                     end
+`ifndef SYNTHESIS
+                    assert (exact_delta >= -8 && exact_delta <= 7)
+                        else $fatal(1, "Feature transaction exceeds signed four-bit delta");
+`endif
                     feature_sum_q[lane] <= sum;
                 end
             end
@@ -377,6 +397,7 @@ module nnue_evaluator #(
 
             if (eval_accept) begin
                 active_eval_thread <= eval_thread_id;
+                active_eval_slot <= eval_slot;
                 active_eval_turn <= eval_turn;
                 active_eval_bucket <= nnue_output_bucket(eval_piece_count);
                 active_eval_pst <= eval_pst;
@@ -396,20 +417,31 @@ module nnue_evaluator #(
             for (int lane = 0; lane < NNUE_OUTPUT_MAC_LANES; lane++) begin
                 activations_q[lane*4 +: 4] <= screlu(NnueAccumulator'(
                     state_read_q[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]));
-                products_q[lane] <= OutputProduct'(products[lane*8 +: 8]);
+            end
+            // Sum each multiplier's four products before the group register.
+            // The next stage has two fewer adder levels at the same latency.
+            for (int group_id = 0; group_id < PRODUCT_GROUPS; group_id++) begin
+                products_q[group_id] <=
+                    (ProductGroupSum'($signed(products[group_id*32 +: 8]))
+                        + ProductGroupSum'($signed(products[group_id*32+8 +: 8])))
+                    + (ProductGroupSum'($signed(products[group_id*32+16 +: 8]))
+                        + ProductGroupSum'($signed(products[group_id*32+24 +: 8])));
             end
             output_weight_q <= output_weight_read_q;
             partial_sum_q <= sum_tree[1];
             begin
                 automatic int phase = issue_piece_count <= 2 ? 0
                     : issue_piece_count >= 32 ? 30 : int'(issue_piece_count)-2;
-                pst_numerator <= PST_BITS'(int'(issue_pst.first)*phase + int'(issue_pst.endgame)*(30-phase));
+                pst_phase_q <= 5'(phase);
+                pst_endgame_phase_q <= 5'(30-phase);
+                pst_input_q <= issue_pst;
             end
+            pst_numerator <= PST_BITS'(int'(pst_input_q.first)*int'(pst_phase_q)
+                + int'(pst_input_q.endgame)*int'(pst_endgame_phase_q));
             pst_product <= pst_magnitude * RECIP;
             pst_negative <= pst_numerator < 0;
             product_pst <= pst_negative ? -(PstEvalScore'(pst_product >> RECIP_SHIFT))
                 : PstEvalScore'(pst_product >> RECIP_SHIFT);
-            sum_pst <= product_pst;
             result_valid <= sum_tag.valid && sum_tag.last;
             if (sum_tag.valid) begin
                 automatic NnueCorrection total = (sum_tag.first ? NnueCorrection'(0) : running_sum)
@@ -417,7 +449,7 @@ module nnue_evaluator #(
                 running_sum <= total;
                 if (sum_tag.last) begin
                     result <= total + NnueCorrection'({1'b0, sum_tag.bias});
-                    result_pst <= sum_pst;
+                    result_pst <= product_pst;
                 end
             end
         end
@@ -436,17 +468,29 @@ module nnue_evaluator #(
                 2: feature_bank2[nnue_feature_bank_row(NnueFeatureIndex'(feature))*SIDE_ROWS+row] = value[row*FEATURE_WORD_BITS +: FEATURE_WORD_BITS];
             endcase
     endtask
+    // Configuration-only hook: replacing the model also reinitializes its RAM images.
     task automatic load_bias(input int lane, input logic [NNUE_ACCUMULATOR_BIAS_BITS-1:0] value);
         accumulator_bias[lane] = value;
-        for (int perspective = 0; perspective < 2; perspective++)
-            accumulator_memory[BIAS_BASE+perspective*SIDE_ROWS+lane/NNUE_OUTPUT_MAC_LANES][(lane%NNUE_OUTPUT_MAC_LANES)*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
-                = NNUE_ACCUMULATOR_BITS'(value);
+        for (int thread = 0; thread < STATE_THREAD_COUNT; thread++)
+            for (int slot = 0; slot < NNUE_CACHE_ENTRIES; slot++)
+                for (int perspective = 0; perspective < 2; perspective++)
+                    accumulator_memory[(thread*STATE_ROWS+perspective*SIDE_ROWS+lane/NNUE_OUTPUT_MAC_LANES)*NNUE_CACHE_ENTRIES+slot][(lane%NNUE_OUTPUT_MAC_LANES)*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]
+                        = NNUE_ACCUMULATOR_BITS'(value);
     endtask
-    function automatic logic [NNUE_STATE_VALUE_COUNT*NNUE_ACCUMULATOR_BITS-1:0] read_state(input int thread);
+    function automatic logic [NNUE_STATE_VALUE_COUNT*NNUE_ACCUMULATOR_BITS-1:0] read_state(input int thread, input NnueSlot slot);
         for (int row = 0; row < STATE_ROWS; row++)
-            read_state[row*WORD_BITS +: WORD_BITS] = accumulator_memory[thread*STATE_ROWS+row];
+            read_state[row*WORD_BITS +: WORD_BITS] = accumulator_memory[(thread*STATE_ROWS+row)*NNUE_CACHE_ENTRIES+slot];
     endfunction
+    // No read-during-write behavior is assumed from either FPGA vendor.
+    always_ff @(posedge clk) if (rst_n && !clear) begin
+        if (state_write_enable && (eval_read_issue || update_read_issue))
+            assert (state_read_address != state_write_address)
+                else $fatal(1, "NNUE snapshot read/write collision");
+
+    end
     initial begin
+        assert (NNUE_CACHE_ENTRIES >= 2 && (NNUE_CACHE_ENTRIES & (NNUE_CACHE_ENTRIES-1)) == 0)
+            else $fatal(1, "NNUE cache size must be a power of two of at least two");
         assert (NNUE_ACCUMULATOR_COUNT >= NNUE_OUTPUT_MAC_LANES
             && NNUE_ACCUMULATOR_COUNT % NNUE_OUTPUT_MAC_LANES == 0)
             else $fatal(1, "NNUE node count must be a multiple of vector width");

@@ -1,15 +1,11 @@
-// NNUE plan arbitration, board replay requests, and physical update formatting.
+// NNUE plan arbitration, serial board setup requests, and physical update formatting.
 // Included in search_controller scope; arbitration adds no register boundary.
 
     // Start a selected or newly prepared plan without adding an issue-cycle bubble.
-    task automatic start_nnue_plan(input ThreadID thread_id, input logic rebuild);
+    task automatic start_nnue_plan(input ThreadID thread_id);
         nnue_delta_busy <= 1'b1;
-        nnue_delta_draining <= 1'b0;
-        nnue_delta_replay <= rebuild;
-        nnue_delta_first <= 1'b1;
         nnue_delta_thread <= thread_id;
         nnue_delta_step <= 3'd0;
-        nnue_delta_pos <= Position'(0);
         nnue_plan_rr_ptr <= search_thread_after(thread_id);
     endtask : start_nnue_plan
 
@@ -36,82 +32,79 @@
         end
     end
 
-    // Replay payloads share one tile read. Occupancy remains local so a blocked
-    // rebuild can still skip empty squares while another producer owns the port.
-    always_comb begin
-        for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++)
-            for (int square = 0; square < 64; square++)
-                nnue_empty_squares[tid][square]
-                    = search_board[tid].tiles[square].piece_type == NULL_PIECE;
-    end
-    assign nnue_root_square_empty
-        = nnue_empty_squares[nnue_root_init_thread][nnue_root_init_pos];
-    assign nnue_build_square_empty
-        = nnue_empty_squares[nnue_build_thread][nnue_build_pos];
-    assign nnue_delta_square_empty
-        = nnue_empty_squares[nnue_delta_thread][nnue_delta_pos];
-    always_comb begin
-        nnue_replay_thread = nnue_root_init_thread;
-        nnue_replay_pos = nnue_root_init_pos;
-        if (nnue_build_busy && !nnue_build_draining) begin
-            nnue_replay_thread = nnue_build_thread;
-            nnue_replay_pos = nnue_build_pos;
-        end else if (nnue_delta_busy) begin
-            nnue_replay_thread = nnue_delta_thread;
-            nnue_replay_pos = nnue_delta_pos;
-        end
-        nnue_replay_tile = search_board[nnue_replay_thread].tiles[nnue_replay_pos];
-    end
-
     search_nnue_update_encoder nnue_update_encoder (
-        .thread_id(nnue_delta_thread),
-        .plan(nnue_plan[nnue_delta_thread]),
+        .thread_id(nnue_delta_thread), .plan(nnue_plan[nnue_delta_thread]),
         .step(nnue_delta_step),
-        .draining(nnue_delta_draining),
-        .first(nnue_delta_first),
-        .replay_pos(nnue_delta_pos),
-        .replay_tile(nnue_replay_tile),
-        .req_valid(nnue_delta_update_valid),
-        .req(nnue_delta_update_req)
+        .req_valid(nnue_delta_update_valid), .req(nnue_delta_update_req)
     );
 
-    // Root/build replay owns updates until draining, when a child plan may proceed.
+    // A tile replacement subtracts its old feature and adds its new feature as
+    // one transaction. Commit the existing board tile only after NNUE completion.
+    assign nnue_setup_old_tile = search_board[nnue_root_init_thread].tiles[nnue_root_init_pos];
+    assign nnue_setup_new_tile = active_board.tiles[nnue_root_init_pos];
+    assign nnue_setup_same = nnue_setup_old_tile.piece_type == nnue_setup_new_tile.piece_type
+        && (nnue_setup_old_tile.piece_type == NULL_PIECE
+            || nnue_setup_old_tile.piece_color == nnue_setup_new_tile.piece_color);
     always_comb begin
-        nnue_update_valid = 1'b0;
-        nnue_update_req = NnueUpdateRequest'('0);
-        nnue_eval_valid = nnue_build_busy && nnue_build_draining
-            && nnue_eval_tag_count != 2
-            && (!nnue_build_wait_updates || nnue_update_idle);
-        // Payload is unused when invalid; only source ownership selects it.
-        // Empty-square detection controls valid without gating ROM addresses.
-        if (state == CTRL_SEARCH_ROOT_INIT && !nnue_root_init_draining) begin
-            nnue_update_valid = !nnue_root_square_empty;
+        nnue_eval_valid = nnue_build_busy && nnue_eval_tag_count != 2;
+        nnue_update_valid = nnue_delta_busy && nnue_delta_update_valid;
+        nnue_update_req = nnue_delta_update_req;
+        if (state == CTRL_SEARCH_ROOT_INIT) begin
+            nnue_update_req = '0;
             nnue_update_req.thread_id = nnue_root_init_thread;
-            nnue_update_req.ply = PlyIndex'(0);
-            nnue_update_req.white_feature = nnue_feature_index(
-                nnue_replay_pos, nnue_replay_tile, WHITE);
-            nnue_update_req.black_feature = nnue_feature_index(
-                nnue_replay_pos, nnue_replay_tile, BLACK);
+            nnue_update_req.ply = '0;
             nnue_update_req.apply = 1'b1;
-            nnue_update_req.add = 1'b1;
-            nnue_update_req.clear = nnue_root_init_first;
-        end
-        if (nnue_build_busy) begin
-            if (!nnue_build_draining) begin
-                nnue_update_valid = !nnue_build_square_empty;
-                nnue_update_req.thread_id = nnue_build_thread;
-                nnue_update_req.ply = search_ply[nnue_build_thread];
-                nnue_update_req.white_feature = nnue_feature_index(
-                    nnue_replay_pos, nnue_replay_tile, WHITE);
-                nnue_update_req.black_feature = nnue_feature_index(
-                    nnue_replay_pos, nnue_replay_tile, BLACK);
-                nnue_update_req.apply = 1'b1;
-                nnue_update_req.add = 1'b1;
-                nnue_update_req.clear = nnue_build_first;
+            nnue_update_req.combine = 1'b1;
+            nnue_update_req.add = nnue_setup_step == SETUP_ADD;
+            nnue_update_req.complete = nnue_setup_step == SETUP_ADD
+                || nnue_setup_new_tile.piece_type == NULL_PIECE;
+            nnue_update_req.white_feature = nnue_feature_index(nnue_root_init_pos,
+                nnue_setup_step == SETUP_ADD ? nnue_setup_new_tile : nnue_setup_old_tile, WHITE);
+            nnue_update_req.black_feature = nnue_feature_index(nnue_root_init_pos,
+                nnue_setup_step == SETUP_ADD ? nnue_setup_new_tile : nnue_setup_old_tile, BLACK);
+            nnue_update_valid = !nnue_setup_same && (
+                (nnue_setup_step == SETUP_REMOVE && nnue_setup_old_tile.piece_type != NULL_PIECE)
+                || (nnue_setup_step == SETUP_ADD && nnue_setup_new_tile.piece_type != NULL_PIECE));
+            if (nnue_setup_step == SETUP_COPY) begin
+                nnue_update_valid = 1'b1;
+                nnue_update_req.copy = 1'b1;
+                nnue_update_req.combine = 1'b0;
+                nnue_update_req.complete = 1'b1;
             end
         end
-        if ((!nnue_build_busy || nnue_build_draining) && nnue_delta_busy) begin
-            nnue_update_valid = nnue_delta_update_valid;
-            nnue_update_req = nnue_delta_update_req;
-        end
+        nnue_update_req.source_slot = state == CTRL_SEARCH_ROOT_INIT
+            ? nnue_slot[nnue_root_init_thread]
+            : nnue_plan[nnue_update_req.thread_id].reverse
+                ? NnueSlot'(nnue_update_req.ply + PlyIndex'(1))
+                : NnueSlot'(nnue_update_req.ply - PlyIndex'(1));
+        nnue_update_req.destination_slot = NnueSlot'(nnue_update_req.ply);
     end
+
+    // The scan advances only after the board tile and accumulator agree.
+    task automatic advance_nnue_setup();
+        nnue_setup_step <= SETUP_REMOVE;
+        if (nnue_root_init_pos != Position'(63)) begin
+            nnue_root_init_pos <= nnue_root_init_pos + Position'(1);
+        end else begin
+            search_board[nnue_root_init_thread] <= active_board;
+            search_board_in_check[nnue_root_init_thread] <= active_board_in_check;
+            search_zobrist_key[nnue_root_init_thread] <= active_zobrist_key;
+            search_pst_eval[nnue_root_init_thread] <= active_pst_eval;
+            search_piece_count[nnue_root_init_thread] <= active_piece_count;
+            nnue_cached_reverses[nnue_root_init_thread] <= '0;
+            search_ply[nnue_root_init_thread] <= '0;
+            nnue_state_valid[nnue_root_init_thread] <= 1'b1;
+            if (int'(nnue_root_init_thread) == SEARCH_THREAD_COUNT-1) begin
+                nnue_roots_initialized <= 1'b1;
+                state <= kill_pending || reset_requested ? CTRL_SEARCH_DRAIN : nnue_setup_return;
+                if (nnue_setup_return == CTRL_IDLE || nnue_setup_return == CTRL_DIRECT_DONE)
+                    startup_active <= 1'b0;
+            end else begin
+                nnue_root_init_thread <= nnue_root_init_thread + ThreadID'(1);
+                nnue_root_init_pos <= '0;
+                nnue_setup_copy_pending <= nnue_slot[nnue_root_init_thread+ThreadID'(1)] != NnueSlot'(0);
+                nnue_setup_step <= nnue_slot[nnue_root_init_thread+ThreadID'(1)] != NnueSlot'(0)
+                    ? SETUP_COPY : SETUP_REMOVE;
+            end
+        end
+    endtask

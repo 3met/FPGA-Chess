@@ -17,8 +17,11 @@ def load_type_config(path: str) -> dict[str, int]:
         raise BuildError(f"Could not load RTL type configuration {path}: {exc}") from exc
     if not isinstance(config, dict):
         raise BuildError(f"RTL type configuration {path} must contain a JSON object")
-    _require_keys(config, {"threads", "stack_depth"}, path)
-    return {name: _integer(config, name, path, 1) for name in ("threads", "stack_depth")}
+    _require_keys(config, {"threads", "stack_depth", "nnue_cache_entries"}, path)
+    entries = _integer(config, "nnue_cache_entries", path, 2)
+    if entries & (entries - 1):
+        raise BuildError("nnue_cache_entries must be a power of two")
+    return {name: _integer(config, name, path, 1) for name in ("threads", "stack_depth", "nnue_cache_entries")}
 
 
 def type_config_for_target(target: dict) -> dict:
@@ -36,12 +39,16 @@ def type_config_for_target(target: dict) -> dict:
 def rtl_config_source(config: dict) -> str:
     """Render primitive inputs only; identifier and address widths remain derived in RTL."""
     capacities = {name: _integer(config, name, "RTL configuration", 1)
-                  for name in ("threads", "stack_depth")}
+                  for name in ("threads", "stack_depth", "nnue_cache_entries")}
+    entries = capacities["nnue_cache_entries"]
+    if entries < 2 or entries & (entries - 1):
+        raise BuildError("nnue_cache_entries must be a power of two of at least two")
     return (
         "// Generated from the selected configuration; do not edit.\n"
         "package rtl_config;\n"
         f"    localparam int THREAD_CAPACITY = {capacities['threads']};\n"
         f"    localparam int SEARCH_STACK_CAPACITY = {capacities['stack_depth']};\n"
+        f"    localparam int NNUE_CACHE_ENTRIES = {capacities['nnue_cache_entries']};\n"
         "endpackage : rtl_config\n"
     )
 

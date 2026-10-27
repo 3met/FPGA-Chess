@@ -2,7 +2,10 @@
 // Included in search_controller scope; this file is not a standalone compilation unit.
 
     always_ff @(posedge clk) begin
-        if (!rst_n) begin
+        if (!core_rst_n) begin
+            kill_pending <= 1'b0;
+            nnue_setup_step <= SETUP_REMOVE;
+            nnue_setup_return <= CTRL_IDLE;
             move_pop_response_rr <= ThreadID'(0);
             state <= CTRL_NEW_CLEAR_START;
             startup_active <= 1'b1;
@@ -68,27 +71,18 @@
             terminal_result_ply_pipe <= PlyIndex'(0);
             terminal_result_score_pipe <= EvalScore'(0);
             nnue_build_busy <= 1'b0;
-            nnue_build_draining <= 1'b0;
-            nnue_build_first <= 1'b0;
-            nnue_build_wait_updates <= 1'b0;
-            nnue_build_pos <= Position'(0);
             nnue_build_thread <= ThreadID'(0);
             nnue_roots_initialized <= 1'b0;
-            nnue_root_init_draining <= 1'b0;
-            nnue_root_init_first <= 1'b0;
+            nnue_setup_copy_pending <= 1'b0;
             nnue_root_init_thread <= ThreadID'(0);
             nnue_root_init_pos <= Position'(0);
             nnue_eval_tag_read_ptr <= 1'b0;
             nnue_eval_tag_write_ptr <= 1'b0;
             nnue_eval_tag_count <= 2'd0;
             nnue_delta_busy <= 1'b0;
-            nnue_delta_draining <= 1'b0;
-            nnue_delta_replay <= 1'b0;
-            nnue_delta_first <= 1'b0;
             nnue_delta_thread <= ThreadID'(0);
             nnue_plan_rr_ptr <= ThreadID'(0);
             nnue_delta_step <= 3'd0;
-            nnue_delta_pos <= Position'(0);
 `ifdef FPGA_CHESS_PROFILE
             profile_terminal_event <= 1'b0;
             profile_terminal_kind <= 2'd0;
@@ -138,7 +132,6 @@
                 search_tt_history_required[tid] <= 1'b0;
                 search_pending_move[tid] <= NULL_MOVE;
                 search_pending_move_bucket[tid] <= QUIET_MEDIUM_BUCKET;
-                search_ply[tid] <= PlyIndex'(0);
                 search_return_score[tid] <= EvalScore'(0);
                 search_return_valid[tid] <= 1'b0;
                 search_return_was_scout[tid] <= 1'b0;
@@ -153,12 +146,12 @@
                 search_node_init_done[tid] <= 1'b0;
                 nnue_plan_pending[tid] <= 1'b0;
                 nnue_plan_inflight[tid] <= 1'b0;
-                nnue_plan[tid].kind <= NNUE_PLAN_REBUILD;
                 nnue_plan[tid].child_ply <= PlyIndex'(0);
                 nnue_plan[tid].capture_valid <= 1'b0;
                 nnue_plan[tid].real_move <= 1'b0;
                 nnue_plan[tid].reverse <= 1'b0;
                 nnue_state_valid[tid] <= 1'b0;
+                nnue_cached_reverses[tid] <= '0;
                 search_return_move[tid] <= NULL_MOVE;
                 search_return_ponder_move[tid] <= NULL_MOVE;
                 history_update_pending[tid] <= 1'b0;
@@ -190,17 +183,12 @@
             profile_qdelta_prune_event <= 1'b0;
             profile_beta_cutoff_event <= 1'b0;
 `endif
-            if (state != CTRL_SEARCH_RUN) begin
+            if (state != CTRL_SEARCH_RUN && state != CTRL_SEARCH_DRAIN) begin
                 nnue_build_busy <= 1'b0;
-                nnue_build_draining <= 1'b0;
-                nnue_build_first <= 1'b0;
-                nnue_build_wait_updates <= 1'b0;
                 nnue_eval_tag_read_ptr <= 1'b0;
                 nnue_eval_tag_write_ptr <= 1'b0;
                 nnue_eval_tag_count <= 2'd0;
                 nnue_delta_busy <= 1'b0;
-                nnue_delta_draining <= 1'b0;
-                nnue_delta_replay <= 1'b0;
             end
 
             if (move_history_update_valid && move_history_update_ready) begin
@@ -270,43 +258,6 @@
                 end
             end
 
-            if (req_valid && req_ready && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE) begin
-                repetition_epoch <= repetition_epoch + 1'b1;
-                terminal_result_valid_pipe <= 1'b0;
-                resp_reg <= stopped_search_response(
-                    is_search_operation(active_req.operation), 1'b1, ENGINE_END_KILLED);
-                for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
-                    search_board_inflight[tid] <= 1'b0;
-                    search_move_inflight[tid] <= 1'b0;
-                    search_tt_lookup_inflight[tid] <= 1'b0;
-                    search_tt_response_pending[tid] <= 1'b0;
-                    search_repetition_pending[tid] <= 1'b0;
-                    search_repetition_done[tid] <= 1'b0;
-                    search_repetition_draw[tid] <= 1'b0;
-                    search_repetition_seen_before[tid] <= 1'b0;
-                    search_tt_validation_pending[tid] <= 1'b0;
-                    search_tt_validation_passed[tid] <= 1'b0;
-                    search_tt_validation_forced[tid] <= 1'b0;
-                    search_root_has_completed_move[tid] <= 1'b0;
-                    search_root_best_exact[tid] <= 1'b0;
-                    search_return_was_scout[tid] <= 1'b0;
-                    search_return_was_reduced[tid] <= 1'b0;
-                    search_return_was_null[tid] <= 1'b0;
-                    search_pvs_research[tid] <= 1'b0;
-                    history_update_pending[tid] <= 1'b0;
-                    nnue_plan_pending[tid] <= 1'b0;
-                    nnue_plan_inflight[tid] <= 1'b0;
-                    nnue_state_valid[tid] <= 1'b0;
-                    search_thread_phase[tid] <= SEARCH_PHASE_IDLE;
-                end
-                for (int idx = 0; idx < SEARCH_BOARD_TAG_PIPE_LEN; idx++) begin
-                    search_board_tag_valid_pipe[idx] <= 1'b0;
-                end
-                for (int idx = 0; idx < SEARCH_MOVE_TAG_PIPE_LEN; idx++) begin
-                    search_move_tag_valid_pipe[idx] <= 1'b0;
-                end
-                state <= CTRL_FLUSH_RESPOND;
-            end else begin
             // FSM state encodings are mutually exclusive; default retains recovery/idle behavior.
             unique case (state)
                 CTRL_IDLE: begin
@@ -351,7 +302,6 @@
                                     history_update_pending[tid] <= 1'b0;
                                     nnue_plan_pending[tid] <= 1'b0;
                                     nnue_plan_inflight[tid] <= 1'b0;
-                                    nnue_plan[tid].kind <= NNUE_PLAN_REBUILD;
                                     nnue_plan[tid].child_ply <= PlyIndex'(0);
                                     nnue_plan[tid].capture_valid <= 1'b0;
                                     nnue_plan[tid].real_move <= 1'b0;
@@ -376,7 +326,8 @@
                                     state <= CTRL_RESPOND;
                                 end else begin
                                     // Perft borrows the idle first search context and leaves the game board intact.
-                                    search_board[0] <= active_board;
+                                    nnue_setup_return <= req.depth_limit == 8'd0
+                                        ? CTRL_RESPOND : CTRL_PERFT_GEN_ISSUE;
                                     search_board_in_check[0] <= active_board_in_check;
                                     search_zobrist_key[0] <= active_zobrist_key;
                                     search_pst_eval[0] <= active_pst_eval;
@@ -384,16 +335,15 @@
                                     search_pending_move[0] <= NULL_MOVE;
                                     search_stack_top[0] <= empty_search_stack_entry();
                                     search_stack_top[0].move_order_state <= MOVE_ORDER_GENERATE_NOISY;
-                                    search_ply[0] <= PlyIndex'(0);
                                     search_nodes <= (req.depth_limit == 8'd0) ? NodeCountType'(1) : NodeCountType'(0);
                                     if (req.depth_limit == 8'd0) begin
                                         resp_reg <= EngineControllerResponse'('0);
                                         resp_reg.nodes_count <= NodeCountType'(1);
                                         resp_reg.completed_depth <= 8'd0;
                                         resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                        state <= CTRL_RESPOND;
+                                        state <= CTRL_NNUE_SETUP_START;
                                     end else begin
-                                        state <= CTRL_PERFT_GEN_ISSUE;
+                                        state <= CTRL_NNUE_SETUP_START;
                                     end
                                 end
                             end
@@ -408,7 +358,6 @@
                                     resp_reg.end_reason <= ENGINE_END_ERROR;
                                     state <= CTRL_RESPOND;
                                 end else begin
-                                    search_ply[search_thread_id] <= PlyIndex'(0);
                                     search_max_depth <= SearchDepth'(requested_search_depth(req));
                                     search_completed_depth <= SearchDepth'(0);
                                     search_completed_best_move <= NULL_MOVE;
@@ -546,8 +495,8 @@
                                 repetition_history_key <= board_update_zobrist_out;
                                 resp_reg <= EngineControllerResponse'('0);
                                 // Power-up uses the normal serial setup without a response.
-                                startup_active <= 1'b0;
-                                state <= startup_active ? CTRL_IDLE : CTRL_DIRECT_DONE;
+                                nnue_setup_return <= startup_active ? CTRL_IDLE : CTRL_DIRECT_DONE;
+                                state <= CTRL_NNUE_SETUP_START;
                             end else begin
                                 new_setup_index <= new_setup_index + 7'd1;
                                 state <= CTRL_BOARD_ISSUE;
@@ -734,6 +683,10 @@
                 end
 
                 CTRL_SEARCH_ITER_START: begin
+                    if (!nnue_roots_initialized) begin
+                        nnue_setup_return <= CTRL_SEARCH_ITER_START;
+                        state <= CTRL_NNUE_SETUP_START;
+                    end else begin
                     for (int tid = 0; tid < SEARCH_THREAD_COUNT; tid++) begin
                         search_thread_phase[tid] <= SEARCH_PHASE_READY;
                         search_board[tid] <= active_board;
@@ -786,41 +739,42 @@
                     search_thread_id <= ThreadID'(0);
                     search_dispatch <= '0;
                     search_active_thread_count <= ThreadCount'(SEARCH_THREAD_COUNT);
-                    if (!nnue_roots_initialized) begin
-                        nnue_root_init_thread <= ThreadID'(0);
-                        nnue_root_init_pos <= Position'(0);
-                        nnue_root_init_first <= 1'b1;
-                        nnue_root_init_draining <= 1'b0;
-                        state <= CTRL_SEARCH_ROOT_INIT;
-                    end else begin
-                        state <= CTRL_SEARCH_RUN;
+                    state <= CTRL_SEARCH_RUN;
                     end
                 end
 
+                CTRL_NNUE_SETUP_START: begin
+                    nnue_root_init_thread <= '0;
+                    nnue_root_init_pos <= '0;
+                    nnue_setup_copy_pending <= nnue_slot[0] != NnueSlot'(0);
+                    nnue_setup_step <= nnue_slot[0] != NnueSlot'(0) ? SETUP_COPY : SETUP_REMOVE;
+                    state <= CTRL_SEARCH_ROOT_INIT;
+                end
+
                 CTRL_SEARCH_ROOT_INIT: begin
-                    if (!nnue_root_init_draining) begin
-                        if (nnue_root_square_empty
-                                || (nnue_update_valid && nnue_update_ready)) begin
-                            if (!nnue_root_square_empty)
-                                nnue_root_init_first <= 1'b0;
-                            if (nnue_root_init_pos == Position'(63))
-                                nnue_root_init_draining <= 1'b1;
-                            else
-                                nnue_root_init_pos <= nnue_root_init_pos + Position'(1);
+                    case (nnue_setup_step)
+                        SETUP_COPY: if (nnue_update_ready) nnue_setup_step <= SETUP_WAIT;
+                        SETUP_REMOVE: begin
+                            if (nnue_setup_same) advance_nnue_setup();
+                            else if (nnue_setup_old_tile.piece_type == NULL_PIECE)
+                                nnue_setup_step <= SETUP_ADD;
+                            else if (nnue_update_ready)
+                                nnue_setup_step <= nnue_setup_new_tile.piece_type == NULL_PIECE
+                                    ? SETUP_WAIT : SETUP_ADD;
                         end
-                    end else if (nnue_update_idle) begin
-                        nnue_state_valid[nnue_root_init_thread] <= 1'b1;
-                        if (int'(nnue_root_init_thread) == SEARCH_THREAD_COUNT - 1) begin
-                            nnue_roots_initialized <= 1'b1;
-                            nnue_root_init_draining <= 1'b0;
-                            state <= CTRL_SEARCH_RUN;
-                        end else begin
-                            nnue_root_init_thread <= nnue_root_init_thread + ThreadID'(1);
-                            nnue_root_init_pos <= Position'(0);
-                            nnue_root_init_first <= 1'b1;
-                            nnue_root_init_draining <= 1'b0;
+                        SETUP_ADD: if (nnue_update_ready) nnue_setup_step <= SETUP_WAIT;
+                        SETUP_WAIT: if (nnue_update_done_valid) begin
+                            search_ply[nnue_root_init_thread] <= '0;
+                            if (nnue_setup_copy_pending) begin
+                                nnue_setup_copy_pending <= 1'b0;
+                                nnue_setup_step <= SETUP_REMOVE;
+                            end else begin
+                                search_board[nnue_root_init_thread].tiles[nnue_root_init_pos]
+                                    <= nnue_setup_new_tile;
+                                advance_nnue_setup();
+                            end
                         end
-                    end
+                    endcase
                 end
 
                 `include "hardware/rtl/search/search_run.svh"
@@ -840,6 +794,23 @@
                     state <= CTRL_RESPOND;
                 end
             endcase
+            if (state == CTRL_FLUSH_RESPOND) kill_pending <= 1'b0;
+            if (req_valid && req_ready && req.operation == ENGINE_CTRL_KILL && state != CTRL_IDLE) begin
+                kill_pending <= 1'b1;
+                repetition_epoch <= repetition_epoch + 1'b1;
+                resp_reg <= stopped_search_response(
+                    is_search_operation(active_req.operation), 1'b1, ENGINE_END_KILLED);
+                // Setup finishes its current serial scan before cancellation.
+                if (state != CTRL_SEARCH_ROOT_INIT && state != CTRL_NNUE_SETUP_START)
+                    state <= CTRL_SEARCH_DRAIN;
+                if (active_req.operation == ENGINE_CTRL_PERFT) begin
+                    search_board[0] <= active_board;
+                    search_ply[0] <= '0;
+                end
+            end
+            if (reset_requested && nnue_quiescent && active_req.operation == ENGINE_CTRL_PERFT) begin
+                search_board[0] <= active_board;
+                search_ply[0] <= '0;
             end
         end
     end

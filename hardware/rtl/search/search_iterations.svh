@@ -1,6 +1,7 @@
 // Independent iterative-deepening passes, aspiration retries, and primary time decisions.
 // Included in CTRL_SEARCH_RUN so helper threads and stop decisions keep their ordering.
 
+                    if (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested()) begin
                     // Clock-search iteration decisions are deliberately staged.
                     // Only registered timing values may control root-state reloads.
                     if (search_thread_phase[0] == SEARCH_PHASE_TIME_SCALE) begin
@@ -21,7 +22,7 @@
                             resp_reg.nodes_count <= search_nodes;
                             resp_reg.completed_depth <= search_completed_depth;
                             resp_reg.end_reason <= ENGINE_END_TIME_LIMIT;
-                            state <= CTRL_FLUSH_RESPOND;
+                            state <= CTRL_SEARCH_DRAIN;
                         end else begin
                             search_thread_target_depth[0]
                                 <= search_thread_target_depth[0] + SearchDepth'(1);
@@ -117,7 +118,7 @@
                                 resp_reg.nodes_count <= search_nodes;
                                 resp_reg.completed_depth <= search_thread_target_depth[tid];
                                 resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                                state <= CTRL_FLUSH_RESPOND;
+                                state <= CTRL_SEARCH_DRAIN;
                             end else if ((!depth_finished || aspiration_failed)
                                     && !(primary_thread && !aspiration_failed
                                         && active_req.operation == ENGINE_CTRL_SEARCH_ON_CLOCK)) begin
@@ -125,6 +126,8 @@
                                 active_count_next += ThreadCount'(1);
                             end
                         end
+                    end
+
                     end
 
                     for (int idx = SEARCH_BOARD_TAG_PIPE_LEN - 1; idx > 0; idx--) begin

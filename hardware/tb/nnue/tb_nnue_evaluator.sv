@@ -13,6 +13,9 @@ module tb_nnue_evaluator;
     PlyIndex update_done_ply;
     logic eval_valid = 0, eval_ready, result_valid;
     ThreadID eval_thread_id = 0;
+    NnueSlot eval_slot = '0;
+    NnueSlot selected[TEST_THREADS] = '{default:'0};
+    bit collecting_test = 0;
     Color eval_turn = WHITE;
     PieceCount eval_piece_count = 2;
     PstEvalPair eval_pst = '0;
@@ -84,7 +87,10 @@ module tb_nnue_evaluator;
     // Honor backpressure and update the reference with modular arithmetic.
     task automatic send_update(input NnueUpdateRequest req);
         @(negedge clk);
+        if (!collecting_test) while (!update_idle) @(negedge clk);
         while (!update_ready) @(negedge clk);
+        req.source_slot = selected[req.thread_id];
+        req.destination_slot = selected[req.thread_id] + NnueSlot'(1);
         update_req = req;
         update_valid = 1;
         @(posedge clk);
@@ -92,19 +98,42 @@ module tb_nnue_evaluator;
             for (int side = 0; side < 2; side++)
                 for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
                     automatic int index = side*NNUE_ACCUMULATOR_COUNT+lane;
-                    automatic int value = req.clear ? bias_value(lane) : reference_state[req.thread_id][index];
+                    automatic int value = reference_state[req.thread_id][index];
                     automatic int weight = feature_value(side == 0 ? int'(req.white_feature) : int'(req.black_feature), lane);
-                    reference_state[req.thread_id][index] = wrap(value + (req.add ? weight : -weight));
+                    reference_state[req.thread_id][index] = wrap(value + (req.copy ? 0 : req.add ? weight : -weight));
                 end
         @(negedge clk);
         update_valid = 0;
+        collecting_test = req.combine && !req.complete;
+        if (!collecting_test) selected[req.thread_id] = req.destination_slot;
     endtask
+
+    // Moving blend arithmetic between stages must preserve the public latency,
+    // including consecutive evaluations with different thread/PST/phase inputs.
+    int expected_response_cycle[$];
+    int eval_clock = 0;
+    always @(posedge clk) begin
+        eval_clock++;
+        if (!rst_n || clear) expected_response_cycle.delete();
+        else begin
+            if (eval_valid && eval_ready)
+                expected_response_cycle.push_back(eval_clock + NNUE_OUTPUT_MAC_CYCLES + 3);
+            #1;
+            if (result_valid) begin
+                check(expected_response_cycle.size() != 0, "timed result has an owning request");
+                if (expected_response_cycle.size() != 0)
+                    check(eval_clock == expected_response_cycle.pop_front(),
+                        "evaluation latency remains unchanged");
+            end
+        end
+    end
 
     task automatic send_eval(input int thread, input Color turn, input int piece_count, input int first, input int endgame);
         int expected, bucket, phase;
         @(negedge clk);
         while (!eval_ready) @(negedge clk);
         eval_thread_id = ThreadID'(thread);
+        eval_slot = selected[thread];
         eval_turn = turn;
         eval_piece_count = PieceCount'(piece_count);
         eval_pst = '{first: PstEvalScore'(first), endgame: PstEvalScore'(endgame)};
@@ -126,7 +155,7 @@ module tb_nnue_evaluator;
         logic [NNUE_STATE_VALUE_COUNT*NNUE_ACCUMULATOR_BITS-1:0] actual;
         wait (update_idle);
         @(negedge clk);
-        actual = dut.read_state(thread);
+        actual = dut.read_state(thread, selected[thread]);
         for (int lane = 0; lane < NNUE_STATE_VALUE_COUNT; lane++)
             check(int'($signed(actual[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS])) == reference_state[thread][lane],
                 "committed accumulator matches reversible scalar update");
@@ -155,6 +184,8 @@ module tb_nnue_evaluator;
         end
         for (int acc = -(1 << (NNUE_ACCUMULATOR_BITS-1)); acc < (1 << (NNUE_ACCUMULATOR_BITS-1)); acc++)
             check(int'(dut.screlu(NnueAccumulator'(acc))) == activation(acc), "SCReLU matches every accumulator code");
+        foreach (reference_state[thread, lane])
+            reference_state[thread][lane] = bias_value(lane % NNUE_ACCUMULATOR_COUNT);
         repeat (2) @(negedge clk);
         rst_n = 1;
         for (int thread = 0; thread < TEST_THREADS; thread++) begin
@@ -164,7 +195,6 @@ module tb_nnue_evaluator;
             req.black_feature = 432;
             req.apply = 1;
             req.add = 1;
-            req.clear = 1;
             req.complete = 1;
             req.ply = PlyIndex'(thread+1);
             send_update(req);
@@ -204,6 +234,17 @@ module tb_nnue_evaluator;
             send_eval(1, WHITE, 17, 20, -20);
         end
         wait (expected_result.size() == 0);
+
+        // A null move copies the complete two-perspective image without deltas.
+        begin
+            automatic NnueUpdateRequest req = '0;
+            req.thread_id = 1;
+            req.apply = 1;
+            req.copy = 1;
+            req.complete = 1;
+            send_update(req);
+            check_state(1);
+        end
 
         // Repeated modular overflow and underflow must reverse exactly.
         for (int direction = 0; direction < 2; direction++) begin
