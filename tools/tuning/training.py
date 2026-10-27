@@ -18,6 +18,7 @@ from .config import public_config
 from .data import CacheBatchLoader, available_cpus, cache_datasets
 from .model import (
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_ACCUMULATOR_BIAS_MIN,
     NNUE_OUTPUT_BIAS_MAX,
     NNUE_OUTPUT_BUCKETS,
     NNUE_OUTPUT_WEIGHT_MAX,
@@ -80,7 +81,7 @@ def _repair_boundary_momentum(torch, model, optimizer):
     """Discard momentum that would repeatedly push a shadow beyond its code range."""
     bounds = (
         (model.feature_weights, -2.0, 1.0),
-        (model.accumulator_bias, 0.0, float(NNUE_ACCUMULATOR_BIAS_MAX)),
+        (model.accumulator_bias, float(NNUE_ACCUMULATOR_BIAS_MIN), float(NNUE_ACCUMULATOR_BIAS_MAX)),
         (model.output_weights, float(NNUE_OUTPUT_WEIGHT_MIN), float(NNUE_OUTPUT_WEIGHT_MAX)),
         (model.output_bias, 0.0, float(NNUE_OUTPUT_BIAS_MAX)),
     )

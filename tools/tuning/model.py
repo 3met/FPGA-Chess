@@ -21,8 +21,9 @@ NNUE_ACCUMULATORS = 512
 NNUE_OUTPUT_INPUTS = NNUE_SIDES * NNUE_ACCUMULATORS
 NNUE_OUTPUT_BUCKETS = 8
 NNUE_ACCUMULATOR_BITS = 6
-NNUE_ACCUMULATOR_BIAS_BITS = 4
-NNUE_ACCUMULATOR_BIAS_MAX = (1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1
+NNUE_ACCUMULATOR_BIAS_BITS = NNUE_ACCUMULATOR_BITS
+NNUE_ACCUMULATOR_BIAS_MIN = -(1 << (NNUE_ACCUMULATOR_BIAS_BITS - 1))
+NNUE_ACCUMULATOR_BIAS_MAX = (1 << (NNUE_ACCUMULATOR_BIAS_BITS - 1)) - 1
 NNUE_CLIPPED_ACCUMULATOR_BITS = NNUE_ACCUMULATOR_BITS - 1
 NNUE_CLIPPED_ACCUMULATOR_MAX = (1 << NNUE_CLIPPED_ACCUMULATOR_BITS) - 1
 NNUE_ACTIVATION_BITS = 4
@@ -211,7 +212,7 @@ class EvaluationModel(nn.Module):
         for category in (0, 6):
             self.feature_weights[category * 64:category * 64 + 8] = 0
             self.feature_weights[category * 64 + 56:category * 64 + 64] = 0
-        self.accumulator_bias.clamp_(0, NNUE_ACCUMULATOR_BIAS_MAX)
+        self.accumulator_bias.clamp_(NNUE_ACCUMULATOR_BIAS_MIN, NNUE_ACCUMULATOR_BIAS_MAX)
         self.output_weights.clamp_(NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX)
         self.output_bias.clamp_(0, NNUE_OUTPUT_BIAS_MAX)
 
@@ -229,8 +230,8 @@ class EvaluationModel(nn.Module):
 
     @staticmethod
     def _accumulator_bias_quantized(values: torch.Tensor) -> torch.Tensor:
-        """Quantize the trained accumulator bias to its target unsigned range."""
-        quantized = values.round().clamp(0, NNUE_ACCUMULATOR_BIAS_MAX)
+        """Quantize the trained accumulator bias to its target signed range."""
+        quantized = values.round().clamp(NNUE_ACCUMULATOR_BIAS_MIN, NNUE_ACCUMULATOR_BIAS_MAX)
         return values + (quantized - values).detach()
 
     @staticmethod

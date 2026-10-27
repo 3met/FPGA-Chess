@@ -69,7 +69,7 @@ module nnue_evaluator #(
     // Canonical model arrays are initialization sources, not additional RAM
     // copies in the synthesized datapath.
     logic [NNUE_FEATURE_ROW_BITS-1:0] feature_rom[NNUE_FEATURE_COUNT];
-    logic [NNUE_ACCUMULATOR_BIAS_BITS-1:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
+    logic signed [NNUE_ACCUMULATOR_BIAS_BITS-1:0] accumulator_bias[NNUE_ACCUMULATOR_COUNT];
     logic [7:0] output_bias[NNUE_OUTPUT_BUCKET_COUNT];
     (* ramstyle = "M10K", ram_style = "block" *)
     logic [WEIGHT_BITS-1:0] output_weight_rows[NNUE_OUTPUT_WEIGHT_ROW_COUNT];
@@ -469,7 +469,7 @@ module nnue_evaluator #(
             endcase
     endtask
     // Configuration-only hook: replacing the model also reinitializes its RAM images.
-    task automatic load_bias(input int lane, input logic [NNUE_ACCUMULATOR_BIAS_BITS-1:0] value);
+    task automatic load_bias(input int lane, input logic signed [NNUE_ACCUMULATOR_BIAS_BITS-1:0] value);
         accumulator_bias[lane] = value;
         for (int thread = 0; thread < STATE_THREAD_COUNT; thread++)
             for (int slot = 0; slot < NNUE_CACHE_ENTRIES; slot++)

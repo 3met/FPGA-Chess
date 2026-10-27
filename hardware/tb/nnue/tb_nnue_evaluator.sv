@@ -50,7 +50,8 @@ module tb_nnue_evaluator;
         return (feature*7 + lane*3 + lane/11)%4 - 2;
     endfunction
     function automatic int bias_value(input int lane);
-        return lane % (1 << NNUE_ACCUMULATOR_BIAS_BITS);
+        // Exercise every signed bias code, including both endpoints.
+        return lane % (1 << NNUE_ACCUMULATOR_BIAS_BITS) - (1 << (NNUE_ACCUMULATOR_BIAS_BITS-1));
     endfunction
     function automatic int weight_value(input int bucket, input int lane);
         return (bucket*3 + lane*7 + lane/13)%16 - 8;

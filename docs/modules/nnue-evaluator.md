@@ -6,7 +6,7 @@ The evaluator keeps a circular set of two-perspective accumulator snapshots per 
 
 `nnue_defs` defines the accumulator node count per perspective, vector multiplier width, output bucket count, and piece-count mapping. The node count must be a multiple of the vector width. Defaults are 512 nodes per side, 256 multipliers, and eight output buckets. The default buckets cover piece counts 2–5, 6–9, through 30–32. Model images and the training/export geometry must match these parameters.
 
-Accumulator values are signed six-bit integers, transformer weights signed two-bit integers, activations unsigned four-bit integers, and output weights signed four-bit integers. Accumulator arithmetic wraps modulo 64 without saturation; add/remove updates therefore remain exact inverses. Training penalizes overflow. Activation is `min(15, floor(max(0, accumulator)^2 / 8))`. Output bias remains unsigned six-bit, and the complete dot product retains sufficient signed width until search applies score saturation.
+Accumulator values and biases are signed six-bit integers, transformer weights signed two-bit integers, activations unsigned four-bit integers, and output weights signed four-bit integers. Accumulator arithmetic wraps modulo 64 without saturation; add/remove updates therefore remain exact inverses. Training penalizes overflow. Activation is `min(15, floor(max(0, accumulator)^2 / 8))`. Output bias remains unsigned six-bit, and the complete dot product retains sufficient signed width until search applies score saturation.
 
 Each perspective has 768 direct piece-square features: six friendly and six opposing piece types over 64 squares. The Black perspective flips ranks. Kings are ordinary features, and there are no king buckets or horizontal mirroring. The side-to-move perspective is first in the output layer. The datapath reads White then Black accumulator rows and permutes weight-row addresses to implement that ordering.
 
@@ -43,7 +43,7 @@ Model images are tracked inputs under `hardware/data/nnue/`, written by the trai
 | File | Contents |
 | ---- | -------- |
 | `feature_transformer.hex` | Signed two-bit transformer weights, one complete node vector per feature. Unreachable pawn rows are zero. |
-| `accumulator_bias.hex` | Unsigned four-bit bias per node, loaded into accumulator BRAM initialization. |
+| `accumulator_bias.hex` | Signed six-bit two's-complement bias per node, loaded into accumulator BRAM initialization. |
 | `output_weights.hex` | Signed four-bit weights, one vector per row, grouped by bucket and perspective. |
 | `output_bias.hex` | Unsigned output bias per bucket. |
 

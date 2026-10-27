@@ -11,6 +11,7 @@ from .data import CacheBatchLoader, build_cache, cache_datasets
 from .model import (
     NNUE_ACCUMULATOR_BIAS_BITS,
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_ACCUMULATOR_BIAS_MIN,
     NNUE_ACCUMULATOR_BITS,
     NNUE_ACTIVATION_BITS,
     NNUE_ACTIVATION_MAX,
@@ -92,7 +93,7 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
     model.eval()
 
     feature = model.feature_weights.round().clamp(-2, 1)
-    accumulator_bias = model.accumulator_bias.round().clamp(0, NNUE_ACCUMULATOR_BIAS_MAX)
+    accumulator_bias = model.accumulator_bias.round().clamp(NNUE_ACCUMULATOR_BIAS_MIN, NNUE_ACCUMULATOR_BIAS_MAX)
     output_weights = model.output_weights.round().clamp(
         NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX
     )
@@ -100,7 +101,7 @@ def analyze_quantization(config: dict, run: Path, sample_positions: int = 131_07
     parameter_report = {
         "feature_weights": _parameter_stats(model.feature_weights, -2, 1),
         "accumulator_bias": _parameter_stats(
-            model.accumulator_bias, 0, NNUE_ACCUMULATOR_BIAS_MAX, signed=False
+            model.accumulator_bias, NNUE_ACCUMULATOR_BIAS_MIN, NNUE_ACCUMULATOR_BIAS_MAX, signed=True
         ),
         "output_weights": _parameter_stats(
             model.output_weights, NNUE_OUTPUT_WEIGHT_MIN, NNUE_OUTPUT_WEIGHT_MAX

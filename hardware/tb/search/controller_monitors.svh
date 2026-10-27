@@ -64,10 +64,8 @@
 
         for (int perspective = 0; perspective < 2; perspective++) begin
             for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++) begin
-                automatic NnueAccumulator sum = NnueAccumulator'({{
-                    (NNUE_ACCUMULATOR_BITS-NNUE_ACCUMULATOR_BIAS_BITS){1'b0}},
-                    dut.nnue_evaluator.accumulator_bias[lane][
-                        NNUE_ACCUMULATOR_BIAS_BITS-1:0]});
+                automatic NnueAccumulator sum = NnueAccumulator'(
+                    dut.nnue_evaluator.accumulator_bias[lane]);
                 for (int pos = 0; pos < 64; pos++) begin
                     automatic Tile tile = board.tiles[pos];
                     if (tile.piece_type != NULL_PIECE) begin

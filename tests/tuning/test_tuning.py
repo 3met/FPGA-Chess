@@ -42,6 +42,7 @@ from tools.tuning.engine import (
 )
 from tools.tuning.model import (
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_ACCUMULATOR_BIAS_MIN,
     NNUE_ACCUMULATOR_BITS,
     NNUE_ACCUMULATORS,
     NNUE_ACTIVATION_MAX,
@@ -433,7 +434,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         for category in (0, 6):
             self.assertEqual(model.feature_weights[category*64:category*64+8].unique().tolist(), [0.0])
             self.assertEqual(model.feature_weights[category*64+56:category*64+64].unique().tolist(), [0.0])
-        self.assertEqual(model.accumulator_bias.unique().tolist(), [0.0])
+        self.assertEqual(model.accumulator_bias.unique().tolist(), [float(NNUE_ACCUMULATOR_BIAS_MIN)])
         self.assertEqual(model.output_weights.unique().tolist(), [float(NNUE_OUTPUT_WEIGHT_MAX)])
         self.assertEqual(model.output_bias.unique().tolist(), [0.0])
         with torch.no_grad():
@@ -617,7 +618,9 @@ class TuningModelAndExportTests(unittest.TestCase):
             rows = torch.arange(model.feature_weights.numel()).reshape_as(model.feature_weights)
             model.feature_weights.copy_((rows.remainder(3) - 1).to(torch.float32))
             model.accumulator_bias.copy_(
-                torch.arange(NNUE_ACCUMULATORS).remainder(NNUE_ACCUMULATOR_BIAS_MAX + 1)
+                torch.arange(NNUE_ACCUMULATORS).remainder(
+                    NNUE_ACCUMULATOR_BIAS_MAX - NNUE_ACCUMULATOR_BIAS_MIN + 1
+                ) + NNUE_ACCUMULATOR_BIAS_MIN
             )
             model.output_weights.copy_(
                 torch.arange(model.output_weights.numel()).reshape_as(model.output_weights)
@@ -731,6 +734,22 @@ class TuningModelAndExportTests(unittest.TestCase):
         self.assertEqual(int(tied_outputs.splitlines()[0], 16), (2 << NNUE_OUTPUT_WEIGHT_BITS) | (2 << (2*NNUE_OUTPUT_WEIGHT_BITS)))
         self.assertEqual(tied_biases.splitlines()[0:4], ["0", "2", "2", "0"])
         self.assertEqual(tied_output_bias.splitlines()[:4], ["00", "02", "02", "00"])
+        # Decode every signed bias code and compare export with the QAT forward values.
+        bias_values = torch.arange(
+            NNUE_ACCUMULATOR_BIAS_MIN - 1, NNUE_ACCUMULATOR_BIAS_MAX + 2,
+            dtype=torch.float32,
+        ) - 0.5
+        parameters["nnue"]["accumulator_bias"] = bias_values.repeat(
+            (NNUE_ACCUMULATORS + bias_values.numel() - 1) // bias_values.numel()
+        )[:NNUE_ACCUMULATORS].tolist()
+        _, _, _, signed_biases = export_nnue(parameters)
+        modulus = NNUE_ACCUMULATOR_BIAS_MAX - NNUE_ACCUMULATOR_BIAS_MIN + 1
+        decoded = [int(code, 16) for code in signed_biases.splitlines()]
+        decoded = [code - modulus if code > NNUE_ACCUMULATOR_BIAS_MAX else code for code in decoded]
+        expected = EvaluationModel._accumulator_bias_quantized(
+            torch.tensor(parameters["nnue"]["accumulator_bias"])
+        )
+        self.assertEqual(decoded, expected.tolist())
         parameters["nnue"]["output_units"] = "centipawns"
         with self.assertRaises(ValueError):
             export_nnue(parameters)
@@ -790,11 +809,11 @@ class TuningModelAndExportTests(unittest.TestCase):
         self.assertEqual(stats["minimum_value_fraction"], 0.4)
         self.assertEqual(stats["maximum_value_fraction"], 0.4)
         bias_stats = _parameter_stats(
-            torch.tensor([0.0, float(NNUE_ACCUMULATOR_BIAS_MAX)]),
-            0, NNUE_ACCUMULATOR_BIAS_MAX, signed=False,
+            torch.tensor([float(NNUE_ACCUMULATOR_BIAS_MIN), float(NNUE_ACCUMULATOR_BIAS_MAX)]),
+            NNUE_ACCUMULATOR_BIAS_MIN, NNUE_ACCUMULATOR_BIAS_MAX, signed=True,
         )
-        self.assertEqual(bias_stats["encoding"], "unsigned")
-        self.assertEqual(bias_stats["minimum_bits"], NNUE_ACCUMULATOR_BIAS_MAX.bit_length())
+        self.assertEqual(bias_stats["encoding"], "signed")
+        self.assertEqual(bias_stats["minimum_bits"], NNUE_ACCUMULATOR_BIAS_MAX.bit_length() + 1)
 
     def test_model_matches_manual_current_engine_evaluation(self):
         weights = engine_combined_cp()
@@ -873,7 +892,7 @@ class TuningModelAndExportTests(unittest.TestCase):
         with torch.no_grad():
             model.feature_weights[0, :3] = torch.tensor([-2.0, 1.0, 0.0])
             model.accumulator_bias[:3] = torch.tensor([
-                0.0, float(NNUE_ACCUMULATOR_BIAS_MAX), 1.0,
+                float(NNUE_ACCUMULATOR_BIAS_MIN), float(NNUE_ACCUMULATOR_BIAS_MAX), 1.0,
             ])
         moment = torch.zeros_like(model.feature_weights)
         moment[0, :3] = torch.tensor([1.0, -1.0, 1.0])
@@ -1236,7 +1255,7 @@ class TuningTrainingAndReportTests(unittest.TestCase):
                 quantization = analyze_quantization(config, run, sample_positions=2)
             self.assertEqual(quantization["sample_positions"], 2)
             self.assertEqual(quantization["output_buckets"], NNUE_OUTPUT_BUCKETS)
-            self.assertEqual(quantization["parameters"]["accumulator_bias"]["encoding"], "unsigned")
+            self.assertEqual(quantization["parameters"]["accumulator_bias"]["encoding"], "signed")
             self.assertEqual(quantization["parameters"]["output_bias"]["encoding"], "unsigned")
             self.assertEqual(quantization["target_bits"]["accumulator_state"], NNUE_ACCUMULATOR_BITS)
             self.assertEqual(

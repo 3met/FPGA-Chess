@@ -21,6 +21,7 @@ from .model import (
     NNUE_ACCUMULATOR_BITS,
     NNUE_ACCUMULATOR_BIAS_BITS,
     NNUE_ACCUMULATOR_BIAS_MAX,
+    NNUE_ACCUMULATOR_BIAS_MIN,
     NNUE_FEATURE_COUNT,
     NNUE_OUTPUT_BIAS_BITS,
     NNUE_OUTPUT_BIAS_MAX,
@@ -211,10 +212,14 @@ def export_nnue(parameters: dict) -> tuple[str, str, str, str]:
     biases = nnue["accumulator_bias"]
     if len(biases) != NNUE_ACCUMULATORS:
         raise ValueError(f"NNUE accumulator bias must contain {NNUE_ACCUMULATORS} values")
-    bias_text = "\n".join(
-        f"{max(0, min(NNUE_ACCUMULATOR_BIAS_MAX, round_ties_to_even(value))):x}"
+    # BRAM initialization stores signed biases as two's-complement codes.
+    bias_values = [
+        max(NNUE_ACCUMULATOR_BIAS_MIN,
+            min(NNUE_ACCUMULATOR_BIAS_MAX, round_ties_to_even(value)))
         for value in biases
-    ) + "\n"
+    ]
+    bias_mask = (1 << NNUE_ACCUMULATOR_BIAS_BITS) - 1
+    bias_text = "\n".join(f"{value & bias_mask:x}" for value in bias_values) + "\n"
     output_bias = nnue["output_bias"]
     if len(output_bias) != NNUE_OUTPUT_BUCKETS:
         raise ValueError(f"NNUE output bias must contain {NNUE_OUTPUT_BUCKETS} values")
