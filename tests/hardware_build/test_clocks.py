@@ -64,6 +64,7 @@ class ClockTests(unittest.TestCase):
             project = write_quartus_project(manifest, target, build, 1, 123, profile)
             pll = (build / "clock_generator/pll_ip/pll_ip_0002.sv").read_text()
             blocks = pll.split("    altera_pll #(\n")[1:]
+            self.assertEqual(len(blocks), 3)
             for block, role in zip(blocks, ("engine", "memory", "communication")):
                 clock = profile["clocks"][role]
                 self.assertIn(f'.output_clock_frequency0("{clock["frequency_hz"] / 1e6:.6f} MHz")', block)

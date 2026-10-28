@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import io
+from datetime import datetime, timezone
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,8 +91,10 @@ class SavedProfileTests(unittest.TestCase):
                 profile_output_dir(argparse.Namespace(name=None, output=str(path), replace=True))
 
     def test_latest_and_list_ignore_incomplete_runs(self):
-        self.finish(self.allocate("first"))
-        self.finish(self.allocate("second"))
+        for name, day in (("first", 1), ("second", 2)):
+            with patch("tools.hardware_build.profile_runs.datetime") as clock:
+                clock.now.return_value = datetime(2024, 1, day, tzinfo=timezone.utc)
+                self.finish(self.allocate(name))
         self.allocate("interrupted")
         self.assertIn("Run: second", self.view())
         listed = self.view("--list-runs")

@@ -129,6 +129,25 @@ class ProtocolEncodingTests(unittest.TestCase):
             ),
         )
 
+    def test_response_frames_reject_truncation_and_trailing_bytes(self):
+        """Every response type must consume exactly its documented wire frame."""
+        frames = (
+            "80010000", "8101", "82700cf0ff050403020105019034",
+            "83050403020103", "84120504030201", "85efcdab896745230103005a620218",
+            "ff0109",
+        )
+        for encoded in frames:
+            packet = bytes.fromhex(encoded)
+            with self.subTest(frame=encoded):
+                decode_response(packet)
+                for length in range(len(packet)):
+                    with self.subTest(length=length), self.assertRaises(ProtocolError):
+                        decode_response(packet[:length])
+                with self.assertRaises(ProtocolError):
+                    decode_response(packet + b"\x00")
+        with self.assertRaisesRegex(ProtocolError, "Unknown response type"):
+            decode_response(b"\x7f")
+
     def test_response_reserved_bits_and_unknown_enums_are_rejected(self):
         with self.assertRaisesRegex(ProtocolError, "reserved status bits"):
             decode_response(bytes.fromhex("80900000"))

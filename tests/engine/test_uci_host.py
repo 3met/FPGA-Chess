@@ -424,24 +424,17 @@ class UCIHostDiagnosticTests(unittest.TestCase):
     """Exercise diagnostics without requiring python-chess or a serial adapter."""
 
     def test_uci_advertises_only_runtime_options_without_touching_hardware(self):
-        class Client:
-            def __init__(self):
-                self.commands = []
-
-            def request(self, command):
-                self.commands.append(command)
-                return BuildInfoResponse(0x0123456789ABCDEF, 3, 40_000_000, 24)
-
         host = object.__new__(FPGAUCIHost)
-        host.client = Client()
-        host.build_info = None
+        host.client = mock.Mock()
         host.emit = (lines := []).append
-        host.connect = lambda: host.client
-        host.logger = logging.getLogger("test_uci_build_options")
+        host.connect = mock.Mock(side_effect=AssertionError("UCI handshake connected to hardware"))
+        host._get_build_info = mock.Mock(side_effect=AssertionError("UCI handshake queried hardware"))
 
         host._handle_uci()
 
-        self.assertEqual(host.client.commands, [])
+        self.assertEqual(host.client.mock_calls, [])
+        host.connect.assert_not_called()
+        host._get_build_info.assert_not_called()
         self.assertEqual(
             lines,
             [
@@ -452,23 +445,6 @@ class UCIHostDiagnosticTests(unittest.TestCase):
                 "uciok",
             ],
         )
-
-    def test_uci_does_not_request_build_information(self):
-        host = object.__new__(FPGAUCIHost)
-        host.emit = (lines := []).append
-        host._get_build_info = lambda: (_ for _ in ()).throw(TimeoutError("no FPGA"))
-        host.logger = logging.getLogger("test_uci_build_options_failure")
-        host.logger.disabled = True
-
-        host._handle_uci()
-
-        self.assertEqual(lines, [
-            "id name FPGA Chess",
-            "id author Emet Behrendt",
-            "option name Ponder type check default false",
-            f"option name Move Overhead type spin default {DEFAULT_MOVE_OVERHEAD_MS} min 0 max 16777215",
-            "uciok",
-        ])
 
     def test_ponder_option_is_stored_and_build_properties_are_not_options(self):
         host = object.__new__(FPGAUCIHost)

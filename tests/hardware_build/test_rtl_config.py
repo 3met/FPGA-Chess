@@ -20,9 +20,13 @@ class RTLConfigTests(unittest.TestCase):
             root = Path(temporary)
             for threads, stack_depth in ((1, 1), (3, 33), (17, 65)):
                 config = {"threads": threads, "stack_depth": stack_depth, "nnue_cache_entries": 4}
-                path = write_rtl_config(root / str(threads), config)
-                self.assertEqual(path.read_text(), rtl_config_source(config))
-            self.assertIn("THREAD_CAPACITY = 1;", (root / "1/rtl_config.sv").read_text())
+                write_rtl_config(root / str(threads), config)
+            # Read after all writes so accidental shared output paths are detected.
+            for threads, stack_depth in ((1, 1), (3, 33), (17, 65)):
+                with self.subTest(threads=threads, stack_depth=stack_depth):
+                    source = (root / str(threads) / "rtl_config.sv").read_text()
+                    self.assertIn(f"THREAD_CAPACITY = {threads};", source)
+                    self.assertIn(f"SEARCH_STACK_CAPACITY = {stack_depth};", source)
 
     def test_missing_or_invalid_capacities_have_no_fallback(self):
         """A missing input fails rather than choosing unrelated shared type widths."""

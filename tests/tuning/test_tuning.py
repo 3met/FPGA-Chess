@@ -33,6 +33,7 @@ from tools.tuning.data import (
 from tools.tuning.engine import (
     NNUE_OUTPUT_MAC_LANES,
     NNUE_OUTPUT_WEIGHT_BITS,
+    NNUE_OUTPUT_BIAS_BITS,
     commit_parameters,
     export_nnue,
     export_values,
@@ -401,6 +402,23 @@ class TuningModelAndExportTests(unittest.TestCase):
             if name != "pst":
                 path.write_text(f"old {name}", encoding="utf-8")
         return paths
+
+    @contextlib.contextmanager
+    def engine_output_fixture(self, root):
+        """Redirect every export destination even when the guard under test regresses."""
+        paths = self.make_engine_outputs(root)
+        replacements = {
+            "PST_PATH": paths["pst"],
+            "GENERATED_PATHS": (paths["pst_hex"], paths["material"]),
+            "NNUE_FEATURE_PATH": paths["nnue_feature"],
+            "NNUE_OUTPUT_PATH": paths["nnue_output"],
+            "NNUE_OUTPUT_BIAS_PATH": paths["nnue_output_bias"],
+            "NNUE_BIAS_PATH": paths["nnue_bias"],
+        }
+        with contextlib.ExitStack() as stack:
+            for name, value in replacements.items():
+                stack.enter_context(mock.patch(f"tools.tuning.engine.{name}", value))
+            yield paths
 
     def test_nnue_piece_count_bucket_boundaries(self):
         counts = (2, 5, 6, 9, 10, 13, 14, 17, 18, 21, 22, 25, 26, 29, 30, 32)
@@ -994,13 +1012,19 @@ class TuningModelAndExportTests(unittest.TestCase):
                 _require_matching_rtl()
 
     def test_engine_commit_waits_for_matching_rtl(self):
-        """A width mismatch must block ROM export before changing engine files."""
+        """A width mismatch must block ROM export before changing any output."""
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
             atomic_write_json(run / "parameters.json", self.parameter_document())
-            with mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_BITS", 1):
+            with self.engine_output_fixture(run) as paths, \
+                    mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_BITS", NNUE_OUTPUT_BIAS_BITS + 1), \
+                    mock.patch("tools.tuning.engine.subprocess.run") as generate, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                before = {path: path.read_bytes() for path in paths.values()}
                 with self.assertRaisesRegex(RuntimeError, "update RTL"):
                     commit_parameters(run)
+                self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
+                generate.assert_not_called()
 
     def test_dry_run_rejects_missing_nnue_parameters(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1343,49 +1367,31 @@ class TuningTrainingAndReportTests(unittest.TestCase):
             self.assertNotIn("output_zero_fraction", quantization["nodes"])
 
     def test_default_config_and_validation(self):
+        """Validate defaults, then isolate each malformed setting from a known-good fixture."""
         config = load_config(None)
         self.assertTrue(Path(config["dataset"]["path"]).is_absolute())
         self.assertIsInstance(config["filters"]["remove_captures"], bool)
         self.assertIsInstance(config["filters"]["remove_in_check"], bool)
-        self.assertGreater(config["training"]["learning_rate"], 0)
-        self.assertGreater(config["training"]["cosine_final_factor"], 0)
-        self.assertLess(config["training"]["cosine_final_factor"], 1)
-        bad = json.loads(Path("tools/tuning/default_config.json").read_text(encoding="utf-8"))
-        bad["training"]["batch_size"] = 0
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "bad.json"
-            path.write_text(json.dumps(bad), encoding="utf-8")
-            with self.assertRaises(ConfigError):
-                load_config(path)
-        bad["training"]["batch_size"] = 1
-        bad["training"]["microbatch_size"] = 1
-        bad["training"]["early_stopping_patience"] = 0
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "bad.json"
-            path.write_text(json.dumps(bad), encoding="utf-8")
-            with self.assertRaises(ConfigError):
-                load_config(path)
-        bad["training"]["early_stopping_patience"] = 1
-        bad["training"]["bucket_loss_weights"] = [1.0] * NNUE_OUTPUT_BUCKETS
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "bad.json"
-            path.write_text(json.dumps(bad), encoding="utf-8")
-            with self.assertRaises(ConfigError):
-                load_config(path)
-        del bad["training"]["bucket_loss_weights"]
-        bad["training"]["microbatch_size"] = 2
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "bad.json"
-            path.write_text(json.dumps(bad), encoding="utf-8")
-            with self.assertRaises(ConfigError):
-                load_config(path)
-        bad["training"]["microbatch_size"] = 1
-        bad["training"]["loss"] = "score_probability_mse"
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "bad.json"
-            path.write_text(json.dumps(bad), encoding="utf-8")
-            with self.assertRaises(ConfigError):
-                load_config(path)
+            path = Path(directory) / "config.json"
+            baseline = json.loads(Path("tools/tuning/default_config.json").read_text(encoding="utf-8"))
+            baseline["training"].update(batch_size=4, microbatch_size="auto")
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            load_config(path)
+            for field, value, message in (
+                ("batch_size", 0, "batch_size"),
+                ("microbatch_size", 5, "microbatch_size"),
+                ("early_stopping_patience", 0, "early_stopping_patience"),
+                ("bucket_loss_weights", [1.0] * NNUE_OUTPUT_BUCKETS, "unknown training settings"),
+                ("loss", "score_probability_mse", "unknown training settings"),
+                ("cosine_final_factor", 0, "cosine_final_factor"),
+                ("cosine_final_factor", 1, "cosine_final_factor"),
+            ):
+                with self.subTest(field=field, value=value):
+                    candidate = {**baseline, "training": {**baseline["training"], field: value}}
+                    path.write_text(json.dumps(candidate), encoding="utf-8")
+                    with self.assertRaisesRegex(ConfigError, message):
+                        load_config(path)
 
 
 if __name__ == "__main__":

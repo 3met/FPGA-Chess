@@ -106,6 +106,8 @@ class EngineBuildConfigTests(unittest.TestCase):
     def test_quartus_project_includes_generated_engine_metadata(self):
         manifest = load_manifest()
         target = manifest["synthesis_targets"]["quartus-de1-soc"]
+        # Exercise project option propagation without freezing the production target policy.
+        target = dict(target, map_optimization="speed", fit_effort="standard", fit_timing_optimization=True)
         with tempfile.TemporaryDirectory() as temp_dir:
             build_dir = Path(temp_dir)
             project = write_quartus_project(manifest, target, build_dir, 2, 0x0123456789ABCDEF)

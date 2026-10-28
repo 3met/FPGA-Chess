@@ -85,21 +85,25 @@ class EngineConfigTests(unittest.TestCase):
         for index, threshold in enumerate(policy["quiet_bucket_thresholds"], 1):
             self.assertEqual(params[f"QUIET_THRESHOLD_{index}"], threshold)
 
-    def test_signed_history_rejects_values_outside_entry_width(self):
-        """Both endpoints must fit the configured signed RAM width."""
-        config = self.load_temporary_config()
-        widths = {"default_score": config["history_entry_bits"]}
-        for field, bits in widths.items():
+    def test_signed_history_boundaries(self):
+        """Test both signed endpoints and adjacent failures using explicit widths."""
+        for bits in (5, 8):
             limit = 1 << (bits - 1)
-            for value in (-limit - 1, limit):
-                with self.subTest(field=field, value=value), self.assertRaises(BuildError):
-                    self.load_temporary_config({"history": {field: value}})
-        with self.assertRaises(BuildError):
-            limit = 1 << (min(widths.values()) - 1)
-            self.load_temporary_config({"history": {"maximum_reward": limit}})
-        for thresholds in ([-2147483649, -2, 0], [0, 1, 2147483648], [-8, -8, 2]):
-            with self.subTest(thresholds=thresholds), self.assertRaises(BuildError):
-                self.load_temporary_config({"history": {"quiet_bucket_thresholds": thresholds}})
+            engine = {"history_heuristic": {"entry_bits": bits}}
+            policy = {"maximum_reward": limit - 1, "castling_bonus": 0}
+            for prior in (-limit, limit - 1):
+                with self.subTest(bits=bits, prior=prior):
+                    config = self.load_temporary_config(
+                        {"history": {**policy, "default_score": prior}}, engine)
+                    self.assertEqual(engine_rtl_parameter_values(config)["HISTORY_DEFAULT_SCORE"], prior)
+            for prior in (-limit - 1, limit):
+                with self.subTest(bits=bits, prior=prior), self.assertRaisesRegex(
+                        BuildError, "default_score must fit"):
+                    self.load_temporary_config(
+                        {"history": {**policy, "default_score": prior}}, engine)
+            with self.subTest(bits=bits), self.assertRaisesRegex(BuildError, "maximum_reward must fit"):
+                self.load_temporary_config(
+                    {"history": {"default_score": 0, "castling_bonus": 0, "maximum_reward": limit}}, engine)
 
     def test_tt_queue_depths_reach_rtl_parameters(self):
         """Check device overrides independently of the production queue sizes."""
@@ -141,33 +145,16 @@ class EngineConfigTests(unittest.TestCase):
 
     def test_soft_factor_range_must_contain_default(self):
         with self.assertRaisesRegex(BuildError, "minimum <= default <= maximum"):
-            self.load_temporary_config({"time_management": {"soft_factor_minimum": 5}})
+            self.load_temporary_config({"time_management": {
+                "soft_factor_minimum": 5, "soft_factor_default": 4, "soft_factor_maximum": 8}})
 
     def test_structural_values_have_no_policy_ceiling(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            search_path = root / "search.json"
-            engine_path = root / "engine.json"
-            default_search = Path("hardware/config/search/default.json").read_text(encoding="utf-8")
-            search_path.write_text(default_search, encoding="utf-8")
-            engine_path.write_text(
-                json.dumps({
-                    "search_config": str(search_path),
-                    "engine": {"threads": 17, "stack_depth": 65, "nnue_cache_entries": 4},
-                    "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"],
-                    "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
-                    "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
-                    "move_memory": {"entries_per_thread": 2048,
-                                    "bucket_ratios_descending": [32, 64, 32, 64, 64, 192, 16, 48]},
-                    "instrumentation": {"search_statistics": False},
-                }),
-                encoding="utf-8",
-            )
-            with mock.patch("tools.hardware_build.engine_config.repo_path", side_effect=lambda value: Path(value).resolve()), \
-                    mock.patch("tools.hardware_build.engine_config.rel", side_effect=lambda value: str(value)):
-                config = load_engine_config(str(engine_path))
-            self.assertEqual(config["threads"], 17)
-            self.assertEqual(config["stack_depth"], 65)
+        """Non-power-of-two capacities are accepted without unrelated fixture copies."""
+        config = self.load_temporary_config(engine_updates={
+            "engine": {"threads": 17, "stack_depth": 65},
+        })
+        self.assertEqual(config["threads"], 17)
+        self.assertEqual(config["stack_depth"], 65)
 
     def test_nnue_snapshot_cache_geometry(self):
         """Only powers of two with separate source/destination slots are accepted."""
@@ -179,37 +166,9 @@ class EngineConfigTests(unittest.TestCase):
                 self.load_temporary_config(engine_updates={"engine": {"nnue_cache_entries": entries}})
 
     def test_zero_thread_count_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            engine_path = root / "engine.json"
-            engine_path.write_text(
-                json.dumps({
-                    "search_config": "hardware/config/search/default.json",
-                    "engine": {"threads": 0, "stack_depth": 1, "nnue_cache_entries": 4},
-                    "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"],
-                    "transposition_table": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["transposition_table"],
-                    "history_heuristic": {"entry_count": 8192, "entry_bits": 8},
-                    "move_memory": {"entries_per_thread": 2048,
-                                    "bucket_ratios_descending": [32, 64, 32, 64, 64, 192, 16, 48]},
-                    "instrumentation": {"search_statistics": False},
-                }),
-                encoding="utf-8",
-            )
-            with mock.patch("tools.hardware_build.engine_config.repo_path", side_effect=lambda value: engine_path if value == str(engine_path) else Path(value).resolve()), \
-                    mock.patch("tools.hardware_build.engine_config.rel", side_effect=lambda value: str(value)):
-                with self.assertRaisesRegex(BuildError, "threads must be an integer of at least 1"):
-                    load_engine_config(str(engine_path))
-
-    def test_history_reward_must_fit_configured_entry_width(self):
-        with self.assertRaisesRegex(BuildError, "fit the configured .*entry width"):
-            self.load_temporary_config({"history": {"maximum_reward": 256}})
-
-    def test_history_default_must_fit_signed_entry_width(self):
-        with self.assertRaisesRegex(BuildError, "default_score must fit"):
-            self.load_temporary_config({"history": {"default_score": 256}})
-        self.load_temporary_config({"history": {"default_score": -1}})
-        with self.assertRaises(BuildError):
-            self.load_temporary_config({"history": {"maximum_reward": 128}})
+        """Reject the capacity itself while all other settings remain valid."""
+        with self.assertRaisesRegex(BuildError, "threads must be an integer of at least 1"):
+            self.load_temporary_config(engine_updates={"engine": {"threads": 0}})
 
     def test_history_entry_count_must_be_a_power_of_two(self):
         with self.assertRaisesRegex(BuildError, "must be a power of two"):
@@ -235,8 +194,10 @@ class EngineConfigTests(unittest.TestCase):
             {"history": {"default_score": 8, "maximum_reward": 15, "quiet_bucket_thresholds": [16, 32, 64]}},
             {"history_heuristic": {"entry_bits": 5}},
         )
-        with self.assertRaisesRegex(BuildError, "must fit the signed ordering score"):
-            self.load_temporary_config({"history": {"quiet_bucket_thresholds": [8, 16, 1 << 31]}})
+        for thresholds in ([-(1 << 31) - 1, -2, 0], [8, 16, 1 << 31]):
+            with self.subTest(thresholds=thresholds), self.assertRaisesRegex(
+                    BuildError, "must fit the signed ordering score"):
+                self.load_temporary_config({"history": {"quiet_bucket_thresholds": thresholds}})
 
     def test_aspiration_multiplier_must_grow_the_delta(self):
         with self.assertRaisesRegex(BuildError, "must be greater than one"):
@@ -248,7 +209,9 @@ class EngineConfigTests(unittest.TestCase):
 
     def test_null_move_reductions_must_leave_child_depth(self):
         with self.assertRaisesRegex(BuildError, "smaller than their depth thresholds"):
-            self.load_temporary_config({"null_move": {"shallow_reduction": 3}})
+            self.load_temporary_config({"null_move": {
+                "minimum_depth": 3, "deep_depth_threshold": 6,
+                "shallow_reduction": 3, "deep_reduction": 4}})
 
     def test_rfp_margins_must_fit_the_evaluation_range(self):
         with self.assertRaisesRegex(BuildError, "between 0 and 32767"):

@@ -36,7 +36,7 @@ module tb_time_management;
 
     time_management #(
         // Golden allocations exercise a fixed fixture policy, independent of tuned defaults.
-        .CLOCK_FREQ(1000),
+        .CLOCK_FREQ(3000),
         .MOVES_TO_GO_BUFFER(2), .DEFAULT_MOVES_DIVISOR(20),
         .INCREMENT_NUMERATOR(4), .INCREMENT_DENOMINATOR(5),
         .HARD_BASE_MULTIPLIER(4), .HARD_TIME_NUMERATOR(4), .HARD_TIME_DENOMINATOR(5),
@@ -77,11 +77,24 @@ module tb_time_management;
         timer_reset = 1'b0;
 
         timer_run = 1'b1;
-        repeat (3) @(negedge clk);
+        repeat (9) @(negedge clk);
         timer_run = 1'b0;
         check(elapsed_ms == TimeType'(3), "timer counts running milliseconds");
         repeat (2) @(negedge clk);
         check(elapsed_ms == TimeType'(3), "timer pauses without losing elapsed time");
+
+        // Pausing must retain sub-millisecond progress, not just whole milliseconds.
+        timer_run = 1;
+        repeat (2) @(negedge clk);
+        timer_run = 0;
+        repeat (4) @(negedge clk);
+        check(elapsed_ms == TimeType'(3), "partial millisecond survives pause");
+        timer_run = 1;
+        @(negedge clk); timer_run = 0;
+        check(elapsed_ms == TimeType'(4), "resume completes the partial millisecond");
+        timer_reset = 1;
+        @(negedge clk); timer_reset = 0;
+        check(elapsed_ms == 0, "timer reset discards elapsed time");
 
         setup_fixed_time = 1'b1;
         time_limit = TimeType'(250);
@@ -114,6 +127,50 @@ module tb_time_management;
         check(soft_ms == TimeType'(10), "single legal move caps the adaptive soft deadline");
         check(next_depth_ms == TimeType'(6), "next-depth threshold uses the capped soft deadline");
 
+        // Boundary allocations must clamp before unsigned subtraction or narrowing.
+        setup_fixed_time = 1; setup_clock_time = 0;
+        for (int limit = 9; limit <= 10; limit++) begin
+            time_limit = TimeType'(limit);
+            pulse_setup();
+            check(base_ms == 0 && soft_ms == 0 && next_depth_ms == 0 && hard_ms == 0,
+                "overhead at or above fixed time gives zero budget");
+        end
+        setup_fixed_time = 0; setup_clock_time = 1;
+        remaining_time = 9; clock_increment = 0;
+        pulse_setup();
+        check(base_ms == 0 && soft_ms == 0 && hard_ms == 0, "exhausted clock does not underflow");
+        remaining_time = 110; clock_increment = 1000; moves_to_go = 1;
+        pulse_setup();
+        check(base_ms == 833 && hard_ms == 80, "remaining clock caps a large increment budget");
+        remaining_time = 131084; clock_increment = 0; moves_to_go = '1;
+        pulse_setup();
+        check(base_ms == 2, "maximum moves-to-go plus buffer does not wrap");
+
+        adaptive_base_ms = 101; adaptive_hard_ms = 150;
+        adaptive_factor = 8; adaptive_single_legal_move = 0;
+        pulse_adaptive();
+        check(soft_ms == 150 && next_depth_ms == 90, "hard cap precedes next-depth scaling");
+        adaptive_factor = 3; adaptive_hard_ms = 400;
+        pulse_adaptive();
+        check(soft_ms == 75 && next_depth_ms == 45, "fractional budgets truncate consistently");
+
+        // Cancel in-flight division and wait past its normal latency for stale completion.
+        @(negedge clk); setup_start = 1;
+        @(negedge clk); setup_start = 0;
+        repeat (8) @(negedge clk);
+        check(busy, "cancellation scenario reaches active arithmetic");
+        cancel = 1;
+        @(negedge clk); cancel = 0;
+        repeat (110) begin
+            @(negedge clk);
+            check(!busy && !done, "cancel suppresses late completion");
+        end
+        setup_fixed_time = 1; setup_clock_time = 0; time_limit = 60;
+        pulse_setup();
+        check(base_ms == 50 && hard_ms == 50, "new allocation succeeds after cancellation");
+        @(negedge clk);
+        check(!done, "completion is a single-cycle pulse");
+
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
         if (fail_count != 0) $fatal(1, "time-management checks failed");
@@ -121,7 +178,7 @@ module tb_time_management;
     end
 
     initial begin
-        #20000;
+        #100000;
         $fatal(1, "time-management test timed out");
     end
 

@@ -55,6 +55,19 @@ module tb_tt_cache_bank;
         @(negedge clk);
         check(read_set[0] == WAY_BITS'(201) && read_set[1] == WAY_BITS'(202) && !read_lru,
             "both slot updates and LRU state persist in RAM");
+        // Disabled reads retain the last result even while that set is overwritten.
+        read_enable = 0; read_index = 2;
+        write_enable = 1; write_index = 1; write_slot = 0; write_way = WAY_BITS'(301);
+        lru_write_enable = 1; lru_write_index = 1; lru_write_value = 1;
+        repeat (3) begin
+            @(negedge clk);
+            check(read_set[0] == WAY_BITS'(201) && read_set[1] == WAY_BITS'(202) && !read_lru,
+                "disabled read holds its payload and replacement state");
+        end
+        write_enable = 0; lru_write_enable = 0; read_enable = 1; read_index = 1;
+        @(negedge clk);
+        check(read_set[0] == WAY_BITS'(301) && read_set[1] == WAY_BITS'(202) && read_lru,
+            "writes during a read stall are visible on the next enabled read");
         $display("Pass Count: %0d", pass_count); $display("Fail Count: %0d", fail_count);
         if (fail_count) $fatal(1, "TT cache bank test failed"); $finish;
     end

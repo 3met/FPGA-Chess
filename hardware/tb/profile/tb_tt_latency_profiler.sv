@@ -90,4 +90,6 @@ module tb_tt_latency_profiler;
         $display("Fail Count: 0");
         $finish;
     end
+    // A broken cross-clock completion must fail instead of hanging the suite.
+    initial begin #100_000; $fatal(1, "TT latency profiler timeout"); end
 endmodule

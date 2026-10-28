@@ -51,8 +51,8 @@ module tb_async_fifo;
         rd_en = 1'b0;
         repeat (4) @(posedge wr_clk);
         repeat (4) @(posedge rd_clk);
-        wr_rst_n = 1'b1;
-        rd_rst_n = 1'b1;
+        @(negedge wr_clk); wr_rst_n = 1'b1;
+        @(negedge rd_clk); rd_rst_n = 1'b1;
         repeat (4) @(posedge wr_clk);
         repeat (4) @(posedge rd_clk);
     endtask : reset_fifo
@@ -124,6 +124,36 @@ module tb_async_fifo;
         read_byte(8'h66);
         read_byte(8'h77);
 
+        // An empty read must not advance the pointer or consume the next write.
+        repeat (4) @(negedge rd_clk);
+        check(empty, "concurrent traffic drains completely");
+        rd_en = 1;
+        repeat (4) @(negedge rd_clk);
+        rd_en = 0;
+        write_byte(8'hb7);
+        read_byte(8'hb7);
+
+        // Unequal producer/consumer pauses cross the Gray pointers repeatedly.
+        fork
+            begin
+                for (int index = 0; index < 96; index++) begin
+                    repeat (index % 3) @(negedge wr_clk);
+                    write_byte(8'(index ^ 8'h5a));
+                end
+            end
+            begin
+                for (int index = 0; index < 96; index++) begin
+                    repeat (index % 5) @(negedge rd_clk);
+                    read_byte(8'(index ^ 8'h5a));
+                end
+            end
+        join
+        repeat (4) @(negedge rd_clk);
+        check(empty, "sustained cross-clock traffic has no extra words");
+
+        // Reset a populated FIFO so recovery proves stale contents are discarded.
+        write_byte(8'hde);
+        write_byte(8'had);
         reset_fifo();
         check(empty, "FIFO empty after reset recovery");
         write_byte(8'hc3);

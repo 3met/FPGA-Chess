@@ -60,6 +60,18 @@ class ZobristGenerationTests(unittest.TestCase):
             zobrist.render_sv_package(turn_value, side_values[:4]),
         )
 
+    def test_validator_rejects_corrupted_keys(self):
+        """Prove the validator detects aliases and XOR cancellation, not just good data."""
+        turn, side, tiles = zobrist.build_values()
+        for replacement, message in (
+            (0, "enabled zero"),
+            (turn, "duplicate"),
+            (turn ^ side[1], "three-key"),
+            (turn ^ side[1] ^ side[2], "four-key"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                zobrist.validate_values(turn, [replacement, *side[1:]], tiles)
+
     def test_full_domain_balance_avalanche_and_rank(self):
         """Reject hidden aliases, biased output bits, and reduced XOR entropy."""
         values = zobrist.hash_features()

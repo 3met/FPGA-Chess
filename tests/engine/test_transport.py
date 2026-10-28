@@ -3,7 +3,7 @@ import threading
 import unittest
 from unittest import mock
 
-from software.engine.transport import SerialByteTransport, SerialDependencyError, SerialPortInfo, get_serial_port, list_serial_ports
+from software.engine.transport import SerialByteTransport, SerialDependencyError, SerialTimeoutError, SerialPortInfo, get_serial_port, list_serial_ports
 
 
 class SerialPortListingTests(unittest.TestCase):
@@ -122,6 +122,45 @@ class SerialWriteTests(unittest.TestCase):
 
         serial_port.write.assert_called_once_with(b"ab")
         serial_port.flush.assert_not_called()
+
+
+class SerialIOTests(unittest.TestCase):
+    def setUp(self):
+        """Use a byte source only; never construct or discover a serial connection."""
+        self.transport = object.__new__(SerialByteTransport)
+        self.port = self.transport._serial = mock.Mock()
+
+    def test_fragmented_response_and_empty_polls_preserve_bytes(self):
+        """A response can arrive across multiple short reads and idle polls."""
+        self.port.read.side_effect = [b"a", b"", b"bc", b"d"]
+        with mock.patch("software.engine.transport.time.monotonic", return_value=0):
+            self.assertEqual(self.transport.read_exact(4, timeout=1), b"abcd")
+        self.assertEqual(self.port.read.call_args_list,
+                         [mock.call(4), mock.call(3), mock.call(3), mock.call(1)])
+
+    def test_partial_response_uses_one_deadline(self):
+        """Receiving a prefix must not restart the timeout for the rest of a frame."""
+        self.port.read.side_effect = [b"a", b""]
+        with mock.patch("software.engine.transport.time.monotonic", side_effect=[0, 0.2, 0.9, 1.1]):
+            with self.assertRaisesRegex(SerialTimeoutError, "4 bytes; got 1"):
+                self.transport.read_exact(4, timeout=1)
+        self.assertEqual(self.port.read.call_count, 2)
+
+    def test_empty_and_invalid_reads_do_not_touch_serial(self):
+        """Zero-length reads succeed locally and negative lengths fail locally."""
+        self.assertEqual(self.transport.read_exact(0), b"")
+        with self.assertRaises(ValueError):
+            self.transport.read_exact(-1)
+        self.port.read.assert_not_called()
+
+    def test_short_write_is_reported(self):
+        """A partial command must never be reported as successfully transmitted."""
+        self.transport._write_lock = threading.Lock()
+        for written in (0, 1):
+            with self.subTest(written=written):
+                self.port.write.return_value = written
+                with self.assertRaises(SerialTimeoutError):
+                    self.transport.write(b"ab")
 
 
 if __name__ == "__main__":
