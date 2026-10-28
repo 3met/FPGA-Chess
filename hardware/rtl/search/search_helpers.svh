@@ -97,9 +97,9 @@
             : depth - SearchDepth'(1) - reduction;
     endfunction : null_child_depth
 
-    // Cache the position/depth portion when launching the TT lookup. Alpha can
-    // change when the TT response is consumed, so unit-window eligibility stays
-    // live while the fixed beta-bound test is cached with the node.
+    // Cache position/depth eligibility together with the beta-bound test in the
+    // saved node when launching the TT lookup. Alpha can change on TT response,
+    // so unit-window eligibility stays live.
     function automatic logic search_thread_null_candidate(input int thread_index);
         automatic SearchDepth depth = search_stack_top[thread_index].remaining_depth;
         automatic SearchDepth reduction = depth < SearchDepth'(NULL_DEEP_DEPTH_THRESHOLD)
@@ -137,9 +137,8 @@
             && !search_thread_rfp_ready(thread_index)
             && search_stack_top[thread_index].tt_checked
             && !search_stack_top[thread_index].null_attempted
-            && search_null_candidate[thread_index]
             && search_stack_top[thread_index].unit_window
-            && search_stack_top[thread_index].null_beta_allowed;
+            && search_stack_top[thread_index].null_eligible;
     endfunction : search_thread_null_ready
 
     function automatic logic search_thread_eval_ready(input int thread_index);

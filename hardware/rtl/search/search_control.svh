@@ -121,7 +121,6 @@
                 search_move_inflight[tid] <= 1'b0;
                 search_tt_lookup_inflight[tid] <= 1'b0;
                 search_tt_response_pending[tid] <= 1'b0;
-                search_null_candidate[tid] <= 1'b0;
                 search_repetition_pending[tid] <= 1'b0;
                 search_repetition_done[tid] <= 1'b0;
                 search_repetition_draw[tid] <= 1'b0;

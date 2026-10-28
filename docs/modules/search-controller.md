@@ -101,7 +101,7 @@ Reset, New Game, Kill, and search restart prevent outstanding responses from cha
 
 ## Node Lifecycle
 
-The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent. Fixed RFP eligibility and the null-move beta-bound test are cached with the node at TT probe issue, keeping wide window comparisons out of shared dispatch while preserving them on parent restoration. Return-score and quiet-history decisions use each thread's local parent state; arbitration enables only the selected thread's update in the same cycle. Quiet-history classification reuses the completed NNUE undo plan's capture and promotion metadata, which remains owned by the returning move until its result is folded.
+The controller applies the search policy described in [search-design.md](../architecture/search-design.md), coordinating terminal checks, TT lookup, pruning, move generation, child search, and return to the parent. Fixed RFP eligibility and full null-move eligibility are cached with the node at TT probe issue, keeping policy comparisons out of shared dispatch while preserving them on parent restoration. The saved null-move bit combines position, depth, check, consecutive-null, fifty-move, and mate-bound restrictions; child probes cannot overwrite the parent's eligibility. Return-score and quiet-history decisions use each thread's local parent state; arbitration enables only the selected thread's update in the same cycle. Quiet-history classification reuses the completed NNUE undo plan's capture and promotion metadata, which remains owned by the returning move until its result is folded.
 
 Move generation produces pseudo-legal candidates. The controller applies each candidate speculatively and rejects it if the moving side remains in check. Accepted children update repetition and NNUE state; returning from a child restores the parent position and folds the child score into its result.
 
@@ -117,7 +117,7 @@ Depth, node, and time limits are checked at safe search boundaries. Hard time li
 
 Completed primary iterations retain the best root move and its searched child reply as a two-move principal-variation prefix for UCI pondering.
 
-Kill stops new work and completes only after outstanding responses can no longer change the active operation. Accepted board results retain their aligned pruning classifications through drain, including after a time or node limit. A killed search selects and snapshots its result before completing.
+Kill stops new work and completes only after outstanding responses can no longer change the active operation. On the Kill acceptance cycle, board-operation suppression also suppresses its pipeline tag and thread-state admission, so drain never interprets an idle board result as a move. Accepted board results retain their aligned pruning classifications through drain, including after a time or node limit. A killed search selects and snapshots its result before completing.
 
 Node-limited search can commit at most one additional node beyond its requested count.
 

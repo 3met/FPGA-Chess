@@ -290,6 +290,34 @@ module tb_nnue_evaluator;
         send_eval(0, WHITE, 2, 0, 0);
         wait (expected_result.size() == 0);
         @(negedge clk);
+        // Uniform saturated activations exercise both extremes of every
+        // reduction stage, including carry/sign growth between product groups.
+        for (int extreme = 0; extreme < 2; extreme++) begin
+            automatic int bucket = int'(nnue_output_bucket(PieceCount'(2)));
+            automatic int weight = extreme == 0
+                ? -(1 << (NNUE_OUTPUT_WEIGHT_BITS-1))
+                : (1 << (NNUE_OUTPUT_WEIGHT_BITS-1))-1;
+            for (int lane = 0; lane < NNUE_ACCUMULATOR_COUNT; lane++)
+                dut.load_bias(lane, NNUE_ACCUMULATOR_BIAS_BITS'(
+                    (1 << (NNUE_ACCUMULATOR_BITS-1))-1));
+            dut.output_bias[bucket] = '0;
+            for (int lane = 0; lane < NNUE_OUTPUT_INPUT_COUNT; lane++)
+                dut.output_weight_rows[bucket*NNUE_OUTPUT_MAC_CYCLES+lane/NNUE_OUTPUT_MAC_LANES]
+                    [(lane%NNUE_OUTPUT_MAC_LANES)*NNUE_OUTPUT_WEIGHT_BITS +: NNUE_OUTPUT_WEIGHT_BITS]
+                        = NNUE_OUTPUT_WEIGHT_BITS'(weight);
+            eval_thread_id = '0;
+            eval_slot = selected[0];
+            eval_turn = WHITE;
+            eval_piece_count = 2;
+            eval_pst = '0;
+            expected_result.push_back(NNUE_OUTPUT_INPUT_COUNT*15*weight);
+            expected_pst.push_back(0);
+            eval_valid = 1;
+            @(negedge clk);
+            eval_valid = 0;
+            wait (expected_result.size() == 0);
+            @(negedge clk);
+        end
         $display("Pass Count: %0d", pass_count);
         $display("Fail Count: %0d", fail_count);
         if (fail_count) $fatal(1,"NNUE evaluator failed");

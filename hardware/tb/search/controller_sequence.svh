@@ -54,6 +54,7 @@
 
         reset_active_search();
         reset_active_search(1);
+        kill_on_reverse_issue();
         kill_before_pruning_classification();
         run_fresh_game_repeatability();
 

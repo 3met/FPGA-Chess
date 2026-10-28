@@ -34,11 +34,13 @@ module nnue_evaluator #(
     localparam int MEMORY_ROWS = STATE_THREAD_COUNT * STATE_ROWS * NNUE_CACHE_ENTRIES;
     localparam int ADDRESS_BITS = $clog2(MEMORY_ROWS);
     localparam int WEIGHT_BITS = NNUE_OUTPUT_MAC_LANES * NNUE_OUTPUT_WEIGHT_BITS;
-    localparam int PRODUCT_GROUPS = (NNUE_OUTPUT_MAC_LANES + 3) / 4;
+    localparam int PACKED_GROUPS = (NNUE_OUTPUT_MAC_LANES + 3) / 4;
+    localparam int PRODUCT_GROUPS = (PACKED_GROUPS + 1) / 2;
     localparam int TREE_LEAVES = 1 << $clog2(PRODUCT_GROUPS);
     typedef logic [ADDRESS_BITS-1:0] StateAddress;
     typedef logic signed [7:0] OutputProduct;
-    typedef logic signed [9:0] ProductGroupSum;
+    typedef logic signed [9:0] ProductQuadSum;
+    typedef logic signed [10:0] ProductGroupSum;
     typedef logic signed [$clog2(NNUE_OUTPUT_MAC_LANES)+7:0] PartialSum;
     typedef logic signed [3:0] FeatureSum;
 
@@ -171,7 +173,8 @@ module nnue_evaluator #(
     } RowTag;
     RowTag read_tag, activation_tag, product_tag, sum_tag;
     logic [NNUE_OUTPUT_MAC_LANES*4-1:0] activations_q;
-    wire [PRODUCT_GROUPS*32-1:0] products;
+    wire [PACKED_GROUPS*32-1:0] products;
+    ProductQuadSum product_quads[PACKED_GROUPS];
     ProductGroupSum products_q[PRODUCT_GROUPS];
     PartialSum sum_tree[2*TREE_LEAVES];
     PartialSum partial_sum_q;
@@ -244,7 +247,7 @@ module nnue_evaluator #(
 
     genvar group_index, lane_index;
     generate
-        for (group_index = 0; group_index < PRODUCT_GROUPS; group_index++) begin : gen_products
+        for (group_index = 0; group_index < PACKED_GROUPS; group_index++) begin : gen_products
             wire [15:0] a, w;
             for (lane_index = 0; lane_index < 4; lane_index++) begin : gen_lane
                 if (group_index*4 + lane_index < NNUE_OUTPUT_MAC_LANES) begin : gen_used
@@ -257,6 +260,12 @@ module nnue_evaluator #(
             end
             nnue_packed_products multiplier (.activations(a), .weights(w),
                 .products(products[group_index*32 +: 32]));
+            // Reduce each DSP's four products before pairing adjacent DSPs.
+            assign product_quads[group_index] =
+                (ProductQuadSum'($signed(products[group_index*32 +: 8]))
+                    + ProductQuadSum'($signed(products[group_index*32+8 +: 8])))
+                + (ProductQuadSum'($signed(products[group_index*32+16 +: 8]))
+                    + ProductQuadSum'($signed(products[group_index*32+24 +: 8])));
         end
     endgenerate
 
@@ -418,14 +427,13 @@ module nnue_evaluator #(
                 activations_q[lane*4 +: 4] <= screlu(NnueAccumulator'(
                     state_read_q[lane*NNUE_ACCUMULATOR_BITS +: NNUE_ACCUMULATOR_BITS]));
             end
-            // Sum each multiplier's four products before the group register.
-            // The next stage has two fewer adder levels at the same latency.
+            // Register eight-product sums, sharing the reduction more evenly
+            // between stages and halving the remaining tree's leaf count.
             for (int group_id = 0; group_id < PRODUCT_GROUPS; group_id++) begin
                 products_q[group_id] <=
-                    (ProductGroupSum'($signed(products[group_id*32 +: 8]))
-                        + ProductGroupSum'($signed(products[group_id*32+8 +: 8])))
-                    + (ProductGroupSum'($signed(products[group_id*32+16 +: 8]))
-                        + ProductGroupSum'($signed(products[group_id*32+24 +: 8])));
+                    ProductGroupSum'(product_quads[group_id*2])
+                    + (group_id*2+1 < PACKED_GROUPS
+                        ? ProductGroupSum'(product_quads[group_id*2+1]) : ProductGroupSum'(0));
             end
             output_weight_q <= output_weight_read_q;
             partial_sum_q <= sum_tree[1];

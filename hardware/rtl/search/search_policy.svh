@@ -373,7 +373,7 @@
         entry.entered_by_null = 1'b0;
         entry.rfp_checked = 1'b0;
         entry.rfp_eligible = 1'b0;
-        entry.null_beta_allowed = 1'b0;
+        entry.null_eligible = 1'b0;
         entry.nnue_undo = '0;
         entry.failed_quiet0 = 12'd0;
         entry.failed_quiet1 = 12'd0;

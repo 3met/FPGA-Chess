@@ -128,6 +128,9 @@
             && !(|search_board_mask)
             && |search_null_mask;
         search_board_issue_valid = (state == CTRL_SEARCH_RUN && !nnue_draining && !search_stop_requested())
+            // Match the physical board port's immediate Kill suppression:
+            // drain must never receive a valid tag for an idle operation.
+            && !(req_valid && req.operation == ENGINE_CTRL_KILL)
             && (move_board_bypass_valid
                 || |search_board_mask
                 || search_null_issue_valid);

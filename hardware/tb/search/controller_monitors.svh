@@ -1,6 +1,14 @@
 // Handshake, state-ownership, NNUE reference, and bounded-completion monitors.
 // Included in tb_search_controller scope.
 
+    // A board completion tag may only describe a real accepted operation,
+    // including on cancellation edges before kill_pending is registered.
+    always @(posedge clk) begin
+        if (rst_n && dut.core_rst_n && dut.search_board_issue_valid)
+            assert (dut.board_update_op != BOARD_IDLE_OP)
+                else $fatal(1, "valid search board issue has no physical operation");
+    end
+
     // Record completion cycles and complete responses for baseline comparisons.
     integer monitor_cycle_count = 0;
     always @(posedge clk) begin
@@ -516,6 +524,7 @@
                 end
             end
             if (dut.tt_lookup_resp_valid) begin
+                if (dut.tt_lookup_resp.hit) tt_hit_count += 1;
                 tt_response_thread_seen[int'(dut.tt_lookup_resp.thread_id)] = 1'b1;
                 if (dut.tt_lookup_resp.hit
                         && dut.tt_lookup_resp.depth < dut.search_remaining_depth(
@@ -720,10 +729,10 @@
                             dut.search_stack_top[tid].zero_window_node,
                             dut.search_board_in_check[tid], dut.search_stack_top[tid].beta),
                         "cached RFP eligibility matches the node entry window");
-                    check(dut.search_stack_top[tid].null_beta_allowed
-                            == (dut.search_stack_top[tid].beta > -MATE_THRESHOLD
-                                && dut.search_stack_top[tid].beta < MATE_THRESHOLD),
-                        "cached null-move bound eligibility matches the node beta");
+                    check(dut.search_stack_top[tid].null_eligible
+                            == (dut.search_thread_null_candidate(tid)
+                                && dut.null_beta_eligible(dut.search_stack_top[tid].beta)),
+                        "cached null-move eligibility matches the current node");
                 end
             end
         end
@@ -761,4 +770,13 @@
                 dut.nnue_update_req.thread_id, dut.nnue_update_req.ply,
                 dut.nnue_update_req.white_feature, dut.nnue_update_req.black_feature,
                 dut.nnue_update_req.add, dut.nnue_update_req.complete, dut.nnue_update_req.copy);
+    end
+
+    // A restored node must never borrow another node's cached null eligibility.
+    always @(posedge clk) if (rst_n && dut.core_rst_n
+            && dut.search_board_issue_valid && dut.search_board_issue_is_null) begin
+        automatic int tid = int'(dut.search_board_issue_thread);
+        assert (dut.search_thread_null_candidate(tid)
+                && dut.null_beta_eligible(dut.search_stack_top[tid].beta))
+            else $fatal(1, "null probe violates current node eligibility");
     end

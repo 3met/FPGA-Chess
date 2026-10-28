@@ -26,7 +26,7 @@ The six ROM outputs are sign-adjusted, summed into a signed four-bit delta, and 
 
 ## Forward Pipeline
 
-Each request streams all accumulator rows through registered memory output, registered activation, registered multiplier products, and one registered vector sum. The next request starts reading immediately after the previous request's last row, while older products and sums drain. Per-row validity, first/last markers, bias, and PST data preserve request ordering without resetting the datapath between evaluations.
+Each request streams all accumulator rows through registered memory output, registered activation, registered sums of eight multiplier products, and one registered vector sum. Grouping the products balances adder depth across the existing stages without changing latency. The next request starts reading immediately after the previous request's last row, while older products and sums drain. Per-row validity, first/last markers, bias, and PST data preserve request ordering without resetting the datapath between evaluations.
 
 With `R = 2 * nodes_per_side / vector_width`, the minimum initiation interval is `R` clocks and the result latency is `R + 3` clocks from acceptance. A sustained request stream has no idle multiplier cycles. The registered partial sums accumulate across rows, and output bias is added once at the end.
 

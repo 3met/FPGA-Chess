@@ -22,6 +22,7 @@
     int pass_count = 0;
     int fail_count = 0;
     int tt_lookup_count = 0;
+    int tt_hit_count = 0;
     int tt_store_count = 0;
     logic observe_underpromotion = 0, underpromotion_store_seen = 0;
     TTStoreRequest underpromotion_store;

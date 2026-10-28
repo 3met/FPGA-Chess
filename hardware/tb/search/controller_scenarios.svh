@@ -19,6 +19,58 @@
         run_perft(8'd2, NodeCountType'(400), "reset during search restores startpos");
     endtask : reset_active_search
 
+    // Kill on a reverse issue edge must suppress both the operation and its
+    // tag; otherwise drain mistakes an idle result for a new child board.
+    task automatic kill_on_reverse_issue();
+        automatic EngineControllerRequest request = zero_request();
+        automatic int cycles = 0;
+        automatic ThreadID interrupted_thread;
+        automatic PlyIndex interrupted_ply;
+        new_game();
+        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
+        request.depth_limit = 8'd4;
+        pulse_request(request, "search before reverse-issue Kill");
+        while (!(dut.search_board_issue_valid
+                && dut.board_update_op == BOARD_REVERSE_MOVE_OP) && cycles < 200000) begin
+            do_clock(1);
+            cycles++;
+        end
+        check(cycles < 200000, "Kill targets a pending reverse operation");
+        interrupted_thread = dut.search_board_issue_thread;
+        interrupted_ply = dut.search_ply[interrupted_thread];
+        request = zero_request();
+        request.operation = ENGINE_CTRL_KILL;
+        req = request;
+        req_valid = 1'b1;
+        #1;
+        check(req_ready, "reverse-issue Kill accepted");
+        check(dut.board_update_op == BOARD_IDLE_OP && !dut.search_board_issue_valid,
+            "Kill suppresses the board operation and its tag together");
+        do_clock(1);
+        req_valid = 1'b0;
+        req = zero_request();
+        check(!dut.search_board_tag_valid_pipe[0], "Kill admits no idle board tag");
+        wait_response("reverse-issue Kill");
+        check(!resp.error && resp.end_reason == ENGINE_END_KILLED,
+            "reverse-issue Kill drains successfully");
+        check(dut.search_ply[interrupted_thread] == interrupted_ply,
+            "suppressed reverse leaves its thread at the existing ply");
+        for (int tid = 0; tid < THREAD_COUNT; tid++)
+            check(dut.nnue_evaluator.read_state(tid, dut.nnue_slot[tid])
+                    === reference_nnue_state(dut.search_board[tid]),
+                "Kill preserves each retained board/accumulator pair");
+        new_game();
+        for (int tid = 0; tid < THREAD_COUNT; tid++)
+            check(dut.nnue_evaluator.read_state(tid, dut.nnue_slot[tid])
+                    === reference_nnue_state(dut.active_board),
+                "NewGame after Kill reconstructs the correct root");
+        reset_dut();
+        for (int tid = 0; tid < THREAD_COUNT; tid++)
+            check(dut.nnue_evaluator.read_state(tid, dut.nnue_slot[tid])
+                    === reference_nnue_state(dut.active_board),
+                "warm reset after Kill preserves the correct root");
+    endtask : kill_on_reverse_issue
+
     // Cancel before the classifier stage, with its old flag deliberately different
     // from the accepted move's classification, so drain must advance that stage.
     task automatic kill_before_pruning_classification();
@@ -97,11 +149,13 @@
             {label, " first search visited every legal root child"});
 
         tt_lookup_count = 0;
+        tt_hit_count = 0;
         tt_store_count = 0;
         run_search_depth_record(8'd1, {label, " second search"}, second_move, second_score, second_nodes);
         check(tt_lookup_count > 0, {label, " second search issued TT lookup"});
-        check(tt_lookup_count >= first_lookup_count, {label, " second search issued repeated TT lookups"});
-        check(second_nodes <= first_nodes, {label, " second search did not search more nodes"});
+        // Shared-table scheduling and learned ordering can change node counts;
+        // verify actual cache reuse rather than assuming monotonic search work.
+        check(tt_hit_count > 0, {label, " second search reused TT entries"});
         check(second_score == first_score, {label, " second search same score"});
         check(second_move == first_move, {label, " second search same best move"});
     endtask : run_tt_reuse_test
@@ -164,7 +218,6 @@
             automatic FullBoard saved_board = dut.search_board[tid];
             automatic SearchThreadPhase saved_phase = dut.search_thread_phase[tid];
             automatic PlyIndex saved_ply = dut.search_ply[tid];
-            automatic logic saved_null_candidate = dut.search_null_candidate[tid];
             automatic logic saved_node_init_done = dut.search_node_init_done[tid];
             // Save the mutated fields without a simulator-dependent hierarchical type lookup.
             automatic logic saved_tt_checked = dut.search_stack_top[tid].tt_checked;
@@ -177,7 +230,7 @@
             automatic logic saved_zero_window_node = dut.search_stack_top[tid].zero_window_node;
             automatic logic saved_rfp_checked = dut.search_stack_top[tid].rfp_checked;
             automatic logic saved_rfp_eligible = dut.search_stack_top[tid].rfp_eligible;
-            automatic logic saved_null_beta_allowed = dut.search_stack_top[tid].null_beta_allowed;
+            automatic logic saved_null_eligible = dut.search_stack_top[tid].null_eligible;
             automatic logic saved_null_attempted = dut.search_stack_top[tid].null_attempted;
             automatic int saved_remaining_depth = int'(dut.search_stack_top[tid].remaining_depth);
 
@@ -190,14 +243,13 @@
             dut.search_stack_top[tid].tt_move = make_move(Position'(12), Position'(28), PROMO_QUEEN);
             dut.search_stack_top[tid].move_order_state = MOVE_ORDER_DIRECT;
             dut.search_stack_top[tid].beta = EvalScore'(100);
-            dut.search_stack_top[tid].null_beta_allowed = dut.null_beta_eligible(dut.search_stack_top[tid].beta);
             dut.search_stack_top[tid].alpha = EvalScore'(99);
             dut.search_stack_top[tid].unit_window = 1'b1;
             dut.search_stack_top[tid].zero_window_node = 1'b1;
             dut.search_stack_top[tid].rfp_checked = 1'b1;
             dut.search_stack_top[tid].null_attempted = 1'b0;
             dut.search_stack_top[tid].remaining_depth = dut.NULL_MINIMUM_DEPTH;
-            dut.search_null_candidate[tid] = 1'b1;
+            dut.search_stack_top[tid].null_eligible = 1'b1;
             dut.search_node_init_done[tid] = 1'b1;
             dut.search_tt_validation_pending[tid] = 1'b0;
             check(dut.search_thread_null_ready(tid), "fixture permits a null probe before TT validation");
@@ -223,7 +275,6 @@
             dut.search_board[tid] = saved_board;
             dut.search_thread_phase[tid] = saved_phase;
             dut.search_ply[tid] = saved_ply;
-            dut.search_null_candidate[tid] = saved_null_candidate;
             dut.search_node_init_done[tid] = saved_node_init_done;
             dut.search_stack_top[tid].tt_checked = saved_tt_checked;
             dut.search_stack_top[tid].has_tt_move = saved_has_tt_move;
@@ -235,7 +286,7 @@
             dut.search_stack_top[tid].zero_window_node = saved_zero_window_node;
             dut.search_stack_top[tid].rfp_checked = saved_rfp_checked;
             dut.search_stack_top[tid].rfp_eligible = saved_rfp_eligible;
-            dut.search_stack_top[tid].null_beta_allowed = saved_null_beta_allowed;
+            dut.search_stack_top[tid].null_eligible = saved_null_eligible;
             dut.search_stack_top[tid].null_attempted = saved_null_attempted;
             dut.search_stack_top[tid].remaining_depth = saved_remaining_depth;
         end

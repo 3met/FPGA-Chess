@@ -161,7 +161,7 @@ module move_generator_read_pipeline #(
                     && generation_start_ply[lane] == cache_ply[tid];
                 automatic logic running_matches = cache_valid[tid]
                     && generation_ply_q[lane] == cache_ply[tid];
-                if (pointer_load_pending[tid] && !pointer_load_issue[tid]) begin
+                if (pointer_load_pending[tid]) begin
                     start_matches = generation_start_ply[lane] == pointer_load_tag[tid];
                     running_matches = generation_ply_q[lane] == pointer_load_tag[tid];
                 end
@@ -414,8 +414,11 @@ module move_generator_read_pipeline #(
             pointer_read_address[tid] = PointerAddress'(pointer_read_ply[tid]);
             // Commit the registered cache one cycle after its update. Defer a
             // colliding read until that commit is visible on either RAM vendor.
-            if (pointer_write_pending[tid]
-                    && pointer_read_ply[tid] == cache_ply[tid])
+            // Keep one pointer read outstanding. Consume its registered result
+            // independently of this cycle's command arbitration and read address.
+            if (pointer_load_pending[tid]
+                    || (pointer_write_pending[tid]
+                        && pointer_read_ply[tid] == cache_ply[tid]))
                 pointer_load_issue[tid] = 1'b0;
             pointer_write_enable[tid] = pointer_write_pending[tid] && rst_n && !clear && !flush;
             pointer_write_address[tid] = PointerAddress'(cache_ply[tid]);
@@ -495,11 +498,11 @@ module move_generator_read_pipeline #(
                         stage_valid[thread_index] <= pop_valid[thread_index];
                         if (pop_valid[thread_index]) stage_ply[thread_index] <= pop_ply[thread_index];
                     end
+                    pointer_load_pending[thread_index] <= pointer_load_issue[thread_index];
                     if (pointer_load_issue[thread_index]) begin
-                        pointer_load_pending[thread_index] <= 1'b1;
                         pointer_load_tag[thread_index] <= pointer_read_ply[thread_index];
-                    end else if (pointer_load_pending[thread_index]) begin
-                        pointer_load_pending[thread_index] <= 1'b0;
+                    end
+                    if (pointer_load_pending[thread_index]) begin
                         cache_valid[thread_index] <= 1'b1;
                         cache_ply[thread_index] <= pointer_load_tag[thread_index];
                         cache_state_bits[thread_index] <= PackedMovePointerState'(pointer_read_bits[thread_index]);

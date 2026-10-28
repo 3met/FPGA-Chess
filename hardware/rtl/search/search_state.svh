@@ -105,7 +105,8 @@
         logic rfp_checked;
         // Cache fixed entry-time policy tests before shared pipeline arbitration.
         logic rfp_eligible;
-        logic null_beta_allowed;
+        // Position, depth, and mate-bound eligibility belong to the saved node.
+        logic null_eligible;
         // The entering move supplies squares and promotion choice; turn and
         // null-move state reconstruct the rest of the reversible NNUE delta.
         SearchNnueUndo nnue_undo;
@@ -232,7 +233,6 @@
     SearchThreadMask search_null_mask;
     SearchThreadMask search_terminal_mask;
     SearchThreadMask search_terminal_no_move_mask;
-    logic search_null_candidate[0:SEARCH_THREAD_COUNT-1];
     SearchThreadPhase search_thread_phase[0:SEARCH_THREAD_COUNT-1];
     ThreadCount search_active_thread_count;
     EvalScore search_return_score[0:SEARCH_THREAD_COUNT-1];
