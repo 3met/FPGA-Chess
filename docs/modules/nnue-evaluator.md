@@ -4,7 +4,7 @@ The evaluator keeps a circular set of two-perspective accumulator snapshots per 
 
 ## Model and Parameters
 
-`nnue_defs` defines the accumulator node count per perspective, vector multiplier width, output bucket count, and piece-count mapping. The node count must be a multiple of the vector width. Defaults are 512 nodes per side, 256 multipliers, and eight output buckets. The default buckets cover piece counts 2–5, 6–9, through 30–32. Model images and the training/export geometry must match these parameters.
+The selected evaluation model defines the accumulator node count per perspective, output bucket count, and piece-count mapping. `nnue_defs` exposes these generated constants alongside the vector multiplier width. The node count must be a multiple of the vector width. Training/export geometry must match the model, and build preparation rejects unsupported geometry.
 
 Accumulator values and biases are signed six-bit integers, transformer weights signed two-bit integers, activations unsigned four-bit integers, and output weights signed four-bit integers. Accumulator arithmetic wraps modulo 64 without saturation; add/remove updates therefore remain exact inverses. Training penalizes overflow. Activation is `min(15, floor(max(0, accumulator)^2 / 8))`. Output bias remains unsigned six-bit, and the complete dot product retains sufficient signed width until search applies score saturation.
 
@@ -38,7 +38,7 @@ The Cyclone V wrapper groups two independent unsigned 18×18 multipliers into on
 
 ## Model Data
 
-Model images are tracked inputs under `hardware/data/nnue/`, written by the training exporter. Builds require these files and never generate or replace them. Their contents participate in the build fingerprint.
+The complete quantized evaluation is stored in a tracked `.nnue.json` file under `hardware/data/evaluation/`, selected by `evaluation_file` in the FPGA engine configuration. Standalone tests select a model in their type configuration. Build preparation validates the file and generates the following private ROM images in the build directory. Model contents participate in synthesis, simulation, and profiling fingerprints. See the [evaluation file format](../architecture/evaluation-file.md).
 
 | File | Contents |
 | ---- | -------- |

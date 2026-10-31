@@ -21,7 +21,7 @@ python -m tools.hardware_build validate
 
 `list` shows source sets, tests, data inputs, generated data, and targets from [`hardware/build/manifest.json`](../../hardware/build/manifest.json). `validate` checks the manifest and referenced files. Use `python -m tools.hardware_build <command> --help` for a command's options.
 
-The NNUE model images are explicit `data_files` inputs. They are validated, fingerprinted, and copied into Quartus projects; generated-data commands never modify them.
+Each engine or standalone type configuration explicitly selects an `evaluation_file`, using a repository-relative path. Build preparation validates this `.nnue.json` model and generates evaluation ROMs and RTL constants inside the build directory. Model contents participate in build fingerprints; separate builds keep independent evaluation files. See the [evaluation file format](../architecture/evaluation-file.md).
 
 ## Run Tests
 

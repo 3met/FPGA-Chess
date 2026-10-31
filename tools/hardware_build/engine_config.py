@@ -328,7 +328,7 @@ def load_engine_config(value: str) -> dict:
     engine_profile = _load_object(engine_path, "engine configuration")
     _require_keys(
         engine_profile,
-        {"search_config", "engine", "transposition_table", "history_heuristic", "move_memory", "instrumentation", "clocks"},
+        {"evaluation_file", "search_config", "engine", "transposition_table", "history_heuristic", "move_memory", "instrumentation", "clocks"},
         rel(engine_path),
     )
     search_value = engine_profile.get("search_config")
@@ -356,7 +356,10 @@ def load_engine_config(value: str) -> dict:
         raise BuildError("move_memory.entries_per_thread must be a multiple of the bucket ratio sum")
     if any(bucket_unit * ratio >= 2048 for ratio in ratios):
         raise BuildError("move_memory bucket capacities must fit the 11-bit bucket pointers")
+    from .rtl_config import evaluation_config
+
     resolved = {
+        **evaluation_config(engine_profile),
         "move_memory_entries": entries,
         "move_bucket_ratios_descending": ratios,
         "engine_config": rel(engine_path),

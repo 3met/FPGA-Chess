@@ -1,4 +1,5 @@
 {
+  "evaluation_file": "hardware/data/evaluation/baseline.nnue.json",
   "threads": 16,
   "stack_depth": 64,
   "nnue_cache_entries": 8

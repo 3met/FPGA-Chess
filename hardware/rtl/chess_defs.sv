@@ -148,8 +148,11 @@ package chess_defs;
 		return score <= MIN_EVAL_SCORE ? MIN_EVAL_SCORE : score - EvalScore'(1);
 	endfunction
 
-	// Generated from the canonical material/PST parameter JSON.
-	`include "hardware/rtl/generated/evaluation_parameters.svh"
+	// Evaluation constants derive from the selected quantized model file.
+	localparam int PST_EVAL_BOUND = rtl_config::PST_EVAL_BOUND;
+	localparam int PST_EVAL_BITS = $clog2(PST_EVAL_BOUND + 1) + 1;
+	localparam EvalScore PIECE_VALS_128[8] = rtl_config::PIECE_VALS_128;
+	localparam EvalScore PIECE_VALS_ENDGAME_128[8] = rtl_config::PIECE_VALS_ENDGAME_128;
 	// Legal promotions bound incremental totals; never saturate reversible sums.
 	typedef logic signed [PST_EVAL_BITS-1:0] PstEvalScore;
 	typedef struct packed {

@@ -55,7 +55,7 @@ class VendorMacroTests(unittest.TestCase):
 class DataInputTests(unittest.TestCase):
     def test_model_inputs_must_be_existing_paths(self):
         """Malformed or absent inputs fail validation instead of creating empty models."""
-        for inputs in ("model.hex", [None], ["hardware/data/nnue/missing-model.hex"]):
+        for inputs in ("model.hex", [None], ["hardware/data/evaluation/missing-model.nnue.json"]):
             with self.subTest(inputs=inputs):
                 manifest = load_manifest()
                 manifest["data_files"] = inputs

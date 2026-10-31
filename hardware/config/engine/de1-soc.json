@@ -1,4 +1,5 @@
 {
+  "evaluation_file": "hardware/data/evaluation/baseline.nnue.json",
   "search_config": "hardware/config/search/default.json",
   "engine": {
     "threads": 3,

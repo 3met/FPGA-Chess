@@ -14,6 +14,8 @@ from tests.hardware_build.profile_fixtures import (
     make_report,
     sample_metrics,
 )
+from tools.evaluation_model import BASELINE_PATH
+
 from tools.hardware_build.common import BuildError
 from tools.hardware_build.manifest import load_manifest
 from tools.hardware_build.profile_format import format_profile_topics
@@ -153,7 +155,7 @@ class ProfileGuidedBuildTests(unittest.TestCase):
             fingerprint.write_text("test-key\n", encoding="utf-8")
             args = argparse.Namespace(threads=2, stack_depth=8, engine_clock_hz=100,
                                       simulator_threads=1, waveform=False, force_rebuild=True,
-                                      resolved_engine_config={"digest": "configuration", "threads": 2, "stack_depth": 8, "nnue_cache_entries": 8,
+                                      resolved_engine_config={"evaluation_file": str(BASELINE_PATH), "digest": "configuration", "threads": 2, "stack_depth": 8, "nnue_cache_entries": 8,
                                           "clocks": json.loads(Path("hardware/config/engine/de1-soc.json").read_text())["clocks"]})
 
             def run(cmd, *unused, **kwargs):
@@ -196,7 +198,7 @@ class ModelSimProfileBuildTests(unittest.TestCase):
             receipt = build / "fingerprint.txt"
             receipt.write_text("test-key\n")
             args = argparse.Namespace(threads=2, stack_depth=8, force_rebuild=True,
-                                      resolved_engine_config={"digest": "fixture", "threads": 2, "stack_depth": 8, "nnue_cache_entries": 8})
+                                      resolved_engine_config={"evaluation_file": str(BASELINE_PATH), "digest": "fixture", "threads": 2, "stack_depth": 8, "nnue_cache_entries": 8})
             manifest = {"simulator": {"modelsim": {"vlog_args": ["-sv"]}}}
             with patch("tools.hardware_build.profiling.BUILD_ROOT", root), \
                     patch("tools.hardware_build.profiling.require_tool", return_value=str(tool)), \
@@ -222,7 +224,7 @@ class ModelSimProfileBuildTests(unittest.TestCase):
             tool = root / "vlog"
             tool.touch()
             args = argparse.Namespace(threads=2, stack_depth=8, force_rebuild=False,
-                                      resolved_engine_config={"digest": "fixture", "threads": 2, "stack_depth": 8, "nnue_cache_entries": 8})
+                                      resolved_engine_config={"evaluation_file": str(BASELINE_PATH), "digest": "fixture", "threads": 2, "stack_depth": 8, "nnue_cache_entries": 8})
             manifest = {"simulator": {"modelsim": {"vlog_args": ["-sv"]}}}
             def compile_command(command, *unused, **kwargs):
                 if len(command) == 2:

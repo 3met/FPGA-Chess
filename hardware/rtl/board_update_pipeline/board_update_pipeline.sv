@@ -32,8 +32,8 @@ module board_update_pipeline #(
     typedef logic [8:0] PstAddr;
     typedef logic [2:0] PstPieceIndex;
     localparam int PST_ENTRY_COUNT = 6 * 64;
-    localparam PST_MEM_INIT_FILE = "hardware/data/pst_values/pst_values.hex";
-    localparam PST_ENDGAME_MEM_INIT_FILE = "hardware/data/pst_values/pst_values_endgame.hex";
+    localparam PST_MEM_INIT_FILE = rtl_config::PST_VALUES_FILE;
+    localparam PST_ENDGAME_MEM_INIT_FILE = rtl_config::PST_VALUES_ENDGAME_FILE;
     localparam int PST_READ_PORTS = 4;
     localparam int ZOBRIST_DELTA_LANES = 4;
 

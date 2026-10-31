@@ -1,15 +1,14 @@
-"""Export trained combined values to engine material and PST sources."""
+"""Export trained parameters as complete quantized evaluation models."""
 
 from __future__ import annotations
 
 import json
 import math
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 from tools.common.files import atomic_write_text
+from tools.evaluation_model import EVALUATION_ROOT, architecture, decode_model, format_model, tensor, pack_values
 
 from .config import REPO_ROOT
 from .model import (
@@ -31,21 +30,10 @@ from .model import (
     NNUE_OUTPUT_WEIGHT_MAX,
     NNUE_OUTPUT_WEIGHT_MIN,
     PIECE_ORDER,
-    PST_PATH,
 )
 
 
-GENERATED_PATHS = (
-    REPO_ROOT / "hardware/data/pst_values/pst_values.hex",
-    REPO_ROOT / "hardware/data/pst_values/pst_values_endgame.hex",
-    REPO_ROOT / "hardware/rtl/generated/evaluation_parameters.svh",
-)
-NNUE_FEATURE_PATH = REPO_ROOT / "hardware/data/nnue/feature_transformer.hex"
-NNUE_OUTPUT_PATH = REPO_ROOT / "hardware/data/nnue/output_weights.hex"
-NNUE_OUTPUT_BIAS_PATH = REPO_ROOT / "hardware/data/nnue/output_bias.hex"
-NNUE_BIAS_PATH = REPO_ROOT / "hardware/data/nnue/accumulator_bias.hex"
 NNUE_OUTPUT_MAC_LANES = 256
-GENERATOR = REPO_ROOT / "hardware/scripts/generate_pst_values.py"
 FIXED_MATERIAL_128 = {"pawn": 128, "king": 0}
 PST_WORD_BITS = 10
 PST_MIN = -(1 << (PST_WORD_BITS - 1))
@@ -238,9 +226,7 @@ def _require_matching_rtl() -> None:
     """Reject ROM export if the training widths diverge from deployed RTL."""
     rtl = (REPO_ROOT / "hardware/rtl/nnue/defs.sv").read_text(encoding="utf-8")
     expected = {
-        "NNUE_ACCUMULATOR_COUNT": NNUE_ACCUMULATORS,
         "NNUE_OUTPUT_MAC_LANES": NNUE_OUTPUT_MAC_LANES,
-        "NNUE_OUTPUT_BUCKET_COUNT": NNUE_OUTPUT_BUCKETS,
         "NNUE_ACCUMULATOR_BITS": NNUE_ACCUMULATOR_BITS,
         "NNUE_ACCUMULATOR_BIAS_BITS": NNUE_ACCUMULATOR_BIAS_BITS,
         "NNUE_ACTIVATION_BITS": NNUE_ACTIVATION_BITS,
@@ -262,53 +248,59 @@ def _require_matching_rtl() -> None:
         raise RuntimeError("Score limits differ from RTL; update RTL or training configuration before engine-commit")
 
 
-def commit_parameters(run: Path, dry_run: bool = False) -> None:
+def export_model(parameters: dict, name: str) -> dict:
+    """Quantize training outputs once into a self-contained deployment model."""
+    feature, output, output_bias, bias = export_nnue(parameters)
+    def words(text, bits, width, signed=True):
+        """Recover quantized lane values from the shared training export arithmetic."""
+        values = []
+        for row in text.splitlines():
+            packed = int(row, 16)
+            for lane in range(width):
+                value = (packed >> (bits * lane)) & ((1 << bits) - 1)
+                values.append(value - (1 << bits) if signed and value >= 1 << (bits - 1) else value)
+        return values
+    # Match training's piece-count bucket mapping, including the final count.
+    ranges = []
+    for count in range(2, 33):
+        bucket = min(NNUE_OUTPUT_BUCKETS - 1, (count - 2) * NNUE_OUTPUT_BUCKETS // 32)
+        if len(ranges) <= bucket:
+            ranges.append([count, count])
+        else:
+            ranges[bucket][1] = count
+    document = {
+        "metadata": {"name": name, "training_run": name, "best_step": parameters.get("best_step")},
+        "architecture": architecture(NNUE_ACCUMULATORS, ranges),
+        "weights": {
+            "accumulator": {"weights": tensor(words(feature, 2, NNUE_ACCUMULATORS), 2),
+                            "biases": tensor(words(bias, 6, 1), 6)},
+            "output": {"weights": tensor(words(output, 4, NNUE_OUTPUT_MAC_LANES), 4),
+                       "biases": tensor(words(output_bias, 6, 1, False), 6, False)}},
+        "material": {"dtype": "int16"}, "pst": {"dtype": "int10", "encoding": "base64"}}
+    for phase, suffix in (("opening", ""), ("endgame", "_endgame")):
+        material, pst = export_values(parameters, suffix)
+        document["material"][phase] = dict(zip(PIECE_ORDER, material))
+        document["pst"][phase] = {piece: pack_values(pst[piece], 10) for piece in PIECE_ORDER}
+    decode_model(document)
+    return document
+
+
+def commit_parameters(run: Path, dry_run: bool = False, output: Path | None = None) -> None:
+    """Save one validated deployment file without changing FPGA model selection."""
     parameters, source = load_run_parameters(run)
-    material, pst = export_values(parameters)
-    endgame_material, endgame_pst = export_values(parameters, "_endgame")
-    nnue_feature, nnue_output, nnue_output_bias, nnue_bias = export_nnue(parameters)
-    print(f"Run: {run.name} ({source})")
-    print("Material (pawn/128): " + ", ".join(
-        f"{piece}={value}" for piece, value in zip(PIECE_ORDER, material)
-    ))
-    print("Endgame material (pawn/128): " + ", ".join(
-        f"{piece}={value}" for piece, value in zip(PIECE_ORDER, endgame_material)
-    ))
-    if dry_run:
-        print("Dry run; engine files were not changed.")
-        return
     _require_matching_rtl()
-    pst_document = json.loads(PST_PATH.read_text(encoding="utf-8"))
-    pst_document["material"] = dict(zip(PIECE_ORDER, material))
-    pst_document["pst"] = pst
-    pst_document["material_endgame"] = dict(zip(PIECE_ORDER, endgame_material))
-    pst_document["pst_endgame"] = endgame_pst
-    new_pst = json.dumps(pst_document, indent=2) + "\n"
-    paths = (
-        PST_PATH, *GENERATED_PATHS, NNUE_FEATURE_PATH, NNUE_OUTPUT_PATH,
-        NNUE_OUTPUT_BIAS_PATH, NNUE_BIAS_PATH,
-    )
-    before = {path: path.read_bytes() for path in paths}
-    try:
-        atomic_write_text(PST_PATH, new_pst)
-        atomic_write_text(NNUE_FEATURE_PATH, nnue_feature)
-        atomic_write_text(NNUE_OUTPUT_PATH, nnue_output)
-        atomic_write_text(NNUE_OUTPUT_BIAS_PATH, nnue_output_bias)
-        atomic_write_text(NNUE_BIAS_PATH, nnue_bias)
-        result = subprocess.run(
-            [sys.executable, str(GENERATOR)],
-            cwd=REPO_ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(result.stdout.strip() or f"generator exited {result.returncode}")
-    except BaseException:
-        for path, contents in before.items():
-            temporary = path.with_suffix(path.suffix + ".restore")
-            temporary.write_bytes(contents)
-            temporary.replace(path)
-        raise
-    print("Updated material/PST data and packed NNUE feature/output ROM images.")
+    document = export_model(parameters, run.name)
+    destination = Path(output) if output is not None else EVALUATION_ROOT / f"{run.name}.nnue.json"
+    if not destination.name.endswith(".nnue.json"):
+        raise ValueError("evaluation output path must end in .nnue.json")
+    print(f"Run: {run.name} ({source})")
+    print(f"Evaluation file: {destination}")
+    for phase in ("opening", "endgame"):
+        print(phase.capitalize() + " material (pawn/128): " + ", ".join(
+            f"{piece}={value}" for piece, value in document["material"][phase].items()))
+    if dry_run:
+        print("Dry run; no files were changed.")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(destination, format_model(document))
+    print("Saved quantized evaluation model; select it with evaluation_file in the FPGA configuration.")

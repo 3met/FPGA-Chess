@@ -8,7 +8,7 @@ package nnue_defs;
     localparam int NNUE_SIDE_COUNT = 2;
     localparam int NNUE_PIECE_CATEGORY_COUNT = 6;
     localparam int NNUE_FEATURE_COUNT = NNUE_SIDE_COUNT * NNUE_PIECE_CATEGORY_COUNT * 64;
-    parameter int NNUE_ACCUMULATOR_COUNT = 512;
+    localparam int NNUE_ACCUMULATOR_COUNT = rtl_config::NNUE_ACCUMULATOR_COUNT;
     localparam int NNUE_FEATURE_WEIGHT_BITS = 2;
     localparam int NNUE_FEATURE_ROW_BITS =
         NNUE_ACCUMULATOR_COUNT * NNUE_FEATURE_WEIGHT_BITS;
@@ -32,21 +32,14 @@ package nnue_defs;
     parameter int NNUE_OUTPUT_MAC_LANES = 256;
     localparam int NNUE_OUTPUT_MAC_CYCLES =
         (NNUE_OUTPUT_INPUT_COUNT + NNUE_OUTPUT_MAC_LANES - 1) / NNUE_OUTPUT_MAC_LANES;
-    parameter int NNUE_OUTPUT_BUCKET_COUNT = 8;
+    localparam int NNUE_OUTPUT_BUCKET_COUNT = rtl_config::NNUE_OUTPUT_BUCKET_COUNT;
     localparam int NNUE_OUTPUT_WEIGHT_ROW_COUNT =
         NNUE_OUTPUT_BUCKET_COUNT * NNUE_OUTPUT_MAC_CYCLES;
     typedef logic [(NNUE_OUTPUT_BUCKET_COUNT <= 1 ? 1 : $clog2(NNUE_OUTPUT_BUCKET_COUNT))-1:0] NnueOutputBucket;
 
-    // The packed map is a parameter so alternate piece-count bucket boundaries
-    // do not require a different datapath. Entries are ordered by piece count.
+    // Piece-count boundaries come from the selected model.
     localparam int NNUE_BUCKET_MAP_BITS = 33 * $bits(NnueOutputBucket);
-    function automatic logic [NNUE_BUCKET_MAP_BITS-1:0] default_bucket_map();
-        for (int count = 0; count <= 32; count++)
-            default_bucket_map[count*$bits(NnueOutputBucket) +: $bits(NnueOutputBucket)]
-                = NnueOutputBucket'(count <= 2 ? 0 : count >= 32
-                    ? NNUE_OUTPUT_BUCKET_COUNT-1 : (count-2)*NNUE_OUTPUT_BUCKET_COUNT/32);
-    endfunction
-    parameter logic [NNUE_BUCKET_MAP_BITS-1:0] NNUE_OUTPUT_BUCKET_MAP = default_bucket_map();
+    localparam logic [NNUE_BUCKET_MAP_BITS-1:0] NNUE_OUTPUT_BUCKET_MAP = rtl_config::NNUE_OUTPUT_BUCKET_MAP;
 
     function automatic NnueOutputBucket nnue_output_bucket(input PieceCount piece_count);
         automatic int count = int'(piece_count) > 32 ? 32 : int'(piece_count);

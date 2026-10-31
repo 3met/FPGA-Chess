@@ -382,14 +382,6 @@
     }
   },
   "generated_data": {
-    "pst-values": {
-      "script": "hardware/scripts/generate_pst_values.py",
-      "outputs": [
-        "hardware/data/pst_values/pst_values.hex",
-        "hardware/data/pst_values/pst_values_endgame.hex",
-        "hardware/rtl/generated/evaluation_parameters.svh"
-      ]
-    },
     "zobrist": {
       "script": "hardware/scripts/generate_zobrist.py",
       "outputs": [
@@ -416,7 +408,7 @@
         "reference_frequency_hz": 50000000,
         "reference_port": "CLOCK_50"
       },
-      "seed": 3,
+      "seed": 4,
       "map_effort": "auto",
       "map_optimization": "speed",
       "fit_effort": "standard",
@@ -470,10 +462,5 @@
       "jtag_id": "02D120DD"
     }
   },
-  "data_files": [
-    "hardware/data/nnue/feature_transformer.hex",
-    "hardware/data/nnue/output_weights.hex",
-    "hardware/data/nnue/output_bias.hex",
-    "hardware/data/nnue/accumulator_bias.hex"
-  ]
+  "data_files": []
 }

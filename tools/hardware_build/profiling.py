@@ -19,6 +19,8 @@ from software.engine.protocol import (
     encode_fen,
 )
 
+from tools.evaluation_model import ROM_FILES
+
 from .common import (
     rtl_source_dependencies,
     BUILD_ROOT,
@@ -111,7 +113,7 @@ def _resolve_profile_config(args: argparse.Namespace, manifest: dict | None = No
 
 def _compact_verilator_profile_build(build_dir: Path) -> None:
     """Keep only reusable outputs after Verilator has linked the simulator."""
-    keep = {"profile_sim.exe" if os.name == "nt" else "profile_sim", "fingerprint.txt", "compile.log", "rtl_config.sv"}
+    keep = {"profile_sim.exe" if os.name == "nt" else "profile_sim", "fingerprint.txt", "compile.log", "rtl_config.sv", *ROM_FILES}
     for path in build_dir.iterdir():
         if path.name in keep:
             continue

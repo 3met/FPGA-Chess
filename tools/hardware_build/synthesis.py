@@ -7,6 +7,8 @@ import re
 import shutil
 from pathlib import Path
 
+from tools.evaluation_model import ROM_FILES
+
 from .common import (
     BUILD_ROOT,
     BuildError,
@@ -106,6 +108,8 @@ def deterministic_build_id(manifest: dict, target: dict, resolved_config: dict |
         expand_source_set(manifest, target["source_set"]),
         generated_includes=generated_includes,
     ))
+    inputs.add(repo_path(type_config["evaluation_file"]))
+    inputs.add(REPO_ROOT / "tools/evaluation_model.py")
     inputs.update(repo_path(path) for path in manifest.get("data_files", []))
     inputs.update(
         repo_path(output)
@@ -301,6 +305,7 @@ def write_quartus_project(
         ])
     for message_id in target.get("message_disable", []):
         lines.append(f"set_global_assignment -name MESSAGE_DISABLE {message_id}")
+    lines.extend(qsf_assignment_for_source(build_dir / name) for name in ROM_FILES)
     assigned_sources = set(sources)
     lines.extend(qsf_assignment_for_source(source) for source in sources)
     if generated_build_config is not None:

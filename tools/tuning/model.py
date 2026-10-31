@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import json
-
 import torch
 from torch import nn
 
-from .config import REPO_ROOT
+from tools.evaluation_model import BASELINE_PATH, load_model
+
 from .data import FEATURE_COUNT
 
 
 PIECE_ORDER = ("pawn", "knight", "bishop", "rook", "queen", "king")
-PST_PATH = REPO_ROOT / "hardware/data/pst_values/pst_values.json"
+
+EVALUATION_PATH = BASELINE_PATH
 FIXED_MATERIAL_CP = {"pawn": 100.0, "king": 0.0}
 NNUE_SIDES = 2
 NNUE_PIECE_CATEGORIES = 6
@@ -81,14 +81,14 @@ def _squared_clipped_activation(accumulators: torch.Tensor) -> torch.Tensor:
 
 def engine_parameters_cp() -> tuple[torch.Tensor, torch.Tensor]:
     """Load canonical material and PST values in centipawns."""
-    parameters = json.loads(PST_PATH.read_text(encoding="utf-8"))
+    parameters = load_model(EVALUATION_PATH)
     scale = 100.0 / 128.0
     material = torch.tensor(
-        [parameters["material"][piece] * scale for piece in PIECE_ORDER],
+        [value * scale for value in parameters["material_opening"]],
         dtype=torch.float32,
     )
     pst = torch.tensor(
-        [[value * scale for value in parameters["pst"][piece]] for piece in PIECE_ORDER],
+        [[value * scale for value in parameters["pst_opening"][index*64:(index+1)*64]] for index in range(len(PIECE_ORDER))],
         dtype=torch.float32,
     )
     return material, pst

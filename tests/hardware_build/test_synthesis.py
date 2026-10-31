@@ -67,7 +67,7 @@ class EngineBuildConfigTests(unittest.TestCase):
         manifest = load_manifest()
         target = manifest["synthesis_targets"]["quartus-de1-soc"]
         original_id = deterministic_build_id(manifest, target)
-        model_path = Path(manifest["data_files"][0]).resolve()
+        model_path = Path(load_engine_config(target["engine_config"])["evaluation_file"]).resolve()
         read_bytes = Path.read_bytes
 
         def changed_model(path):

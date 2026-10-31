@@ -79,10 +79,10 @@ module nnue_evaluator #(
     logic [$clog2(NNUE_OUTPUT_WEIGHT_ROW_COUNT)-1:0] output_weight_address;
 
     initial begin
-        $readmemh("hardware/data/nnue/feature_transformer.hex", feature_rom);
-        $readmemh("hardware/data/nnue/accumulator_bias.hex", accumulator_bias);
-        $readmemh("hardware/data/nnue/output_weights.hex", output_weight_rows);
-        $readmemh("hardware/data/nnue/output_bias.hex", output_bias);
+        $readmemh(rtl_config::FEATURE_TRANSFORMER_FILE, feature_rom);
+        $readmemh(rtl_config::ACCUMULATOR_BIAS_FILE, accumulator_bias);
+        $readmemh(rtl_config::OUTPUT_WEIGHTS_FILE, output_weight_rows);
+        $readmemh(rtl_config::OUTPUT_BIAS_FILE, output_bias);
         for (int row = 0; row < BANK_ROWS; row++) begin
             feature_bank0[row] = '0;
             feature_bank1[row] = '0;

@@ -25,5 +25,6 @@ These docs describe the FPGA chess engine architecture, module contracts, protoc
 | Stockfish benchmark | [development/stockfish-benchmark.md](development/stockfish-benchmark.md) |
 | Engine timing and latency | [development/engine-timing.md](development/engine-timing.md) |
 | Runtime profiling | [development/engine-profiling.md](development/engine-profiling.md) |
+| Evaluation model format | [architecture/evaluation-file.md](architecture/evaluation-file.md) |
 | Evaluation tuning | [development/evaluation-tuning.md](development/evaluation-tuning.md) |
 | Search-parameter tuning | [development/search-parameter-tuning.md](development/search-parameter-tuning.md) |

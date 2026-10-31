@@ -382,44 +382,6 @@ class TuningModelAndExportTests(unittest.TestCase):
             },
         }
 
-    @staticmethod
-    def make_engine_outputs(root: Path) -> dict[str, Path]:
-        """Create isolated sentinel files for every engine parameter output."""
-        paths = {
-            "pst": root / "pst.json",
-            "pst_hex": root / "pst.hex",
-            "material": root / "material.svh",
-            "nnue_feature": root / "nnue-feature.hex",
-            "nnue_output": root / "nnue-output.hex",
-            "nnue_output_bias": root / "nnue-output-bias.hex",
-            "nnue_bias": root / "nnue-bias.hex",
-        }
-        paths["pst"].write_text(json.dumps({
-            "material": dict.fromkeys(PIECE_ORDER, 0),
-            "pst": {piece: [0] * 64 for piece in PIECE_ORDER},
-        }), encoding="utf-8")
-        for name, path in paths.items():
-            if name != "pst":
-                path.write_text(f"old {name}", encoding="utf-8")
-        return paths
-
-    @contextlib.contextmanager
-    def engine_output_fixture(self, root):
-        """Redirect every export destination even when the guard under test regresses."""
-        paths = self.make_engine_outputs(root)
-        replacements = {
-            "PST_PATH": paths["pst"],
-            "GENERATED_PATHS": (paths["pst_hex"], paths["material"]),
-            "NNUE_FEATURE_PATH": paths["nnue_feature"],
-            "NNUE_OUTPUT_PATH": paths["nnue_output"],
-            "NNUE_OUTPUT_BIAS_PATH": paths["nnue_output_bias"],
-            "NNUE_BIAS_PATH": paths["nnue_bias"],
-        }
-        with contextlib.ExitStack() as stack:
-            for name, value in replacements.items():
-                stack.enter_context(mock.patch(f"tools.tuning.engine.{name}", value))
-            yield paths
-
     def test_nnue_piece_count_bucket_boundaries(self):
         counts = (2, 5, 6, 9, 10, 13, 14, 17, 18, 21, 22, 25, 26, 29, 30, 32)
         codes = torch.zeros((len(counts), 32), dtype=torch.int16)
@@ -976,55 +938,54 @@ class TuningModelAndExportTests(unittest.TestCase):
             self.assertEqual(parameters["best_step"], 11)
             self.assertEqual(parameters["material"]["pawn"], 100.0)
 
-    def test_dry_run_does_not_change_engine_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            run = root / "run"
-            run.mkdir()
-            atomic_write_json(run / "parameters.json", self.parameter_document())
-            paths = self.make_engine_outputs(root)
-            before = {path: path.read_bytes() for path in paths.values()}
-            with (
-                mock.patch("tools.tuning.engine.PST_PATH", paths["pst"]),
-                mock.patch("tools.tuning.engine.GENERATED_PATHS", (paths["pst_hex"], paths["material"])),
-                mock.patch("tools.tuning.engine.NNUE_FEATURE_PATH", paths["nnue_feature"]),
-                mock.patch("tools.tuning.engine.NNUE_OUTPUT_PATH", paths["nnue_output"]),
-                mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_PATH", paths["nnue_output_bias"]),
-                mock.patch("tools.tuning.engine.NNUE_BIAS_PATH", paths["nnue_bias"]),
-                mock.patch("tools.tuning.engine.subprocess.run") as generate,
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                commit_parameters(run, dry_run=True)
-            self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
-            generate.assert_not_called()
-
-    def test_current_training_geometry_matches_rtl(self):
-        from tools.tuning.engine import _require_matching_rtl
-
-        _require_matching_rtl()
-        for name, value in (("ENGINE_EVAL_BITS", ENGINE_EVAL_BITS),
-                            ("ENGINE_MAX_MATE_DISTANCE", ENGINE_MAX_MATE_DISTANCE)):
-            with self.subTest(name=name), mock.patch(f"tools.tuning.engine.{name}", value + 1):
-                with self.assertRaisesRegex(RuntimeError, "Score limits"):
-                    _require_matching_rtl()
-        with mock.patch("tools.tuning.engine.NNUE_ACCUMULATORS", NNUE_ACCUMULATORS + 1):
-            with self.assertRaisesRegex(RuntimeError, "NNUE_ACCUMULATOR_COUNT"):
-                _require_matching_rtl()
-
-    def test_engine_commit_waits_for_matching_rtl(self):
-        """A width mismatch must block ROM export before changing any output."""
+    def test_engine_commit_writes_only_selected_quantized_model(self):
+        from tools.evaluation_model import load_model
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
             atomic_write_json(run / "parameters.json", self.parameter_document())
-            with self.engine_output_fixture(run) as paths, \
-                    mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_BITS", NNUE_OUTPUT_BIAS_BITS + 1), \
-                    mock.patch("tools.tuning.engine.subprocess.run") as generate, \
-                    contextlib.redirect_stdout(io.StringIO()):
-                before = {path: path.read_bytes() for path in paths.values()}
+            output = run / "selected.nnue.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                commit_parameters(run, dry_run=True, output=output)
+                self.assertFalse(output.exists())
+                commit_parameters(run, output=output)
+            model = load_model(output)
+            self.assertTrue(all(value == 0 for value in model["output_weights"]))
+            self.assertEqual(set(p.name for p in run.iterdir()), {"parameters.json", output.name})
+
+    def test_deployment_model_preserves_quantized_training_export(self):
+        """File serialization preserves signs, units, and tensor lane ordering."""
+        from tools.evaluation_model import decode_model, rom_images
+        from tools.tuning.engine import export_model
+        parameters = self.parameter_document()
+        parameters["material"]["knight"] = 300.0
+        parameters["pst"]["queen"][10] = -2.2
+        parameters["nnue"]["feature_weights"][8][:4] = [-2, -1, 0, 1]
+        parameters["nnue"]["accumulator_bias"][:4] = [-32, -1.5, 1.5, 31]
+        parameters["nnue"]["output_weights"][0][:4] = [-8, 7, -1.5, 2.5]
+        parameters["nnue"]["output_bias"][0] = 63
+        document = export_model(parameters, "test-run")
+        decoded = decode_model(json.loads(json.dumps(document)))
+        images = rom_images(decoded)
+        exported = export_nnue(parameters)
+        for name, original in zip(("feature_transformer.hex", "output_weights.hex",
+                                   "output_bias.hex", "accumulator_bias.hex"), exported):
+            self.assertEqual([int(v, 16) for v in images[name].splitlines()],
+                             [int(v, 16) for v in original.splitlines()])
+        material, pst = export_values(parameters)
+        self.assertEqual(decoded["material_opening"], material)
+        self.assertEqual(decoded["pst_opening"], [v for piece in PIECE_ORDER for v in pst[piece]])
+
+    def test_engine_commit_waits_for_matching_rtl(self):
+        """A width mismatch must block export before replacing the destination."""
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            atomic_write_json(run / "parameters.json", self.parameter_document())
+            output = run / "selected.nnue.json"
+            output.write_text("original")
+            with mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_BITS", NNUE_OUTPUT_BIAS_BITS + 1):
                 with self.assertRaisesRegex(RuntimeError, "update RTL"):
-                    commit_parameters(run)
-                self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
-                generate.assert_not_called()
+                    commit_parameters(run, output=output)
+            self.assertEqual(output.read_text(), "original")
 
     def test_dry_run_rejects_missing_nnue_parameters(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1035,29 +996,17 @@ class TuningModelAndExportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "NNUE"):
                 commit_parameters(run, dry_run=True)
 
-    def test_failed_generation_rolls_back_canonical_parameters(self):
+    def test_invalid_model_leaves_destination_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            run = root / "run"
-            run.mkdir()
-            atomic_write_json(run / "parameters.json", self.parameter_document())
-            paths = self.make_engine_outputs(root)
-            before = {path: path.read_bytes() for path in paths.values()}
-            failed = mock.Mock(returncode=1, stdout="generation failed")
-            with (
-                mock.patch("tools.tuning.engine.PST_PATH", paths["pst"]),
-                mock.patch("tools.tuning.engine.GENERATED_PATHS", (paths["pst_hex"], paths["material"])),
-                mock.patch("tools.tuning.engine.NNUE_FEATURE_PATH", paths["nnue_feature"]),
-                mock.patch("tools.tuning.engine.NNUE_OUTPUT_PATH", paths["nnue_output"]),
-                mock.patch("tools.tuning.engine.NNUE_OUTPUT_BIAS_PATH", paths["nnue_output_bias"]),
-                mock.patch("tools.tuning.engine.NNUE_BIAS_PATH", paths["nnue_bias"]),
-                mock.patch("tools.tuning.engine._require_matching_rtl"),
-                mock.patch("tools.tuning.engine.subprocess.run", return_value=failed),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                with self.assertRaises(RuntimeError):
-                    commit_parameters(run)
-            self.assertEqual(before, {path: path.read_bytes() for path in paths.values()})
+            run = Path(directory)
+            parameters = self.parameter_document()
+            parameters["material"]["queen"] = 100000.0
+            atomic_write_json(run / "parameters.json", parameters)
+            output = run / "selected.nnue.json"
+            output.write_text("original")
+            with self.assertRaises(ValueError):
+                commit_parameters(run, output=output)
+            self.assertEqual(output.read_text(), "original")
 
 
 class TuningTrainingAndReportTests(unittest.TestCase):
@@ -1184,7 +1133,7 @@ class TuningTrainingAndReportTests(unittest.TestCase):
                     tuning_main(["engine-commit", "--run", "interrupted", "--dry-run"]),
                     0,
                 )
-            commit.assert_called_once_with(run.resolve(), True)
+            commit.assert_called_once_with(run.resolve(), True, None)
 
     def test_train_rebuild_cache_is_an_explicit_command_option(self):
         """The cache rebuild choice belongs to each invocation, not the run config."""

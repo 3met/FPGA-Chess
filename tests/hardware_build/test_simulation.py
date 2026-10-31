@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tools.evaluation_model import BASELINE_PATH
+
 from tools.hardware_build.simulation import parse_fail_count, run_modelsim_top
 
 
@@ -93,7 +95,7 @@ class VerilatorBackendTests(unittest.TestCase):
             header = root / 'fixture.svh'
             header.write_text('// original fixture')
             config = root / 'types.json'
-            config.write_text(json.dumps({'threads': 3, 'stack_depth': 33, 'nnue_cache_entries': 4}))
+            config.write_text(json.dumps({'evaluation_file': str(BASELINE_PATH), 'threads': 3, 'stack_depth': 33, 'nnue_cache_entries': 4}))
             versions = {'verilator': 'Verilator fixture', 'g++': 'C++ fixture'}
             builds = []
             backend_flags = []
@@ -121,7 +123,7 @@ class VerilatorBackendTests(unittest.TestCase):
                 self.assertEqual(len(builds), 2)
                 source.write_text('module bench; initial $finish; endmodule')
                 self.assertTrue(compile_bench()['ok'])
-                config.write_text(json.dumps({'threads': 5, 'stack_depth': 17, 'nnue_cache_entries': 4}))
+                config.write_text(json.dumps({'evaluation_file': str(BASELINE_PATH), 'threads': 5, 'stack_depth': 17, 'nnue_cache_entries': 4}))
                 self.assertTrue(compile_bench()['ok'])
                 versions['verilator'] = 'changed toolchain fixture'
                 self.assertTrue(compile_bench()['ok'])

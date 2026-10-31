@@ -25,7 +25,7 @@ python -m tools.tuning train --config <config-path> --resume <run-id-or-path>
 python -m tools.tuning train --config <config-path> --initialize <run-id-or-path>
 ```
 
-Resume restores training state; the configuration must match the original run except for `training.max_steps`. Initialization keeps compatible model parameters and starts a fresh optimizer. The two options are mutually exclusive. Training from scratch starts material/PST values from the checked-in engine table.
+Resume restores training state; the configuration must match the original run except for `training.max_steps`. Initialization keeps compatible model parameters and starts a fresh optimizer. The two options are mutually exclusive. Training from scratch starts material/PST values from the checked-in baseline evaluation model.
 
 ## Inspect and Export
 
@@ -42,10 +42,10 @@ These commands also accept `--config <path>`. Omit `--run` to select the latest 
 | ------- | ------ |
 | `view-report` | Shows training progress, latest and best-checkpoint validation metrics, and material/PST values. |
 | `quantization-report` | Analyzes integer ranges, accumulator wrapping, activation occupancy, combined-evaluation clipping, and phase-bucket coverage. Saves `quantization.json` in the run directory. Use `--sample-positions <count>` to control sample size. |
-| `engine-commit --dry-run` | Shows the exported material values without changing engine files. |
-| `engine-commit` | Validates hardware widths, updates opening/endgame material and PST data, writes NNUE ROM images, and regenerates tracked hardware data. |
+| `engine-commit --dry-run` | Validates the complete export and shows its destination and material values without writing files. |
+| `engine-commit` | Saves the final quantized material, PST, and NNUE parameters in one `.nnue.json` file. |
 
-Despite its name, `engine-commit` writes files; it does not create a Git commit. Without `--run`, export requires the latest run to be complete. An explicit run can export saved parameters or its best checkpoint. Use a model compatible with the current RTL, review the generated changes, and run [build and verification](build-test-synthesis.md) before deploying them.
+Despite its name, `engine-commit` writes a file; it does not create a Git commit. The destination defaults to `hardware/data/evaluation/<run-name>.nnue.json`; use `--output <path.nnue.json>` to choose another path. Select the exported model explicitly with the FPGA engine configuration's `evaluation_file`; export does not change that selection. Without `--run`, export requires the latest run to be complete. An explicit run can export saved parameters or its best checkpoint. Use a model compatible with the current RTL, review the exported model, and run [build and verification](build-test-synthesis.md) before deploying them.
 
 Runs contain `report.json`, `metrics.jsonl`, `latest.pt` for resuming, `best.pt` for the checkpoint selected by validation loss, and `parameters.json` after successful completion.
 

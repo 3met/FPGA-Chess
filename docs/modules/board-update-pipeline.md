@@ -66,7 +66,7 @@ The checked king and mover king are selected from the captured request during ta
 
 ## PST Tables
 
-Both material and piece-square parameter sets are maintained in `hardware/data/pst_values/pst_values.json`. Generation produces a ROM and material definitions for each set. Both ROMs receive the same square addresses. Four shared contribution lanes select the piece and addition/removal sign for push, reverse, or setup, then balanced sums update each phase. Disabled ROM lanes contribute zero, including null moves and side-only operations. Both phases use explicit scalar arithmetic paths through their accumulators.
+Both material and piece-square parameter sets are maintained in the selected `.nnue.json` evaluation file under `hardware/data/evaluation/`. Build preparation produces private ROMs and material definitions for each set. Both ROMs receive the same square addresses. Four shared contribution lanes select the piece and addition/removal sign for push, reverse, or setup, then balanced sums update each phase. Disabled ROM lanes contribute zero, including null moves and side-only operations. Both phases use explicit scalar arithmetic paths through their accumulators.
 
 ## Move History
 

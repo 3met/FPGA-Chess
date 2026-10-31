@@ -1302,8 +1302,8 @@ module tb_board_update_pipeline;
     endtask
 
     initial begin
-        $readmemh("hardware/data/pst_values/pst_values.hex", pst_values);
-        $readmemh("hardware/data/pst_values/pst_values_endgame.hex", pst_values_endgame);
+        $readmemh(rtl_config::PST_VALUES_FILE, pst_values);
+        $readmemh(rtl_config::PST_VALUES_ENDGAME_FILE, pst_values_endgame);
         $readmemh(ZOBRIST_TILE_REFERENCE_FILE, zobrist_tile_reference);
         $readmemh(ZOBRIST_EP_REFERENCE_FILE, zobrist_ep_reference);
 

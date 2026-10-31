@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("train", "Train static-evaluation parameters"),
         ("view-report", "Print the latest or selected run report"),
         ("quantization-report", "Profile trained NNUE integer ranges"),
-        ("engine-commit", "Write trained parameters to engine source files"),
+        ("engine-commit", "Save a quantized evaluation model"),
     ):
         subparser = subparsers.add_parser(name, help=help_text)
         subparser.add_argument("--config", help="JSON config path; defaults to the checked-in config")
@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Rebuild the dataset cache even when a matching cache exists",
             )
         if name == "engine-commit":
+            subparser.add_argument("--output", type=Path, help="Destination .nnue.json path; defaults to the run name under hardware/data/evaluation")
             subparser.add_argument("--dry-run", action="store_true", help="Show exported material without changing files")
         if name == "quantization-report":
             subparser.add_argument(
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"latest run {run.name} is {run_status(run)!r}; resume it or pass --run explicitly "
                 "to export its best checkpoint"
             )
-        commit_parameters(run, args.dry_run)
+        commit_parameters(run, args.dry_run, args.output)
         return 0
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
