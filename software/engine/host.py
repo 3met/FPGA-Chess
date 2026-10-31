@@ -776,11 +776,17 @@ class FPGAUCIHost:
                 self._stop_event.wait()
             if isinstance(response, StatusResponse):
                 response = self._get_killed_search_result()
+            # A canceled speculative search may stop before proving any legal move.
+            # Its UCI completion is discarded by the consumer, not used as a played move.
+            canceled_ponder = is_ponder and self._stop_event.is_set() and not self._ponderhit_event.is_set()
             # UCI consumers may submit a new position as soon as bestmove is printed.
             # The FPGA response is complete here, so release the host search state first.
             release_search()
             if isinstance(response, SearchResultResponse):
-                self._emit_search_result(response, board_snapshot, search_elapsed)
+                if canceled_ponder and response.best_move.is_null:
+                    self.emit("bestmove 0000")
+                else:
+                    self._emit_search_result(response, board_snapshot, search_elapsed)
             elif isinstance(response, PerftResultResponse):
                 self.emit(f"info string perft depth {response.completed_depth} nodes {response.nodes}")
             elif response is None:

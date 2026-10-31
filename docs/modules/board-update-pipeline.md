@@ -60,6 +60,8 @@ Three general feature lanes handle the moving piece, placed piece, and capture. 
 
 The pipeline maintains cached king squares, the Zobrist key, both material/PST sums, and piece count for setup, moves, and reversal.
 
+Quiet moves and synthetic null moves increment the halfmove clock with saturation so an expired draw clock cannot wrap to zero. Pawn moves and captures reset it; reversal restores the exact saved value, including a saturated value.
+
 The checked king and mover king are selected from the captured request during table alignment, keeping dispatch selection out of the first king-square register path.
 
 ## PST Tables

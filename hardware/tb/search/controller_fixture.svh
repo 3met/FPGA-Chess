@@ -38,6 +38,7 @@
     bit root_stack_capture_pending[0:THREAD_COUNT-1];
     bit repetition_root_request_seen;
     bit repetition_child_request_seen;
+    bit repetition_child_draw_seen;
     bit all_threads_root_active_seen;
     bit search_dispatch_state_seen;
     bit active_thread_count_full_seen;

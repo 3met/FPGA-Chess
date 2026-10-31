@@ -137,11 +137,11 @@ def _run_repetition_checks(
     startup_timeout: float,
     search_timeout: float,
 ) -> list[tuple[RepetitionCase, str]]:
-    """Test direct repetition detection separately from draw-move policy."""
+    """Check legal results at repeated roots separately from descendant draw-move policy."""
     failures: list[tuple[RepetitionCase, str]] = []
     for case in REPETITION_CASES:
-        # First prove that the same child changes from playable at occurrence
-        # two to an immediate draw at occurrence three, with its TT entry warm.
+        # Both occurrences remain searchable roots with legal best moves, even
+        # when the latter qualifies for a draw. Preserve its warm TT context.
         engine.new_game(startup_timeout)
         twofold_nodes, twofold_move, _, twofold_score = _search_position(
             engine,
@@ -163,11 +163,11 @@ def _run_repetition_checks(
             failures.append((case, f"{direct_searches}, twofold child was incorrectly terminal"))
         elif not _is_legal_repetition_move(case, case.cycle_moves, twofold_move):
             failures.append((case, f"{direct_searches}, twofold child returned illegal move {twofold_move}"))
-        if threefold_move != "0000" or threefold_score != "cp 0":
-            failures.append((case, f"{direct_searches}, threefold child did not return a terminal draw"))
+        if not _is_legal_repetition_move(case, case.final_child_moves, threefold_move):
+            failures.append((case, f"{direct_searches}, threefold root returned illegal move {threefold_move}"))
 
-        # Then test whether search chooses or avoids the now-proven draw based
-        # on the fixture's policy, preserving TT state only within this phase.
+        # Then test whether search chooses or avoids the repeated descendant
+        # based on the fixture's policy, preserving TT state only within this phase.
         engine.new_game(startup_timeout)
         primed_nodes, primed_move, _, primed_score = _search_position(
             engine,

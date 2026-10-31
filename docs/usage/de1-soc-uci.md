@@ -55,7 +55,7 @@ The port may instead be set through `FPGA_CHESS_PORT`. When neither an argument 
 
 The `uci` handshake is hardware-independent and advertises `Ponder` and `Move Overhead`. Overhead is subtracted from fixed-time and clock-search deadlines. The first `isready` connects, resets the protocol, waits for initialization, and starts a new game. Connection settings use `--port`, `FPGA_CHESS_PORT`, and `--baud`.
 
-The host advertises the standard UCI `Ponder` option. `go ponder` searches the speculative position to the hardware depth ceiling without consuming the normal clock budget, and `ponderhit` restarts the saved search limit on the same transposition-table-warmed position.
+The host advertises the standard UCI `Ponder` option. `go ponder` searches the speculative position to the hardware depth ceiling without consuming the normal clock budget, and `ponderhit` restarts the saved search limit on the same transposition-table-warmed position. Completed searches select legal moves even at roots that qualify for a draw. Stopping speculation before a legal result exists produces an empty completion for the client to discard; completed played searches retain strict move validation.
 
 Immutable synthesized properties are available through `debug build`. `debug stats` always reports whether move memory has overflowed since the last new game or reset, even when detailed search statistics are disabled. To measure serial command turnaround, use `debug latency` for 100 status transactions or `debug latency <count>` for 100–1000 transactions; the host reports minimum, median, and p95 round-trip latency.
 

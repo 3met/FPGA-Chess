@@ -18,6 +18,7 @@ module tb_search_controller #(
     `include "hardware/tb/search/controller_drivers.svh"
     `include "hardware/tb/search/controller_positions.svh"
     `include "hardware/tb/search/controller_scenarios.svh"
+    `include "hardware/tb/search/controller_draws.svh"
     `include "hardware/tb/search/controller_sequence.svh"
     `include "hardware/tb/search/controller_monitors.svh"
 

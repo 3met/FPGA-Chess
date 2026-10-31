@@ -386,8 +386,10 @@
         return search_node_stop_q || search_time_stop_q;
     endfunction : search_stop_requested
 
+    // Even depth-zero requests select a root move; only descendants enter quiescence.
     function automatic logic search_in_qsearch(input ThreadID thread);
-        return search_stack_top[thread].remaining_depth == SearchDepth'(0);
+        return search_ply[thread] != PlyIndex'(0)
+            && search_stack_top[thread].remaining_depth == SearchDepth'(0);
     endfunction : search_in_qsearch
 
     // Constant-folded Q8 approximation used to populate the small LMR ROM.

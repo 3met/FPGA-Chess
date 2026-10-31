@@ -821,36 +821,6 @@
         check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
     endtask : run_black_qsearch_capture_test
 
-    task automatic run_halfmove_draw_search(input string label);
-        automatic EngineControllerRequest request = zero_request();
-
-        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
-        request.depth_limit = 8'd3;
-        pulse_request(request, label);
-        wait_response(label);
-        check(!resp.error, {label, " no error"});
-        check(resp.score == DRAW_EVAL_SCORE, {label, " draw score"});
-        check(resp.nodes_count == NodeCountType'(0), {label, " no nodes searched"});
-        check(resp.best_move.from_pos == Position'(0) && resp.best_move.to_pos == Position'(0), {label, " no best move needed"});
-        check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
-    endtask : run_halfmove_draw_search
-
-    task automatic run_repetition_draw_search(input string label);
-        automatic EngineControllerRequest request = zero_request();
-
-        repetition_root_request_seen = 1'b0;
-        request.operation = ENGINE_CTRL_SEARCH_DEPTH;
-        request.depth_limit = 8'd1;
-        pulse_request(request, label);
-        wait_response(label);
-        check(!resp.error, {label, " no error"});
-        check(resp.score == DRAW_EVAL_SCORE, {label, " draw score"});
-        check(resp.nodes_count == NodeCountType'(0), {label, " no nodes searched"});
-        check(resp.best_move.from_pos == Position'(0) && resp.best_move.to_pos == Position'(0), {label, " no best move needed"});
-        check(resp.end_reason == ENGINE_END_DEPTH_LIMIT, {label, " end reason"});
-        check(repetition_root_request_seen, {label, " checks root repetition"});
-    endtask : run_repetition_draw_search
-
     task automatic run_node_limit_search(input string label);
         automatic EngineControllerRequest request = zero_request();
 

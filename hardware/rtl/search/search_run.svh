@@ -304,8 +304,8 @@
                                 // speculative result; its history entry will be
                                 // overwritten by the next candidate at this ply.
                                 search_thread_phase[board_thread_id] <= SEARCH_PHASE_READY;
-                            end else if (search_board[board_thread_id].halfmove_clock
-                                    >= HalfmoveClock'(100)) begin
+                            end else if (board_ply != PlyIndex'(0)
+                                    && search_board[board_thread_id].halfmove_clock >= HalfmoveClock'(100)) begin
                                 // This legal evasion rules out checkmate in the
                                 // unchanged parent. Claim its draw without entering
                                 // a child, even if the evasion would reset the clock.

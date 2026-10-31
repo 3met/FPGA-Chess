@@ -349,7 +349,8 @@
                 end
                 if (lmr_recovery_check_pending[idx]) begin
                     check(8'(dut.search_pending_child_depth[idx]) == lmr_expected_child_depth[idx],
-                        "LMR recovery restores full child depth without another reduction");
+                        $sformatf("LMR recovery restores full child depth expected=%0d actual=%0d",
+                            lmr_expected_child_depth[idx], 8'(dut.search_pending_child_depth[idx])));
                     lmr_recovery_check_pending[idx] = 1'b0;
                 end
                 if (dut.search_thread_aspiration_active[0] && !aspiration_window_seen) begin
@@ -604,7 +605,9 @@
                 if (dut.search_pvs_research[lmr_tid]) begin
                     lmr_recovery_issue_seen = 1'b1;
                     lmr_full_tt_pending[lmr_tid] = 1'b1;
-                    lmr_expected_child_depth[lmr_tid] = 8'(dut.search_stack_top[lmr_tid].remaining_depth - 1'b1);
+                    // Depth-zero roots can re-search a scout into quiescence at depth zero.
+                    lmr_expected_child_depth[lmr_tid] = dut.search_stack_top[lmr_tid].remaining_depth == 0
+                        ? 8'd0 : 8'(dut.search_stack_top[lmr_tid].remaining_depth - 1'b1);
                     lmr_recovery_check_pending[lmr_tid] = 1'b1;
                 end else if (dut.lmr_eligible(
                         dut.search_ply[lmr_tid],
@@ -636,6 +639,11 @@
                 if (dut.repetition_req_ply == PlyIndex'(0)) repetition_root_request_seen = 1'b1;
                 else repetition_child_request_seen = 1'b1;
             end
+            if (dut.repetition_resp_valid && dut.repetition_resp_epoch == dut.repetition_epoch
+                    && dut.repetition_resp_is_draw
+                    && dut.search_repetition_pending[dut.repetition_resp_thread]
+                    && dut.search_ply[dut.repetition_resp_thread] != PlyIndex'(0))
+                repetition_child_draw_seen = 1'b1;
             if (dut.state == CTRL_SEARCH_RUN) begin
                 automatic bit all_active;
 

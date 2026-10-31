@@ -1,6 +1,6 @@
 # Repetition Checker (`repetition_checker`)
 
-The repetition checker determines whether a search position has occurred at least twice previously, making the current occurrence a draw by threefold repetition. It compares full 64-bit Zobrist keys; compact indexing is used only to select storage and never establishes equality.
+The repetition checker determines whether a search position has occurred at least twice previously, permitting a draw by threefold repetition. It compares full 64-bit Zobrist keys; compact indexing is used only to select storage and never establishes equality. Search applies the draw shortcut only below the root so a requested root search still selects a legal move.
 
 ## History Model
 

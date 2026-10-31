@@ -431,6 +431,11 @@ module board_update_pipeline #(
         tile_write_data[lane] = tile;
     endtask : plan_tile_write
 
+    // Reversible moves must not wrap an expired draw clock back to zero.
+    function automatic HalfmoveClock increment_halfmove_clock(input HalfmoveClock clock_value);
+        return (&clock_value) ? clock_value : clock_value + HalfmoveClock'(1);
+    endfunction : increment_halfmove_clock
+
     task automatic replace_side_data(
         inout FullBoard board,
         input Color turn,
@@ -940,7 +945,8 @@ module board_update_pipeline #(
                 if (from_pos == Position'('d60) || from_pos == Position'('d56) || to_pos == Position'('d56)) next_castle.black_queenside = 1'b0;
 
                 next_has_ep = zobrist_new_ep_valid_q;
-                next_halfmove = (is_ep || destination_tile.piece_type != NULL_PIECE || moving_tile.piece_type == PAWN) ? HalfmoveClock'('d0) : in.board.halfmove_clock + HalfmoveClock'('d1);
+                next_halfmove = (is_ep || destination_tile.piece_type != NULL_PIECE || moving_tile.piece_type == PAWN)
+                    ? HalfmoveClock'(0) : increment_halfmove_clock(in.board.halfmove_clock);
                 replace_side_data(out.board, Color'(~in.board.turn), next_castle, next_has_ep, next_ep_file, next_halfmove);
             end
 
@@ -996,7 +1002,7 @@ module board_update_pipeline #(
                     in.board.castling_rights,
                     1'b0,
                     in.board.ep_file,
-                    in.board.halfmove_clock + HalfmoveClock'(1)
+                    increment_halfmove_clock(in.board.halfmove_clock)
                 );
             end
 

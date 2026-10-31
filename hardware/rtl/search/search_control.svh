@@ -669,15 +669,9 @@
 
                 CTRL_REPETITION_ROOT_WAIT: begin
                     if (repetition_resp_valid && repetition_resp_epoch == repetition_epoch) begin
-                        if (repetition_resp_is_draw) begin
-                            resp_reg <= EngineControllerResponse'('0);
-                            resp_reg.score <= DRAW_EVAL_SCORE;
-                            resp_reg.best_move <= NULL_MOVE;
-                            resp_reg.end_reason <= ENGINE_END_DEPTH_LIMIT;
-                            state <= CTRL_RESPOND;
-                        end else begin
-                            state <= CTRL_SEARCH_ITER_START;
-                        end
+                        // Root searches select a move even when a draw can be claimed.
+                        // Keep the complete history available to descendant probes.
+                        state <= CTRL_SEARCH_ITER_START;
                     end
                 end
 

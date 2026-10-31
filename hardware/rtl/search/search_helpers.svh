@@ -37,11 +37,17 @@
         return !(ply == PlyIndex'(0) && thread != ThreadID'(0));
     endfunction : should_probe_search_tt
 
-    // A checked position at the draw threshold must first prove an evasion
+    // Draw shortcuts apply below the root; the root must compare legal moves.
+    function automatic logic search_fifty_move_draw(input int thread_index);
+        return search_ply[thread_index] != PlyIndex'(0)
+            && search_board[thread_index].halfmove_clock >= HalfmoveClock'(100);
+    endfunction : search_fifty_move_draw
+
+    // A checked child at the draw threshold must first prove an evasion
     // exists: checkmate ends the game before a fifty-move draw can be claimed.
     function automatic logic search_thread_terminal_ready(input int thread_index);
         return search_thread_ready(thread_index)
-            && ((search_board[thread_index].halfmove_clock >= HalfmoveClock'(100)
+            && ((search_fifty_move_draw(thread_index)
                     && (!search_board_in_check[thread_index]
                         || search_stack_top[thread_index].has_legal))
                 || search_stack_top[thread_index].move_order_state == MOVE_ORDER_DONE);
@@ -52,7 +58,7 @@
     function automatic logic search_thread_tt_lookup_ready(input int thread_index);
         return search_thread_ready(thread_index)
             && !search_thread_terminal_ready(thread_index)
-            && search_board[thread_index].halfmove_clock < HalfmoveClock'(100)
+            && !search_fifty_move_draw(thread_index)
             && !search_in_qsearch(ThreadID'(thread_index))
             && !search_stack_top[thread_index].tt_checked
             && should_probe_search_tt(
@@ -145,7 +151,7 @@
         return search_thread_ready(thread_index)
             && !search_tt_validation_pending[thread_index]
             && !search_thread_terminal_ready(thread_index)
-            && search_board[thread_index].halfmove_clock < HalfmoveClock'(100)
+            && !search_fifty_move_draw(thread_index)
             && !search_thread_tt_lookup_ready(thread_index)
             && (search_thread_rfp_ready(thread_index)
                 || (!search_thread_null_ready(thread_index)
@@ -185,8 +191,10 @@
             && !search_move_inflight[thread_index];
     endfunction : search_thread_quiet_ready
 
+    // Expired-clock root scores must not escape into a clock-independent TT entry.
     function automatic logic should_store_search_tt(input ThreadID thread, input PlyIndex ply);
         return !search_in_qsearch(thread)
+            && search_board[thread].halfmove_clock < HalfmoveClock'(100)
             && !(search_board_in_check[thread] && !search_stack_top[thread].has_legal);
     endfunction : should_store_search_tt
 

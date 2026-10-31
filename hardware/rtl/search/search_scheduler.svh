@@ -98,7 +98,7 @@
             search_terminal_mask[idx] = search_thread_terminal_ready(idx);
             search_terminal_no_move_mask[idx] = search_terminal_mask[idx]
                 && search_stack_top[idx].move_order_state == MOVE_ORDER_DONE
-                && !(search_board[idx].halfmove_clock >= HalfmoveClock'(100)
+                && !(search_fifty_move_draw(idx)
                     && search_stack_top[idx].has_legal);
         end
         // Always consume a registered response. Keeping backend response

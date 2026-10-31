@@ -414,7 +414,11 @@ module tb_board_update_pipeline;
                 || (moved_color == BLACK && get_rank(from_pos) == BoardRank'(6)
                     && get_rank(to_pos) == BoardRank'(4)))
             && ref_ep_has_capturer(ref_board, Color'(~ref_board.turn), get_file(to_pos));
-        next_halfmove = (is_ep || destination_tile.piece_type != NULL_PIECE || moving_tile.piece_type == PAWN) ? HalfmoveClock'(0) : ref_board.halfmove_clock + HalfmoveClock'(1);
+        next_halfmove = (is_ep || destination_tile.piece_type != NULL_PIECE || moving_tile.piece_type == PAWN)
+            ? HalfmoveClock'(0) : HalfmoveClock'(int'(ref_board.halfmove_clock) + 1);
+        if (next_halfmove == HalfmoveClock'(0) && ref_board.halfmove_clock == HalfmoveClock'('1)
+                && moving_tile.piece_type != PAWN && destination_tile.piece_type == NULL_PIECE)
+            next_halfmove = HalfmoveClock'('1);
 
         ref_board.turn = Color'(~ref_board.turn);
         ref_board.castling_rights = next_castle;
@@ -480,7 +484,8 @@ module tb_board_update_pipeline;
         ref_history[ref_ply].halfmove_clock = ref_board.halfmove_clock;
         ref_board.turn = Color'(~ref_board.turn);
         ref_board.has_ep = 1'b0;
-        ref_board.halfmove_clock += HalfmoveClock'(1);
+        if (ref_board.halfmove_clock != HalfmoveClock'('1))
+            ref_board.halfmove_clock += HalfmoveClock'(1);
         ref_ply += PlyIndex'(1);
     endtask
 
@@ -750,6 +755,35 @@ module tb_board_update_pipeline;
         expect_equal(ref_board.halfmove_clock == HalfmoveClock'(17),
             "null reverse restores halfmove clock");
     endtask
+
+    // Saturation preserves an expired draw clock; undo and irreversible moves still restore/reset it.
+    task automatic test_halfmove_saturation();
+        automatic HalfmoveClock maximum = HalfmoveClock'('1);
+        setup_start_position();
+        set_halfmove_clock(maximum - HalfmoveClock'(1), "clock before saturation");
+        push_move(Position'(6), Position'(21), PROMO_QUEEN, "quiet move reaches saturation");
+        expect_equal(board_out.halfmove_clock == maximum, "quiet move reaches maximum clock");
+        push_move(Position'(62), Position'(45), PROMO_QUEEN, "quiet move at saturation");
+        expect_equal(board_out.halfmove_clock == maximum, "quiet move does not wrap expired clock");
+        reverse_move("undo saturated black move");
+        expect_equal(board_out.halfmove_clock == maximum, "undo restores saturated clock");
+        reverse_move("undo move reaching saturation");
+        expect_equal(board_out.halfmove_clock == maximum - HalfmoveClock'(1), "undo restores pre-saturation clock");
+        set_halfmove_clock(maximum, "null move at saturation");
+        push_null("saturated null move");
+        expect_equal(board_out.halfmove_clock == maximum, "null move does not wrap expired clock");
+        reverse_move("undo saturated null move");
+        expect_equal(board_out.halfmove_clock == maximum, "null undo restores saturated clock");
+        push_move(Position'(12), Position'(28), PROMO_QUEEN, "pawn resets saturated clock");
+        expect_equal(board_out.halfmove_clock == HalfmoveClock'(0), "pawn move resets saturated clock");
+        reverse_move("undo saturated pawn move");
+        expect_equal(board_out.halfmove_clock == maximum, "pawn undo restores saturated clock");
+        set_tile(BLACK_KNIGHT, Position'(21), "capture target for saturated clock");
+        push_move(Position'(6), Position'(21), PROMO_QUEEN, "capture resets saturated clock");
+        expect_equal(board_out.halfmove_clock == HalfmoveClock'(0), "capture resets saturated clock");
+        reverse_move("undo saturated capture");
+        expect_equal(board_out.halfmove_clock == maximum, "capture undo restores saturated clock");
+    endtask : test_halfmove_saturation
 
     task automatic test_en_passant_canonicalization();
         automatic ZobristKey key_without_ep;
@@ -1285,6 +1319,7 @@ module tb_board_update_pipeline;
         test_back_to_back_king_safety();
         test_main_move_sequence();
         test_null_move();
+        test_halfmove_saturation();
         test_en_passant_canonicalization();
         test_castles();
         test_set_tile_overwrite();

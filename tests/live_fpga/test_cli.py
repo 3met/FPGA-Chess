@@ -303,19 +303,20 @@ class RepetitionSanityTests(unittest.TestCase):
         results = []
         for case in REPETITION_CASES:
             twofold_move = self._legal_move(case, case.cycle_moves)
+            threefold_move = self._legal_move(case, case.final_child_moves)
             primed_move = self._legal_move(case, case.moves_to_candidate_root)
             final_move = case.draw_move
             if not case.should_choose_draw:
                 final_move = self._legal_move(case, case.final_moves, (case.draw_move,))
             results.extend([
                 (100, twofold_move, 0.0, "cp 20"),
-                (0, "0000", 0.0, "cp 0"),
+                (100, threefold_move, 0.0, "cp 20"),
                 (100, primed_move, 0.0, "cp 20"),
                 (100, final_move, 0.0, "cp 0"),
             ])
         return results
 
-    def test_repetition_checks_detection_and_policy_separately(self):
+    def test_repetition_checks_root_moves_and_descendant_policy_separately(self):
         engine = MagicMock()
 
         with patch("tests.live_fpga.cli._search_position", side_effect=self._passing_results()) as search:
@@ -352,6 +353,18 @@ class RepetitionSanityTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("final search returned illegal move e2e5", failures[0][1])
+
+    def test_repetition_checks_reject_a_null_result_at_a_threefold_root(self):
+        """Draw eligibility must not let a completed root search omit its legal best move."""
+        case = REPETITION_CASES[0]
+        results = self._passing_results()[:4]
+        results[1] = (0, "0000", 0.0, "cp 0")
+        with patch("tests.live_fpga.cli.REPETITION_CASES", (case,)), \
+                patch("tests.live_fpga.cli._search_position", side_effect=results):
+            failures = _run_repetition_checks(MagicMock(), SANITY_REPETITION_DEPTH, 10.0, 120.0)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("threefold root returned illegal move 0000", failures[0][1])
 
     def test_repetition_checks_report_the_wrong_policy(self):
         case = REPETITION_CASES[0]

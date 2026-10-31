@@ -419,6 +419,45 @@ class UCIHostSpecTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, "null bestmove for non-terminal position"):
             host._format_bestmove(Move(0, 0), host.chess.Board())
 
+    def test_canceled_ponder_without_a_legal_result_completes_without_failure(self):
+        """Stopping speculation before root legality is established must not report a failed played search."""
+        host = self.make_host()
+        host.client = mock.Mock()
+        host._search_active = True
+        host._stop_event.set()
+        host.client.search_request.return_value = StatusResponse(
+            status=1, error=EngineError.NONE, active_operation=0,
+        )
+        host.client.request.return_value = SearchResultResponse(
+            Move(0, 0), 0, nodes=0, completed_depth=0, end_reason=EndReason.KILLED,
+        )
+        lines = []
+        host.emit = lines.append
+
+        host._search_worker(cmd_search_depth(1), host.board.copy(), False, True, cmd_search_depth(1))
+
+        self.assertEqual(lines, ["bestmove 0000"])
+        self.assertFalse(host._is_search_active())
+
+    def test_completed_ponder_still_rejects_a_null_move(self):
+        """A real ponderhit result keeps the same legal-move contract as an ordinary search."""
+        for stopped in (False, True):
+            with self.subTest(stopped=stopped):
+                host = self.make_host()
+                host.client = mock.Mock()
+                host._search_active = True
+                host._ponderhit_event.set()
+                if stopped:
+                    host._stop_event.set()
+                host.client.search_request.return_value = SearchResultResponse(
+                    Move(0, 0), 0, nodes=0, completed_depth=0, end_reason=EndReason.DEPTH_LIMIT,
+                )
+                host.emit = (lines := []).append
+                with mock.patch.object(host, "logger"):
+                    host._search_worker(cmd_search_depth(1), host.board.copy(), False, True, cmd_search_depth(1))
+
+                self.assertTrue(any("search failed: FPGA returned null bestmove" in line for line in lines))
+
 
 class UCIHostDiagnosticTests(unittest.TestCase):
     """Exercise diagnostics without requiring python-chess or a serial adapter."""

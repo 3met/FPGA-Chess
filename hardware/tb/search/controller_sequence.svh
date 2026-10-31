@@ -207,35 +207,7 @@
         setup_black_rook_takes_queen();
         run_black_qsearch_capture_test("black qsearch rook takes queen");
 
-        new_game();
-        setup_rook_takes_queen();
-        set_halfmove_clock(HalfmoveClock'(100), "set 50-move draw halfmove clock");
-        run_halfmove_draw_search("50-move draw search");
-
-        new_game();
-        setup_checkmate_position();
-        set_halfmove_clock(HalfmoveClock'(100), "checkmate at fifty-move threshold");
-        run_checkmate_search("checkmate precedes fifty-move draw");
-        run_qsearch_checkmate_test("qsearch mate precedes fifty-move draw");
-
-        new_game();
-        setup_qsearch_quiet_evasion_position();
-        set_halfmove_clock(HalfmoveClock'(100), "checked draw threshold");
-        run_halfmove_draw_search("checked position with evasion is drawn");
-
-        new_game();
-        clear_start_position("checked draw with only a capturing evasion");
-        set_tile(WHITE_KING, Position'(53), "white king f7");
-        set_tile(WHITE_ROOK, Position'(55), "white rook h7");
-        set_tile(BLACK_KING, Position'(63), "black king h8");
-        set_turn(BLACK, "black to move");
-        set_halfmove_clock(HalfmoveClock'(100), "capture evasion draw threshold");
-        run_halfmove_draw_search("capturing evasion still permits a draw claim");
-
-        new_game();
-        repeat_knight_shuffle_once("first repetition cycle");
-        repeat_knight_shuffle_once("second repetition cycle");
-        run_repetition_draw_search("threefold root search");
+        run_root_draw_regressions();
 
         run_root_tt_score_policy_test("root TT score policy");
         run_tt_validation_priority_test();
@@ -293,7 +265,9 @@
                 baseline_move, baseline_score, baseline_nodes);
             for (int row = 0; row < NNUE_FEATURE_COUNT; row++)
                 dut.nnue_evaluator.load_feature(row, '0);
-            dut.nnue_evaluator.load_feature(8, {NNUE_ROW_BYTES{8'h55}});
+            // Every legal root move keeps the same pawn correction, including a pawn push.
+            for (int square = 0; square < 64; square++)
+                dut.nnue_evaluator.load_feature(square, {NNUE_ROW_BYTES{8'h55}});
             for (int row = bucket * NNUE_OUTPUT_MAC_CYCLES;
                     row < (bucket + 1) * NNUE_OUTPUT_MAC_CYCLES; row++)
                 dut.nnue_evaluator.output_weight_rows[row] = {NNUE_OUTPUT_MAC_LANES{4'h1}};
@@ -310,9 +284,9 @@
             set_tile(WHITE_PAWN, Position'(8), "NNUE correction white pawn a2");
             run_search_depth_record(8'd0, "NNUE correction search",
                 nnue_move, nnue_score, nnue_nodes);
-            // Only White's direct a2-pawn feature is nonzero, so the ordered
-            // concatenation contributes one activation in every White lane.
-            check(nnue_score == baseline_score + EvalScore'(NNUE_ACCUMULATOR_COUNT),
+            // White's sole pawn contributes one activation in every White lane.
+            // The positive correction at each Black child is negated at the root.
+            check(nnue_score == baseline_score - EvalScore'(NNUE_ACCUMULATOR_COUNT),
                 $sformatf("search adds NNUE correction: baseline=%0d corrected=%0d",
                     baseline_score, nnue_score));
         end
